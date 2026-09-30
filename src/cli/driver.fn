@@ -408,8 +408,14 @@ pub fun with_extension(str path, str ext) str {
   ret change_ext(path, ext);
 }
 
-// The suffix an executable carries on this platform.
+// The suffix an executable carries on this platform. Emscripten's own
+// output is a `.js` glue file (plus a `.wasm` alongside it), not a native
+// executable at all - checked first since it overrides the native
+// per-platform suffix below regardless of host OS.
 pub fun exe_suffix() str {
+  if compiler_is_emscripten(resolve_c_compiler()) {
+    ret ".js";
+  }
   if runtime_backend_is_windows() {
     ret ".exe";
   }
@@ -458,6 +464,18 @@ pub fun compiler_is_msvc(str cc) flag {
   let name = basename(cc);
   ret equals(name, "cl") || equals(name, "cl.exe");
 }
+
+// True when `cc` is the emscripten compiler (targets WebAssembly, output
+// is a `.js` glue file plus a `.wasm`, not a native executable). Emscripten
+// only ever activates via an explicit `FUN_CC=emcc` (or `em++`) override -
+// never auto-detected as a fallback candidate, since compiling for wasm by
+// accident on a machine that merely happens to have it installed would be
+// a surprising, wrong default for an ordinary native build.
+pub fun compiler_is_emscripten(str cc) flag {
+  let name = basename(cc);
+  ret equals(name, "emcc") || equals(name, "em++") || equals(name, "emcc.bat") ||
+    equals(name, "em++.bat");
+  }
 
 // Lowers `input` to C at `out_path`, with `defines` available to the
 // program as constants. The error text names the stage that rejected the
@@ -766,6 +784,49 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     // assert the exact literal text of.
     argv_args.push("/link");
     argv_args.push("/STACK:134217728");
+  } elif compiler_is_emscripten(cc) {
+    // emcc is clang-like enough to share the optimize/debug/output flag
+    // shapes below, but not the rest.
+    //
+    // `-pthread` is required even for a program that never itself
+    // touches threading: every compiled Fun program's own
+    // generated `main()` unconditionally spawns one pthread worker to run
+    // on an explicit large stack (confirmed directly - without this, the
+    // program silently produces no output at all under Node, since the
+    // stubbed single-threaded pthread_create() emscripten otherwise links
+    // never actually runs the thread body). Node's own worker_threads-based
+    // pthread emulation works with just this - no SharedArrayBuffer or
+    // cross-origin-isolation headers needed there (those are a browser-only
+    // requirement, relevant only once this target is also served to an
+    // actual browser page, not to plain `node` execution).
+    //
+    // No `-lm`/`-lws2_32` (emscripten's own libc already bundles libm, and
+    // Winsock is native-Windows-only), and no OpenSSL linking (no such
+    // library exists for this target).
+    argv_args.push("-pthread");
+    // Wasm's linear memory starts small (16 MiB default) - nowhere near
+    // enough for `main()`'s own 128 MiB worker-thread stack alone, let
+    // alone anything the program itself allocates. Grow on demand instead
+    // of guessing a fixed initial size.
+    argv_args.push("-sALLOW_MEMORY_GROWTH=1");
+    if _wants_optimization(optimize, debug_info) {
+      argv_args.push("-O2");
+    }
+    argv_args.push(c_path);
+    argv_args.push("-o");
+    argv_args.push(exe_path);
+    if debug_info {
+      argv_args.push("-g");
+    } else {
+      argv_args.push("-g0");
+    }
+    // Emscripten assumes a module may stay alive after `main()` returns
+    // (a browser app with its own event loop/canvas draws is the common
+    // case it's designed around), so by default it neither flushes stdio
+    // nor actually exits when `main()` returns - a run-once CLI-style Fun
+    // program would otherwise produce no output at all. This makes it
+    // behave like an ordinary program instead.
+    argv_args.push("-sEXIT_RUNTIME=1");
   } else {
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
@@ -1301,7 +1362,15 @@ pub fun run_exe(str exe_path, Vec<str>* args) num {
   Vec<str> argv_args;
   argv_args.init(0);
   defer argv_args.free();
-  argv_args.push(executable_path(exe_path));
+  // Emscripten's own output (see `exe_suffix`) is a `.js` glue file, not
+  // a native executable at all - it needs a JS runtime to run it, same
+  // as any other `.js` file would.
+  if ends_with(exe_path, ".js") {
+    argv_args.push("node");
+    argv_args.push(exe_path);
+  } else {
+    argv_args.push(executable_path(exe_path));
+  }
   num i = 0;
   for i < args.len {
     argv_args.push(args.get(i));
@@ -1570,6 +1639,79 @@ test "the msvc compiler is recognized by name" {
   assert compiler_is_msvc("cl.exe"), "expected cl.exe to be msvc";
   assert !compiler_is_msvc("cc"), "expected cc to be gcc-style";
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
+}
+
+test "the emscripten compiler is recognized by name" {
+  assert compiler_is_emscripten("emcc"), "expected emcc to be emscripten";
+  assert compiler_is_emscripten("em++"), "expected em++ to be emscripten";
+  assert compiler_is_emscripten("/opt/homebrew/bin/emcc"), "expected a full path to emcc to still be recognized";
+  assert !compiler_is_emscripten("cc"), "expected cc not to be emscripten";
+  assert !compiler_is_emscripten("cl.exe"), "expected cl.exe not to be emscripten";
+}
+
+test "the wasm target's own output suffix is .js" {
+  set_env("FUN_CC", "emcc");
+  assert equals(exe_suffix(), ".js"), "expected emscripten's own output suffix to be .js";
+  set_env("FUN_CC", "");
+}
+
+sequential test "wasm target real end to end, through the actual emscripten toolchain when installed" {
+  // Skipped (not failed) when emscripten isn't installed locally - CI
+  // gets its own real coverage of this once the emscripten SDK is set
+  // up there (a separate, later piece of work); this is a bonus check
+  // for whoever already has it installed, not the primary gate.
+  Vec<str> probe_args;
+  probe_args.init(2);
+  probe_args.push("emcc");
+  probe_args.push("--version");
+  let probe = run(argv_from(&probe_args));
+  probe_args.free();
+  if probe.is_err() {
+    ret;
+  }
+
+  str src = `use std.c.io;
+  `fun main() num {
+  `  printf("wasm hello %lld\n", 6 * 7);
+  `  ret 0;
+  `}`;
+  str source_path = "src/cli/driver_wasm_e2e_fixture.test.fn";
+  assert write_string(source_path, src), "could not stage the wasm end-to-end fixture";
+  defer remove_file(source_path);
+
+  str c_path = "src/cli/driver_wasm_e2e_fixture.test.c";
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  let lowered = compile_to_c(source_path, c_path, &defines, false);
+  assert lowered.is_ok(), format("expected the wasm end-to-end fixture to lower to C: {str}", lowered.unwrap_err());
+  defer remove_file(c_path);
+
+  set_env("FUN_CC", "emcc");
+  str exe_path = format("src/cli/driver_wasm_e2e_fixture.test{str}", exe_suffix());
+  num cc_code = compile_c_to_exe_mode(c_path, exe_path, false, false);
+  set_env("FUN_CC", "");
+  assert cc_code == 0, "expected emcc to accept the generated C";
+  defer remove_file(exe_path);
+  str wasm_path = "src/cli/driver_wasm_e2e_fixture.test.wasm";
+  defer remove_file(wasm_path);
+
+  // Mirrors `run_exe`'s own `.js` detection, using `run()` instead of
+  // `spawn_inherited()` so the output can be captured and asserted on
+  // here, rather than just inherited straight to the terminal.
+  Vec<str> run_args;
+  run_args.init(2);
+  run_args.push("node");
+  run_args.push(exe_path);
+  let ran = run(argv_from(&run_args));
+  run_args.free();
+  assert ran.is_ok(), "expected node to run the compiled wasm program";
+  ProcessResult r = ran.unwrap();
+  assert contains(r.stdout_text, "wasm hello 42"), format(
+    "expected the wasm build to actually run and print the right value, got stdout={str} stderr={str}",
+    r.stdout_text,
+    r.stderr_text
+  );
 }
 
 test "a compound field whose type was never imported is reported by name" {
