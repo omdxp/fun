@@ -6,12 +6,13 @@
   "scripts": {
     "sync:version": "node scripts/sync-version.mjs",
     "generate:content": "node scripts/generate-content.mjs",
+    "prebake:wasm": "node scripts/prebake-wasm.mjs",
     "dev:web": "vite --host",
     "dev:server": "tsx watch server/index.ts",
     "dev": "npm run sync:version && npm run generate:content && concurrently \"npm:dev:server\" \"npm:dev:web\"",
     "build:web": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
-    "build": "npm run sync:version && npm run generate:content && npm run build:web && npm run build:server",
+    "build": "npm run sync:version && npm run generate:content && npm run prebake:wasm && npm run build:web && npm run build:server",
     "start": "node dist-server/index.js"
   },
   "dependencies": {
