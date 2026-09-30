@@ -5603,6 +5603,114 @@ pub fun _fit_tuple_binding_position(FitBranch br, num binding_idx) num {
   ret result;
 }
 
+// Mirrors `Checker._is_known_concrete_name`/codegen's own copy: whether
+// `name` is a fixed, real type (a non-generic compound, a non-generic
+// enum, or a builtin scalar), never a still-abstract type-parameter
+// name. fls keeps its own copy, scanning the raw program directly,
+// the same way every other layer of this feature does.
+fun _fls_is_known_concrete_type_name(Vec<Node>* program, str name) flag {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if equals(c.name, name) {
+          ret !c.has_type_params;
+        }
+      }
+      .Enum(e) -> {
+        if equals(e.name, name) {
+          ret !e.has_type_params;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
+    equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
+    equals(name, "void");
+  }
+
+fun _fls_is_generic_compound(Vec<Node>* program, str name) flag {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if equals(c.name, name) {
+          ret c.has_type_params;
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret false;
+}
+
+// Mirrors `Checker._auto_resolve_bare_generic_shape_target` and
+// codegen's own copy: a bare generic compound name (`Box(b)`, no
+// `<Args>`) auto-resolves to its one concrete instantiation of
+// `shape_name` when exactly one exists, so hover shows the real bound
+// type (`Box__num* b`) instead of the unresolved bare template name.
+// Anything else about `type_name` passes through unchanged.
+pub fun _fls_auto_resolve_bare_generic_shape_target(
+  Vec<Node>* program,
+  str type_name,
+  str shape_name
+) str {
+  if !_fls_is_generic_compound(program, type_name) {
+    ret type_name;
+  }
+  Vec<str> concrete_names;
+  concrete_names.init(2);
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Impl(im) -> {
+        if !im.has_shape_name || !equals(im.shape_name, shape_name) {
+          continue;
+        }
+        if im.has_concrete_dtype {
+          str prefix = format("{str}__", type_name);
+          if starts_with(im.type_name, prefix) {
+            concrete_names.push(im.type_name);
+          }
+          continue;
+        }
+        if !im.has_type_params || !equals(im.type_name, type_name) {
+          continue;
+        }
+        flag all_concrete = true;
+        for tp : im.type_params {
+          if !_fls_is_known_concrete_type_name(program, tp) {
+            all_concrete = false;
+            break;
+          }
+        }
+        if !all_concrete {
+          continue;
+        }
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(im.type_name);
+        for tp : im.type_params {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        concrete_names.push(recon_sb.build());
+      }
+      _ -> {}
+    }
+  }
+  if concrete_names.len == 1 {
+    ret concrete_names.get(0);
+  }
+  ret type_name;
+}
+
 fun _lookup_fit_binding(
   Vec<Token>* tokens,
   Node* body,
@@ -5681,6 +5789,20 @@ fun _lookup_fit_binding(
             fit br.condition.kind {
               .Identifier(sname) -> { shape_type_name = sname; }
               _ -> {}
+            }
+            if !equals(shape_type_name, "") {
+              // A bare generic name (`Box(b)`, no `<Args>`) parses to
+              // just its own written identifier - the `<Args>` sugar
+              // form is already mangled by the parser itself, but this
+              // auto-resolve convenience is a semantic-layer decision,
+              // invisible to the parser, so hover needs its own copy
+              // to show the real bound type rather than the bare name.
+              str subj_shape_name = fit_subject_type(tokens, program, f.exp, file, line);
+              shape_type_name = _fls_auto_resolve_bare_generic_shape_target(
+                program,
+                shape_type_name,
+                subj_shape_name
+              );
             }
             if !equals(shape_type_name, "") && br.body != nil {
               StringBuilder shb = string_builder_init(24);
