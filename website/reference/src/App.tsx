@@ -141,9 +141,6 @@ function withBasePath(relativePath: string) {
   return `${normalizedBase}${normalizedPath}`;
 }
 
-const isGithubPages =
-  typeof window !== "undefined" &&
-  window.location.hostname.endsWith("github.io");
 const DOC_TABS: Array<{
   key: DocTabKey;
   navLabel: string;
@@ -201,14 +198,13 @@ const TABS: Array<{
 }> = [
   ...DOC_TABS.map((dt) => ({ key: dt.key as TabKey, label: dt.navLabel })),
   { key: "stdlib", label: "Std Library" },
-  {
-    key: "playground",
-    label: "Playground",
-    disabled: isGithubPages,
-    tooltip: isGithubPages
-      ? "Playground is disabled on GitHub Pages because there is no backend API available to run code. To use the Playground, run the site locally or set up a remote runner API."
-      : undefined,
-  },
+  // No longer gated on GitHub Pages: the curated samples shown here are
+  // pre-baked to wasm at build time (see prebake-wasm.mjs, #189) and run
+  // client-side with no backend at all, the same as any other runnable
+  // docs example - `RunCodeBlock` itself decides per example, per click,
+  // whether a pre-baked module, a configured backend, or neither is
+  // available, rather than this tab hiding everything up front.
+  { key: "playground", label: "Playground" },
 ];
 
 function parseStdlibHash(hash: string) {
@@ -2161,40 +2157,25 @@ export default function App() {
           <section className="panel">
             <h1>Interactive Playground</h1>
             <p className="lead">
-              Edit and run snippets locally with your real Fun compiler.
+              Run curated samples right here in your browser, or edit and
+              run against a real Fun compiler.
             </p>
-            {isGithubPages && (
-              <div
-                className="hint"
-                style={{ color: "#ff7f9f", borderColor: "#ff7f9f" }}
-              >
-                Playground is disabled on GitHub Pages because there is no
-                backend API available to run code. To use the Playground, run
-                the site locally or set up a remote runner API.
-              </div>
-            )}
-            {!isGithubPages && (
-              <>
-                <div className="hint">
-                  Requires fun-out/bin/fun. If missing, run `fun build` in
-                  repo root first.
-                </div>
-                {content.samples.map((s) => (
-                  <RunCodeBlock
-                    key={s.title}
-                    title={s.title}
-                    initialCode={s.code}
-                  />
-                ))}
-                <details>
-                  <summary>Raw stdlib docs source</summary>
-                  <MarkdownWithPlayground
-                    markdown={content.docs.stdlibReadme}
-                    sourcePath="stdlib/README.md"
-                  />
-                </details>
-              </>
-            )}
+            <div className="hint">
+              These samples run entirely in your browser via a pre-baked
+              wasm build, no backend needed - edit one and Run still needs
+              a real backend (run the site locally with fun-out/bin/fun
+              built, or configure a remote runner API).
+            </div>
+            {content.samples.map((s) => (
+              <RunCodeBlock key={s.title} title={s.title} initialCode={s.code} />
+            ))}
+            <details>
+              <summary>Raw stdlib docs source</summary>
+              <MarkdownWithPlayground
+                markdown={content.docs.stdlibReadme}
+                sourcePath="stdlib/README.md"
+              />
+            </details>
           </section>
         )}
       </main>
