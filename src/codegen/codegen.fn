@@ -5779,7 +5779,7 @@ impl Codegen {
             _ -> {}
           }
           flag use_str_eq = !lhs_is_nil && !rhs_is_nil &&
-            (lhs_is_str_lit || rhs_is_str_lit);
+          (lhs_is_str_lit || rhs_is_str_lit);
           if use_str_eq {
             flag sp = !self.suppress_next_expr_parens;
             self.suppress_next_expr_parens = false;
