@@ -17,6 +17,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { samples } from "./playground-samples.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -94,16 +95,35 @@ const docFiles = [
   "stdlib/README.md",
 ];
 
+// Normalized the same way the frontend hashes `initialCode` before
+// looking a module up (`RunCodeBlock.tsx`) - trimmed and CRLF-normalized,
+// so the two independent extraction paths (this file's own regex here,
+// react-markdown's parser there) don't have to produce byte-identical
+// strings, just the same *content*.
+function hashCode(code) {
+  const normalized = code.replace(/\r\n/g, "\n").trim();
+  return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
 async function collectBlocks() {
   const seen = new Map();
   for (const rel of docFiles) {
     const text = await fs.readFile(path.join(repoRoot, rel), "utf8");
     for (const match of text.matchAll(FENCE_RE)) {
       const code = match[1];
-      const hash = crypto.createHash("sha256").update(code).digest("hex");
+      const hash = hashCode(code);
       if (!seen.has(hash)) {
         seen.set(hash, code);
       }
+    }
+  }
+  // The "Interactive Playground" tab's curated samples are the same
+  // fixed-at-build-time category as a docs example, just not sourced
+  // from a markdown fence - pre-bake these too.
+  for (const sample of samples) {
+    const hash = hashCode(sample.code);
+    if (!seen.has(hash)) {
+      seen.set(hash, sample.code);
     }
   }
   return seen;
