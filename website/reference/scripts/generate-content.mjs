@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { samples } from "./playground-samples.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -642,66 +643,6 @@ for (const file of stdFiles) {
   const src = await fs.readFile(file, "utf8");
   stdlib.push(parseStdFile(file, src));
 }
-
-const samples = [
-  {
-    title: "Hello World",
-    code: `use std.c.io;
-
-fun main() {
-  printf("hello from fun\\n");
-}
-`,
-  },
-  {
-    title: "Alias Imports",
-    code: `// file: main.fn
-use std.io;
-use mod1 as one;
-use mod2 as two;
-
-fun main() {
-  num a = one.pick();
-  num b = two.pick();
-  println_fmt("a+b={num}", a + b);
-}
-
-// file: mod1.fn
-pub fun pick() num {
-  ret 10;
-}
-
-// file: mod2.fn
-pub fun pick() num {
-  ret 32;
-}
-`,
-  },
-  {
-    title: "Compounds + Impl",
-    code: `use std.io;
-
-compound Point {
-  num x;
-  num y;
-}
-
-impl Point {
-  move_by(num dx, num dy) {
-    self.x = self.x + dx;
-    self.y = self.y + dy;
-  }
-}
-
-fun main() {
-  Point p;
-  p.x = 1; p.y = 2;
-  p.move_by(3, 4);
-  println_fmt("{num},{num}", p.x, p.y);
-}
-`,
-  },
-];
 
 const generated = {
   generatedAt: new Date().toISOString(),
