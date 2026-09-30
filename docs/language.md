@@ -1155,6 +1155,72 @@ which reads far more clearly than an `if a == .. && b == .. && c == ..
 { ... } elif ...` chain once there are more than two or three
 combinations to cover.
 
+### Fit over a shape: structural downcasting
+
+`fit` can also recover the concrete type behind a shape-typed value,
+dispatched at runtime through the same vtable an ordinary shape method
+call already uses:
+
+```fun
+shape HasArea {
+  area() num;
+}
+
+compound Circle {
+  num radius;
+}
+
+compound Square {
+  num side;
+}
+
+impl Circle as HasArea {
+  area() num { ret self.radius * self.radius; }
+}
+
+impl Square as HasArea {
+  area() num { ret self.side * self.side; }
+}
+
+fun describe(HasArea s) str {
+  str out = "unknown shape";
+  fit s {
+    Circle(c) -> { out = format("circle, radius {num}", c.radius); }
+    Square(sq) -> { out = format("square, side {num}", sq.side); }
+    _ -> { }
+  }
+  ret out;
+}
+```
+
+- A downcast arm is written bare, with no leading dot: `Circle(c)`, not
+  `.Circle(c)` - the dotted form is an enum-variant pattern, this is a
+  different thing. `Circle` must be a real `impl Circle as HasArea { ...
+  }` for the shape being matched, checked at compile time.
+- Exactly one binding recovers the whole concrete value as a pointer
+  (`c: Circle*` above), never a payload destructure - a shape isn't a
+  tagged union, so there's nothing to pull apart field by field the way
+  `.Circle(x, y, r)` would for a data-carrying enum variant.
+- `fit_non_exhaustive` applies the same way it does for an enum: every
+  type registered as implementing the shape *anywhere in the program*
+  must be covered, or a catch-all `_` arm is required. Covering the same
+  implementor twice reports `fit_unreachable_branch`.
+- Ordinary shape method dispatch and this downcast use the same runtime
+  representation, so there is no extra cost to make a value fit-able -
+  a shape-typed value already carries a vtable pointer.
+- A concrete instantiation of a generic implementor can be named too:
+  `Box<num>(b) -> ...` against `impl Box<num> as Sized { ... }`, or
+  `Wrapper<Circle>(w) -> ...` against `impl Wrapper<Circle> as Sized {
+  ... }`.
+- A bare generic name auto-resolves when it's unambiguous: `Box(b) ->
+  ...` (no `<Args>`) works exactly like `Box<num>(b) -> ...` when
+  `Box<num>` is the only instantiation of `Box` implementing the shape
+  being matched. Two or more instantiations make the bare form
+  ambiguous - write the generic arguments explicitly to pick one. An
+  unbound generic itself is still rejected outright: `impl Box<T> as
+  Sized { ... }` has no single concrete vtable to dispatch to at all, so
+  there's no valid arm to write for it, bare or otherwise.
+
 ## Defer
 
 - **Purpose**: run cleanup logic automatically when the current lexical

@@ -2945,6 +2945,22 @@ fun _collect_function_scope(
 // bindings (`.Circle(r)`'s own `r`) against the fit's own subject
 // type, the same way hover already does via `fit_subject_type`/
 // `variant_payload_type` — every other case ignores them.
+// The bare identifier a fit branch's own condition names (`Circle` in
+// `Circle(c) -> ...`), or "" for anything else - a `.`-qualified
+// enum-destructure condition (`.Circle(c)`) never matches, the same
+// unambiguous signal `symbols.fn::_lookup_fit_binding` uses for its own
+// copy of this check.
+fun _bare_condition_identifier(FitBranch branch) str {
+  if !branch.has_condition || branch.condition == nil {
+    ret "";
+  }
+  fit branch.condition.kind {
+    .Identifier(name) -> { ret name; }
+    _ -> {}
+  }
+  ret "";
+}
+
 fun _collect_locals(
   Vec<Token>* tokens,
   Node* body,
@@ -2998,16 +3014,34 @@ fun _collect_locals(
             tbi = tbi + 1;
           }
           free_params_vec(&tuple_pieces);
-        } elif branch.has_bindings && !equals(enum_name, "") {
-          str variant_name = branch_variant_name(branch);
-          num bi = 0;
-          for bi < branch.bindings.len {
-            str binding_name = branch.bindings.get(bi);
-            let payload_type = variant_payload_type(program, enum_name, variant_name, bi, concrete_args);
-            if payload_type.is_some() {
-              items.push(_item(binding_name, .Variable, payload_type.unwrap()));
+        } elif branch.has_bindings {
+          // A shape-downcast arm (`Circle(c) -> ...`) always parses to a
+          // bare `.Identifier` condition - the enum-destructure path
+          // below always builds a `.`-qualified one instead - so this
+          // check alone tells the two apart, mirroring `symbols.fn`'s
+          // own `_lookup_fit_binding`.
+          str shape_type_name = _bare_condition_identifier(branch);
+          if !equals(shape_type_name, "") {
+            shape_type_name = _fls_auto_resolve_bare_generic_shape_target(
+              program,
+              shape_type_name,
+              enum_name
+            );
+            str bname = branch.bindings.get(0);
+            if !equals(bname, "_") {
+              items.push(_item(bname, .Variable, format("{str}*", shape_type_name)));
             }
-            bi = bi + 1;
+          } elif !equals(enum_name, "") {
+            str variant_name = branch_variant_name(branch);
+            num bi = 0;
+            for bi < branch.bindings.len {
+              str binding_name = branch.bindings.get(bi);
+              let payload_type = variant_payload_type(program, enum_name, variant_name, bi, concrete_args);
+              if payload_type.is_some() {
+                items.push(_item(binding_name, .Variable, payload_type.unwrap()));
+              }
+              bi = bi + 1;
+            }
           }
         }
         _collect_locals(tokens, branch.body, items, program, file, line);

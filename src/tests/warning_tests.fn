@@ -400,6 +400,138 @@ test "a fit missing several variants names every one of them, not just the first
   assert count(found, "fit_non_exhaustive") == 1, "expected every missing variant folded into a single warning";
 }
 
+test "a shape-downcast fit missing an implementor is noticed" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `  }
+  `  ret out;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing implementor to be noticed";
+  assert contains(found, "'Square'"), "expected the message to name what is missing";
+}
+
+test "a shape-downcast fit covering every implementor needs no wildcard" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Square(sq) -> { out = "square"; }
+  `  }
+  `  ret out;
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected covering every implementor to need no catch-all, same as an enum's own variants";
+}
+
+test "a shape-downcast fit naming the same implementor twice is noticed" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Circle(c2) -> { out = "circle again"; }
+  `    _ -> { }
+  `  }
+  `  ret out;
+  `}`;
+  assert contains(
+    notice(src, false),
+    "fit_unreachable_branch"
+  ), "expected the second Circle arm to be reported unreachable";
+}
+
+test "a shape-downcast fit missing a concrete generic instantiation is noticed" {
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing concrete instantiation to be noticed";
+  assert contains(found, "'Box__num'"), "expected the message to name the mangled instantiation";
+}
+
+test "a shape-downcast fit missing an unbound generic implementor asks for nothing impossible" {
+  // impl Box<T> as Sized has no valid arm syntax at all - it must not be
+  // demanded.
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<T> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected the unbound generic template not to be demanded";
+}
+
+test "a shape-downcast fit covering a concrete generic instantiation needs no wildcard" {
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    Box<num>(b) -> { ret b.count; }
+  `  }
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected covering the concrete instantiation to need no catch-all";
+}
+
+test "a shape-downcast fit's bare auto-resolved arm counts as covering its one concrete instantiation" {
+  // Box(b) (no <Args>) auto-resolves to Box<num> at typecheck since it's
+  // the only impl of Box<...> for Sized - exhaustiveness must credit it
+  // against the same reconstructed name, not treat the bare arm as
+  // covering nothing.
+  str src = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    Box(b) -> { ret b.count; }
+  `  }
+  `}`;
+  assert !contains(
+    notice(src, false),
+    "fit_non_exhaustive"
+  ), "expected the bare auto-resolved arm to need no catch-all";
+}
+
 test "a fit comma-separated arm counts every alternative as covered" {
   str src = `enum Color { Red, Green, Blue }
   `fun warm(Color c) flag {

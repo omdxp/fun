@@ -566,6 +566,22 @@ fun _free_shape_implementors_map(Map<str, Set<str>>* implementors) {
   implementors.free();
 }
 
+// Frees a whole `Map<str, Vec<Vec<str>>>` where every value's own strings
+// are borrowed from the AST (never a fresh allocation) - same shape as
+// `_free_shape_implementors_map` just above, for `Checker.shape_impl_type_params`.
+fun _free_shape_impl_type_params_map(Map<str, Vec<Vec<str>>>* type_params_by_key) {
+  Vec<str> keys = type_params_by_key.keys();
+  defer keys.free();
+  for k : keys {
+    Vec<Vec<str>> entries = type_params_by_key.at(k).unwrap();
+    for e : entries {
+      e.free();
+    }
+    entries.free();
+  }
+  type_params_by_key.free();
+}
+
 // The variant name a bare enum-variant shorthand initializer names,
 // whether payload-less (`.Same`) or carrying one (`.Same(5)`, parsed as
 // a call whose callee is the same dot-shorthand shape). `.None` for
@@ -956,6 +972,24 @@ compound Checker {
   // shape-typed-parameter coercion - the two are deliberately different
   // strictness levels, not a shared notion of "satisfies this shape".
   Map<str, Set<str>> shape_implementors;
+  // An implementor's own `type_params`, keyed `"{type_name}::{shape_name}"`,
+  // recorded only when the impl has them. `impl Box<num> as Sized`
+  // resolves `type_name` to the mangled `Box__num` immediately and needs
+  // nothing here, but `impl Box<Circle> as Sized` - an already-declared
+  // compound/enum used as the argument, rather than a builtin scalar -
+  // can't be told apart from a genuine unbound template (`impl Box<T> as
+  // Sized`) by the parser at that position, so both are stored the same
+  // way (`has_type_params` true, `type_params` holding the argument's own
+  // name). A shape-downcast fit arm naming the mangled form directly
+  // (`Box__Circle(b)`, what `Box<Circle>(b)` parses to) needs this to
+  // reconstruct that same mangled identity and confirm which case it
+  // actually is - see `check_shape_destructure_condition`.
+  // One entry per distinct impl matching that key - `impl Box<num> as
+  // Sized` and `impl Box<str> as Sized` both key to "Box::Sized", each
+  // contributing its own `type_params` list, since the base+shape name
+  // alone doesn't distinguish them (only the reconstructed mangled
+  // identity does).
+  Map<str, Vec<Vec<str>>> shape_impl_type_params;
   // A shape implementor's own declared argument type for that shape
   // (`Range` -> `num` for `impl Range as Iterator<num>`), keyed by
   // `"{type_name}::{shape_name}"` - lets a for-loop's own general
@@ -1019,6 +1053,7 @@ fun _checker_new() Checker {
   c.declared_at.init(32);
   c.shapes = set_init("", 16);
   c.shape_implementors.init(16);
+  c.shape_impl_type_params.init(16);
   c.shape_elem_by_type.init(16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
@@ -3258,6 +3293,45 @@ fun _branch_enum_name(Node* condition) str {
   ret "";
 }
 
+// What a shape-downcast fit arm's named type turned out to be, from
+// `Checker._shape_downcast_target_verdict`.
+pub enum ShapeDowncastVerdict {
+  // Not a registered implementor of the shape at all, bare or
+  // reconstructed.
+  NotAnImplementor,
+  // A registered implementor, but a still-abstract one with no single
+  // concrete value to dispatch to (an unbound template, or an
+  // instantiation naming at least one abstract, non-real-type argument).
+  Generic,
+  // A registered implementor naming one fixed, real type - safe to
+  // downcast to.
+  Concrete,
+}
+
+// The bare type name a shape-downcast fit arm names (`Circle(c) -> ...`),
+// or empty when `branch` isn't that shape at all: the parser
+// (`_try_parse_fit_shape_destructure`) already commits a bare, undotted
+// `Type(...)` pattern to exactly this AST shape - a plain `.Identifier`
+// condition with `bindings` populated - never produced by the
+// enum-destructure path, which always builds a `.`-qualified condition
+// instead. So a bare identifier condition with any bindings at all is
+// unambiguously this shape, not just a heuristic - arity is verified
+// separately by `check_shape_destructure_condition`, not here, so a
+// wrong-arity arm (`Circle(a, b)`) still gets a clear error instead of
+// silently falling through to the ordinary value-pattern path (which
+// would leave its bindings undefined and fail confusingly, deep in
+// codegen, instead of here).
+fun _shape_destructure_type_name(FitBranch branch) str {
+  if !branch.has_condition || !branch.has_bindings || branch.bindings.len == 0 {
+    ret "";
+  }
+  fit branch.condition.kind {
+    .Identifier(name) -> { ret name; }
+    _ -> {}
+  }
+  ret "";
+}
+
 fun _is_comparison(str op) flag {
   ret equals(op, "==") || equals(op, "!=") || equals(op, "<") || equals(op, ">") ||
     equals(
@@ -3340,10 +3414,30 @@ impl Checker {
       subject = subject_type.name;
       have_subject_type = true;
     }
+    flag subject_is_shape = have_subject_type && self.shapes.has(subject_type.name);
     for branch : f.branches {
+      str shape_type_name = "";
+      if branch.has_condition && subject_is_shape {
+        shape_type_name = _shape_destructure_type_name(branch);
+        if !equals(shape_type_name, "") {
+          shape_type_name = self._auto_resolve_bare_generic_shape_target(
+            shape_type_name,
+            subject_type.name,
+            branch.condition
+          );
+          if self.failed {
+            ret;
+          }
+        }
+      }
       if branch.has_condition {
         if branch.is_tuple_pattern {
           self.check_fit_tuple_pattern_condition(branch, subject_type, have_subject_type);
+        } elif !equals(shape_type_name, "") {
+          self.check_shape_destructure_condition(branch, shape_type_name, subject_type);
+          if self.failed {
+            ret;
+          }
         } else {
           self.check_shorthand_variant(branch.condition, subject_type, env);
           if self.failed {
@@ -3366,6 +3460,8 @@ impl Checker {
       if branch.is_tuple_pattern && branch.has_condition && have_subject_type &&
         subject_type.is_tuple {
         self.bind_fit_tuple_pattern(branch, subject_type, env);
+      } elif !equals(shape_type_name, "") {
+        self.bind_fit_shape_pattern(branch, shape_type_name, env);
       }
       self.check_statement(branch.body, env);
       env.pop();
@@ -3455,6 +3551,337 @@ impl Checker {
         }
       }
       _ -> {}
+    }
+  }
+
+  // Verifies a shape-downcast arm (`Circle(c) -> ...`, only reached when
+  // the fit subject is itself shape-typed and `_shape_destructure_type_name`
+  // already confirmed a bare-identifier condition with at least one
+  // binding): `type_name` must be a real `impl type_name as <subject's
+  // shape> { ... }`, and the arm must bind exactly one name to recover
+  // the concrete value, mirroring `Option.Some(v)`/`Result.Ok(v)`'s
+  // single-payload shape rather than multi-field enum-payload
+  // destructuring.
+  check_shape_destructure_condition(FitBranch branch, str type_name, CheckedType subject_type) {
+    let verdict = self._shape_downcast_target_verdict(type_name, subject_type.name);
+    fit verdict {
+      .NotAnImplementor -> {
+        self.fail(
+          format(
+          "'{str}' does not implement shape '{str}'",
+          type_name,
+          subject_type.name
+          ),
+          branch.condition
+        );
+        ret;
+      }
+      .Generic -> {
+        self.fail(
+          format(
+          "'{str}' is generic and has no single concrete implementation to downcast to",
+          type_name
+          ),
+          branch.condition
+        );
+        ret;
+      }
+      .Concrete -> {}
+    }
+    if branch.bindings.len != 1 {
+      self.fail(
+        format(
+        "expected exactly one binding to recover the concrete '{str}' value, got {num}",
+        type_name,
+        branch.bindings.len
+        ),
+        branch.condition
+      );
+    }
+  }
+
+  // Whether `name` is usable as one fixed, real value's own type: a
+  // non-generic compound, a non-generic enum, or a builtin scalar -
+  // never a still-abstract type-parameter name (`T`, `K`, `V`, ...),
+  // which is never actually declared as any of these.
+  _is_known_concrete_name(str name) flag {
+    let compound_info = self.compounds.at(name);
+    if compound_info.is_some() {
+      ret !compound_info.unwrap().is_generic;
+    }
+    if self.enum_names.has(name) {
+      let enum_params = self.enum_type_params.at(name);
+      ret enum_params.is_none() || enum_params.unwrap().len == 0;
+    }
+    ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
+      equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
+      equals(name, "void");
+    }
+
+  // A bare generic compound name (`Box(b)`, no `<Args>`) auto-resolves
+  // to its one concrete implementation of `shape_name` when exactly one
+  // exists (`Box<num>`, say, is the only `impl Box<...> as Sized` in
+  // the program) - same convenience `Wrapper<T> w;` already gets from
+  // type inference elsewhere, applied here to a fit arm's pattern.
+  // Anything else about `type_name` (not a generic compound at all,
+  // already `<Args>`-mangled, a genuinely unbound template with zero
+  // concrete instantiations) passes through unchanged, and
+  // `_shape_downcast_target_verdict` reports the right thing for it.
+  // Two or more concrete instantiations is ambiguous - reported here
+  // directly (not deferred to the verdict's generic catch-all) since
+  // only this function still has the actual candidate list to name.
+  _auto_resolve_bare_generic_shape_target(str type_name, str shape_name, Node* condition) str {
+    let compound_info = self.compounds.at(type_name);
+    if compound_info.is_none() || !compound_info.unwrap().is_generic {
+      ret type_name;
+    }
+    let keys = self.shape_impl_type_params.keys();
+    Vec<str> concrete_names;
+    concrete_names.init(2);
+    for k : keys {
+      num sep = last_index_of_char(k, ':');
+      if sep < 1 {
+        continue;
+      }
+      str base_name = substr(k, 0, sep - 1);
+      str this_shape = substr(k, sep + 1, len(k) - sep - 1);
+      if !equals(base_name, type_name) || !equals(this_shape, shape_name) {
+        continue;
+      }
+      let entries_opt = self.shape_impl_type_params.at(k);
+      if entries_opt.is_none() {
+        continue;
+      }
+      Vec<Vec<str>> entries = entries_opt.unwrap();
+      for tps : entries {
+        flag all_concrete = true;
+        for tp : tps {
+          if !self._is_known_concrete_name(tp) {
+            all_concrete = false;
+            break;
+          }
+        }
+        if !all_concrete {
+          continue;
+        }
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(base_name);
+        for tp : tps {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        concrete_names.push(recon_sb.build());
+      }
+    }
+    // A scalar-argument instantiation (`impl Box<num> as Sized`) never
+    // shows up in `shape_impl_type_params` at all - `has_concrete_dtype`
+    // resolves its own mangled identity immediately at parse time, with
+    // nothing ambiguous left to record there, so it's registered
+    // directly under its final mangled name in `shape_implementors`
+    // instead. Every entry there sharing `type_name`'s own mangling
+    // prefix is one of these.
+    let bucket_opt = self.shape_implementors.at(shape_name);
+    if bucket_opt.is_some() {
+      str prefix = format("{str}__", type_name);
+      for candidate : bucket_opt.unwrap().keys() {
+        if starts_with(candidate, prefix) {
+          concrete_names.push(candidate);
+        }
+      }
+    }
+    if concrete_names.len == 1 {
+      ret concrete_names.get(0);
+    }
+    if concrete_names.len > 1 {
+      StringBuilder list_sb = string_builder_init(16);
+      num li = 0;
+      for li < concrete_names.len {
+        if li > 0 {
+          list_sb.append(", ");
+        }
+        list_sb.append("'");
+        list_sb.append(concrete_names.get(li));
+        list_sb.append("'");
+        li = li + 1;
+      }
+      self.fail(
+        format(
+        "'{str}' is ambiguous between {str} - write the generic arguments explicitly, like '{str}<...>(...)'",
+        type_name,
+        list_sb.build(),
+        type_name
+        ),
+        condition
+      );
+    }
+    ret type_name;
+  }
+
+  // What a shape-downcast fit arm's named type (`type_name`, the bare
+  // identifier the arm wrote, or the mangled form a `Type<Args>(...)`
+  // arm's own generic sugar produces) turns out to be, against
+  // `shape_name`. Two ways to match:
+  //
+  // 1. A direct, bare match through `implements_shape` -
+  // `shape_implementors` (`Circle` for a real `impl Circle as HasArea`,
+  // but ALSO the bare template name for `impl Box<T> as Sized`, which
+  // registers no differently - `type_params` says nothing about whether
+  // each name is a fresh parameter or a reference to a real type, so
+  // that's checked here via `_is_known_concrete_name`, not assumed).
+  //
+  // 2. A reconstructed match: `type_name` mangles back to `base__arg1__
+  // arg2...` for some registered `(base, shape_name)` impl's own
+  // `type_params` (`Box__Circle` for `impl Box<Circle> as Sized`, an
+  // already-declared compound used as the argument - indistinguishable
+  // from a fresh type-param name at parse time, so stored the exact same
+  // way `impl Box<T> as Sized` would be; see `Checker.
+  // shape_impl_type_params`'s own doc comment). Every argument must be a
+  // real type for this to count as concrete - a genuinely unbound
+  // template could coincidentally reconstruct into the same string a
+  // hand-written mangled name would, and `_is_known_concrete_name`
+  // catches that too.
+  _shape_downcast_target_verdict(str type_name, str shape_name) ShapeDowncastVerdict {
+    CheckedType candidate = checked_unknown();
+    candidate.name = type_name;
+    candidate.pointer_depth = 1;
+    if self.implements_shape(candidate, shape_name) {
+      // Unlike a type_param's own name below (expected to be a simple
+      // name, real or abstract, positively confirmed), `type_name` here
+      // can be a mangled instantiation (`Box__num`, from a
+      // `has_concrete_dtype` impl - already fully resolved, never found
+      // under its own exact mangled string in `self.compounds`) as
+      // easily as a bare one. Only reject when it's POSITIVELY known as
+      // a generic compound/enum declaration; anything else (not found at
+      // all, or found and non-generic) is safe.
+      let compound_info = self.compounds.at(type_name);
+      if compound_info.is_some() {
+        if compound_info.unwrap().is_generic {
+          ret .Generic;
+        }
+        ret .Concrete;
+      }
+      let enum_params = self.enum_type_params.at(type_name);
+      if enum_params.is_some() && enum_params.unwrap().len > 0 {
+        ret .Generic;
+      }
+      ret .Concrete;
+    }
+    let keys = self.shape_impl_type_params.keys();
+    for k : keys {
+      let entries_opt = self.shape_impl_type_params.at(k);
+      if entries_opt.is_none() {
+        continue;
+      }
+      num sep = last_index_of_char(k, ':');
+      if sep < 1 {
+        continue;
+      }
+      // "{base}::{shape}" - the base name ends two characters before
+      // this last ':'.
+      str base_name = substr(k, 0, sep - 1);
+      str this_shape = substr(k, sep + 1, len(k) - sep - 1);
+      if !equals(this_shape, shape_name) {
+        continue;
+      }
+      // More than one impl can share this base+shape key (`impl Box<num>
+      // as Sized` and `impl Box<str> as Sized` both key to "Box::Sized"),
+      // so every candidate's own reconstruction is tried, not just one.
+      Vec<Vec<str>> entries = entries_opt.unwrap();
+      flag matched_entry = false;
+      for tps : entries {
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(base_name);
+        for tp : tps {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        if !equals(recon_sb.build(), type_name) {
+          continue;
+        }
+        matched_entry = true;
+        for tp : tps {
+          if !self._is_known_concrete_name(tp) {
+            ret .Generic;
+          }
+        }
+        break;
+      }
+      if !matched_entry {
+        continue;
+      }
+      ret .Concrete;
+    }
+    ret .NotAnImplementor;
+  }
+
+  // `type_name` (`Box__num`, `Wrapper__Circle`, ...) reconstructed back
+  // into a real generic `CheckedType` (`Box<num>`, `Wrapper<Circle>`)
+  // when it names a `has_type_params` impl's own mangled identity -
+  // `.None` for anything else (a plain type, or a `has_concrete_dtype`
+  // impl's already-resolved mangled name, neither of which needs this).
+  // A flat `CheckedType{name: type_name}` resolves a plain type fine,
+  // but not a generic one: field-type substitution needs the real
+  // `generic_args` structure, not just the pre-mangled string, the same
+  // way an ordinary `Wrapper<Circle> w;` declaration already carries it.
+  _reconstruct_generic_checked_type(str type_name) Option<CheckedType> {
+    let keys = self.shape_impl_type_params.keys();
+    for k : keys {
+      let entries_opt = self.shape_impl_type_params.at(k);
+      if entries_opt.is_none() {
+        continue;
+      }
+      num sep = last_index_of_char(k, ':');
+      if sep < 1 {
+        continue;
+      }
+      str base_name = substr(k, 0, sep - 1);
+      // More than one impl can share this base+shape key (`impl Box<num>
+      // as Sized` and `impl Box<str> as Sized` both key to "Box::Sized"),
+      // so every candidate's own reconstruction is tried, not just one.
+      Vec<Vec<str>> entries = entries_opt.unwrap();
+      for tps : entries {
+        StringBuilder recon_sb = string_builder_init(16);
+        recon_sb.append(base_name);
+        for tp : tps {
+          recon_sb.append("__");
+          recon_sb.append(tp);
+        }
+        if !equals(recon_sb.build(), type_name) {
+          continue;
+        }
+        CheckedType ct = checked_unknown();
+        ct.name = base_name;
+        Vec<CheckedType> gargs;
+        gargs.init(tps.len);
+        for tp : tps {
+          CheckedType arg_ct = checked_unknown();
+          arg_ct.name = tp;
+          gargs.push(arg_ct);
+        }
+        ct.generic_args = gargs;
+        ret .Some(ct);
+      }
+    }
+    ret .None;
+  }
+
+  // Binds a shape-downcast arm's single name to the concrete
+  // implementor's own type, as a pointer (matching how `self` is
+  // received inside that type's own methods). Caller has already
+  // verified the arm names a real implementor with exactly one binding,
+  // and pushed a fresh `env` scope for the arm body.
+  bind_fit_shape_pattern(FitBranch branch, str type_name, TypeEnv* env) {
+    str bname = branch.bindings.get(0);
+    if !equals(bname, "_") {
+      let reconstructed = self._reconstruct_generic_checked_type(type_name);
+      CheckedType bound = checked_unknown();
+      if reconstructed.is_some() {
+        bound = reconstructed.unwrap();
+      } else {
+        bound.name = type_name;
+      }
+      bound.pointer_depth = 1;
+      env.define(bname, bound);
     }
   }
 
@@ -4234,6 +4661,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer checker.declared_at.free();
   defer checker.shapes.free();
   defer _free_shape_implementors_map(&checker.shape_implementors);
+  defer _free_shape_impl_type_params_map(&checker.shape_impl_type_params);
   defer checker.shape_elem_by_type.free();
   defer checker.plain_enums.free();
   defer checker.globals.free();
@@ -4391,6 +4819,26 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         checker.register_impl(block);
         if block.has_shape_name {
           checker.record_shape_impl(block.type_name, block.shape_name);
+          if block.has_type_params {
+            StringBuilder tp_key_sb = string_builder_init(24);
+            tp_key_sb.append(block.type_name);
+            tp_key_sb.append("::");
+            tp_key_sb.append(block.shape_name);
+            Vec<str> tp_names;
+            tp_names.init(block.type_params.len);
+            for tp : block.type_params {
+              tp_names.push(tp);
+            }
+            str tp_key = tp_key_sb.build();
+            Vec<Vec<str>> tp_entries;
+            tp_entries.init(1);
+            let existing_tp = checker.shape_impl_type_params.at(tp_key);
+            if existing_tp.is_some() {
+              tp_entries = existing_tp.unwrap();
+            }
+            tp_entries.push(tp_names);
+            checker.shape_impl_type_params.put(tp_key, tp_entries);
+          }
           if block.has_shape_arg_dtype {
             StringBuilder qeb_key_sb = string_builder_init(24);
             qeb_key_sb.append(block.type_name);

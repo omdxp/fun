@@ -2686,12 +2686,69 @@ impl Codegen {
     Vec<flag> arg_is_pointer,
     Vec<DataType*> arg_dtypes
   ) {
+    // More than one impl can share the same (base_name, shape_name,
+    // argument count) - `impl Wrapper<Circle> as Sized` and `impl
+    // Wrapper<Square> as Sized` both look identical to this search by
+    // name and arity alone, since an already-declared type used as a
+    // generic argument is stored exactly like a fresh type-param name
+    // (the parser can't tell them apart at that position; see
+    // `Checker.shape_impl_type_params`'s own doc comment for the same
+    // ambiguity on the typecheck side). Without this pre-scan, whichever
+    // one happened to be declared first would be used for EVERY
+    // instantiation sharing that arity, producing a method whose real
+    // name is correctly `Wrapper__Square__Sized__len` (from
+    // `shape_inst_override_name`) but whose parameter type is wrongly
+    // `Wrapper__Circle*` (Circle's own impl body, never touched by
+    // substitution below - substitution only replaces the COMPOUND's own
+    // declared param name, e.g. "T", which neither "Circle" nor "Square"
+    // ever literally is). A real, still-abstract template (`impl Box<T>
+    // as Sized`) is unaffected: "T" never equals a real concrete
+    // argument name, so no exact match is ever found for it here, and
+    // the existing arity-only matching below still applies unchanged.
+    flag exact_match_exists = false;
+    for tmpl0 : self.generic_impl_templates {
+      fit tmpl0.kind {
+        .Impl(i0) -> {
+          if !equals(i0.type_name, base_name) || !i0.has_shape_name ||
+            i0.has_shape_concrete_instantiation || i0.type_params.len != arg_type_names.len {
+            continue;
+          }
+          flag all_eq = true;
+          num pj = 0;
+          for pj < i0.type_params.len {
+            if !equals(i0.type_params.get(pj), arg_type_names.get(pj)) {
+              all_eq = false;
+              break;
+            }
+            pj = pj + 1;
+          }
+          if all_eq {
+            exact_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
           if !equals(i.type_name, base_name) || !i.has_shape_name ||
             i.has_shape_concrete_instantiation || i.type_params.len != arg_type_names.len {
             continue;
+          }
+          if exact_match_exists {
+            flag this_is_exact = true;
+            num pj2 = 0;
+            for pj2 < i.type_params.len {
+              if !equals(i.type_params.get(pj2), arg_type_names.get(pj2)) {
+                this_is_exact = false;
+                break;
+              }
+              pj2 = pj2 + 1;
+            }
+            if !this_is_exact {
+              continue;
+            }
           }
           // `i.has_shape_concrete_instantiation` only flags a generic
           // shape already resolved to concrete args at the impl (`impl
@@ -2860,6 +2917,40 @@ impl Codegen {
     let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
     let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
 
+    // Same ambiguity fixed in `emit_one_generic_impl_method`/
+    // `maybe_emit_shape_vtable_for_instantiation` just above - an exact
+    // positional type_params match is required when one exists, so this
+    // prototype's own return/parameter types come from the SAME impl
+    // `emit_one_generic_impl_method` later fills the body from, instead
+    // of possibly mismatching it (a real "conflicting types" C error).
+    flag exact_proto_match_exists = false;
+    for tmpl0c : self.generic_impl_templates {
+      fit tmpl0c.kind {
+        .Impl(i0c) -> {
+          if !equals(i0c.type_name, base_name) || i0c.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !equals(shape_name, "") &&
+            (!i0c.has_shape_name || !equals(i0c.shape_name, shape_name)) {
+            continue;
+          }
+          flag all_eq_c = true;
+          num pjd = 0;
+          for pjd < i0c.type_params.len {
+            if !equals(i0c.type_params.get(pjd), arg_type_names.get(pjd)) {
+              all_eq_c = false;
+              break;
+            }
+            pjd = pjd + 1;
+          }
+          if all_eq_c {
+            exact_proto_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
+
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -2869,6 +2960,20 @@ impl Codegen {
           if !equals(shape_name, "") &&
             (!i.has_shape_name || !equals(i.shape_name, shape_name)) {
             continue;
+          }
+          if exact_proto_match_exists {
+            flag this_is_exact_c = true;
+            num pje = 0;
+            for pje < i.type_params.len {
+              if !equals(i.type_params.get(pje), arg_type_names.get(pje)) {
+                this_is_exact_c = false;
+                break;
+              }
+              pje = pje + 1;
+            }
+            if !this_is_exact_c {
+              continue;
+            }
           }
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
@@ -3542,6 +3647,46 @@ impl Codegen {
     let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
     let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
 
+    // Same ambiguity as `maybe_emit_shape_vtable_for_instantiation`'s own
+    // pre-scan: more than one impl can share (base_name, shape_name,
+    // arity) when an already-declared type stands in for a fresh
+    // type-param name at that parser position (`impl Wrapper<Circle> as
+    // Sized` next to `impl Wrapper<Square> as Sized`). Without requiring
+    // an exact positional match when one exists, this picks whichever
+    // impl's own method text happens to come first in
+    // `generic_impl_templates`, silently emitting the wrong instantiation's
+    // body under the right name - the C compiles fine, it just runs the
+    // wrong code, since there's no name/type mismatch a compiler would
+    // catch. A real unbound template's own param name never happens to
+    // equal the concrete arg it's asked for, so it's unaffected.
+    flag exact_owner_match_exists = false;
+    for tmpl0b : self.generic_impl_templates {
+      fit tmpl0b.kind {
+        .Impl(i0b) -> {
+          if !equals(i0b.type_name, base_name) || i0b.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !equals(shape_name, "") &&
+            (!i0b.has_shape_name || !equals(i0b.shape_name, shape_name)) {
+            continue;
+          }
+          flag all_eq_b = true;
+          num pjb = 0;
+          for pjb < i0b.type_params.len {
+            if !equals(i0b.type_params.get(pjb), arg_type_names.get(pjb)) {
+              all_eq_b = false;
+              break;
+            }
+            pjb = pjb + 1;
+          }
+          if all_eq_b {
+            exact_owner_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
+
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -3556,6 +3701,20 @@ impl Codegen {
           if !equals(shape_name, "") &&
             (!i.has_shape_name || !equals(i.shape_name, shape_name)) {
             continue;
+          }
+          if exact_owner_match_exists {
+            flag this_is_exact_b = true;
+            num pjc = 0;
+            for pjc < i.type_params.len {
+              if !equals(i.type_params.get(pjc), arg_type_names.get(pjc)) {
+                this_is_exact_b = false;
+                break;
+              }
+              pjc = pjc + 1;
+            }
+            if !this_is_exact_b {
+              continue;
+            }
           }
           if !impl_allows_generic_args(
             i.has_type_param_forced_insts,
@@ -10340,6 +10499,38 @@ impl Codegen {
     Vec<str> tmpl_type_params;
     tmpl_type_params.init(0);
     Option<DataType> shape_elem_dt = .None;
+    // Same ambiguity as the shape-vtable/method search above - two
+    // different iterator impls of the same generic base and arity
+    // (`impl SomeIter<Circle> as Iterator<num>` next to `impl
+    // SomeIter<Square> as Iterator<num>`) need an exact type_params
+    // match, or whichever is declared first would splice its own
+    // next() body for every instantiation sharing that arity.
+    flag exact_iter_match_exists = false;
+    for tmpl0d : self.generic_impl_templates {
+      fit tmpl0d.kind {
+        .Impl(i0d) -> {
+          if !equals(i0d.type_name, base_name) || i0d.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !i0d.has_shape_name || !equals(i0d.shape_name, "Iterator") {
+            continue;
+          }
+          flag all_eq_d = true;
+          num pjf = 0;
+          for pjf < i0d.type_params.len {
+            if !equals(i0d.type_params.get(pjf), arg_type_names.get(pjf)) {
+              all_eq_d = false;
+              break;
+            }
+            pjf = pjf + 1;
+          }
+          if all_eq_d {
+            exact_iter_match_exists = true;
+          }
+        }
+        _ -> {}
+      }
+    }
     for tmpl : self.generic_impl_templates {
       fit tmpl.kind {
         .Impl(i) -> {
@@ -10348,6 +10539,20 @@ impl Codegen {
           }
           if !i.has_shape_name || !equals(i.shape_name, "Iterator") {
             continue;
+          }
+          if exact_iter_match_exists {
+            flag this_is_exact_d = true;
+            num pjg = 0;
+            for pjg < i.type_params.len {
+              if !equals(i.type_params.get(pjg), arg_type_names.get(pjg)) {
+                this_is_exact_d = false;
+                break;
+              }
+              pjg = pjg + 1;
+            }
+            if !this_is_exact_d {
+              continue;
+            }
           }
           StringBuilder pfx = string_builder_init(16);
           pfx.append(i.type_name);
@@ -11055,6 +11260,274 @@ impl Codegen {
   // `wrote_branch`. Each positional binding gets an `__auto_type name =
   // subj.payload.Variant._N;` declaration first, and is registered as a
   // known local when its payload field type is on record.
+  // The bare type name a shape-downcast fit arm names (`Circle(c) ->
+  // ...`), or empty when `branch` isn't that shape. The parser
+  // (`_try_parse_fit_shape_destructure`) already commits this pattern to
+  // a plain `.Identifier` condition with `bindings` populated, never
+  // produced by the enum-destructure path (which always builds a
+  // `.`-qualified condition instead), so this is unambiguous. Mirrors
+  // `typecheck.fn`'s own `_shape_destructure_type_name` - each layer
+  // keeps its own copy rather than sharing across files, same as
+  // `warnings.fn`'s independent `enum_variants` scan.
+  _fit_shape_destructure_type_name(FitBranch branch) str {
+    if !branch.has_condition || !branch.has_bindings || branch.bindings.len != 1 {
+      ret "";
+    }
+    fit branch.condition.kind {
+      .Identifier(name) -> { ret name; }
+      _ -> {}
+    }
+    ret "";
+  }
+
+  // Triggers `dt`'s real instantiation (struct and, as a side effect of
+  // `ensure_compound_instantiated`/`maybe_emit_shape_vtable_for_
+  // instantiation`, its shape vtable too, when it implements one) ahead
+  // of wherever it would otherwise first happen lazily. Reached directly
+  // from ordinary statement emission deep inside a function body
+  // (`emit_fit`), not from within an already-hoisted type-instantiation
+  // chain - a bare `self.state.write(...)` here would land the result as
+  // a LOCAL declaration inside the enclosing function (legal C, but
+  // scoped only to that function, invisible to any other function
+  // needing the same type). Builds its own scratch buffer, the same
+  // shape `maybe_emit_shape_vtable_for_instantiation` uses for its own
+  // mid-body trigger, and splices the result at file scope via
+  // `emit_hoisted`.
+  _trigger_compound_instantiation_hoisted(DataType dt) {
+    CodegenState scratch = self.new_scratch_state();
+    CodegenState* saved_state = self.state;
+    let saved_hoist_pos = self.hoist_insert_pos;
+    let saved_scratch_depth = self.hoist_scratch_depth;
+    let saved_stmt_start = self.current_stmt_start_pos;
+    self.state = &scratch;
+    self.hoist_insert_pos = .None;
+    self.hoist_scratch_depth = 0;
+    self.current_stmt_start_pos = .None;
+    let compound_name = self.ensure_compound_instantiated(dt);
+    if compound_name.is_none() {
+      self.ensure_enum_instantiated(dt);
+    }
+    self.state = saved_state;
+    self.hoist_insert_pos = saved_hoist_pos;
+    self.hoist_scratch_depth = saved_scratch_depth;
+    self.current_stmt_start_pos = saved_stmt_start;
+    self.emit_hoisted(scratch.out.build());
+  }
+
+  // Ensures the concrete impl (implementor, shape) pair a shape-downcast
+  // fit arm names is fully instantiated (struct and vtable) before the
+  // arm's own `if (subj.vtable == &__fun_impl_...)` check references it
+  // by name - unlike ordinary shape method dispatch (`recv.vtable->
+  // method(...)`), which only ever reads the pointer already stored in a
+  // fat-pointer value's own `.vtable` field, never the vtable symbol by
+  // name, so it never needs this.
+  //
+  // A genuinely non-generic impl (`impl Circle as HasArea`) is already
+  // handled: the ordinary top-level pass emits its vtable unconditionally
+  // before any function body, so there's nothing to do here.
+  //
+  // A concrete instantiation of a generic type needs an explicit early
+  // trigger, and comes in two AST shapes depending on its own argument:
+  // `impl Box<num> as Sized` (a builtin/scalar argument) resolves its own
+  // `concrete_dtype` immediately, so `has_concrete_dtype` is set and
+  // `type_name` is already the mangled identity. `impl Box<Circle> as
+  // Sized` (an already-declared compound/enum argument) is instead
+  // stored exactly like a generic TEMPLATE (`has_type_params` true,
+  // `type_params` holding the argument's own name) - the parser can't
+  // tell a fresh type-param name from a reference to an existing
+  // concrete type at this position, so it doesn't try, and this is
+  // indistinguishable from `impl Box<T> as Sized` by that flag alone.
+  // Reconstructing the same mangled identity `_mangled_dtype_name` (the
+  // parser) and `ensure_compound_instantiated` (below) both build lets
+  // this recognize which case it actually is before committing either
+  // way - a real, unbound template never matches a real mangled name.
+  ensure_specific_shape_impl_vtable_emitted(str type_name, str shape_name) {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_shape_name || !equals(i.shape_name, shape_name) {
+            continue;
+          }
+          if i.has_concrete_dtype {
+            if equals(i.type_name, type_name) {
+              self._trigger_compound_instantiation_hoisted(*i.concrete_dtype);
+              ret;
+            }
+            continue;
+          }
+          if i.has_type_params {
+            StringBuilder recon_sb = string_builder_init(16);
+            recon_sb.append(i.type_name);
+            for tp : i.type_params {
+              recon_sb.append("__");
+              recon_sb.append(tp);
+            }
+            str reconstructed = recon_sb.build();
+            if !equals(reconstructed, type_name) {
+              continue;
+            }
+            DataType dt = dtype_new();
+            dt.type_str = i.type_name;
+            Vec<DataType*> gargs;
+            gargs.init(i.type_params.len);
+            for tp : i.type_params {
+              DataType* argdt = malloc(sizeof(DataType));
+              *argdt = dtype_new();
+              argdt.type_str = tp;
+              gargs.push(argdt);
+            }
+            dt.generic_args = gargs;
+            self._trigger_compound_instantiation_hoisted(dt);
+            ret;
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+
+  // Mirrors `Checker._is_known_concrete_name`: whether `name` is a
+  // fixed, real type (a non-generic compound, a non-generic enum, or a
+  // builtin scalar), never a still-abstract type-parameter name.
+  _is_known_concrete_type_name(str name) flag {
+    if self.compound_names.contains(name) {
+      ret !self.generic_compound_names.contains(name);
+    }
+    if self.enum_names.contains(name) {
+      ret !self.generic_enum_names.contains(name);
+    }
+    ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
+      equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
+      equals(name, "void");
+    }
+
+  // Mirrors `Checker._auto_resolve_bare_generic_shape_target` (each
+  // layer keeps its own copy, same as every other piece of this
+  // feature): a bare generic compound name (`Box`, no `<Args>`)
+  // resolves to its one concrete instantiation of `shape_name` when
+  // exactly one such `impl` exists in the program. Typecheck has
+  // already rejected an ambiguous (2+) or genuinely unbound case before
+  // codegen ever runs, so unlike the typecheck-side helper this one
+  // only needs to find the unique match, not report on the rest.
+  // Anything that isn't a bare known-generic compound name passes
+  // through unchanged.
+  _auto_resolve_bare_generic_shape_target(str type_name, str shape_name) str {
+    if !self.generic_compound_names.contains(type_name) {
+      ret type_name;
+    }
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_shape_name || !equals(i.shape_name, shape_name) {
+            continue;
+          }
+          // A scalar-argument instantiation (`impl Box<num> as Sized`)
+          // never sets `has_type_params` at all - `has_concrete_dtype`
+          // resolves its own mangled identity immediately at parse
+          // time, so `type_name` here is already the final `Box__num`.
+          if i.has_concrete_dtype {
+            if starts_with(i.type_name, format("{str}__", type_name)) {
+              ret i.type_name;
+            }
+            continue;
+          }
+          if !i.has_type_params || !equals(i.type_name, type_name) {
+            continue;
+          }
+          flag all_concrete = true;
+          for tp : i.type_params {
+            if !self._is_known_concrete_type_name(tp) {
+              all_concrete = false;
+              break;
+            }
+          }
+          if !all_concrete {
+            continue;
+          }
+          StringBuilder recon_sb = string_builder_init(16);
+          recon_sb.append(i.type_name);
+          for tp : i.type_params {
+            recon_sb.append("__");
+            recon_sb.append(tp);
+          }
+          ret recon_sb.build();
+        }
+        _ -> {}
+      }
+    }
+    ret type_name;
+  }
+
+  // Emits one `fit` branch recovering the concrete type behind a
+  // shape-typed subject (`Circle(c) -> { ... }`): compares the fat
+  // pointer's `vtable` field against that concrete impl's own singleton
+  // vtable instance. `ensure_specific_shape_impl_vtable_emitted` (called
+  // from `emit_fit` right before this) guarantees it's already defined
+  // by this point, whether it was emitted unconditionally for an
+  // ordinary non-generic impl or triggered early here for a generic
+  // one's concrete instantiation.
+  emit_fit_shape_branch(
+    str subj_name,
+    flag subj_is_pointer,
+    str shape_name,
+    str type_name,
+    FitBranch br,
+    flag wrote_branch
+  ) Option<CodegenErrorKind> {
+    if wrote_branch {
+      self.state.write(" else if (");
+    } else {
+      self.state.write("if (");
+    }
+    self.state.write(subj_name);
+    if subj_is_pointer {
+      self.state.write("->");
+    } else {
+      self.state.write(".");
+    }
+    self.state.write("vtable == &__fun_impl_");
+    self.state.write(type_name);
+    self.state.write("_");
+    self.state.write(shape_name);
+    self.state.write("_vtable) {\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    str bname = br.bindings.get(0);
+    if !equals(bname, "_") {
+      // Pinned, not a plain flush: this declaration is synthesized, not
+      // a real user statement, so without re-pinning it would inherit
+      // whatever `#line` the branch's own guard condition last flushed
+      // (the arm's own line) rather than a debugger showing it on the
+      // binding's actual line.
+      if br.condition != nil && br.condition.has_pos {
+        self.state.write_indent_pinned(br.condition.pos);
+      } else {
+        self.state.write_indent();
+      }
+      self.state.write(type_name);
+      self.state.write("* ");
+      self.state.write(bname);
+      self.state.write(" = (");
+      self.state.write(type_name);
+      self.state.write("*)");
+      self.state.write(subj_name);
+      if subj_is_pointer {
+        self.state.write("->");
+      } else {
+        self.state.write(".");
+      }
+      self.state.write("self;\n");
+      self.record_local(bname, type_name, true);
+    }
+    let berr = self.emit_body(*br.body);
+    if berr.is_some() {
+      ret berr;
+    }
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}");
+    ret .None;
+  }
+
   emit_fit_enum_branch(
     str subj_name,
     flag subj_is_pointer,
@@ -11648,6 +12121,47 @@ impl Codegen {
       }
       if handled_as_enum {
         continue;
+      }
+
+      // Shape downcast arm (`Circle(c) -> { ... }`): only when the
+      // subject itself is shape-typed and the branch names a known
+      // implementor of it. Checked before the bindings guard just below,
+      // since `Circle(c)` parses as an ordinary call with no
+      // `br.bindings` populated (that field only ever comes from the
+      // dotted enum-shorthand destructure path handled above).
+      //
+      // Gated on `shape_decl_names` (every shape DECLARATION, registered
+      // eagerly right after the prelude, independent of any impl at
+      // all), not `shape_names` (which only ever gains an entry once
+      // some concrete impl's vtable machinery has actually run - a
+      // chicken-and-egg gap when every implementor of this shape is a
+      // generic instantiation, since those are only triggered from
+      // *inside* this same branch via `ensure_specific_shape_impl_
+      // vtable_emitted` below). Requiring `shape_names` here first would
+      // mean a shape with no non-generic implementor anywhere in the
+      // program could never enter this branch at all.
+      if subj_type.is_some() && self.shape_decl_names.contains(subj_type.unwrap()) {
+        str shape_downcast_type = self._fit_shape_destructure_type_name(br);
+        if !equals(shape_downcast_type, "") {
+          shape_downcast_type = self._auto_resolve_bare_generic_shape_target(
+            shape_downcast_type,
+            subj_type.unwrap()
+          );
+          self.ensure_specific_shape_impl_vtable_emitted(shape_downcast_type, subj_type.unwrap());
+          let sherr = self.emit_fit_shape_branch(
+            subj_name,
+            subj_is_pointer,
+            subj_type.unwrap(),
+            shape_downcast_type,
+            br,
+            wrote_branch
+          );
+          if sherr.is_some() {
+            ret sherr;
+          }
+          wrote_branch = true;
+          continue;
+        }
       }
 
       if br.has_bindings && br.bindings.len > 0 {

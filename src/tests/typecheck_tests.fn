@@ -2717,3 +2717,244 @@ test "an enum whose variants carry data cannot be compared with == or !=, but a 
   `  flag same = p == nil;
   `}`, "expected a pointer to a data-carrying enum to compare against nil");
 }
+
+test "a shape-downcast fit accepts a real implementor and rejects everything else" {
+  accepts(
+    `shape HasArea { area() num; }
+    `compound Circle { num radius; }
+    `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+    `fun describe(HasArea s) num {
+    `  fit s {
+    `    Circle(c) -> { ret c.radius; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a real implementor to be accepted, and c bound as the concrete type"
+  );
+  str msg = check(
+    `shape HasArea { area() num; }
+    `compound Circle { num radius; }
+    `compound Triangle { num base; }
+    `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+    `fun describe(HasArea s) num {
+    `  fit s {
+    `    Triangle(t) -> { ret t.base; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(msg, "'Triangle' does not implement shape 'HasArea'"), "expected a non-implementor to be rejected by name";
+  str arity_msg = check(
+    `shape HasArea { area() num; }
+    `compound Circle { num radius; }
+    `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+    `fun describe(HasArea s) num {
+    `  fit s {
+    `    Circle(a, b) -> { ret a; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(
+    arity_msg,
+    "expected exactly one binding to recover the concrete 'Circle' value"
+  ), "expected a wrong-arity destructure to be rejected with a clear message";
+  accepts(
+    `enum Outcome {
+    `  Done(num),
+    `  Failed,
+    `}
+    `fun main() {
+    `  Outcome a = Outcome.Failed;
+    `  fit a {
+    `    .Done(v) -> { }
+    `    .Failed -> { }
+    `  }
+    `}`,
+    "expected an ordinary enum fit to be unaffected by shape-downcast recognition"
+  );
+}
+
+test "a shape-downcast fit rejects an unbound generic implementor's own type" {
+  // An unbound generic impl (`impl Box<T> as Sized`) has no single
+  // concrete vtable to dispatch to at all - there's no way to write a
+  // valid destructure arm for it.
+  str msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<T> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(
+    msg,
+    "'Box' is generic and has no single concrete implementation to downcast to"
+  ), "expected the unbound generic template to be rejected by name";
+
+  // A hand-typed mangled form naming a genuinely unbound template's own
+  // type param is rejected too (Box__T, matching impl Box<T> as Sized's
+  // own type_params reconstructed) - T is never a real declared type.
+  str fake_mangled_msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<T> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box__T(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(
+    fake_mangled_msg,
+    "'Box__T' is generic and has no single concrete implementation to downcast to"
+  ), "expected a reconstructed-but-still-abstract name to be rejected the same way";
+}
+
+test "a shape-downcast fit accepts a concrete generic instantiation" {
+  // A builtin/scalar argument (`impl Box<num> as Sized`) resolves its
+  // own concrete_dtype immediately - type_name is already mangled to
+  // Box__num, no ambiguity at all.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box<num>(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a concrete scalar-argument instantiation to be accepted"
+  );
+  // An already-declared compound argument (`impl Wrapper<Circle> as
+  // Sized`) is stored exactly like a generic template at parse time -
+  // the reconstruction check in check_shape_destructure_condition must
+  // recognize Circle as a real type to accept this.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Circle { num radius; }
+    `impl Circle as Sized { len() num { ret self.radius; } }
+    `compound Wrapper<T> {
+    `  T inner;
+    `  num extra;
+    `}
+    `impl Wrapper<Circle> as Sized {
+    `  len() num { ret self.extra; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Circle(c) -> { ret c.radius; }
+    `    Wrapper<Circle>(w) -> { ret w.extra; }
+    `  }
+    `}`,
+    "expected a concrete compound-argument instantiation to be accepted, disambiguated from a real unbound template"
+  );
+  // The bare mangled form works too, not just the <Args> sugar - both
+  // parse to the exact same AST shape.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box__num(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected the bare mangled form to be accepted the same as the <num> sugar"
+  );
+}
+
+test "a shape-downcast fit auto-resolves a bare generic name to its one concrete instantiation" {
+  // Only one impl of Box<...> for Sized exists in this program, so
+  // `Box(b)` (no `<Args>`) unambiguously means `Box<num>(b)`.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a bare name with exactly one concrete instantiation to auto-resolve"
+  );
+  // Same auto-resolve for a compound-argument instantiation, field
+  // access included, so the bound value's real type came through.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Circle { num radius; }
+    `compound Wrapper<T> {
+    `  T inner;
+    `  num extra;
+    `}
+    `impl Wrapper<Circle> as Sized {
+    `  len() num { ret self.extra; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Wrapper(w) -> { ret w.extra; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`,
+    "expected a bare name to auto-resolve to a concrete compound-argument instantiation"
+  );
+}
+
+test "a shape-downcast fit rejects a bare generic name with two concrete instantiations as ambiguous" {
+  str msg = check(
+    `shape Sized { len() num; }
+    `compound Box<T> {
+    `  T val;
+    `  num count;
+    `}
+    `impl Box<num> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `impl Box<str> as Sized {
+    `  len() num { ret self.count; }
+    `}
+    `fun describe(Sized s) num {
+    `  fit s {
+    `    Box(b) -> { ret b.count; }
+    `    _ -> { ret 0; }
+    `  }
+    `}`
+  );
+  assert contains(msg, "'Box' is ambiguous between"), "expected an ambiguous bare name to be rejected by name";
+  assert contains(msg, "'Box__num'") && contains(msg, "'Box__str'"),
+  "expected the ambiguous message to name both candidates";
+  assert contains(msg, "write the generic arguments explicitly"),
+  "expected the ambiguous message to point at the <Args> fix";
+}

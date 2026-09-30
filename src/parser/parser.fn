@@ -4999,6 +4999,148 @@ impl Parser {
     ret .None;
   }
 
+  // Tries to parse a shape-downcast fit pattern at the cursor: a bare
+  // (undotted) `Type(binding)`, recovering the concrete type behind a
+  // shape-typed fit subject. Distinguished from an ordinary call/value
+  // pattern by requiring its parenthesized contents to be plain
+  // identifiers, the same shape `_try_parse_fit_destructure`'s own
+  // binding list requires - nothing in the language today writes a real
+  // call as a fit pattern this way (confirmed by grep across the whole
+  // repo before adding this), so committing once that shape is seen is
+  // safe. On a match, consumes those tokens, sets `*out_condition` to
+  // the bare type-name identifier, fills `*out_bindings` (exactly one
+  // name; arity is enforced later in typecheck, not here, to give a real
+  // error rather than a silent non-match), and sets `*out_matched` true.
+  // Whether `Type` actually implements the subject's shape is also a
+  // typecheck-time question - the parser has no type information.
+  _try_parse_fit_shape_destructure(
+    flag* out_matched,
+    Node* out_condition,
+    Vec<str>* out_bindings
+  ) Option<ParseErrorKind> {
+    *out_matched = false;
+    let sp0_opt = self.state.token_peek_n(0);
+    let sp1_opt = self.state.token_peek_n(1);
+    if sp0_opt.is_none() || sp1_opt.is_none() {
+      ret .None;
+    }
+    let sp0 = sp0_opt.unwrap();
+    let sp1 = sp1_opt.unwrap();
+    if sp0.type != .Identifier {
+      ret .None;
+    }
+    // A concrete generic instantiation (`Circle<num>(c) -> ...`, matching
+    // a real `impl Circle<num> as Shape { ... }`) commits unconditionally
+    // once `Ident<` is seen here - there is no other sensible meaning for
+    // that shape in fit-pattern position, unlike the bare `Ident(` case
+    // just below (which could, in principle, be an ordinary call used as
+    // a value-equality pattern, hence its own extra validation). A
+    // genuinely malformed `<...>` list still reports a real parse error
+    // rather than silently falling through.
+    flag has_generic_args = token_is_operator(sp1, "<");
+    if !has_generic_args && !token_is_operator(sp1, "(") {
+      ret .None;
+    }
+    if !has_generic_args {
+      // Peek past the parenthesized list without consuming: it must hold
+      // nothing but a comma-separated identifier list, or this isn't a
+      // shape-destructure pattern at all (falls through to the ordinary
+      // expression fallback unchanged, e.g. a real call with a computed
+      // argument).
+      num peek_i = 2;
+      for true {
+        let pk_opt = self.state.token_peek_n(peek_i);
+        if pk_opt.is_none() {
+          ret .None;
+        }
+        let pk = pk_opt.unwrap();
+        if pk.type != .Identifier {
+          ret .None;
+        }
+        peek_i = peek_i + 1;
+        let sep_opt = self.state.token_peek_n(peek_i);
+        if sep_opt.is_none() {
+          ret .None;
+        }
+        let sep = sep_opt.unwrap();
+        if token_is_operator(sep, ",") {
+          peek_i = peek_i + 1;
+          continue;
+        }
+        if token_is_symbol(sep, ')') {
+          break;
+        }
+        ret .None;
+      }
+    }
+
+    str type_name = "";
+    fit sp0.data {
+      .Sval(s) -> { type_name = s; }
+      _ -> {}
+    }
+    Pos type_pos = sp0.pos;
+    self.state.token_next(); // Type
+
+    if has_generic_args {
+      DataType generic_dt = dtype_new();
+      generic_dt.type_str = type_name;
+      let gaerr = self.state.parse_generic_type_args(&generic_dt);
+      if gaerr.is_some() {
+        ret gaerr;
+      }
+      // Mangled exactly the way an `impl Circle<num> as Shape { ... }`
+      // header's own `type_name` already is, so a concrete instantiation
+      // written here lines up with what's registered as a real
+      // implementor without typecheck/codegen needing to know anything
+      // about generics at all - they just see a plain (if unusually
+      // spelled) type name, same as any other shape-downcast arm.
+      type_name = _mangled_dtype_name(&generic_dt);
+    }
+
+    Node type_node = node_new(.Identifier(type_name));
+    type_node.pos = type_pos;
+    type_node.has_pos = true;
+    type_node.flags.inside_expression = true;
+
+    let slperr = self.state.expect_op("(");
+    if slperr.is_some() {
+      ret slperr;
+    }
+    Vec<str> sbinds;
+    sbinds.init(0);
+    for !self.state.next_token_is_symbol(')') {
+      let sbt = self.state.token_next();
+      if sbt.is_none() || sbt.unwrap().type != .Identifier {
+        report_expected_identifier(self.state, sbt, "expected binding name in shape destructuring pattern");
+        ret .Some(.InvalidIdentifier);
+      }
+      str sbname = "";
+      fit sbt.unwrap().data {
+        .Sval(s) -> { sbname = s; }
+        _ -> {}
+      }
+      sbinds.push(sbname);
+      if !self.state.next_token_is_operator(",") {
+        break;
+      }
+      self.state.token_next();
+    }
+    let srperr = self.state.expect_sym(')');
+    if srperr.is_some() {
+      ret srperr;
+    }
+    if sbinds.len == 0 {
+      self.state.err("shape destructuring pattern '()' must bind exactly one name");
+      ret .Some(.InvalidToken);
+    }
+
+    *out_condition = type_node;
+    *out_bindings = sbinds;
+    *out_matched = true;
+    ret .None;
+  }
+
   // Tries to parse a data-carrying-enum destructuring fit pattern at the
   // cursor: `Enum.Variant(a, b)` or shorthand `.Variant(a, b)`. On a
   // match, consumes those tokens, sets `*out_condition` to the variant-
@@ -5226,34 +5368,51 @@ impl Parser {
       ret dxerr;
     }
 
+    flag shape_destructure_matched = false;
     flag is_tuple_pattern = false;
     if destructure_matched {
       arm_condition = destructure_condition;
       bindings = destructure_bindings;
     } else {
-      flag tuple_pattern_matched = false;
-      Node tuple_pattern_condition = node_new(.Blank);
-      Vec<str> tuple_pattern_bindings;
-      tuple_pattern_bindings.init(0);
-      let txerr = self._try_parse_fit_tuple_pattern(
-        &tuple_pattern_matched,
-        &tuple_pattern_condition,
-        &tuple_pattern_bindings
+      Node shape_destructure_condition = node_new(.Blank);
+      Vec<str> shape_destructure_bindings;
+      shape_destructure_bindings.init(0);
+      let sdxerr = self._try_parse_fit_shape_destructure(
+        &shape_destructure_matched,
+        &shape_destructure_condition,
+        &shape_destructure_bindings
       );
-      if txerr.is_some() {
-        ret txerr;
+      if sdxerr.is_some() {
+        ret sdxerr;
       }
-      if tuple_pattern_matched {
-        arm_condition = tuple_pattern_condition;
-        bindings = tuple_pattern_bindings;
-        is_tuple_pattern = true;
+      if shape_destructure_matched {
+        arm_condition = shape_destructure_condition;
+        bindings = shape_destructure_bindings;
       } else {
-        Node simple_condition = node_new(.Blank);
-        let serr = self._parse_fit_simple_pattern(&simple_condition);
-        if serr.is_some() {
-          ret serr;
+        flag tuple_pattern_matched = false;
+        Node tuple_pattern_condition = node_new(.Blank);
+        Vec<str> tuple_pattern_bindings;
+        tuple_pattern_bindings.init(0);
+        let txerr = self._try_parse_fit_tuple_pattern(
+          &tuple_pattern_matched,
+          &tuple_pattern_condition,
+          &tuple_pattern_bindings
+        );
+        if txerr.is_some() {
+          ret txerr;
         }
-        arm_condition = simple_condition;
+        if tuple_pattern_matched {
+          arm_condition = tuple_pattern_condition;
+          bindings = tuple_pattern_bindings;
+          is_tuple_pattern = true;
+        } else {
+          Node simple_condition = node_new(.Blank);
+          let serr = self._parse_fit_simple_pattern(&simple_condition);
+          if serr.is_some() {
+            ret serr;
+          }
+          arm_condition = simple_condition;
+        }
       }
     }
 
@@ -5300,7 +5459,7 @@ impl Parser {
     // plain one (not a destructuring or tuple pattern, and so with no
     // bindings of its own to keep consistent across alternatives) -
     // those only make sense as an arm's one and only pattern.
-    if !destructure_matched && !is_tuple_pattern && !is_wildcard {
+    if !destructure_matched && !shape_destructure_matched && !is_tuple_pattern && !is_wildcard {
       for self.state.next_token_is_operator(",") {
         self.state.token_next(); // consume ','
         Node or_condition = node_new(.Blank);

@@ -1,0 +1,53 @@
+// Structural downcasting: a `fit` block can recover the concrete type
+// behind a shape-typed value, dispatched at runtime through the same
+// vtable the shape's ordinary method calls already use.
+
+use std.c.io;
+use std.io;
+
+shape HasArea {
+  area() num;
+}
+
+compound Circle {
+  num radius;
+}
+
+compound Square {
+  num side;
+}
+
+impl Circle as HasArea {
+  area() num {
+    ret self.radius * self.radius;
+  }
+}
+
+impl Square as HasArea {
+  area() num {
+    ret self.side * self.side;
+  }
+}
+
+fun describe(HasArea s) str {
+  str out = "unknown shape";
+  fit s {
+    Circle(c) -> { out = format("circle, radius {num}", c.radius); }
+    Square(sq) -> { out = format("square, side {num}", sq.side); }
+    _ -> {}
+  }
+  ret out;
+}
+
+fun main() {
+  Circle c;
+  c.radius = 3;
+  Square sq;
+  sq.side = 4;
+
+  HasArea hc = &c;
+  HasArea hs = &sq;
+
+  printf("%s (area %lld)\n", describe(hc), hc.area());
+  printf("%s (area %lld)\n", describe(hs), hs.area());
+}

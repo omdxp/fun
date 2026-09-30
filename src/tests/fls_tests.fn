@@ -3506,6 +3506,70 @@ test "hovering a fit arm's own payload binding resolves when the subject is a le
   assert contains(hover(&reads, doc, 12, 18), "num v"), "expected the payload binding to resolve through a let-inferred, method-call fit subject";
 }
 
+test "hovering a shape-downcast fit arm's binding resolves to the concrete type" {
+  str src = `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `fun describe(HasArea s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    _ -> { ret 0; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapedowncast.fn";
+  doc.path = "shapedowncast.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 5, 11), "Circle* c"), "expected the binding site to show the concrete pointer type";
+  assert contains(hover(&reads, doc, 5, 23), "Circle* c"), "expected a use site inside the arm body to resolve the same way";
+
+  // The type name itself (`Circle` in `Circle(c) -> ...`) is an
+  // ordinary identifier reference as far as the parser is concerned -
+  // no shape-downcast-specific handling needed here, unlike the binding
+  // above.
+  str jumped = definition(&reads, doc, 5, 6);
+  assert contains(jumped, "shapedowncast.fn"), "expected go-to-definition on the pattern's type name to resolve";
+  assert !equals(jumped, "[]"), "expected a real location, not an empty result";
+}
+
+test "hover and completion resolve a bare generic shape-downcast arm auto-resolved to its one concrete instantiation" {
+  // `Wrapper(w)` (no `<Args>`) auto-resolves at typecheck since it's the
+  // only impl of Wrapper<...> for Sized - hover, scope completion, and
+  // dot-completion each keep their own independent copy of this
+  // resolution (mirroring typecheck.fn/codegen.fn/warnings.fn's own
+  // copies), so all three need checking, not just one.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapebareauto.fn";
+  doc.path = "shapebareauto.fn";
+  doc.text = `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Wrapper<T> { T inner; num extra; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `fun describe(Sized s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `    Wrapper(w) -> { ret w.extra; }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 8, 12), "Wrapper__Circle* w"), "expected the binding site to resolve to the auto-resolved concrete type";
+  assert contains(hover(&reads, doc, 8, 24), "Wrapper__Circle* w"), "expected a use site inside the arm body to resolve the same way";
+
+  str scoped = completion(&reads, doc, 8, 24, false);
+  assert contains(scoped, `"label":"w"`), "expected the auto-resolved binding offered in scope completion";
+
+  str dotted = completion(&reads, doc, 8, 26, false);
+  assert contains(dotted, `"label":"extra"`), "expected Wrapper__Circle's own field 'extra' offered through the auto-resolved binding";
+}
+
 test "hover resolves a shape-typed receiver's own method, not just a concrete one" {
   // User-reported. lookup_method only ever searched impl blocks by
   // their own type_name, which is always the concrete implementing
@@ -5077,6 +5141,90 @@ test "code actions fill in a fit's missing arm with a correctly-sized stub" {
   assert contains(out, `"newText":"  .Square(v0) -> {}\n"`), "expected a correctly-sized stub, Square takes one payload value";
   // Inserted right before the fit block's own closing brace (line 7).
   assert contains(out, `"start":{"line":7,"character":2}`), "expected the insertion right before the fit's closing brace";
+}
+
+test "code actions fill in a shape-downcast fit's missing implementor arm" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapenonexhaustive.fn";
+  doc.path = "shapenonexhaustive.fn";
+  doc.text = `shape HasArea {
+  `  area() num;
+  `}
+  `compound Circle {
+  `  num radius;
+  `}
+  `compound Square {
+  `  num side;
+  `}
+  `impl Circle as HasArea {
+  `  area() num { ret self.radius * self.radius; }
+  `}
+  `impl Square as HasArea {
+  `  area() num { ret self.side * self.side; }
+  `}
+  `fun describe(HasArea s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 16;
+  d.col = 2;
+  d.end_line = 16;
+  d.end_col = 5;
+  d.severity = DIAG_SEVERITY_WARNING;
+  d.message = "fit_non_exhaustive: fit does not handle 'Square'";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Fill in missing 'Square' arm"`), "expected the shape-downcast fit-arm quick fix";
+  assert contains(out, `"newText":"  Square(s) -> {}\n"`), "expected a bare, undotted stub with a lowercased binding name";
+  // Inserted right before the fit block's own closing brace (line 18).
+  assert contains(out, `"start":{"line":18,"character":2}`), "expected the insertion right before the fit's closing brace";
+}
+
+test "code actions fill in every missing shape-downcast implementor at once" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapenonexhaustive_multi.fn";
+  doc.path = "shapenonexhaustive_multi.fn";
+  doc.text = `shape HasArea {
+  `  area() num;
+  `}
+  `compound Circle {
+  `  num radius;
+  `}
+  `fun describe(HasArea s) num {
+  `  fit s {
+  `    Circle(c) -> { ret c.radius; }
+  `  }
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 6;
+  d.col = 2;
+  d.end_line = 6;
+  d.end_col = 5;
+  d.severity = DIAG_SEVERITY_WARNING;
+  d.message = "fit_non_exhaustive: fit does not handle 'Square', 'Triangle'";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Fill in missing 'Square', 'Triangle' arms"`), "expected one fix naming both missing implementors, plural";
+  assert contains(out, `Square(s) -> {}`), "expected a stub for Square";
+  assert contains(out, `Triangle(t) -> {}`), "expected a stub for Triangle too, in the same fix";
 }
 
 test "code actions fill in every missing arm at once, not just the first" {

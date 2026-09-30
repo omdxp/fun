@@ -1,0 +1,263 @@
+// Shape-downcast fit: `Circle(c) -> ...` recovering the concrete type
+// behind a shape-typed value at runtime. Exhaustiveness-warning coverage
+// lives in warning_tests.fn, alongside the rest of fit's exhaustiveness
+// checks; this file covers parsing/typechecking/dispatch.
+
+use harness;
+use std.string;
+
+test "a shape-downcast fit dispatches to the concrete implementor" {
+  str src = `use std.c.io;
+  `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Square(sq) -> { out = "square"; }
+  `    _ -> { }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Square sq; sq.side = 4;
+  `  HasArea hc = &c;
+  `  HasArea hs = &sq;
+  `  printf("%s %s\n", describe(hc), describe(hs));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_dispatch", "shape-downcast fit dispatch");
+  assert equals(out, "circle square\n"), "expected each concrete type to dispatch to its own arm";
+}
+
+test "a shape-downcast fit dispatch is order-independent, not accidental" {
+  // Same program as above with the arms swapped, to rule out the first
+  // branch always winning regardless of the actual runtime type.
+  str src = `use std.c.io;
+  `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Square(sq) -> { out = "square"; }
+  `    Circle(c) -> { out = "circle"; }
+  `    _ -> { }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Square sq; sq.side = 4;
+  `  HasArea hc = &c;
+  `  HasArea hs = &sq;
+  `  printf("%s %s\n", describe(hc), describe(hs));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_dispatch_swapped", "shape-downcast fit dispatch, arms swapped");
+  assert equals(out, "circle square\n"), "expected dispatch by runtime type, not by arm order";
+}
+
+test "a shape-downcast fit falls through to the wildcard for an uncovered implementor" {
+  str src = `use std.c.io;
+  `shape HasArea { area() num; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Circle as HasArea { area() num { ret self.radius * self.radius; } }
+  `impl Square as HasArea { area() num { ret self.side * self.side; } }
+  `fun describe(HasArea s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    _ -> { out = "other"; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Square sq; sq.side = 4;
+  `  HasArea hs = &sq;
+  `  printf("%s\n", describe(hs));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_wildcard", "shape-downcast fit wildcard fallback");
+  assert equals(out, "other\n"), "expected the wildcard arm for the uncovered implementor";
+}
+
+test "an ordinary enum fit is unaffected by shape-downcast parsing" {
+  str src = `use std.c.io;
+  `enum Color { Red, Green, Blue }
+  `fun main() num {
+  `  Color c = .Green;
+  `  fit c {
+  `    .Red -> { printf("red\n"); }
+  `    .Green -> { printf("green\n"); }
+  `    .Blue -> { printf("blue\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_enum_unaffected", "ordinary enum fit still works");
+  assert equals(out, "green\n"), "expected ordinary enum fit dispatch to be unaffected";
+}
+
+test "an ordinary data-carrying enum destructure is unaffected by shape-downcast parsing" {
+  str src = `use std.c.io;
+  `enum Shape2D { Circle2D(num), Square2D(num) }
+  `fun main() num {
+  `  Shape2D s = .Circle2D(5);
+  `  fit s {
+  `    .Circle2D(r) -> { printf("circle %lld\n", r); }
+  `    .Square2D(side) -> { printf("square %lld\n", side); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_enum_destructure_unaffected",
+    "ordinary enum destructure fit still works"
+  );
+  assert equals(out, "circle 5\n"), "expected ordinary enum-payload destructure to be unaffected";
+}
+
+test "a shape-downcast fit dispatches to a concrete generic instantiation (scalar argument)" {
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Box<T> { T val; num count; }
+  `impl Box<num> as Sized { len() num { ret self.count; } }
+  `fun describe(Sized s) str {
+  `  str out = "unknown";
+  `  fit s {
+  `    Circle(c) -> { out = "circle"; }
+  `    Box<num>(b) -> { out = "box"; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Box<num> b; b.val = 5; b.count = 7;
+  `  Sized sc = &c;
+  `  Sized sb = &b;
+  `  printf("%s %s\n", describe(sc), describe(sb));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "shape_fit_generic_scalar", "shape-downcast fit, concrete scalar generic instantiation");
+  assert equals(out, "circle box\n"), "expected dispatch to the concrete Box<num> implementor";
+}
+
+test "a shape-downcast fit dispatches to a concrete generic instantiation (compound argument), field access included" {
+  // The harder case: the parser can't tell a fresh type-param name from
+  // a reference to an already-declared type at `impl Wrapper<Circle> as
+  // Sized`'s own position, so this is stored exactly like a generic
+  // template internally - disambiguating it, instantiating its vtable
+  // early enough for the fit's own C output to reference it, and
+  // resolving field access on the recovered value all have to work
+  // together here.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Wrapper<T> { T inner; num extra; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `fun describe(Sized s) num {
+  `  num out = 0;
+  `  fit s {
+  `    Circle(c) -> { out = c.radius; }
+  `    Wrapper<Circle>(w) -> { out = w.extra; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Wrapper<Circle> w; w.inner = c; w.extra = 9;
+  `  Sized sc = &c;
+  `  Sized sw = &w;
+  `  printf("%lld %lld\n", describe(sc), describe(sw));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_generic_compound",
+    "shape-downcast fit, concrete compound generic instantiation"
+  );
+  assert equals(out, "3 9\n"), "expected dispatch to the concrete Wrapper<Circle> implementor with correct field access";
+}
+
+test "a shape-downcast fit dispatches correctly when two instantiations of the same generic implement the same shape" {
+  // Regression: the template search matched (base name, shape, arity)
+  // only, so Wrapper<Square>'s own vtable trampoline was built from
+  // Wrapper<Circle>'s method body (declared first), producing a real C
+  // compile error - a bug in ordinary shape dispatch too, not specific
+  // to fit, just surfaced by testing this arm shape thoroughly.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Wrapper<T> { T inner; num extra; }
+  `compound Circle { num radius; }
+  `compound Square { num side; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `impl Wrapper<Square> as Sized { len() num { ret self.extra * 10; } }
+  `fun describe(Sized s) num {
+  `  num out = 0;
+  `  fit s {
+  `    Wrapper<Circle>(a) -> { out = a.extra; }
+  `    Wrapper<Square>(b) -> { out = b.extra; }
+  `    _ -> { out = -1; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Wrapper<Circle> wc; wc.extra = 5;
+  `  Wrapper<Square> ws; ws.extra = 7;
+  `  Sized sc = &wc;
+  `  Sized ss = &ws;
+  `  printf("%lld %lld\n", describe(sc), describe(ss));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_two_generic_instantiations",
+    "shape-downcast fit dispatches correctly with two instantiations of the same generic"
+  );
+  assert equals(out, "5 7\n"), "expected each instantiation to dispatch to its own method body, not the first-declared one's";
+}
+
+test "a shape-downcast fit dispatches a bare generic name auto-resolved to its one concrete instantiation" {
+  // Only one impl of Wrapper<...> for Sized exists here, so the arm can
+  // write the bare `Wrapper(w)` (no `<Circle>`) and still dispatch
+  // correctly - codegen's own copy of the auto-resolve has to find the
+  // same unique instantiation typecheck already accepted.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Circle { num radius; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `compound Wrapper<T> { T inner; num extra; }
+  `impl Wrapper<Circle> as Sized { len() num { ret self.extra; } }
+  `fun describe(Sized s) num {
+  `  num out = 0;
+  `  fit s {
+  `    Circle(c) -> { out = c.radius; }
+  `    Wrapper(w) -> { out = w.extra; }
+  `  }
+  `  ret out;
+  `}
+  `fun main() num {
+  `  Circle c; c.radius = 3;
+  `  Wrapper<Circle> w; w.inner = c; w.extra = 9;
+  `  Sized sc = &c;
+  `  Sized sw = &w;
+  `  printf("%lld %lld\n", describe(sc), describe(sw));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_bare_generic_auto_resolve",
+    "shape-downcast fit, bare generic name auto-resolved to its one concrete instantiation"
+  );
+  assert equals(out, "3 9\n"), "expected the bare Wrapper(w) arm to dispatch to Wrapper<Circle>'s vtable and read the right field";
+}
