@@ -30,9 +30,14 @@ dest_stdlib="$dest_share"
 
 mkdir -p "$dest_bin" "$dest_share"
 
-# Copy binaries
-cp -f "$src_bin/fun" "$dest_bin/fun" 2>/dev/null || cp -f "$src_bin/fun.exe" "$dest_bin/fun"
-cp -f "$src_bin/fls" "$dest_bin/fls" 2>/dev/null || cp -f "$src_bin/fls.exe" "$dest_bin/fls"
+# Copy binaries. `rm -f` first, then `cp` into a fresh file, rather than
+# `cp -f` overwriting in place: a previous install's `fun`/`fls` may still
+# be running (an editor's own fls process, in particular), and truncating
+# its file in place while it's reading can crash it. Unlinking first lets
+# a running process keep its own already-open file descriptor untouched.
+rm -f "$dest_bin/fun" "$dest_bin/fls"
+cp "$src_bin/fun" "$dest_bin/fun" 2>/dev/null || cp "$src_bin/fun.exe" "$dest_bin/fun"
+cp "$src_bin/fls" "$dest_bin/fls" 2>/dev/null || cp "$src_bin/fls.exe" "$dest_bin/fls"
 chmod 755 "$dest_bin/fun" "$dest_bin/fls" || true
 
 # Copy stdlib signatures
@@ -45,8 +50,6 @@ mkdir -p "$dest_share"
 cat >"$env_snippet" <<EOF
 # Fun environment
 export FUN_STDLIB_DIR="$dest_stdlib"
-export FUN_CC="gcc"
-export FUN_CC_ARGS=""
 EOF
 
 # Persist FUN_STDLIB_DIR into the user's shell profile (best-effort).
@@ -81,8 +84,6 @@ append_block_fish() {
     echo
     echo "$marker_begin"
     echo "set -gx FUN_STDLIB_DIR \"$dest_stdlib\""
-    echo "set -gx FUN_CC \"gcc\""
-    echo "set -gx FUN_CC_ARGS \"\""
     echo "$marker_end"
   } >>"$profile"
 }
@@ -115,8 +116,7 @@ echo "Installed fun to: $prefix"
 echo "Installed fls to: $prefix"
 echo "Stdlib installed to: $dest_share"
 echo "FUN_STDLIB_DIR snippet: $env_snippet"
-echo "FUN_CC=gcc"
-echo "FUN_CC_ARGS="
+echo "C compiler: auto-detected at build time (clang, then gcc, then cc); set FUN_CC yourself to override"
 if [ "$persisted" = "yes" ]; then
   if [ -n "$shell_name" ]; then
     echo "FUN_STDLIB_DIR persisted for shell: $shell_name"
