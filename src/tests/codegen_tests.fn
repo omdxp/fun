@@ -887,3 +887,36 @@ test "a fit tuple pattern compiles under MSVC's strict, non-GNU C" {
     out_msvc
   );
 }
+
+test "reachability pruning keeps a called function and drops an unreferenced one from the same file" {
+  str src = `fun reached_helper() num {
+  `  ret 42;
+  `}
+  `fun never_called_helper() num {
+  `  ret 99;
+  `}
+  `fun main() num {
+  `  ret reached_helper();
+  `}`;
+  let out = emit_c_with_imports_pruning(src, "prune_dead_helper", "an unreferenced helper should be pruned");
+  assert contains(out, "return 42;"), "expected the called helper's own body to survive pruning";
+  // `never_called_helper` still gets a one-line forward declaration
+  // regardless (see `mark_reachable_names`'s own doc comment: only
+  // body emission is gated, prototypes never are), so this checks for
+  // its body specifically rather than the bare name, which the
+  // always-present prototype would also match.
+  assert !contains(out, "return 99;"), "expected the never-called helper's own body to be pruned, even though its prototype still exists";
+}
+
+test "reachability pruning keeps a function referenced only as a value, never called by name" {
+  str src = `als IntFn = fun() num;
+  `fun value_only_helper() num {
+  `  ret 7;
+  `}
+  `fun main() num {
+  `  IntFn f = value_only_helper;
+  `  ret f();
+  `}`;
+  let out = emit_c_with_imports_pruning(src, "prune_value_only", "a function referenced only as a value should survive pruning");
+  assert contains(out, "value_only_helper"), "expected the value-referenced function's body to survive pruning even with no direct call-by-name syntax";
+}
