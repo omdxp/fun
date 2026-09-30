@@ -489,7 +489,22 @@ jobs:
   build-reference-site:
     name: Build reference website
     runs-on: ubuntu-24.04
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    # `setup-fun@v1`'s `version: latest` below resolves to this very
+    # release the instant it's published, whether or not its own assets
+    # have finished uploading yet (the same self-inflicted timing hazard
+    # release-process notes already document elsewhere) - wait for
+    # `upload-release-assets` so `latest`'s assets actually exist by the
+    # time this job asks for them.
+    needs: [upload-release-assets]
+    # `upload-release-assets` itself only runs `if: github.event_name ==
+    # 'release'` (workflow_dispatch has no Release to attach assets to),
+    # so it's always `skipped`, never `success`, on that trigger - `not
+    # failure()` accepts both `success` (the release trigger) and
+    # `skipped` (workflow_dispatch) while still refusing to run if the
+    # upload genuinely failed.
+    if: |
+      !failure() && !cancelled() &&
+      (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
