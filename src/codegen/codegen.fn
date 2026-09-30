@@ -5746,36 +5746,31 @@ impl Codegen {
             _ -> {}
           }
         }
-        // `str == str`/`str != str` must use `strcmp`, not C pointer
-        // comparison. On MSVC string literals are not deduplicated across
-        // translation units, so a function returning `""` yields a
-        // different address than a `""` literal in the same condition even
-        // though both are semantically empty strings.
+        // `str == str`/`str != str` when either operand is a string
+        // literal must use value comparison, not C pointer comparison. On
+        // MSVC string literals are not deduplicated across translation
+        // units, so a function returning `""` yields a different address
+        // than a `""` literal in the same condition even though both are
+        // semantically empty strings.
         //
-        // The check is conservative on purpose: calling `resolve_field_chain`
-        // before `emit_expr` would trigger its call-receiver probe which has
-        // side effects on hoist positions and generic-method draining. Instead
-        // we detect the three safe patterns without a probe:
-        // - either side is a string literal  (covers `func() != ""`)
-        // - left is a bare identifier whose declared type is `str`
-        // (covers `a != b`)
-        // Nil comparisons are skipped — those are null-pointer checks and
-        // pointer comparison is intentional there.
+        // We use `__fun_str_eq` (emitted in the prelude) rather than raw
+        // `strcmp` so that a null str on either side is treated as
+        // "not equal to any string literal" — matching the old pointer
+        // comparison semantics exactly and avoiding a segfault.
+        //
+        // Trigger only when at least one side is a string literal; that
+        // covers `func() != ""` and `ident == "val"` without firing on
+        // `ident != 0` or `ident != nil` (null-pointer checks where the
+        // right operand is not a string literal at all, so calling
+        // resolve_field_chain is not needed and has no side effects here).
         if equals(e.op, "==") || equals(e.op, "!=") {
           flag lhs_is_nil = false;
           flag rhs_is_nil = false;
           flag lhs_is_str_lit = false;
           flag rhs_is_str_lit = false;
-          flag lhs_is_str_ident = false;
           fit e.left.kind {
             .Nil -> { lhs_is_nil = true; }
             .String(_) -> { lhs_is_str_lit = true; }
-            .Identifier(lname) -> {
-              let lt = self.lookup_local_type_name(lname);
-              if lt.is_some() && equals(lt.unwrap(), "str") {
-                lhs_is_str_ident = true;
-              }
-            }
             _ -> {}
           }
           fit e.right.kind {
@@ -5783,15 +5778,19 @@ impl Codegen {
             .String(_) -> { rhs_is_str_lit = true; }
             _ -> {}
           }
-          flag use_strcmp = !lhs_is_nil && !rhs_is_nil &&
-            (lhs_is_str_lit || rhs_is_str_lit || lhs_is_str_ident);
-          if use_strcmp {
+          flag use_str_eq = !lhs_is_nil && !rhs_is_nil &&
+            (lhs_is_str_lit || rhs_is_str_lit);
+          if use_str_eq {
             flag sp = !self.suppress_next_expr_parens;
             self.suppress_next_expr_parens = false;
             if sp {
               self.state.write("(");
             }
-            self.state.write("strcmp(");
+            if equals(e.op, "==") {
+              self.state.write("__fun_str_eq(");
+            } else {
+              self.state.write("!__fun_str_eq(");
+            }
             let lerr2 = self.emit_expr(*e.left);
             if lerr2.is_some() {
               ret lerr2;
@@ -5801,11 +5800,7 @@ impl Codegen {
             if rerr2.is_some() {
               ret rerr2;
             }
-            if equals(e.op, "==") {
-              self.state.write(") == 0");
-            } else {
-              self.state.write(") != 0");
-            }
+            self.state.write(")");
             if sp {
               self.state.write(")");
             }
@@ -15952,6 +15947,7 @@ impl Codegen {
     `#include <ctype.h>
     `#include <limits.h>
     ``);
+    self.state.write("static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n");
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
     if program_uses_std_c_header(self.all_nodes, "math.fn") {
@@ -22424,6 +22420,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
+    `static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
