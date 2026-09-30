@@ -35,6 +35,17 @@ jobs:
         with:
           version: latest
           token: ${{ secrets.GITHUB_TOKEN }}
+      # Real toolchain availability for the wasm target (Tier 1 of the
+      # WebAssembly initiative, see #184/#185): once `emcc` is on PATH,
+      # the wasm tests already in the suite (gated to skip gracefully
+      # when it's missing, not fail) start actually exercising the real
+      # toolchain here instead of only on whoever happens to have it
+      # installed locally. One lane only - the wasm target's own output
+      # doesn't depend on the build host's platform, so there's nothing
+      # for the other two lanes to verify that this one doesn't already.
+      - name: Set up emscripten
+        if: matrix.os == 'ubuntu-24.04'
+        uses: mymindstorm/setup-emsdk@v14
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: omdxp/msvc-dev-cmd@v1
@@ -81,6 +92,25 @@ jobs:
             FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
             FUN_STDLIB_DIR="$PWD/stdlib" ./fun-out/bin/fun build
           fi
+      # An explicit, unconditional check (not gated behind the suite's own
+      # skip-when-missing wasm tests) that the toolchain set up above
+      # actually works here - if `setup-emsdk` itself ever silently breaks,
+      # this fails loudly instead of the suite quietly skipping everything
+      # and reporting green with no real wasm coverage at all.
+      - name: Smoke-test the wasm target
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 5
+        run: |
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          cat > /tmp/wasm_ci_smoke.fn << 'FNEOF'
+          use std.c.io;
+          fun main() num {
+            printf("wasm ci smoke: %lld\n", 6 * 7);
+            ret 0;
+          }
+          FNEOF
+          FUN_CC=emcc ./fun-out/bin/fun -in /tmp/wasm_ci_smoke.fn > /tmp/wasm_ci_smoke.out
+          grep -q "wasm ci smoke: 42" /tmp/wasm_ci_smoke.out
       - name: Run the test suite on ${{ matrix.lane }}
         if: matrix.os != 'ubuntu-24.04'
         timeout-minutes: 20
