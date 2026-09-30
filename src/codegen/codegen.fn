@@ -516,6 +516,18 @@ pub compound Codegen {
   // statement instead of using GNU `({...})`, replace `__auto_type` with
   // explicit C types wherever they can be inferred at transpile time.
   flag msvc_mode;
+  // Compiling for the WebAssembly target (`FUN_CC=emcc`/`em++`). Most of
+  // the program surface works unmodified there (file I/O against
+  // emscripten's own in-memory filesystem, `Atomic<T>`/`Guarded<T>`/
+  // `fork`'s scheduler all confirmed working under Node - the target
+  // just needs `-pthread` for `main()`'s own worker thread regardless of
+  // whether the program itself touches threading). Real sockets and real
+  // process spawning have no equivalent at all under this target though,
+  // and fail in confusing ways (a runtime `Cannot find module 'ws'` from
+  // deep inside the generated glue for sockets; an `undefined symbol:
+  // posix_spawnp` link error for spawning) - `transpile` rejects both
+  // outright with a real Fun-level message instead.
+  flag emscripten_mode;
   // Incremented for each variadic call that uses the hoist path so each
   // call's temporaries get a unique prefix in the surrounding scope.
   num va_call_counter;
@@ -693,6 +705,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.last_where = "";
   g.test_mode = false;
   g.msvc_mode = false;
+  g.emscripten_mode = false;
   g.fuzz_mode = false;
   g.debug_info = false;
   g.fuzz_target = "";
@@ -17762,6 +17775,16 @@ impl Codegen {
   pub transpile(Vec<Node> nodes) Option<CodegenErrorKind> {
     self.state.debug_info = self.debug_info;
     self.all_nodes = nodes;
+    if self.emscripten_mode {
+      if program_uses_std_c_header(nodes, "net.fn") {
+        self.error_note = "std.net is not supported when compiling for WebAssembly - no raw socket access in this target";
+        ret .Some(.InvalidNode);
+      }
+      if program_uses_std_c_header(nodes, "process.fn") {
+        self.error_note = "std.process is not supported when compiling for WebAssembly - no subprocess spawning in this target";
+        ret .Some(.InvalidNode);
+      }
+    }
     // Computed before the prelude is written, so it's available by the
     // time any pass needs to know whether the program uses `fork`.
     self.uses_fork = uses_fork_in(nodes, self.test_mode, self.fuzz_mode);
