@@ -480,13 +480,21 @@ pub fun compiler_is_emscripten(str cc) flag {
 // Lowers `input` to C at `out_path`, with `defines` available to the
 // program as constants. The error text names the stage that rejected the
 // program.
-pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info, false);
+//
+// `prune_unreachable` defaults to true (a whole-program build, where
+// nothing outside the generated C can call a pruned function - see
+// `Codegen.prune_unreachable`), and is set false only for a library/
+// object build (`fun.toml`'s `[lib]` target, compiled on to a `.o` a
+// consumer outside this compilation links against), where a public
+// symbol nothing in this compilation calls itself may still be a real
+// external entry point.
+pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, flag debug_info, flag prune_unreachable = true) Result<flag, str> {
+  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info, false, prune_unreachable);
 }
 
 // Lowers `input` to C, reporting declarations nothing reads.
 pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info, false);
+  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info, false, true);
 }
 
 // Lowers `input` to C, emitting a test runner in place of the program's
@@ -544,9 +552,10 @@ pub fun compile_to_c_mode(
   flag fuzz_mode,
   str fuzz_target,
   flag debug_info,
-  flag warn_unused_lenient
+  flag warn_unused_lenient,
+  flag prune_unreachable = true
 ) Result<flag, str> {
-  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil);
+  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil, prune_unreachable);
 }
 
 // Where a coverage-instrumented test binary writes its counts. `nil` in
@@ -568,7 +577,8 @@ pub fun compile_to_c_cover(
   str fuzz_target,
   flag debug_info,
   flag warn_unused_lenient,
-  CoverPlan* cover
+  CoverPlan* cover,
+  flag prune_unreachable = true
 ) Result<flag, str> {
   let merged = parse_program_with_imports(input)!;
   if test_mode {
@@ -678,6 +688,7 @@ pub fun compile_to_c_cover(
   cg.fuzz_target = fuzz_target;
   cg.msvc_mode = compiler_is_msvc(resolve_c_compiler());
   cg.emscripten_mode = compiler_is_emscripten(resolve_c_compiler());
+  cg.prune_unreachable = prune_unreachable;
   cg.debug_info = debug_info;
   if cover != nil {
     cg.coverage = true;
@@ -1651,6 +1662,38 @@ test "the msvc compiler is recognized by name" {
   assert !compiler_is_msvc("/usr/bin/gcc"), "expected gcc to be gcc-style";
 }
 
+test "compile_to_c prunes an unreferenced function by default, but keeps it for a library build" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+
+  str src = `pub fun unreferenced_public_fn() num {
+  `  ret 7;
+  `}
+  `fun main() num {
+  `  ret 0;
+  `}`;
+  str path = "src/cli/driver_prune_default.test.fn";
+  assert write_string(path, src), "could not stage the prune-default fixture";
+  defer remove_file(path);
+
+  str c_whole_program = "src/cli/driver_prune_default_exe.test.c";
+  let exe_lowered = compile_to_c(path, c_whole_program, &defines, false);
+  assert exe_lowered.is_ok(), format("expected the fixture to lower to C for a whole-program build: {str}", exe_lowered.unwrap_err());
+  defer remove_file(c_whole_program);
+  str exe_c = read_to_string(c_whole_program);
+  // A one-line forward declaration still exists regardless (only body
+  // emission is gated), so this checks for the body specifically.
+  assert !contains(exe_c, "return 7;"), "expected the default whole-program build to prune an unreferenced public function's body";
+
+  str c_library = "src/cli/driver_prune_default_lib.test.c";
+  let lib_lowered = compile_to_c(path, c_library, &defines, false, false);
+  assert lib_lowered.is_ok(), format("expected the fixture to lower to C for a library build: {str}", lib_lowered.unwrap_err());
+  defer remove_file(c_library);
+  str lib_c = read_to_string(c_library);
+  assert contains(lib_c, "return 7;"), "expected a library build (prune_unreachable=false) to keep a public function nothing in this compilation calls";
+}
+
 test "the emscripten compiler is recognized by name" {
   assert compiler_is_emscripten("emcc"), "expected emcc to be emscripten";
   assert compiler_is_emscripten("em++"), "expected em++ to be emscripten";
@@ -2021,7 +2064,10 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
   if m.has_lib {
     make_dir_all("fun-out/lib");
     str c_path = path_join("fun-out/lib", format("{str}.c", m.lib.name));
-    let lowered = compile_to_c(m.lib.path, c_path, &defines, debug_info);
+    // A library build: code outside this compilation may link against
+    // a public symbol nothing inside it calls itself, so reachability
+    // pruning - safe only for a whole-program build - stays off here.
+    let lowered = compile_to_c(m.lib.path, c_path, &defines, debug_info, false);
     if lowered.is_err() {
       writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
       ret 1;

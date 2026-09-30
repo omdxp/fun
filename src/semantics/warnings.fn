@@ -306,12 +306,12 @@ fun _constant_truth(Node* node) Option<flag> {
 // What a function reads: its body, the types of its arguments, and its
 // return type. Shared so a method inside an `impl` is read exactly as a
 // top-level function is, rather than being skipped for want of a case.
-fun _collect_function_reads(FunctionNode f, Set<str>* out) {
+pub fun collect_function_reads(FunctionNode f, Set<str>* out) {
   if f.has_body {
-    _collect_reads(f.body, out);
+    collect_reads(f.body, out);
   }
   for a : f.args {
-    _collect_reads(a, out);
+    collect_reads(a, out);
   }
   if f.has_rtype && f.rtype != nil {
     out.add(f.rtype.type_str);
@@ -336,15 +336,15 @@ fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
         out.add(v.var_type.type_str);
       }
       if v.has_val {
-        _collect_reads(v.val, out);
+        collect_reads(v.val, out);
       }
     }
     .StatementIf(ifn) -> {
-      _collect_reads(ifn.condition, out);
+      collect_reads(ifn.condition, out);
       _collect_reads_excluding_declarations(ifn.body, out);
     }
     .StatementElseIf(ein) -> {
-      _collect_reads(ein.condition, out);
+      collect_reads(ein.condition, out);
       _collect_reads_excluding_declarations(ein.body, out);
     }
     .StatementElse(body) -> { _collect_reads_excluding_declarations(body, out); }
@@ -353,17 +353,17 @@ fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
       fit kind {
         .Cond(c) -> {
           if c.has_condition {
-            _collect_reads(c.condition, out);
+            collect_reads(c.condition, out);
           }
           _collect_reads_excluding_declarations(c.body, out);
         }
         .Iter(it) -> {
-          _collect_reads(it.iterable, out);
+          collect_reads(it.iterable, out);
           _collect_reads_excluding_declarations(it.body, out);
         }
       }
     }
-    _ -> { _collect_reads(stmt, out); }
+    _ -> { collect_reads(stmt, out); }
   }
 }
 
@@ -1795,7 +1795,7 @@ impl Analysis {
         continue;
       }
       fit node.kind {
-        .Function(f) -> { _collect_function_reads(f, &read); }
+        .Function(f) -> { collect_function_reads(f, &read); }
         .Impl(block) -> {
           read.add(block.type_name);
           if block.has_shape_name {
@@ -1808,7 +1808,7 @@ impl Analysis {
             // A method's own node reads nothing; what it reads is in its
             // body and signature, the same as any other function.
             fit m.kind {
-              .Function(f) -> { _collect_function_reads(f, &read); }
+              .Function(f) -> { collect_function_reads(f, &read); }
               _ -> {}
             }
           }
@@ -1823,8 +1823,8 @@ impl Analysis {
             }
           }
         }
-        .Variable(v) -> { _collect_reads(node, &read); }
-        .Test(t) -> { _collect_reads(t.body, &read); }
+        .Variable(v) -> { collect_reads(node, &read); }
+        .Test(t) -> { collect_reads(t.body, &read); }
         _ -> {}
       }
     }
@@ -2354,7 +2354,7 @@ fun _free_analysis_scratch(Analysis* state) {
 
 // Collects every name an expression or statement reads, so a declaration
 // that no one reads can be told apart from one that is used.
-fun _collect_reads(Node* node, Set<str>* out) {
+pub fun collect_reads(Node* node, Set<str>* out) {
   if node == nil {
     ret;
   }
@@ -2362,37 +2362,37 @@ fun _collect_reads(Node* node, Set<str>* out) {
     .Identifier(name) -> { out.add(name); }
     .Expression(e) -> {
       if e.has_left {
-        _collect_reads(e.left, out);
+        collect_reads(e.left, out);
       }
       if e.has_right {
-        _collect_reads(e.right, out);
+        collect_reads(e.right, out);
       }
     }
-    .ExpressionParenthesis(inner) -> { _collect_reads(inner, out); }
+    .ExpressionParenthesis(inner) -> { collect_reads(inner, out); }
     .Unary(u) -> {
-      _collect_reads(u.operand, out);
+      collect_reads(u.operand, out);
       if u.has_error_arg {
-        _collect_reads(u.error_arg, out);
+        collect_reads(u.error_arg, out);
       }
     }
     .Tenary(t) -> {
-      _collect_reads(t.cond, out);
-      _collect_reads(t.then_val, out);
-      _collect_reads(t.else_val, out);
+      collect_reads(t.cond, out);
+      collect_reads(t.then_val, out);
+      collect_reads(t.else_val, out);
     }
-    .Bracket(items) -> { _collect_reads(items, out); }
-    .Panic(message) -> { _collect_reads(message, out); }
+    .Bracket(items) -> { collect_reads(items, out); }
+    .Panic(message) -> { collect_reads(message, out); }
     .CompoundInit(init) -> {
       if init.has_dtype {
         out.add(init.init_dtype.type_str);
       }
       for f : init.fields {
-        _collect_reads(f.value, out);
+        collect_reads(f.value, out);
       }
     }
     .Body(body) -> {
       for s : body.statements {
-        _collect_reads(s, out);
+        collect_reads(s, out);
       }
     }
     .Variable(v) -> {
@@ -2404,47 +2404,47 @@ fun _collect_reads(Node* node, Set<str>* out) {
         }
       }
       if v.has_val {
-        _collect_reads(v.val, out);
+        collect_reads(v.val, out);
       }
     }
-    .StatementReturn(value) -> { _collect_reads(value, out); }
-    .StatementDefer(inner) -> { _collect_reads(inner, out); }
-    .StatementFork(call) -> { _collect_reads(call, out); }
+    .StatementReturn(value) -> { collect_reads(value, out); }
+    .StatementDefer(inner) -> { collect_reads(inner, out); }
+    .StatementFork(call) -> { collect_reads(call, out); }
     .StatementIf(ifn) -> {
-      _collect_reads(ifn.condition, out);
-      _collect_reads(ifn.body, out);
+      collect_reads(ifn.condition, out);
+      collect_reads(ifn.body, out);
     }
     .StatementElseIf(ein) -> {
-      _collect_reads(ein.condition, out);
-      _collect_reads(ein.body, out);
+      collect_reads(ein.condition, out);
+      collect_reads(ein.body, out);
     }
-    .StatementElse(body) -> { _collect_reads(body, out); }
+    .StatementElse(body) -> { collect_reads(body, out); }
     .StatementAssert(a) -> {
-      _collect_reads(a.condition, out);
+      collect_reads(a.condition, out);
       if a.has_message {
-        _collect_reads(a.message, out);
+        collect_reads(a.message, out);
       }
     }
     .StatementFit(f) -> {
-      _collect_reads(f.exp, out);
+      collect_reads(f.exp, out);
       for branch : f.branches {
         if branch.has_condition {
-          _collect_reads(branch.condition, out);
+          collect_reads(branch.condition, out);
         }
-        _collect_reads(branch.body, out);
+        collect_reads(branch.body, out);
       }
     }
     .StatementFor(kind) -> {
       fit kind {
         .Cond(c) -> {
           if c.has_condition {
-            _collect_reads(c.condition, out);
+            collect_reads(c.condition, out);
           }
-          _collect_reads(c.body, out);
+          collect_reads(c.body, out);
         }
         .Iter(it) -> {
-          _collect_reads(it.iterable, out);
-          _collect_reads(it.body, out);
+          collect_reads(it.iterable, out);
+          collect_reads(it.body, out);
         }
       }
     }
