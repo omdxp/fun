@@ -145,12 +145,27 @@ async function compileOne(hash, code) {
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "fun-wasm-prebake-"));
   try {
+    // The entry file is named `<hash>.fn`, not its own marker-given name
+    // (`main.fn`/`snippet.fn`) - `default_exe_path`'s own naming derives
+    // the compiled output's basename from the *input file's* name, and
+    // emcc bakes the matching `.wasm` filename directly into the `.js`
+    // glue it emits at compile time. Copying the output to `<hash>.js`/
+    // `<hash>.wasm` afterwards without this would leave the glue file
+    // still looking for its wasm binary under its old name - it would
+    // 404 in the browser (confirmed directly: the fetch actually returns
+    // the server's HTML 404 page, which WebAssembly.instantiate then
+    // rejects as "expected magic word 00 61 73 6d, found 3c 21 64 6f",
+    // i.e. the literal bytes of "<!do..."). Other files keep their own
+    // names - only the entry file's name is what ends up baked into the
+    // output, and nothing else imports it by that name.
+    const hashedEntryName = `${hash}.fn`;
     for (const file of parsed.files) {
-      const dest = path.join(tempDir, file.path);
+      const destName = file.path === parsed.entryFile ? hashedEntryName : file.path;
+      const dest = path.join(tempDir, destName);
       await fs.mkdir(path.dirname(dest), { recursive: true });
       await fs.writeFile(dest, file.contents, "utf8");
     }
-    const entryPath = path.join(tempDir, parsed.entryFile);
+    const entryPath = path.join(tempDir, hashedEntryName);
 
     // Deliberately not `-no-exec`: running it here too (via `node`, as
     // part of `fun -in`'s own ordinary flow) is a real safety check, not
@@ -163,12 +178,7 @@ async function compileOne(hash, code) {
       maxBuffer: 1024 * 1024,
     });
 
-    const builtBase = path.join(
-      tempDir,
-      "fun-out",
-      "bin",
-      path.basename(parsed.entryFile, ".fn"),
-    );
+    const builtBase = path.join(tempDir, "fun-out", "bin", hash);
     await fs.mkdir(outputDir, { recursive: true });
     await fs.copyFile(`${builtBase}.js`, path.join(outputDir, `${hash}.js`));
     await fs.copyFile(`${builtBase}.wasm`, path.join(outputDir, `${hash}.wasm`));
