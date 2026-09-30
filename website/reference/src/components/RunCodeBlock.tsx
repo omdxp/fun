@@ -43,9 +43,24 @@ async function hashCode(code: string): Promise<string> {
 // the classic, well-supported emscripten integration pattern, chosen over
 // `-sMODULARIZE` specifically so the artifact `prebake-wasm.mjs` already
 // produces (and already verified working end to end, #189) needs no
-// compile-flag changes here. Rejects (falling back to the backend, or the
-// "nothing available" message) when no module exists for this hash - a
-// 404 is the normal, expected case for any edited or non-pre-baked code.
+// compile-flag changes here.
+//
+// Each run gets its own fresh, throwaway iframe rather than injecting the
+// script into the main document - confirmed necessary directly, not just
+// a defensive choice: the module's own top-level `class`/`let`/`const`
+// declarations (an internal emscripten helper, `EmscriptenEH`, among
+// others) persist in whatever global lexical scope they first execute
+// in, even after the `<script>` tag that declared them is removed from
+// the DOM - a real, unrelated-to-this-project browser platform
+// limitation, not something `-sMODULARIZE` or any compile flag changes.
+// Loading a second module (or re-running the same one) into the shared
+// main-document scope throws "Identifier already declared" instead of
+// running. A fresh iframe is a fresh JS realm every time, so this can
+// never collide, regardless of which example ran there before.
+//
+// Rejects (falling back to the backend, or the "nothing available"
+// message) when no module exists for this hash - a 404 is the normal,
+// expected case for any edited or non-pre-baked code.
 async function runWasm(hash: string): Promise<RunOutcome> {
   const base = import.meta.env.BASE_URL || "/";
   const src = `${base}wasm/${hash}.js`;
@@ -54,13 +69,21 @@ async function runWasm(hash: string): Promise<RunOutcome> {
 
   return new Promise<RunOutcome>((resolve, reject) => {
     let settled = false;
-    let script: HTMLScriptElement | null = null;
-    const previousModule = (window as any).Module;
+
+    const iframe = document.createElement("iframe");
+    iframe.style.display = "none";
+    document.body.appendChild(iframe);
 
     const cleanup = () => {
       window.clearTimeout(timeoutId);
-      (window as any).Module = previousModule;
-      script?.remove();
+      // Deferred, not immediate: `onExit` fires from inside emscripten's
+      // own exit-handling code, which can still touch `Module` itself a
+      // moment later in the same tick (its own pthread-worker teardown,
+      // observed directly) - tearing the iframe down synchronously here
+      // raced that, producing a real (if harmless) console error. A
+      // zero-delay timeout runs after the current callstack unwinds,
+      // giving that a chance to finish first.
+      window.setTimeout(() => iframe.remove(), 0);
     };
     const finish = () => {
       if (settled) return;
@@ -80,17 +103,24 @@ async function runWasm(hash: string): Promise<RunOutcome> {
       15000,
     );
 
-    (window as any).Module = {
+    const iframeWindow = iframe.contentWindow as any;
+    const iframeDocument = iframe.contentDocument;
+    if (!iframeWindow || !iframeDocument) {
+      fail(new Error("Could not create an isolated frame to run the module in."));
+      return;
+    }
+
+    iframeWindow.Module = {
       print: (line: string) => stdoutLines.push(line),
       printErr: (line: string) => stderrLines.push(line),
       onExit: () => finish(),
       onAbort: (what: unknown) => fail(new Error(String(what))),
     };
 
-    script = document.createElement("script");
+    const script = iframeDocument.createElement("script");
     script.src = src;
     script.onerror = () => fail(new Error("No pre-baked wasm module for this example."));
-    document.body.appendChild(script);
+    iframeDocument.body.appendChild(script);
   });
 }
 
