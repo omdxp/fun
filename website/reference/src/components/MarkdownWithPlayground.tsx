@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
@@ -189,7 +189,7 @@ export default function MarkdownWithPlayground({
   const headingRenderer =
     (Tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") =>
     (props: {
-      children?: unknown;
+      children?: ReactNode;
       node?: { position?: { start?: { line?: number } } };
     }) => {
       const text = flattenText(props.children).trim();
