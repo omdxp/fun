@@ -357,23 +357,27 @@ fun _free_str_set(Set<str>* s) {
   s.free();
 }
 
-pub fun parse_program_with_imports(str entry_path) Result<ProgramMergeResult, str> {
-  ret parse_program_with_source(entry_path, nil);
+// `parallel_preload` defaults to true (the existing, fork-based worker
+// pool - see `_preload_and_collect_source`'s own doc comment for why
+// false exists at all: a real multi-threading environment is not
+// something every caller can assume).
+pub fun parse_program_with_imports(str entry_path, flag parallel_preload = true) Result<ProgramMergeResult, str> {
+  ret parse_program_with_source(entry_path, nil, parallel_preload);
 }
 
 // The same, with the entry file's source supplied rather than read from
 // disk. An editor holds text the file does not yet contain, and that is
 // the text to judge; everything it imports is still read from disk.
-pub fun parse_program_with_source(str entry_path, str entry_source) Result<ProgramMergeResult, str> {
+pub fun parse_program_with_source(str entry_path, str entry_source, flag parallel_preload = true) Result<ProgramMergeResult, str> {
   ImportCache cache = import_cache_new();
   defer cache.files.free();
-  ret parse_program_cached(entry_path, entry_source, &cache);
+  ret parse_program_cached(entry_path, entry_source, &cache, parallel_preload);
 }
 
 // The same, reusing what `cache` already holds. A file whose text and
 // surrounding declarations are unchanged is not parsed again, so an edit
 // in one file costs that file rather than the whole import graph.
-pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cache) Result<ProgramMergeResult, str> {
+pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cache, flag parallel_preload = true) Result<ProgramMergeResult, str> {
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
   // Shallow only: every GlobalSymbolInfo is a value copy, and its own
@@ -409,7 +413,8 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
     entry_source,
     &global_symbols,
     &preload_visited,
-    &all_tokens
+    &all_tokens,
+    parallel_preload
   );
   if preload_err.is_some() {
     ret .Err(preload_err.unwrap());
@@ -678,6 +683,30 @@ async fun _preload_worker(PreloadShared* shared, WaitGroup* wpool) {
   wpool.done();
 }
 
+// `_preload_worker`'s own loop, run directly on the caller's thread
+// instead of `fork`ed - the `parallel_preload: false` fallback in
+// `_preload_and_collect_source`. No `WaitGroup` to signal: there is
+// only ever one of these, and it simply returns once the queue closes.
+fun _preload_drain_sync(PreloadShared* shared) {
+  for true {
+    fit shared.queue.recv_result() {
+      .Ok(path) -> {
+        let ferr = _preload_one_file(shared, path, nil);
+        if ferr.is_some() {
+          shared.mu.lock();
+          if !shared.has_error {
+            shared.has_error = true;
+            shared.first_error = ferr.unwrap();
+          }
+          shared.mu.unlock();
+        }
+        _preload_mark_done(shared);
+      }
+      _ -> { break; }
+    }
+  }
+}
+
 // Discovers `path`'s (transitive) import graph and collects just the
 // name of each public top-level `compound` declared anywhere in it
 // (into `out`, keyed by name): a lightweight first pass so
@@ -692,12 +721,23 @@ async fun _preload_worker(PreloadShared* shared, WaitGroup* wpool) {
 // dependency between files (the result, `out`, is a set keyed by name,
 // indifferent to discovery order), so overlapping that work across a
 // handful of workers is a real win without risking the scheduler itself.
+//
+// `parallel_preload: false` runs the same walk on the caller's own
+// thread instead, no `fork` at all - for a target with no real
+// multi-threading to fall back on (confirmed directly: the compiler's
+// own browser-embedded frontend, compiled for WebAssembly and run
+// without the cross-origin-isolation headers SharedArrayBuffer needs,
+// hangs forever here otherwise - every `fork`ed worker's own
+// `pthread_create` fails silently, its return value never checked by
+// the scheduler that spawned it, so it believes workers exist that
+// never started, and the real `WaitGroup.wait()` below never returns).
 fun _preload_and_collect_source(
   str path,
   str source,
   Map<str, GlobalSymbolInfo>* out,
   Set<str>* visited,
-  Vec<Vec<Token>>* all_tokens
+  Vec<Vec<Token>>* all_tokens,
+  flag parallel_preload
 ) Option<str> {
   str norm = _normalize_path(path);
   if visited.has(norm) {
@@ -725,6 +765,16 @@ fun _preload_and_collect_source(
     shared.first_error = entry_err.unwrap();
   }
   _preload_mark_done(&shared);
+
+  if !parallel_preload {
+    _preload_drain_sync(&shared);
+    let _qd2 = shared.queue.destroy();
+    shared.mu.destroy();
+    if shared.has_error {
+      ret .Some(shared.first_error);
+    }
+    ret .None;
+  }
 
   WaitGroup wpool = wait_group_new(preload_worker_count);
   num wi = 0;

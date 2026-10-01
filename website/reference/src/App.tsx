@@ -2157,14 +2157,16 @@ export default function App() {
           <section className="panel">
             <h1>Interactive Playground</h1>
             <p className="lead">
-              Run curated samples right here in your browser, or edit and
-              run against a real Fun compiler.
+              Run curated samples right here in your browser, or edit the
+              code and run that too - no backend involved either way.
             </p>
             <div className="hint">
-              These samples run entirely in your browser via a pre-baked
-              wasm build, no backend needed - edit one and Run still needs
-              a real backend (run the site locally with fun-out/bin/fun
-              built, or configure a remote runner API).
+              Everything here runs entirely in your browser: curated
+              samples via a pre-baked wasm build, and edited code through
+              the Fun compiler's own frontend plus a real C compiler, both
+              compiled to WebAssembly. The first edited run downloads a
+              real C toolchain (around 100 MB, once per session) before it
+              can compile anything.
             </div>
             {content.samples.map((s) => (
               <RunCodeBlock key={s.title} title={s.title} initialCode={s.code} />

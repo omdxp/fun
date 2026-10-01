@@ -84,6 +84,16 @@ pub fun drop_foreign_tests(Vec<Node>* nodes, str entry) {
 // entirely). `host_arch` is the same kind of caller-resolved value,
 // for `Codegen.host_arch` (an `asm arch "..."` block's own check) -
 // see that field's own doc comment for why it can't be resolved here.
+//
+// `parallel_preload` passes straight through to
+// `parse_program_with_imports` - `false` for a caller that is itself
+// running inside a browser sandbox right now (not merely one
+// compiling *for* the wasm target, a different thing: this compiler's
+// own usual native/MSVC/emcc-as-a-cross-compiler builds run on a real
+// OS with real threads regardless of what target they're producing,
+// and stay `true`). See `_preload_and_collect_source`'s own doc
+// comment for why that distinction matters: it hangs forever
+// otherwise.
 pub fun lower_to_c(
   str input,
   str out_path,
@@ -98,9 +108,10 @@ pub fun lower_to_c(
   flag prune_unreachable,
   flag msvc_mode,
   flag emscripten_mode,
-  str host_arch
+  str host_arch,
+  flag parallel_preload
 ) Result<flag, str> {
-  let merged = parse_program_with_imports(input)!;
+  let merged = parse_program_with_imports(input, parallel_preload)!;
   if test_mode {
     drop_foreign_tests(&merged.nodes, input);
   }

@@ -6,6 +6,7 @@ import {
   useSiteHighlighter,
 } from "../utils/shikiHighlighter";
 import { copyTextToClipboard } from "../utils/clipboard";
+import { FunCompileError, runEditedCode } from "../utils/compileInBrowser";
 
 type Props = {
   initialCode: string;
@@ -173,15 +174,33 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           return;
         } catch {
           // No pre-baked module for this example (or it failed to load/
-          // run) - fall through to the backend below, same as an edited
-          // example always does.
+          // run) - fall through to the backend below.
+        }
+      } else {
+        try {
+          const outcome = await runEditedCode(code);
+          setStdout(outcome.stdout);
+          setStderr(outcome.stderr);
+          return;
+        } catch (e) {
+          if (e instanceof FunCompileError) {
+            // The authoritative answer - a live backend would reject
+            // the same program the same way, so there's nothing to
+            // gain by falling through to one.
+            setStderr(e.message);
+            return;
+          }
+          // An infrastructure failure (a module failed to load, a
+          // timeout, the in-browser C compiler itself choked) - fall
+          // through to the backend below, same as an unedited example
+          // without a pre-baked module does.
         }
       }
       if (backendUnavailable) {
         setStderr(
           isUnedited
             ? "This example has no pre-baked offline version and there is no backend API available to run it. Run the site locally, or set up a remote runner API (see project README)."
-            : "Edited code needs a backend API to run, and none is available on GitHub Pages. Run the site locally, set up a remote runner API (see project README), or Reset to run the original, pre-baked example.",
+            : "Could not run this in your browser and there is no backend API available to fall back to. Run the site locally, or set up a remote runner API (see project README).",
         );
         return;
       }
@@ -239,15 +258,7 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           >
             Reset
           </button>
-          <button
-            onClick={run}
-            disabled={isRunning}
-            title={
-              !isUnedited && backendUnavailable
-                ? "Edited code needs a backend API to run, and none is available on GitHub Pages - Run will explain, or Reset to run the original, pre-baked example."
-                : undefined
-            }
-          >
+          <button onClick={run} disabled={isRunning}>
             {isRunning ? "Running..." : "Run"}
           </button>
         </div>
