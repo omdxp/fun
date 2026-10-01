@@ -157,7 +157,7 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
       ])
       .run();
     if (compile.exitCode !== 0) {
-      throw new Error(compile.stderr || "the C compiler rejected the generated program");
+      throw new Error(compile.stderr.text() || "the C compiler rejected the generated program");
     }
     wasmBytes = await compileSandbox.fs.readFile("/workspace/program.wasm");
   } finally {
@@ -168,7 +168,7 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
   const runSandbox = await wasmer.sandboxes.create({ packages: [programPkg] });
   try {
     const out = await runSandbox.command(programPkg).run();
-    return { stdout: out.stdout ?? "", stderr: out.stderr ?? "" };
+    return { stdout: out.stdout.text(), stderr: out.stderr.text() };
   } finally {
     await runSandbox.close();
   }

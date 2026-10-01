@@ -125,13 +125,19 @@ else's page has no way to require. Without the fallback, the parallel
 path doesn't error under those conditions, it hangs - every worker's
 own `pthread_create` fails, and the scheduler has no way to know.
 
-The same cross-origin-isolation gap shows up once more, separately: the
-Wasmer SDK itself logs a non-fatal console warning about it on a page
-that hasn't set those headers (GitHub Pages, serving static files only,
-cannot), since its own sandboxed execution model would also benefit from
-real threading. Compiling and running still work without it - confirmed
-directly, repeatedly, not assumed - just a known, harmless warning
-rather than something this project's own code could silence.
+The same cross-origin-isolation gap shows up once more, separately, and
+here it is not harmless: the Wasmer SDK refuses outright to run a
+package on a page that is not cross-origin-isolated. Confirmed
+directly: without those headers, `window.crossOriginIsolated` is
+false and the SDK throws rather than just losing an optimization.
+Since GitHub Pages serves static files only and cannot set response
+headers, the site ships [`coi-serviceworker.js`](https://github.com/omdxp/fun/blob/main/website/reference/public/coi-serviceworker.js) -
+a service worker that intercepts every same-origin fetch and adds
+`Cross-Origin-Embedder-Policy: require-corp` and
+`Cross-Origin-Opener-Policy: same-origin` to the response client-side.
+A freshly installed service worker does not control the page that
+registered it until the next navigation, so first-time visitors see
+one automatic reload before the Playground becomes usable.
 
 ## Runtime Backend Selection
 

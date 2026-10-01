@@ -625,6 +625,7 @@ jobs:
           npm --prefix website/reference run sync:version
           npm --prefix website/reference run generate:content
           npm --prefix website/reference run prebake:wasm
+          npm --prefix website/reference run prebake:wasm-frontend
           npm --prefix website/reference run build:web
         env:
           VITE_BASE_PATH: /fun/
