@@ -45,7 +45,18 @@ fun main() num {
   // arch "..."` block's own check instead of skipping it, since real
   // inline assembly for some other CPU's instruction set was never
   // going to mean anything once this compiles to wasm anyway.
-  let lowered = lower_to_c(src_path, out_path, &defines, false, false, false, "", false, false, nil, true, false, true, "");
+  // `parallel_preload: false` - this module runs inside a real
+  // browser's own iframe sandbox, with no `SharedArrayBuffer` and no
+  // cross-origin-isolation headers to request one (a caller embedding
+  // this module controls none of that), so the parallel preload
+  // pool's own `fork`ed workers can never actually start - confirmed
+  // directly: left `true`, every run hangs forever rather than erroring,
+  // since the scheduler believes workers exist that silently failed to
+  // spawn. Correct and already proven under Node (the `fun -in`
+  // toolchain this file is compiled through) either way - Node's own
+  // pthread emulation works fine without this, so only the browser
+  // case actually needs the fallback.
+  let lowered = lower_to_c(src_path, out_path, &defines, false, false, false, "", false, false, nil, true, false, true, "", false);
   defines.free();
 
   if lowered.is_err() {

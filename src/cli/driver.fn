@@ -552,7 +552,8 @@ pub fun compile_to_c_cover(
     prune_unreachable,
     compiler_is_msvc(cc),
     compiler_is_emscripten(cc),
-    host_arch_name()
+    host_arch_name(),
+    true
   );
 }
 
