@@ -20,8 +20,6 @@ use lower;
 use coverage;
 use ..ast.coverage_lines;
 use deps;
-use ..codegen.codegen;
-use ..codegen.codegen_state;
 use ..codegen.host_arch;
 use std.string;
 use std.vec;
