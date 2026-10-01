@@ -1,0 +1,58 @@
+// A minimal, separate entry point for running just the compiler's
+// frontend (lex/parse/typecheck/codegen-to-C) inside a browser, via
+// `FUN_CC=emcc`. Deliberately not `src/cli/main.fn`, and deliberately
+// `use lower;` rather than `use driver;`: `driver.fn` itself `use`s
+// `std.process` (to invoke a real C compiler and run the result, and
+// for `deps.fn`'s own git fetches), which trips `codegen.fn`'s own
+// `emscripten_mode` rejection for the whole merged program the instant
+// anything imports it at all - even this file, which never calls any
+// of driver's process-spawning functions. `lower.fn` is the same
+// pipeline with that dependency removed; see its own doc comment.
+//
+// Contract with the caller (a browser page, via the same `Module`
+// integration every other wasm artifact this project produces already
+// uses): write the program's source text to `/playground.fn` in the
+// module's own virtual filesystem before it runs (emscripten's MEMFS,
+// a normal file write, `FS.writeFile` on the JS side), then read the
+// result off stdout/stderr and the exit code exactly as for any other
+// module - success prints the generated C to stdout and exits 0; a
+// rejected program prints the real compiler error to stderr and exits
+// 1. No argv, no interactive stdin: one file in, one of two outputs.
+use lower;
+use manifest;
+use std.io;
+use std.fs;
+use std.vec;
+
+fun main() num {
+  str src_path = "/playground.fn";
+  str out_path = "/playground.c";
+
+  if !exists(src_path) {
+    writeln_to(.Stderr, "no source provided: expected /playground.fn to exist before this module runs");
+    ret 1;
+  }
+
+  Vec<Define> defines;
+  defines.init(0);
+  // `msvc_mode: false, emscripten_mode: true` are given directly rather
+  // than resolved: this target is always emscripten, statically, and
+  // `resolve_c_compiler()` (which would otherwise decide this) lives in
+  // `driver.fn` and needs `std.process` itself to probe an installed
+  // compiler - exactly the dependency this file exists to avoid.
+  // `host_arch: ""` for the same reason (`host_arch_name()` needs it
+  // too, for its own `uname -m` probe) - correctly fails any `asm
+  // arch "..."` block's own check instead of skipping it, since real
+  // inline assembly for some other CPU's instruction set was never
+  // going to mean anything once this compiles to wasm anyway.
+  let lowered = lower_to_c(src_path, out_path, &defines, false, false, false, "", false, false, nil, true, false, true, "");
+  defines.free();
+
+  if lowered.is_err() {
+    writeln_to(.Stderr, lowered.unwrap_err());
+    ret 1;
+  }
+
+  print(read_to_string(out_path));
+  ret 0;
+}
