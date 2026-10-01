@@ -9,7 +9,6 @@
 use codegen_state;
 use ..ast.coverage_lines;
 use typedefs;
-use host_arch;
 use ..ast.ast;
 use ..lexer.token;
 use ..parser.datatype_defs;
@@ -530,6 +529,16 @@ pub compound Codegen {
   // posix_spawnp` link error for spawning) - `transpile` rejects both
   // outright with a real Fun-level message instead.
   flag emscripten_mode;
+  // What `emit_asm_stmt` checks a program's own `asm arch "..."` block
+  // against, resolved by the caller (`host_arch_name()`, `..codegen.
+  // host_arch`) before `transpile()` runs rather than imported and
+  // called here directly: that file needs `std.process` for its own
+  // real `uname -m`/`PROCESSOR_ARCHITECTURE` probe, a dependency this
+  // file must not carry - a caller building for a target with no real
+  // inline-assembly story at all (`lower.fn`'s own wasm frontend
+  // caller) passes "", which correctly fails every named arch's check
+  // in `emit_asm_stmt` rather than only some.
+  str host_arch;
   // Whole-program-build-only dead code elimination: a top-level
   // function or impl method whose name never appears in
   // `reachable_names` skips body emission entirely (its one-line
@@ -724,6 +733,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.test_mode = false;
   g.msvc_mode = false;
   g.emscripten_mode = false;
+  g.host_arch = "";
   g.prune_unreachable = false;
   g.reachable_names = set_init("", 256);
   g.fuzz_mode = false;
@@ -7870,14 +7880,14 @@ impl Codegen {
 
   // Emits an `asm` statement as GCC/Clang extended inline assembly
   // (`__asm__ __volatile__ ("template" : outputs : inputs : clobbers);`).
-  // `arch`, when given, is checked against `host_arch_name()`, read
-  // from the host machine at runtime rather than baked into the
-  // compiler binary, matching the reference compiler's own check.
+  // `arch`, when given, is checked against `self.host_arch` (the real
+  // host machine's own architecture, resolved by the caller before
+  // `transpile()` runs - see that field's own doc comment).
   emit_asm_stmt(AsmStmtNode a) Option<CodegenErrorKind> {
     if a.has_arch {
       flag arch_ok = false;
       str want = a.arch_name;
-      str host = host_arch_name();
+      str host = self.host_arch;
       if equals(want, "x86_64") || equals(want, "amd64") {
         arch_ok = equals(host, "x86_64");
       } elif equals(want, "x86") || equals(want, "i386") {

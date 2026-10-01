@@ -1,0 +1,255 @@
+// The "lower Fun source to C" pipeline, pulled out of `driver.fn` so it
+// can be imported on its own, with no `std.process` dependency at all:
+// `driver.fn` itself `use`s `std.process` (to invoke a real C compiler
+// and run the result, and for `deps.fn`'s own git fetches), which makes
+// the whole merged program trip `codegen.fn`'s own `emscripten_mode`
+// rejection the instant anything imports `driver` at all, even a
+// caller that only ever wants this pipeline and never touches the
+// process-spawning parts. A minimal, wasm-buildable "compile Fun
+// source to C, nothing past that" entry point needs this file
+// specifically, not `driver.fn`, for exactly that reason.
+//
+// `driver.fn`'s own `compile_to_c_cover` is now a thin wrapper around
+// `lower_to_c` below, computing `msvc_mode`/`emscripten_mode` via its
+// own `resolve_c_compiler()` (which needs `std.process` to probe for
+// an installed compiler) and passing the result in - this file itself
+// never calls that, so every existing caller's behavior is unchanged.
+use ..parser.import_resolver;
+use ..semantics.typecheck;
+use ..semantics.warnings;
+use ..semantics.alias_expand;
+use ..ast.ast;
+use manifest;
+use ..codegen.codegen;
+use ..codegen.codegen_state;
+use std.string;
+use std.vec;
+use std.option;
+use std.result;
+use std.io;
+use std.fs;
+
+// Where a coverage-instrumented test binary writes its counts. `nil`
+// means no instrumentation.
+pub compound CoverPlan {
+  str out_path;
+  str pwd;
+}
+
+// Prints one warning in the CLI's own reporting shape.
+pub fun print_warning(Warning w) {
+  StringBuilder line = string_builder_init(96);
+  line.append("[Warning:");
+  line.append(warning_id_name(w.id));
+  line.append("] ");
+  line.append(w.message);
+  if w.has_pos {
+    line.append(format("\nLocation: {str}:{num}:{num}", w.pos.filename, w.pos.line, w.pos.col));
+  }
+  writeln_to(.Stderr, line.build());
+}
+
+// Drops every `test` block that came from a file other than `entry`, so
+// a test binary runs just its own file's tests, as `fun test <file>`
+// promises. The imported modules are compiled in for their code, but
+// their tests are run by their own `fun test`, and running them again
+// from every importer would multiply the work and, in a user's
+// project, run a dependency's tests.
+pub fun drop_foreign_tests(Vec<Node>* nodes, str entry) {
+  str want = _normalize_path(entry);
+  num kept = 0;
+  num i = 0;
+  for i < nodes.len {
+    Node n = nodes.get(i);
+    flag foreign = false;
+    fit n.kind {
+      .Test(_) -> { foreign = n.has_pos && !equals(n.pos.filename, want); }
+      _ -> {}
+    }
+    if !foreign {
+      nodes.data[kept] = nodes.data[i];
+      kept = kept + 1;
+    }
+    i = i + 1;
+  }
+  nodes.len = kept;
+  free(want);
+}
+
+// Lowers `input` to C, optionally instrumented for coverage (`cover`),
+// with the target compiler's `msvc_mode`/`emscripten_mode` given
+// directly rather than resolved here - the caller decides how (see
+// `driver.fn`'s own `compile_to_c_cover`, or a wasm-target caller that
+// already knows its target statically and skips that resolution
+// entirely). `host_arch` is the same kind of caller-resolved value,
+// for `Codegen.host_arch` (an `asm arch "..."` block's own check) -
+// see that field's own doc comment for why it can't be resolved here.
+pub fun lower_to_c(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  flag test_mode,
+  flag warn_unused,
+  flag fuzz_mode,
+  str fuzz_target,
+  flag debug_info,
+  flag warn_unused_lenient,
+  CoverPlan* cover,
+  flag prune_unreachable,
+  flag msvc_mode,
+  flag emscripten_mode,
+  str host_arch
+) Result<flag, str> {
+  let merged = parse_program_with_imports(input)!;
+  if test_mode {
+    drop_foreign_tests(&merged.nodes, input);
+  }
+
+  // Injected ahead of the program's own declarations, so anything in it
+  // can refer to them.
+  num di = defines.len;
+  for di > 0 {
+    di = di - 1;
+    Define* d = &defines.data[di];
+    merged.nodes.insert(0, manifest_const_node(d.name, d.value));
+  }
+
+  // Every `als` reference is expanded transparently, in place, before
+  // typecheck ever sees the program - typecheck and codegen never learn
+  // aliases exist at all.
+  let alias_err = expand_type_aliases(&merged.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
+  }
+  // `merged.entry_nodes` is a separate parse from `merged.nodes` (see its
+  // own doc comment), so the `was_used` flag expansion just stamped onto
+  // `merged.nodes` never reaches it on its own - the `unused_type_alias`
+  // warning below reports against `entry_nodes`, so it needs its own copy.
+  sync_type_alias_usage(&merged.nodes, &merged.entry_nodes);
+
+  // Type checking runs over the merged program, so a call into an
+  // imported module is checked against the signature it was declared
+  // with.
+  let checked = typecheck_program(&merged.nodes);
+  if checked.is_err() {
+    TypeError e = checked.unwrap_err();
+    // Lenient mode's own promise (see Options.warn_unused_lenient's doc
+    // comment): a warning nothing else depends on shouldn't stay
+    // invisible just because something unrelated in the file doesn't
+    // typecheck. `analyze` reads straight from the parsed nodes,
+    // independent of whatever typechecking got through, so it still
+    // runs here even though the type error below still fails the build
+    // - fls's own diagnose() does the identical thing for the same
+    // reason, for the editor rather than the CLI.
+    if warn_unused_lenient {
+      let lenient_noticed = analyze(&merged.entry_nodes, &merged.nodes, true, input);
+      if lenient_noticed.is_ok() {
+        Vec<Warning> lenient_warnings = lenient_noticed.unwrap();
+        num lwi = 0;
+        for lwi < lenient_warnings.len {
+          print_warning(lenient_warnings.get(lwi));
+          lwi = lwi + 1;
+        }
+        lenient_warnings.free();
+      }
+    }
+    if e.has_pos {
+      // The node's own file, which is not the entry file when the error
+      // is in something it imported.
+      str where = e.pos.filename;
+      if equals(where, "") {
+        where = input;
+      }
+      ret .Err(format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        e.message,
+        where,
+        e.pos.line,
+        e.pos.col
+      ));
+    }
+    ret .Err(e.message);
+  }
+
+  // Warnings are reported after checking, so a program that does not
+  // compile is not also told what it might have meant. They are read
+  // from the file's own parse: merging drops the import statements, and
+  // what another file declares is its own business.
+  let noticed = analyze(&merged.entry_nodes, &merged.nodes, warn_unused, input);
+  if noticed.is_err() {
+    UnmetExpectation ue = noticed.unwrap_err();
+    if ue.has_pos {
+      str where = ue.pos.filename;
+      if equals(where, "") {
+        where = input;
+      }
+      ret .Err(format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        ue.message,
+        where,
+        ue.pos.line,
+        ue.pos.col
+      ));
+    }
+    ret .Err(ue.message);
+  }
+  Vec<Warning> warnings = noticed.unwrap();
+  defer warnings.free();
+  num wi = 0;
+  for wi < warnings.len {
+    print_warning(warnings.get(wi));
+    wi = wi + 1;
+  }
+
+  CodegenState state = codegen_state_new();
+  Codegen cg = codegen_new(&state);
+  cg.test_mode = test_mode;
+  cg.fuzz_mode = fuzz_mode;
+  cg.fuzz_target = fuzz_target;
+  cg.msvc_mode = msvc_mode;
+  cg.emscripten_mode = emscripten_mode;
+  cg.host_arch = host_arch;
+  cg.prune_unreachable = prune_unreachable;
+  cg.debug_info = debug_info;
+  if cover != nil {
+    cg.coverage = true;
+    cg.cover_out = cover.out_path;
+    cg.cover_pwd = cover.pwd;
+  }
+  cg.import_aliases = merged.aliases;
+  cg.alias_rename_keys = merged.alias_rename_keys;
+  cg.alias_rename_targets = merged.alias_rename_targets;
+
+  let cg_err = cg.transpile(merged.nodes);
+  fit cg_err {
+    .Some(kind) -> {
+      str what = "unsupported node";
+      fit kind {
+        .UnsupportedNode -> {}
+        .InvalidNode -> { what = "invalid node"; }
+      }
+      if !equals(cg.error_note, "") {
+        if !equals(cg.last_where, "") {
+          ret .Err(format(
+            "codegen failed: {str}: {str}, near {str}",
+            what,
+            cg.error_note,
+            cg.last_where
+          ));
+        }
+        ret .Err(format("codegen failed: {str}: {str}", what, cg.error_note));
+      }
+      if !equals(cg.last_where, "") {
+        ret .Err(format("codegen failed: {str}, near {str}", what, cg.last_where));
+      }
+      ret .Err(format("codegen failed: {str}", what));
+    }
+    .None -> {}
+  }
+
+  str c_source = state.out.build();
+  if !write_string(out_path, c_source) {
+    ret .Err(format("could not write {str}", out_path));
+  }
+  ret .Ok(true);
+}
