@@ -87,13 +87,51 @@ browser page - see this project's own [reference
 website](https://omdxp.github.io/fun/), whose docs examples run this way
 client-side, with no backend server at all.
 
-This makes Fun **programs** able to target WebAssembly. It does not make
-the *compiler itself* run inside a browser - the compiler's own pipeline
-still needs a native C compiler to finish a build, which a browser
-sandbox can never provide. An interactive, arbitrary-code playground
-running with zero backend would need a dedicated WebAssembly codegen
-backend bypassing that step entirely; that's a separate, future project,
-not this one.
+This makes Fun **programs** able to target WebAssembly - the compiler's
+own pipeline still ordinarily needs a native C compiler to finish a
+build, which a plain browser sandbox can never provide on its own. The
+reference website's own Interactive Playground closes that gap for
+arbitrary, freshly-typed code anyway, without a dedicated WebAssembly
+codegen backend: see "The in-browser Playground" below for how.
+
+### The in-browser Playground
+
+The reference website's [Interactive
+Playground](https://omdxp.github.io/fun/) runs arbitrary, edited code
+entirely client-side, no backend server involved, by running the
+*compiler itself* as two separate WebAssembly modules in the browser:
+
+1. A minimal build of the compiler's own frontend (lex, parse,
+   typecheck, codegen-to-C - stops there, never invokes a real C
+   compiler itself) runs first, lowering the typed source to C.
+2. A real C compiler, itself compiled to WebAssembly and running in
+   the same page ([`@wasmer/sdk`](https://docs.wasmer.io/javascript-sdk)'s
+   `clang/clang` package - genuine clang, lld, and wasm-ld, targeting
+   wasm32-wasi), compiles that C and runs the result.
+
+Both pieces are real, general-purpose builds, not special-cased for
+this one use - the first is the same `FUN_CC=emcc` target described
+above, applied to the compiler's own source; the second is an ordinary
+C compiler that happens to run as wasm. The second module is large
+(~105 MB) and fetched lazily, only on the first edited run, and cached
+for the rest of that page session.
+
+This is also why `_preload_and_collect_source`'s parallel import
+preloading (`fork`ing a fixed worker pool to read a program's import
+graph concurrently) has a sequential fallback: a browser only grants
+real multi-threading (`SharedArrayBuffer`) with cross-origin-isolation
+response headers, which a compiler embedded as a library inside someone
+else's page has no way to require. Without the fallback, the parallel
+path doesn't error under those conditions, it hangs - every worker's
+own `pthread_create` fails, and the scheduler has no way to know.
+
+The same cross-origin-isolation gap shows up once more, separately: the
+Wasmer SDK itself logs a non-fatal console warning about it on a page
+that hasn't set those headers (GitHub Pages, serving static files only,
+cannot), since its own sandboxed execution model would also benefit from
+real threading. Compiling and running still work without it - confirmed
+directly, repeatedly, not assumed - just a known, harmless warning
+rather than something this project's own code could silence.
 
 ## Runtime Backend Selection
 
