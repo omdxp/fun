@@ -54,18 +54,19 @@ nothing; results flow back through channels.
   can.
 
 ```fun
+use std.io;
 use std.channel;
 
 async fun square_into(Channel<num>* out, num v) {
   out <- v * v;
 }
 
-fun main() num {
+fun main() {
   Channel<num> results = channel_new_cap(0, 8);
   fork square_into(&results, 2);
   fork square_into(&results, 3);
   num total = (<-results) + (<-results);
-  ret total; // 4 + 9 = 13
+  println_fmt("total={num}", total); // 4 + 9 = 13
 }
 ```
 

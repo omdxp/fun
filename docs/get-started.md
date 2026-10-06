@@ -167,6 +167,7 @@ fun add somejson -git https://github.com/user/somejson -tag v1.2.3
 ```
 
 ```fun
+// fun:no-run
 use deps.somejson.parser;
 ```
 

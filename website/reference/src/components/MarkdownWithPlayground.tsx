@@ -4,6 +4,16 @@ import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
 import HighlightedCode from "./HighlightedCode";
 
+// A fenced example whose own first line is this marker is a
+// deliberate fragment - demonstrating one syntax point, not a
+// complete standalone program (no `main`, undeclared names assumed
+// from surrounding prose, or a dependency that doesn't really exist)
+// - and is rendered as plain highlighted code, no Run button offered
+// at all, instead of one that would always fail. `prebake-wasm.mjs`
+// recognizes the identical marker and skips the block outright rather
+// than spending a real compile attempt on it.
+const NO_RUN_MARKER = /^\/\/\s*fun:no-run\s*\r?\n/;
+
 type Props = {
   markdown: string;
   sourcePath?: string;
@@ -278,6 +288,16 @@ export default function MarkdownWithPlayground({
           const lang = className?.match(/language-(\w+)/)?.[1];
 
           if (isBlock && isFun && enableRunnableFunBlocks) {
+            if (NO_RUN_MARKER.test(text)) {
+              return (
+                <HighlightedCode
+                  code={text.replace(NO_RUN_MARKER, "")}
+                  lang="fun"
+                  className="md-pre"
+                  showCopy
+                />
+              );
+            }
             return <RunCodeBlock initialCode={text} />;
           }
 

@@ -1124,6 +1124,7 @@ an OR of several patterns against the same single subject, and works the
 same way for an enum's dot-shorthand (`.Red, .Blue -> { ... }`):
 
 ```fun
+// fun:no-run
 fun warm(Color c) flag {
   fit c {
     .Red, .Green -> { ret true; }
@@ -1143,6 +1144,7 @@ To match on several values together, build a short combined key first and
 `fit` on that:
 
 ```fun
+// fun:no-run
 str key = format("{chr}{chr}{chr}", a, b, c);
 fit key {
   "str" -> { ... }
@@ -1162,6 +1164,9 @@ dispatched at runtime through the same vtable an ordinary shape method
 call already uses:
 
 ```fun
+use std.io;
+use std.string;
+
 shape HasArea {
   area() num;
 }
@@ -1190,6 +1195,12 @@ fun describe(HasArea s) str {
     _ -> { }
   }
   ret out;
+}
+
+fun main() {
+  Circle c;
+  c.radius = 3;
+  println(describe(&c));
 }
 ```
 
@@ -1237,6 +1248,7 @@ fun describe(HasArea s) str {
 ## Inline Assembly
 
 ```fun
+// fun:no-run
 use std.io;
 
 fun main() {
