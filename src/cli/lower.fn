@@ -94,6 +94,25 @@ pub fun drop_foreign_tests(Vec<Node>* nodes, str entry) {
 // and stay `true`). See `_preload_and_collect_source`'s own doc
 // comment for why that distinction matters: it hangs forever
 // otherwise.
+//
+// `reject_concurrency` is the same kind of distinction, one level up:
+// `fork` (and anything built on it - `runtime_async_spawn`, channels,
+// the thread pool) needs a real OS thread to actually run concurrently
+// with anything. Tier 1's pre-baked examples compile with
+// `emscripten_mode: true` too, through a real `emcc -pthread` build
+// served with the cross-origin-isolation headers that grants - `fork`
+// genuinely works there. The Playground's *edited*-code path lowers
+// through this same function, but what actually runs its output is a
+// wasm32-wasi binary inside `@wasmer/sdk`'s sandbox, with no threading
+// support at all: `fork`'s own generated C still calls `pthread_create`
+// there, which either fails outright or returns success for a "thread"
+// that can never truly run - either way, whatever the program then
+// waits on (a join, a channel receive) waits forever. Confirmed
+// directly: a real concurrency example hung the deployed site's own
+// tab indefinitely. A caller whose output is headed there sets this
+// `true` to turn that hang into an immediate, real compile error
+// instead - every other caller (the native/MSVC/emcc CLI paths, which
+// never hit this problem) stays `false`.
 pub fun lower_to_c(
   str input,
   str out_path,
@@ -109,11 +128,17 @@ pub fun lower_to_c(
   flag msvc_mode,
   flag emscripten_mode,
   str host_arch,
-  flag parallel_preload
+  flag parallel_preload,
+  flag reject_concurrency
 ) Result<flag, str> {
   let merged = parse_program_with_imports(input, parallel_preload)!;
   if test_mode {
     drop_foreign_tests(&merged.nodes, input);
+  }
+  if reject_concurrency && uses_fork_in(merged.nodes, test_mode, fuzz_mode) {
+    ret .Err(
+      "concurrency (fork, async spawn, channels, the thread pool) is not supported when running edited code in your browser - this sandbox has no real threads, so it would hang rather than fail; run it locally instead"
+    );
   }
 
   // Injected ahead of the program's own declarations, so anything in it

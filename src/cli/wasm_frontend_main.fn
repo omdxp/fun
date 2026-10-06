@@ -34,7 +34,25 @@ fun main() num {
   }
 
   Vec<Define> defines;
-  defines.init(0);
+  defines.init(2);
+  // A real `fun build`/`fun -in` run on a real project makes
+  // `PACKAGE_NAME`/`PACKAGE_VERSION` available as ordinary string
+  // constants, taken from `fun.toml` (`manifest_defines`, normally).
+  // This module has no real manifest - it compiles one file handed to
+  // it by a browser page, not a project - so a doc example that
+  // references either constant (there is a real one, documenting
+  // exactly this feature) would otherwise fail to compile at all.
+  // Placeholder values here, matching what a project actually named
+  // "playground" would see, make that example (and any other genuine
+  // use of either constant) work instead of needing to be excluded.
+  Define pkg_name;
+  pkg_name.name = "PACKAGE_NAME";
+  pkg_name.value = "playground";
+  defines.push(pkg_name);
+  Define pkg_version;
+  pkg_version.name = "PACKAGE_VERSION";
+  pkg_version.value = "0.0.0";
+  defines.push(pkg_version);
   // `msvc_mode: false, emscripten_mode: true` are given directly rather
   // than resolved: this target is always emscripten, statically, and
   // `resolve_c_compiler()` (which would otherwise decide this) lives in
@@ -56,7 +74,13 @@ fun main() num {
   // toolchain this file is compiled through) either way - Node's own
   // pthread emulation works fine without this, so only the browser
   // case actually needs the fallback.
-  let lowered = lower_to_c(src_path, out_path, &defines, false, false, false, "", false, false, nil, true, false, true, "", false);
+  // `reject_concurrency: true` - this module's own output (real-world
+  // use: fed straight into `@wasmer/sdk`'s wasm32-wasi sandbox, no
+  // threading support at all) hangs the exact same way for the exact
+  // same reason if the program itself uses `fork` - confirmed directly,
+  // a real concurrency example hung the deployed Playground's own tab
+  // indefinitely. See `lower_to_c`'s own doc comment on this parameter.
+  let lowered = lower_to_c(src_path, out_path, &defines, false, false, false, "", false, false, nil, true, false, true, "", false, true);
   defines.free();
 
   if lowered.is_err() {
