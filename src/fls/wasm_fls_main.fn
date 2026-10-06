@@ -1,6 +1,6 @@
-// A minimal, separate entry point for running one fls request inside a
-// browser, via `FUN_CC=emcc` - the diagnostics half of the Playground's
-// own language-server integration, alongside `wasm_frontend_main.fn`'s
+// A minimal, separate entry point for running one fls session inside a
+// browser, via `FUN_CC=emcc` - the language-server half of the
+// Playground's own integration, alongside `wasm_frontend_main.fn`'s
 // compile-to-C frontend. Deliberately its own module rather than a
 // `main.fn` reuse: `main.fn`'s own `serve` is a blocking loop over real
 // standard input, which a browser sandbox has no equivalent of, and
@@ -12,18 +12,23 @@
 // Contract with the caller: mount every project file at its own real
 // path (the same convention `wasm_frontend_main.fn` already uses, so a
 // `use`d sibling file resolves the same way for both halves of the
-// pipeline), then write the single file being analyzed's content to
-// `/fls_request.json` as `{"uri": "file:///path.fn", "text": "..."}`.
-// One `textDocument/didOpen` is synthesized and handled - enough to
-// trigger `Server.opened`'s own synchronous `report()` call, which
-// always publishes exactly one `textDocument/publishDiagnostics`
-// notification to stdout, framed the same way the real stdio server
-// would send it. No `initialize` handshake needed: diagnostics for a
-// single open document never consult `workspace_root` at all (see
-// `Server.workspace_root`'s own comment) - only true workspace-wide
-// features (`workspace/symbol`, cross-file `references`) would.
+// pipeline), then write `/fls_request.json` as `{"messages": [...]}`,
+// an array of raw, already-framed-free JSON-RPC message bodies to feed
+// through `Server.handle` in order - deliberately protocol-agnostic on
+// this side: every message is just text replayed verbatim, so adding
+// support for another LSP method on the browser side is a JS-only
+// change, never one here. The caller's first message is always its own
+// `textDocument/didOpen` (there is no `initialize` handshake: a single
+// open document never consults `workspace_root` at all - see
+// `Server.workspace_root`'s own comment - only true workspace-wide
+// features would), which also makes `Server.opened`'s own synchronous
+// `report()` publish one `textDocument/publishDiagnostics` notification
+// for free; any later message is whatever specific request the caller
+// wants answered (hover, completion, definition, ...). Every message
+// `write_message` emits comes back on stdout, still framed the way the
+// real stdio server would send it, one after another with nothing in
+// between - the caller's own job to split back apart.
 use server;
-use protocol;
 use std.io;
 use std.fs;
 use std.json;
@@ -41,12 +46,7 @@ fun main() num {
     ret 1;
   }
   JsonValue request = parsed.unwrap();
-  str uri = request.get("uri").unwrap_or(.Null).as_str().unwrap_or("");
-  str text = request.get("text").unwrap_or(.Null).as_str().unwrap_or("");
-  if equals(uri, "") {
-    writeln_to(.Stderr, "malformed request: missing 'uri'");
-    ret 1;
-  }
+  let messages_val = request.get("messages").unwrap_or(.Null).as_array();
 
   Server s = server_new();
   // See `ImportCache.parallel_preload`'s own comment: this module runs
@@ -54,11 +54,18 @@ fun main() num {
   // fork-based worker pool's own threads can never actually start.
   s.reads.imports.parallel_preload = false;
 
-  str body = format(
-    `{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":{str},"languageId":"fun","version":1,"text":{str}}}}`,
-    json_quote(uri),
-    json_quote(text)
-  );
-  s.handle(body);
+  if messages_val.is_some() {
+    for m : messages_val.unwrap() {
+      let body = m.as_str();
+      if body.is_none() {
+        continue;
+      }
+      // `handle` frees its argument; `as_str()` borrows directly from
+      // `request`'s own backing storage, so each message is copied
+      // here rather than handed over as-is.
+      str owned = format("{str}", body.unwrap());
+      s.handle(owned);
+    }
+  }
   ret 0;
 }
