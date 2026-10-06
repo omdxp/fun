@@ -56,7 +56,19 @@ export class FunCompileError extends Error {}
 // stderr is the real compiler error - `runWasm`'s own `onExit` never
 // looks at the code at all, since a pre-baked example is always
 // expected to succeed.
-async function runFrontend(source: string): Promise<string> {
+//
+// `files` is the Playground's whole virtual project (every path the
+// person's file tree holds), `entryPath` names which one is the
+// program's real entry point. `wasm_frontend_main.fn`'s own contract
+// hardcodes a single fixed input path, `/playground.fn` - every file
+// in the project is still written to its own real path too (parent
+// directories created as needed via `FS.mkdirTree`), which is what
+// lets the entry file's own `use mod1;`/`use sub.other;` imports
+// resolve against the project's other files at all: the import
+// resolver looks each one up relative to the importing file's own
+// directory, on the module's virtual filesystem, exactly as it would
+// on a real one.
+async function runFrontend(files: Record<string, string>, entryPath: string): Promise<string> {
   const base = import.meta.env.BASE_URL || "/";
   const hash = await frontendHash();
   const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
@@ -119,12 +131,22 @@ async function runFrontend(source: string): Promise<string> {
       locateFile: (path: string) => versioned(`${base}wasm-frontend/${path}`),
       print: (line: string) => stdoutLines.push(line),
       printErr: (line: string) => stderrLines.push(line),
-      // Writes the source into the module's own virtual filesystem
-      // before it runs - the contract `wasm_frontend_main.fn` itself
-      // documents: it reads from a fixed path, `/playground.fn`.
+      // Mounts every project file at its own real path, plus the
+      // entry file's content again at the fixed path the module always
+      // reads from.
       preRun: [
         (mod: any) => {
-          mod.FS.writeFile("/playground.fn", source);
+          const writeAt = (path: string, content: string) => {
+            const slash = path.lastIndexOf("/");
+            if (slash > 0) {
+              mod.FS.mkdirTree(path.slice(0, slash));
+            }
+            mod.FS.writeFile(path, content);
+          };
+          for (const [path, content] of Object.entries(files)) {
+            writeAt(path.startsWith("/") ? path : `/${path}`, content);
+          }
+          writeAt("/playground.fn", files[entryPath] ?? "");
         },
       ],
       onExit: (code: number) => finish(code),
@@ -225,13 +247,17 @@ export function warmPlaygroundRuntime(): void {
     .catch(() => {});
 }
 
-// The full pipeline for a piece of freshly-edited Fun source. Throws
-// a plain `Error` only for an infrastructure failure (a module failed
-// to load, a timeout) - the caller falls back to a live backend for
-// those. Every substantive rejection, whether the Fun frontend's own
+// The full pipeline for a Playground project - every file the person's
+// file tree holds, plus which one is the entry point. Throws a plain
+// `Error` only for an infrastructure failure (a module failed to load,
+// a timeout) - the caller falls back to a live backend for those.
+// Every substantive rejection, whether the Fun frontend's own
 // parse/typecheck or the C compiler's, is a `FunCompileError`: the
 // authoritative answer a backend would give too, shown directly.
-export async function runEditedCode(source: string): Promise<RunOutcome> {
-  const c = await runFrontend(source);
+export async function runEditedCode(
+  files: Record<string, string>,
+  entryPath: string,
+): Promise<RunOutcome> {
+  const c = await runFrontend(files, entryPath);
   return compileAndRun(c);
 }

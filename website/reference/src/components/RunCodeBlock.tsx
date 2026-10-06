@@ -178,7 +178,7 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
         }
       } else {
         try {
-          const outcome = await runEditedCode(code);
+          const outcome = await runEditedCode({ "playground.fn": code }, "playground.fn");
           setStdout(outcome.stdout);
           setStderr(outcome.stderr);
           return;

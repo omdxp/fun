@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
+import Playground from "./components/Playground";
 import HighlightedCode from "./components/HighlightedCode";
 import { copyTextToClipboard } from "./utils/clipboard";
 import { getSiteHighlighter } from "./utils/shikiHighlighter";
@@ -2176,16 +2177,13 @@ export default function App() {
               code and run that too - no backend involved either way.
             </p>
             <div className="hint">
-              Everything here runs entirely in your browser: curated
-              samples via a pre-baked wasm build, and edited code through
-              the Fun compiler's own frontend plus a real C compiler, both
-              compiled to WebAssembly. The first edited run downloads a
-              real C toolchain (around 100 MB, once per session) before it
-              can compile anything.
+              Everything here runs entirely in your browser: the Fun
+              compiler's own frontend plus a real C compiler, both
+              compiled to WebAssembly. The first run downloads a real C
+              toolchain (around 100 MB, once per session, and loading in
+              the background already) before it can compile anything.
             </div>
-            {content.samples.map((s) => (
-              <RunCodeBlock key={s.title} title={s.title} initialCode={s.code} />
-            ))}
+            <Playground samples={content.samples} />
             <details>
               <summary>Raw stdlib docs source</summary>
               <MarkdownWithPlayground
