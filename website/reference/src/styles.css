@@ -793,10 +793,28 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .pg-static-actions { position: static; opacity: 1; }
 
+.pg-hint {
+  padding: 5px 12px;
+  font: 500 11.5px var(--sans, inherit);
+  color: var(--muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .pg-editor-host {
   flex: 1 1 auto;
   min-height: 320px;
-  overflow: auto;
+  /* Not `overflow: auto` - `.cm-scroller` below already scrolls the
+     editor's own content, so this was always redundant for that, but
+     it had a real, confirmed cost: Safari/WebKit (unlike every
+     Chromium-based browser) can't use CodeMirror's `position: fixed`
+     tooltip mode, so it falls back to `position: absolute` relative
+     to `.cm-editor` - and an `overflow: auto` ancestor clips an
+     absolutely-positioned descendant the moment it's placed "above"
+     a line near the top of the pane, exactly as `fixed` positioning
+     (used everywhere else) would never be clipped. Confirmed directly
+     via WebKit, not assumed - Chromium never showed this because it
+     never takes the `absolute` code path at all. */
+  overflow: visible;
 }
 .pg-editor-host .cm-editor { height: 100%; font: 500 13px/1.5 var(--mono); }
 .pg-editor-host .cm-scroller { overflow: auto; }
