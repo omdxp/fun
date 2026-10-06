@@ -1,0 +1,64 @@
+// A minimal, separate entry point for running one fls request inside a
+// browser, via `FUN_CC=emcc` - the diagnostics half of the Playground's
+// own language-server integration, alongside `wasm_frontend_main.fn`'s
+// compile-to-C frontend. Deliberately its own module rather than a
+// `main.fn` reuse: `main.fn`'s own `serve` is a blocking loop over real
+// standard input, which a browser sandbox has no equivalent of, and
+// which would also throw away every one of `Server`'s own caches on
+// return - this target is reload-per-call instead (see
+// `docs/platforms.md`'s own note on why a *persistent* language-server
+// module is a materially bigger project than this one).
+//
+// Contract with the caller: mount every project file at its own real
+// path (the same convention `wasm_frontend_main.fn` already uses, so a
+// `use`d sibling file resolves the same way for both halves of the
+// pipeline), then write the single file being analyzed's content to
+// `/fls_request.json` as `{"uri": "file:///path.fn", "text": "..."}`.
+// One `textDocument/didOpen` is synthesized and handled - enough to
+// trigger `Server.opened`'s own synchronous `report()` call, which
+// always publishes exactly one `textDocument/publishDiagnostics`
+// notification to stdout, framed the same way the real stdio server
+// would send it. No `initialize` handshake needed: diagnostics for a
+// single open document never consult `workspace_root` at all (see
+// `Server.workspace_root`'s own comment) - only true workspace-wide
+// features (`workspace/symbol`, cross-file `references`) would.
+use server;
+use protocol;
+use std.io;
+use std.fs;
+use std.json;
+
+fun main() num {
+  str request_path = "/fls_request.json";
+  if !exists(request_path) {
+    writeln_to(.Stderr, "no request provided: expected /fls_request.json to exist before this module runs");
+    ret 1;
+  }
+
+  let parsed = parse(read_to_string(request_path));
+  if parsed.is_err() {
+    writeln_to(.Stderr, "malformed request: not valid JSON");
+    ret 1;
+  }
+  JsonValue request = parsed.unwrap();
+  str uri = request.get("uri").unwrap_or(.Null).as_str().unwrap_or("");
+  str text = request.get("text").unwrap_or(.Null).as_str().unwrap_or("");
+  if equals(uri, "") {
+    writeln_to(.Stderr, "malformed request: missing 'uri'");
+    ret 1;
+  }
+
+  Server s = server_new();
+  // See `ImportCache.parallel_preload`'s own comment: this module runs
+  // inside a real browser sandbox with no `SharedArrayBuffer`, so the
+  // fork-based worker pool's own threads can never actually start.
+  s.reads.imports.parallel_preload = false;
+
+  str body = format(
+    `{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":{str},"languageId":"fun","version":1,"text":{str}}}}`,
+    json_quote(uri),
+    json_quote(text)
+  );
+  s.handle(body);
+  ret 0;
+}

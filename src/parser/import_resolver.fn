@@ -314,12 +314,20 @@ pub compound ParsedFile {
 pub compound ImportCache {
   Map<str, ParsedFile> files;
   flag ready;
+  // `true` by default (a real multi-threading environment, the only
+  // place `_preload_and_collect_source`'s `fork`-based worker pool
+  // actually helps) - a caller embedding the parser somewhere that
+  // can never really start a thread (a browser wasm sandbox with no
+  // `SharedArrayBuffer`) sets this `false` once, up front, same as
+  // `wasm_frontend_main.fn` already does for the compile frontend.
+  flag parallel_preload;
 }
 
 pub fun import_cache_new() ImportCache {
   ImportCache c;
   c.files.init(16);
   c.ready = true;
+  c.parallel_preload = true;
   ret c;
 }
 

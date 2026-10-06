@@ -94,7 +94,7 @@ impl AnalysisCache {
 
     // The text a client holds is what to read, not what is on disk;
     // everything it imports is still read from disk.
-    let merged = parse_program_cached(doc.path, doc.text, &self.imports);
+    let merged = parse_program_cached(doc.path, doc.text, &self.imports, self.imports.parallel_preload);
     if merged.is_ok() {
       fresh.program = merged.unwrap();
       fresh.parsed = true;

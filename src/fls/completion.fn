@@ -208,7 +208,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
             if text == nil {
               continue;
             }
-            let merged = parse_program_cached(path, text, &cache.imports);
+            let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
             if merged.is_err() {
               continue;
             }
@@ -1032,7 +1032,7 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     if text == nil {
       continue;
     }
-    let merged = parse_program_cached(path, text, &cache.imports);
+    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       continue;
     }
@@ -1061,7 +1061,7 @@ fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCa
     if text == nil {
       continue;
     }
-    let merged = parse_program_cached(path, text, &cache.imports);
+    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       continue;
     }
@@ -1592,7 +1592,7 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     if text == nil {
       continue;
     }
-    let merged = parse_program_cached(path, text, &cache.imports);
+    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       continue;
     }
@@ -2621,7 +2621,7 @@ fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<I
   if text == nil {
     ret;
   }
-  let merged = parse_program_cached(module_path, text, &cache.imports);
+  let merged = parse_program_cached(module_path, text, &cache.imports, cache.imports.parallel_preload);
   if merged.is_err() {
     ret;
   }
