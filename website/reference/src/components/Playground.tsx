@@ -1,12 +1,72 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { EditorState, type Text } from "@codemirror/state";
-import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
+import { EditorState, StateField, StateEffect, type Text } from "@codemirror/state";
+import {
+  EditorView,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  hoverTooltip,
+  showTooltip,
+  type Tooltip,
+} from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { syntaxHighlighting, defaultHighlightStyle, indentUnit } from "@codemirror/language";
+import { syntaxHighlighting, indentUnit } from "@codemirror/language";
 import { linter, lintGutter, type Diagnostic as CMDiagnostic } from "@codemirror/lint";
+import { autocompletion, type CompletionSource, type Completion } from "@codemirror/autocomplete";
 
-import { funLanguage } from "../utils/funLanguage";
-import { FunCompileError, runEditedCode, getDiagnostics } from "../utils/compileInBrowser";
+import { funLanguage, funHighlightDark, funHighlightLight } from "../utils/funLanguage";
+import {
+  FunCompileError,
+  runEditedCode,
+  getDiagnostics,
+  getHover,
+  getCompletions,
+  getDefinition,
+  getSignatureHelp,
+} from "../utils/compileInBrowser";
+
+// Fun Web/Fun Web Light (the same two editor themes this project ships
+// for VS Code) rather than CodeMirror's own generic default style, so
+// the Playground's colors match what the rest of the site already
+// uses for every other code sample.
+function isDarkTheme(): boolean {
+  const explicit = document.documentElement.dataset.theme;
+  if (explicit === "light") return false;
+  if (explicit === "dark") return true;
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
+}
+
+// LSP's own `CompletionItemKind` numbering (the only part of the LSP
+// response shape a plain `any` doesn't self-document) mapped to
+// CodeMirror's own completion `type` strings, which drive its built-in
+// per-kind icon.
+function completionKind(kind: number | undefined): string {
+  switch (kind) {
+    case 3: return "function";
+    case 2: return "method";
+    case 5: return "property";
+    case 6: return "variable";
+    case 7: return "class";
+    case 8: return "interface";
+    case 9: return "module";
+    case 13: return "enum";
+    case 20: return "enum-member";
+    case 14: return "keyword";
+    case 21: return "constant";
+    default: return "text";
+  }
+}
+
+// A hover/signature-help result's `contents` can be a plain string, a
+// `{language, value}` pair, or (fls's own shape) `{kind, value}`
+// markdown - every form reduces to one string either way.
+function contentsToText(contents: any): string {
+  if (!contents) return "";
+  if (typeof contents === "string") return contents;
+  if (typeof contents.value === "string") return contents.value;
+  if (Array.isArray(contents)) return contents.map(contentsToText).join("\n\n");
+  return "";
+}
 
 type ProjectFiles = Record<string, string>;
 
@@ -186,6 +246,12 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const statesRef = useRef<Map<string, EditorState>>(new Map());
   const filesRef = useRef(files);
   filesRef.current = files;
+  // Set by a goto-definition jump that lands on a *different* file -
+  // the active-file sync effect applies it (moving the cursor there)
+  // right after it swaps in that file's freshly-created state, then
+  // clears it. A same-file jump never touches this; it moves the
+  // cursor directly, no file switch involved.
+  const pendingJumpRef = useRef<{ line: number; character: number } | null>(null);
 
   const tree = useMemo(() => buildTree(Object.keys(files)), [files]);
 
@@ -200,22 +266,89 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     return Math.min(lineInfo.from + Math.max(character, 0), lineInfo.to);
   };
 
+  const posFor = (doc: Text, offset: number): { line: number; character: number } => {
+    const lineInfo = doc.lineAt(offset);
+    return { line: lineInfo.number - 1, character: offset - lineInfo.from };
+  };
+
   const severityFor = (n: number): "error" | "warning" | "info" =>
     n === 2 ? "warning" : n >= 3 ? "info" : "error";
+
+  // Goto-definition's own target: jumps within the same file directly;
+  // a different project file sets `pendingJumpRef` and switches to it
+  // (the sync effect applies the position once that file's state is
+  // live). A target outside the project (stdlib, say) is silently a
+  // no-op - there's nowhere in this editor to show it.
+  const gotoDefinition = async (view: EditorView, path: string, atPos?: number) => {
+    const pos = atPos ?? view.state.selection.main.head;
+    const { line, character } = posFor(view.state.doc, pos);
+    const result = await getDefinition(filesRef.current, path, line, character);
+    const loc = Array.isArray(result) ? result[0] : result;
+    if (!loc?.uri || !loc?.range?.start) return;
+    const targetPath = String(loc.uri).replace(/^file:\/\/\//, "").replace(/^\/+/, "");
+    const targetLine = loc.range.start.line ?? 0;
+    const targetCharacter = loc.range.start.character ?? 0;
+    if (filesRef.current[targetPath] === undefined) return;
+    if (targetPath === path) {
+      const off = offsetFor(view.state.doc, targetLine, targetCharacter);
+      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      return;
+    }
+    pendingJumpRef.current = { line: targetLine, character: targetCharacter };
+    setActiveFile(targetPath);
+  };
 
   const stateFor = (path: string, content: string): EditorState => {
     const existing = statesRef.current.get(path);
     if (existing) return existing;
+
+    const setSignatureTooltip = StateEffect.define<Tooltip | null>();
+    const signatureTooltipField = StateField.define<Tooltip | null>({
+      create: () => null,
+      update(value, tr) {
+        for (const e of tr.effects) {
+          if (e.is(setSignatureTooltip)) return e.value;
+        }
+        return value;
+      },
+      provide: (f) => showTooltip.from(f),
+    });
+
+    const completionSource: CompletionSource = async (context) => {
+      const { line, character } = posFor(context.state.doc, context.pos);
+      const result = await getCompletions(filesRef.current, path, line, character);
+      const items = Array.isArray(result) ? result : result?.items;
+      if (!Array.isArray(items) || items.length === 0) return null;
+      const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/);
+      const from = word ? word.from : context.pos;
+      const options: Completion[] = items.map((it: any) => ({
+        label: it.label,
+        type: completionKind(it.kind),
+        detail: it.detail,
+        info: contentsToText(it.documentation) || undefined,
+        apply: it.insertText || it.label,
+      }));
+      return { from, options };
+    };
+
+    let signatureTimer: number | undefined;
+
     const state = EditorState.create({
       doc: content,
       extensions: [
         lineNumbers(),
         history(),
         highlightActiveLine(),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        syntaxHighlighting(isDarkTheme() ? funHighlightDark : funHighlightLight, { fallback: true }),
         funLanguage,
         indentUnit.of("  "),
-        keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+        keymap.of([
+          { key: "F12", run: (view) => { gotoDefinition(view, path); return true; } },
+          { key: "Alt-d", run: (view) => { gotoDefinition(view, path); return true; } },
+          ...defaultKeymap,
+          ...historyKeymap,
+          indentWithTab,
+        ]),
         EditorView.lineWrapping,
         lintGutter(),
         linter(
@@ -231,10 +364,76 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           },
           { delay: 600 },
         ),
+        hoverTooltip(async (view, pos) => {
+          const { line, character } = posFor(view.state.doc, pos);
+          const result = await getHover(filesRef.current, path, line, character);
+          const text = contentsToText(result?.contents);
+          if (!text) return null;
+          const range = result?.range;
+          const from = range ? offsetFor(view.state.doc, range.start.line, range.start.character) : pos;
+          const to = range ? offsetFor(view.state.doc, range.end.line, range.end.character) : pos;
+          return {
+            pos: from,
+            end: Math.max(from, to),
+            above: true,
+            create: () => {
+              const dom = document.createElement("div");
+              dom.className = "pg-hover-tooltip";
+              const pre = document.createElement("pre");
+              pre.textContent = text.replace(/^```fun\n?/, "").replace(/\n?```$/, "");
+              dom.appendChild(pre);
+              return { dom };
+            },
+          };
+        }),
+        autocompletion({ override: [completionSource] }),
+        // Cmd/Ctrl+click as the primary goto-definition gesture - the
+        // standard one in every mainstream editor, and it sidesteps
+        // `F12`'s own real-world problem: most browsers treat it as a
+        // global DevTools shortcut and a page's own key handler never
+        // sees it, keybinding or not.
+        EditorView.domEventHandlers({
+          mousedown: (event, view) => {
+            if (!event.metaKey && !event.ctrlKey) return false;
+            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+            if (pos == null) return false;
+            event.preventDefault();
+            gotoDefinition(view, path, pos);
+            return true;
+          },
+        }),
+        signatureTooltipField,
         EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
-          const text = update.state.doc.toString();
-          setFiles((prev) => ({ ...prev, [path]: text }));
+          if (update.docChanged) {
+            const text = update.state.doc.toString();
+            setFiles((prev) => ({ ...prev, [path]: text }));
+          }
+          if (update.docChanged || update.selectionSet) {
+            window.clearTimeout(signatureTimer);
+            signatureTimer = window.setTimeout(async () => {
+              const view = update.view;
+              const pos = view.state.selection.main.head;
+              const { line, character } = posFor(view.state.doc, pos);
+              const result = await getSignatureHelp(filesRef.current, path, line, character);
+              const sig = result?.signatures?.[result.activeSignature ?? 0];
+              if (!sig) {
+                view.dispatch({ effects: setSignatureTooltip.of(null) });
+                return;
+              }
+              view.dispatch({
+                effects: setSignatureTooltip.of({
+                  pos,
+                  above: true,
+                  create: () => {
+                    const dom = document.createElement("div");
+                    dom.className = "pg-signature-tooltip";
+                    dom.textContent = sig.label;
+                    return { dom };
+                  },
+                }),
+              });
+            }, 400);
+          }
         }),
       ],
     });
@@ -264,8 +463,31 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     if (view.state !== nextState) {
       view.setState(nextState);
     }
+    const jump = pendingJumpRef.current;
+    if (jump) {
+      pendingJumpRef.current = null;
+      const off = offsetFor(view.state.doc, jump.line, jump.character);
+      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFile, generation]);
+
+  // The dark/light Fun Web highlight style is baked into each file's
+  // `EditorState` at creation time (no reconfigurable compartment -
+  // every state would need its own anyway, since each file keeps its
+  // own cached state). A theme toggle instead just drops every cached
+  // state and bumps `generation`, so the active file's state is
+  // rebuilt with the now-current theme on the next render - the same
+  // small undo-history cost `loadSample`/`resetProject` already pay.
+  useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => {
+      statesRef.current.clear();
+      setGeneration((g) => g + 1);
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
 
   const addFile = () => {
     let n = 1;

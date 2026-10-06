@@ -790,20 +790,53 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .pg-editor-host .cm-lintRange-warning { background-image: none; border-bottom: 2px solid #e0a63a; }
 .pg-editor-host .cm-lintRange-info { background-image: none; border-bottom: 2px solid var(--accent); }
 .pg-editor-host .cm-gutterLintMarker { width: 14px; }
-.pg-editor-host .cm-tooltip-lint {
+
+/* CodeMirror mounts every tooltip (lint, hover, signature help,
+   autocomplete) in a portal on `document.body`, not nested inside
+   `.pg-editor-host` - these are deliberately unscoped, not a typo, and
+   there is only ever one CodeMirror instance on this page. */
+.cm-tooltip {
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+}
+.cm-tooltip-lint {
+  font: 500 12.5px/1.5 var(--mono);
+  padding: 2px 4px;
+}
+.cm-diagnostic {
+  border-left: 3px solid var(--accent);
+  padding: 4px 8px;
+}
+.cm-diagnostic-error { border-left-color: var(--accent-strong); }
+.cm-diagnostic-warning { border-left-color: #e0a63a; }
+
+.pg-hover-tooltip, .pg-signature-tooltip {
+  font: 500 12.5px/1.5 var(--mono);
+  padding: 6px 9px;
+  max-width: 420px;
+}
+.pg-hover-tooltip pre { margin: 0; white-space: pre-wrap; }
+.pg-signature-tooltip { color: var(--accent); }
+
+.cm-tooltip-autocomplete {
+  font: 500 13px/1.4 var(--mono);
+}
+.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: rgba(106, 164, 255, 0.18);
+  color: var(--text);
+}
+.cm-completionLabel { color: var(--text); }
+.cm-completionDetail { color: var(--muted); font-style: normal; margin-left: 6px; }
+.cm-completionInfo {
   background: var(--surface-3);
   border: 1px solid var(--border-strong);
   border-radius: 8px;
   color: var(--text);
   font: 500 12.5px/1.5 var(--mono);
-  padding: 2px 4px;
+  padding: 6px 9px;
 }
-.pg-editor-host .cm-diagnostic {
-  border-left: 3px solid var(--accent);
-  padding: 4px 8px;
-}
-.pg-editor-host .cm-diagnostic-error { border-left-color: var(--accent-strong); }
-.pg-editor-host .cm-diagnostic-warning { border-left-color: #e0a63a; }
 
 :root[data-theme="light"] .pg-shell { background: var(--surface-2); }
 :root[data-theme="light"] .pg-sidebar {

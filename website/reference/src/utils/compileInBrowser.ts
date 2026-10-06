@@ -283,91 +283,197 @@ function mountProjectFiles(mod: any, files: Record<string, string>) {
   }
 }
 
-// One `textDocument/didOpen` against `wasm_fls_main.js` (see that
-// file's own doc comment: reload-per-call, not a persistent server),
-// for `activePath`'s current content within the project `files` holds
-// (mounted so any cross-file reference the language server's own
-// analysis follows still resolves). Returns `[]` for any failure at
-// all - a module that failed to load, a timeout, a malformed response,
-// anything - diagnostics are a nice-to-have overlay on top of the
-// editor, never something that should visibly break it or compete
-// with a real compile error for the person's attention.
+const uriFor = (path: string): string => `file:///${path.replace(/^\/+/, "")}`;
+
+const didOpenMessage = (uri: string, text: string): string =>
+  JSON.stringify({
+    jsonrpc: "2.0",
+    method: "textDocument/didOpen",
+    params: { textDocument: { uri, languageId: "fun", version: 1, text } },
+  });
+
+const requestMessage = (id: string, method: string, params: unknown): string =>
+  JSON.stringify({ jsonrpc: "2.0", id, method, params });
+
+// `write_message`'s own wire format, one message after another with
+// nothing between them: a `Content-Length` header, a blank line, then
+// exactly that many bytes of JSON body, immediately followed by the
+// next header. `print()`'s per-line calls, rejoined with `\n`,
+// reconstruct the original bytes exactly (every header line ends in a
+// real newline; the last message's own unterminated JSON body arrives
+// as emscripten's own buffered-stdout flush at exit, one final
+// `print()` call) - this just walks that reconstructed text one framed
+// message at a time.
+function parseFramedMessages(raw: string): any[] {
+  const out: any[] = [];
+  let rest = raw;
+  for (;;) {
+    const m = rest.match(/^Content-Length: (\d+)\r?\n\r?\n/);
+    if (!m) break;
+    const len = Number(m[1]);
+    const start = m[0].length;
+    const body = rest.slice(start, start + len);
+    try {
+      out.push(JSON.parse(body));
+    } catch {
+      // Malformed framing (a truncated response, say) - stop rather
+      // than risk reading a later message's bytes as this one's body.
+      break;
+    }
+    rest = rest.slice(start + len);
+  }
+  return out;
+}
+
+// Runs one fls session against `wasm_fls_main.js` (see that file's own
+// doc comment: reload-per-call, not a persistent server): every
+// project file is mounted so cross-file analysis resolves, then
+// `messages` (raw JSON-RPC message bodies, in order - the caller's own
+// job to build them, this function is protocol-agnostic) is replayed
+// through `Server.handle`, one call each. Returns every message the
+// session wrote back, parsed and in order - a `textDocument/didOpen`
+// always produces a `publishDiagnostics` notification first; a later
+// request message (if any) produces its own response after that.
+async function runFlsSession(files: Record<string, string>, messages: string[]): Promise<any[]> {
+  const base = import.meta.env.BASE_URL || "/";
+  const hash = await manifestHash("wasm-fls");
+  const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
+  const src = versioned(`${base}wasm-fls/wasm_fls_main.js`);
+  const stdoutChunks: string[] = [];
+
+  const raw = await new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const iframe = document.createElement("iframe");
+    iframe.style.display = "none";
+    document.body.appendChild(iframe);
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      window.setTimeout(() => iframe.remove(), 0);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(stdoutChunks.join("\n"));
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("fls session unavailable"));
+    };
+
+    const timeoutId = window.setTimeout(fail, 10000);
+
+    const iframeWindow = iframe.contentWindow as any;
+    const iframeDocument = iframe.contentDocument;
+    if (!iframeWindow || !iframeDocument) {
+      fail();
+      return;
+    }
+
+    iframeWindow.Module = {
+      locateFile: (path: string) => versioned(`${base}wasm-fls/${path}`),
+      print: (line: string) => stdoutChunks.push(line),
+      printErr: () => {},
+      preRun: [
+        (mod: any) => {
+          mountProjectFiles(mod, files);
+          mod.FS.writeFile("/fls_request.json", JSON.stringify({ messages }));
+        },
+      ],
+      onExit: () => finish(),
+      onAbort: () => fail(),
+    };
+
+    const script = iframeDocument.createElement("script");
+    script.src = src;
+    script.onerror = fail;
+    iframeDocument.body.appendChild(script);
+  });
+
+  return parseFramedMessages(raw);
+}
+
+// One request (hover/definition/completion/signatureHelp, all the
+// same shape: a document position in, one response back) against
+// `activePath`'s current content. Returns `null` for any failure at
+// all - a module that failed to load, a timeout, a malformed or empty
+// response - every one of these features is a nice-to-have overlay on
+// top of the editor, never something that should visibly break it.
+async function flsPositionRequest(
+  files: Record<string, string>,
+  activePath: string,
+  method: string,
+  line: number,
+  character: number,
+): Promise<any | null> {
+  try {
+    const uri = uriFor(activePath);
+    const text = files[activePath] ?? "";
+    const id = "1";
+    const messages = [
+      didOpenMessage(uri, text),
+      requestMessage(id, method, { textDocument: { uri }, position: { line, character } }),
+    ];
+    const results = await runFlsSession(files, messages);
+    const response = results.find((r) => r && r.id === id);
+    return response?.result ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getHover(
+  files: Record<string, string>,
+  activePath: string,
+  line: number,
+  character: number,
+): Promise<any | null> {
+  return flsPositionRequest(files, activePath, "textDocument/hover", line, character);
+}
+
+export async function getDefinition(
+  files: Record<string, string>,
+  activePath: string,
+  line: number,
+  character: number,
+): Promise<any | null> {
+  return flsPositionRequest(files, activePath, "textDocument/definition", line, character);
+}
+
+export async function getSignatureHelp(
+  files: Record<string, string>,
+  activePath: string,
+  line: number,
+  character: number,
+): Promise<any | null> {
+  return flsPositionRequest(files, activePath, "textDocument/signatureHelp", line, character);
+}
+
+export async function getCompletions(
+  files: Record<string, string>,
+  activePath: string,
+  line: number,
+  character: number,
+): Promise<any | null> {
+  return flsPositionRequest(files, activePath, "textDocument/completion", line, character);
+}
+
+// `textDocument/didOpen` alone - `Server.opened`'s own synchronous
+// `report()` always publishes exactly one `publishDiagnostics`
+// notification as a side effect, so no second message is needed.
 export async function getDiagnostics(
   files: Record<string, string>,
   activePath: string,
 ): Promise<Diagnostic[]> {
   try {
-    const base = import.meta.env.BASE_URL || "/";
-    const hash = await manifestHash("wasm-fls");
-    const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
-    const src = versioned(`${base}wasm-fls/wasm_fls_main.js`);
-    const uri = `file:///${activePath.replace(/^\/+/, "")}`;
+    const uri = uriFor(activePath);
     const text = files[activePath] ?? "";
-    const stdoutChunks: string[] = [];
-
-    const raw = await new Promise<string>((resolve, reject) => {
-      let settled = false;
-      const iframe = document.createElement("iframe");
-      iframe.style.display = "none";
-      document.body.appendChild(iframe);
-
-      const cleanup = () => {
-        window.clearTimeout(timeoutId);
-        window.setTimeout(() => iframe.remove(), 0);
-      };
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(stdoutChunks.join("\n"));
-      };
-      const fail = () => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new Error("diagnostics unavailable"));
-      };
-
-      const timeoutId = window.setTimeout(fail, 10000);
-
-      const iframeWindow = iframe.contentWindow as any;
-      const iframeDocument = iframe.contentDocument;
-      if (!iframeWindow || !iframeDocument) {
-        fail();
-        return;
-      }
-
-      iframeWindow.Module = {
-        locateFile: (path: string) => versioned(`${base}wasm-fls/${path}`),
-        print: (line: string) => stdoutChunks.push(line),
-        printErr: () => {},
-        preRun: [
-          (mod: any) => {
-            mountProjectFiles(mod, files);
-            mod.FS.writeFile("/fls_request.json", JSON.stringify({ uri, text }));
-          },
-        ],
-        onExit: () => finish(),
-        onAbort: () => fail(),
-      };
-
-      const script = iframeDocument.createElement("script");
-      script.src = src;
-      script.onerror = fail;
-      iframeDocument.body.appendChild(script);
-    });
-
-    // `write_message`'s own wire format: a `Content-Length` header, a
-    // blank line, then exactly that many bytes of JSON body with no
-    // trailing newline - `print()`'s per-line calls, rejoined with
-    // `\n`, reconstruct this exactly (the header line itself ends in
-    // a real newline; the unterminated JSON body arrives as emscripten's
-    // own buffered-stdout flush at exit, one final `print()` call).
-    const match = raw.match(/Content-Length: (\d+)\r?\n\r?\n([\s\S]*)$/);
-    if (!match) return [];
-    const body = match[2].slice(0, Number(match[1]));
-    const parsed = JSON.parse(body);
-    const items = parsed?.params?.diagnostics;
+    const results = await runFlsSession(files, [didOpenMessage(uri, text)]);
+    const published = results.find((r) => r?.method === "textDocument/publishDiagnostics");
+    const items = published?.params?.diagnostics;
     if (!Array.isArray(items)) return [];
     return items.map((d: any) => ({
       from: { line: d.range.start.line, character: d.range.start.character },
