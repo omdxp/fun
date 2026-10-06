@@ -157,7 +157,13 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
       ])
       .run();
     if (compile.exitCode !== 0) {
-      throw new Error(compile.stderr.text() || "the C compiler rejected the generated program");
+      // A real, substantive answer - the C compiler actually rejected
+      // the generated program - not an infrastructure failure, so it's
+      // thrown as the same authoritative type as a Fun-level compile
+      // error rather than one the caller falls back to a backend for.
+      throw new FunCompileError(
+        compile.stderr.text() || "the C compiler rejected the generated program",
+      );
     }
     wasmBytes = await compileSandbox.fs.readFile("/workspace/program.wasm");
   } finally {
@@ -175,11 +181,11 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
 }
 
 // The full pipeline for a piece of freshly-edited Fun source. Throws
-// for an infrastructure failure (a module failed to load, a timeout,
-// the C-to-wasm compile itself choked) - the caller falls back to a
-// live backend for those. A real `FunCompileError` is also thrown,
-// but callers should treat it as the authoritative answer (the
-// backend would say the same thing) rather than retry there.
+// a plain `Error` only for an infrastructure failure (a module failed
+// to load, a timeout) - the caller falls back to a live backend for
+// those. Every substantive rejection, whether the Fun frontend's own
+// parse/typecheck or the C compiler's, is a `FunCompileError`: the
+// authoritative answer a backend would give too, shown directly.
 export async function runEditedCode(source: string): Promise<RunOutcome> {
   const c = await runFrontend(source);
   return compileAndRun(c);
