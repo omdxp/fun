@@ -681,12 +681,48 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     return () => observer.disconnect();
   }, []);
 
-  const addFile = () => {
-    let n = 1;
-    let name = "file1.fn";
-    while (files[name] !== undefined) {
-      n += 1;
-      name = `file${n}.fn`;
+  // A CSS-only "maximized" overlay (`.pg-shell.pg-fullscreen`, fixed
+  // over the whole viewport) rather than the real Fullscreen API -
+  // that API needs a user-gesture-chained permission that an embedded
+  // doc-site iframe/sandbox isn't guaranteed to have, and this gives
+  // the same "more room to work" outcome without any of that.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFullscreen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isFullscreen]);
+
+  // "+ New" asks for a name instead of silently picking `file1.fn`,
+  // `file2.fn`, ... - a nested path (`sub/dir/name.fn`) works too,
+  // since `FileTree`/`buildTree` already group files by `/`.
+  const [creatingFile, setCreatingFile] = useState(false);
+  const [newFileDraft, setNewFileDraft] = useState("");
+  const newFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (creatingFile) newFileInputRef.current?.focus();
+  }, [creatingFile]);
+
+  // Takes the raw name directly rather than reading `newFileDraft` off
+  // the closure - `onKeyDown`'s Escape branch clears the input and
+  // blurs it in the same synchronous tick, before React has a chance
+  // to re-render with the cleared state, so a closure-captured
+  // `newFileDraft` would still see the old, about-to-be-discarded
+  // text at the moment `onBlur` actually fires.
+  const confirmAddFile = (rawName: string) => {
+    let name = rawName.trim().replace(/^\/+/, "");
+    setCreatingFile(false);
+    if (!name) return;
+    if (!/\.fn$/i.test(name)) name += ".fn";
+    if (files[name] !== undefined) {
+      // Already exists - treat it as "go to" rather than silently
+      // discarding what was typed.
+      setActiveFile(name);
+      return;
     }
     setFiles((prev) => ({ ...prev, [name]: "" }));
     statesRef.current.delete(name);
@@ -758,15 +794,43 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   };
 
   return (
-    <div className="pg-shell">
+    <div className={`pg-shell${isFullscreen ? " pg-fullscreen" : ""}`}>
       <div className="pg-sidebar">
         <div className="pg-sidebar-head">
           <strong>Files</strong>
-          <button type="button" className="ghost pg-small" onClick={addFile}>
+          <button type="button" className="ghost pg-small" onClick={() => setCreatingFile(true)}>
             + New
           </button>
         </div>
         <div className="pg-tree">
+          {creatingFile && (
+            <div className="pg-tree-row pg-tree-new">
+              <input
+                ref={newFileInputRef}
+                className="pg-tree-new-input"
+                value={newFileDraft}
+                placeholder="name.fn"
+                onChange={(e) => setNewFileDraft(e.target.value)}
+                onBlur={(e) => confirmAddFile(e.target.value)}
+                onKeyDown={(e) => {
+                  // Both branches blur rather than confirming directly -
+                  // `onBlur` is the single place that actually commits,
+                  // so Enter can't double-create a file by firing both
+                  // its own handler and the blur that follows it. Escape
+                  // clears the input's own live value (not just React
+                  // state) before blurring, since `onBlur` reads that
+                  // live value directly.
+                  const input = e.target as HTMLInputElement;
+                  if (e.key === "Enter") {
+                    input.blur();
+                  } else if (e.key === "Escape") {
+                    input.value = "";
+                    input.blur();
+                  }
+                }}
+              />
+            </div>
+          )}
           <FileTree
             nodes={tree}
             activeFile={activeFile}
@@ -808,6 +872,14 @@ export default function Playground({ samples }: { samples: Sample[] }) {
             )}
           </span>
           <div className="run-actions pg-static-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setIsFullscreen((v) => !v)}
+              title={isFullscreen ? "Exit full screen (Esc)" : "Full screen"}
+            >
+              {isFullscreen ? "Exit full screen" : "Full screen"}
+            </button>
             <button type="button" className="ghost" onClick={resetProject}>
               Reset
             </button>
@@ -815,6 +887,9 @@ export default function Playground({ samples }: { samples: Sample[] }) {
               {isRunning ? "Running..." : "Run"}
             </button>
           </div>
+        </div>
+        <div className="pg-hint">
+          Cmd/Ctrl+click or F12 to jump to a definition &middot; hover a symbol for its docs &middot; start typing for completions
         </div>
         <div ref={editorHostRef} className="pg-editor-host" />
         {hasRun && (

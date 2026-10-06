@@ -683,6 +683,18 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   margin: 16px 0;
 }
 
+/* The "Full screen" toggle's own maximized state: fixed over the
+   whole viewport, square corners (nothing to round against), no
+   outer margin eating into the room it's there to give back. */
+.pg-shell.pg-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  margin: 0;
+  border-radius: 0;
+  min-height: 100vh;
+}
+
 .pg-sidebar {
   flex: 0 0 220px;
   display: flex;
@@ -739,6 +751,17 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .pg-tree-row:hover { background: rgba(255, 255, 255, 0.06); }
 .pg-tree-row.active { background: rgba(106, 164, 255, 0.16); color: var(--accent-strong); }
 .pg-tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-tree-new { cursor: default; padding: 2px 6px; }
+.pg-tree-new-input {
+  width: 100%;
+  background: var(--surface-3);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--text);
+  font: 500 13px/1.4 var(--mono);
+  padding: 4px 6px;
+}
+.pg-tree-new-input:focus { outline: none; }
 .pg-tree-actions { display: none; gap: 3px; flex: 0 0 auto; }
 .pg-tree-row:hover .pg-tree-actions { display: flex; }
 .pg-tree-btn {
@@ -938,7 +961,13 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   border-right-color: var(--border-soft);
 }
 :root[data-theme="light"] .pg-tree-row { color: var(--text); }
+:root[data-theme="light"] .pg-tree-btn {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: var(--border-strong);
+  color: var(--muted);
+}
 :root[data-theme="light"] .pg-toolbar { border-bottom-color: var(--border-soft); }
+:root[data-theme="light"] .pg-hint { border-bottom-color: var(--border-soft); }
 :root[data-theme="light"] .pg-editor-host .cm-content { color: var(--text); }
 :root[data-theme="light"] .pg-editor-host .cm-gutters {
   background: var(--surface-3);
