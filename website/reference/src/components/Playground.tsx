@@ -580,6 +580,20 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         }),
         signatureTooltipField,
         EditorView.updateListener.of((update) => {
+          // `stateFor` caches one `EditorState` per path and reuses it
+          // unconditionally on every later visit to that file (so undo
+          // history/selection survive a switch away and back) - but a
+          // transaction produces a brand new, immutable `EditorState`
+          // object each time, so without re-caching it here, every
+          // live edit effectively vanishes the moment the user leaves
+          // the file: switching back resurrects the *original*,
+          // pre-edit object instead. Confirmed directly as a real,
+          // severe, pre-existing bug - `files` (the React-visible copy
+          // used for compiling/saving) stayed correct the whole time,
+          // only the editor's own cached state silently reverted.
+          if (update.docChanged || update.selectionSet) {
+            statesRef.current.set(path, update.state);
+          }
           if (update.docChanged) {
             const text = update.state.doc.toString();
             setFiles((prev) => ({ ...prev, [path]: text }));
