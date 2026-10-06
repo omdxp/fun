@@ -14,6 +14,7 @@
 // Playground's editor and this project's own editor theme actually
 // agree with each other.
 import { StreamLanguage, HighlightStyle, type StringStream } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
 import { tags as t, Tag } from "@lezer/highlight";
 
 const KEYWORDS = new Set([
@@ -150,3 +151,64 @@ export const funHighlightLight = HighlightStyle.define([
   { tag: t.operator, color: "#3F63C0" },
   { tag: t.punctuation, color: "#3F63C0" },
 ]);
+
+// The editor's own chrome - caret color and every tooltip/popup
+// (lint, hover, signature help, completion) - built through
+// `EditorView.theme()` rather than plain CSS. Plain CSS targeting
+// `.cm-tooltip`/`.cm-cursor` genuinely doesn't work here: CodeMirror
+// injects its own base theme as a `<style>` tag at runtime, after this
+// site's own stylesheet has already loaded, so an equal-specificity
+// plain rule loses the cascade and the default (light, low-contrast
+// on a dark page) colors show through instead - confirmed directly,
+// not assumed. `EditorView.theme()` is CodeMirror's own intended
+// mechanism for exactly this, correctly layered over its base theme
+// instead of racing it.
+//
+// Every tooltip type shares one base `z-index` (60) so each is at
+// least above ordinary page content; the completion popup and its
+// info panel sit higher (70/71) so they stay on top when a hover or
+// signature-help tooltip happens to be showing at the same time -
+// confirmed directly as a real, visible bug otherwise (a hover
+// tooltip painted over a completion list that was still open).
+export function funEditorTheme(dark: boolean) {
+  const surface = dark ? "#101c3f" : "#f0ece1";
+  const border = dark ? "#37539a" : "#c3bcaa";
+  const text = dark ? "#e8edff" : "#1c2440";
+  const muted = dark ? "#a0afd2" : "#5b678a";
+  const accent = dark ? "#6aa4ff" : "#2f4b86";
+  const caret = dark ? "#e8edff" : "#1c2340";
+  const selected = dark ? "rgba(106, 164, 255, 0.18)" : "rgba(47, 75, 134, 0.14)";
+
+  return EditorView.theme(
+    {
+      ".cm-content": { caretColor: caret },
+      ".cm-cursor, .cm-cursor-primary": { borderLeftColor: caret },
+      ".cm-tooltip": {
+        backgroundColor: surface,
+        border: `1px solid ${border}`,
+        borderRadius: "8px",
+        color: text,
+        zIndex: "60",
+      },
+      ".cm-tooltip-autocomplete": { zIndex: "70" },
+      ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
+        backgroundColor: selected,
+        color: text,
+      },
+      ".cm-completionLabel": { color: text },
+      ".cm-completionDetail": { color: muted, fontStyle: "normal", marginLeft: "6px" },
+      ".cm-completionInfo": {
+        backgroundColor: surface,
+        border: `1px solid ${border}`,
+        borderRadius: "8px",
+        color: text,
+        padding: "6px 9px",
+        zIndex: "71",
+      },
+      ".cm-diagnostic": { borderLeftColor: accent },
+      ".cm-diagnostic-error": { borderLeftColor: dark ? "#ff6b7a" : "#c62f42" },
+      ".cm-diagnostic-warning": { borderLeftColor: "#e0a63a" },
+    },
+    { dark },
+  );
+}

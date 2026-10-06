@@ -700,7 +700,28 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   font-size: 0.85rem;
 }
 
+/* `.pg-sidebar-head`'s own "+ New" button isn't inside `.run-actions`
+   (that one is reserved for the hover-only toolbar over the code
+   itself), so it never picked up any of that scoped button styling -
+   confirmed directly: it rendered as a plain, unthemed white browser
+   button in dark mode. Same visual language as `.run-actions button`,
+   just its own rule. */
+.pg-sidebar-head button {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(14, 20, 38, 0.6);
+  color: #dce6ff;
+  cursor: pointer;
+}
+.pg-sidebar-head button:hover { border-color: var(--accent); }
+
 .pg-small { padding: 3px 7px; font-size: 0.78rem; }
+
+:root[data-theme="light"] .pg-sidebar-head button {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
 
 .pg-tree { padding: 0 6px 10px; }
 
@@ -760,6 +781,16 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .pg-active-file { font: 500 13px var(--mono); color: var(--muted); }
+.pg-loading-badge {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(106, 164, 255, 0.14);
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-family: var(--sans, inherit);
+  vertical-align: middle;
+}
 .pg-static-actions { position: static; opacity: 1; }
 
 .pg-editor-host {
