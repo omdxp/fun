@@ -164,9 +164,12 @@ export const funHighlightLight = HighlightStyle.define([
 // mechanism for exactly this, correctly layered over its base theme
 // instead of racing it.
 //
-// Every tooltip type shares one base `z-index` (60) so each is at
-// least above ordinary page content; the completion popup and its
-// info panel sit higher (70/71) so they stay on top when a hover or
+// Every tooltip type shares one base `z-index` (300) - comfortably
+// above the Playground's own "Full screen" overlay (`.pg-fullscreen`,
+// 200), so a hover/signature/diagnostic tooltip always surfaces over
+// the whole editor regardless of which mode it's in, not just above
+// ordinary page content. The completion popup and its info panel sit
+// higher still (310/311) so they stay on top when a hover or
 // signature-help tooltip happens to be showing at the same time -
 // confirmed directly as a real, visible bug otherwise (a hover
 // tooltip painted over a completion list that was still open).
@@ -188,9 +191,9 @@ export function funEditorTheme(dark: boolean) {
         border: `1px solid ${border}`,
         borderRadius: "8px",
         color: text,
-        zIndex: "60",
+        zIndex: "300",
       },
-      ".cm-tooltip-autocomplete": { zIndex: "70" },
+      ".cm-tooltip-autocomplete": { zIndex: "310" },
       ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
         backgroundColor: selected,
         color: text,
@@ -203,7 +206,7 @@ export function funEditorTheme(dark: boolean) {
         borderRadius: "8px",
         color: text,
         padding: "6px 9px",
-        zIndex: "71",
+        zIndex: "311",
       },
       ".cm-diagnostic": { borderLeftColor: accent },
       ".cm-diagnostic-error": { borderLeftColor: dark ? "#ff6b7a" : "#c62f42" },

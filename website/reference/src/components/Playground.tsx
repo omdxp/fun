@@ -69,6 +69,126 @@ function contentsToText(contents: any): string {
   return "";
 }
 
+// Inline markdown within one line/paragraph: a link (`[label](url)`,
+// fls's own "See also" footer wraps the label in backticks too, which
+// this strips rather than rendering literally) and a code span
+// (`` `x` ``). Deliberately narrow - this only ever renders text fls
+// itself generates, not arbitrary user markdown - so a small regex
+// pass is enough, and building real DOM nodes (never `innerHTML`)
+// keeps it safe regardless.
+function appendInlineMarkdown(parent: HTMLElement, text: string, onLink: (href: string) => void) {
+  const re = /\[`?([^\]]+?)`?\]\(([^)]+)\)|`([^`]+)`/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[2] !== undefined) {
+      // `href`/`label` are their own `const`s, not read off `m` inside
+      // the listener - `m` is one `let` reused by every loop iteration
+      // (reassigned by the next `re.exec` call, `null` once the loop
+      // ends), so every link's listener would otherwise close over the
+      // same binding and see `null` by the time anyone actually clicks.
+      const href = m[2];
+      const label = m[1];
+      const a = document.createElement("a");
+      a.href = href;
+      a.textContent = label;
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        onLink(href);
+      });
+      parent.appendChild(a);
+    } else if (m[3] !== undefined) {
+      const code = document.createElement("code");
+      code.textContent = m[3];
+      parent.appendChild(code);
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+}
+
+// Renders fls's own hover/completion-doc markdown (plain paragraphs,
+// fenced code blocks, a `---` rule, and the "See also" footer's
+// links) as real DOM - CodeMirror's tooltips and completion `info`
+// panels take a DOM node directly, not React, so this builds one by
+// hand rather than pulling in a full markdown library for a handful
+// of block types fls itself is the only producer of.
+function renderDocMarkdown(text: string, onLink: (href: string) => void): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "pg-md";
+  const lines = text.split("\n");
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length === 0) return;
+    const p = document.createElement("p");
+    appendInlineMarkdown(p, para.join(" ").trim(), onLink);
+    root.appendChild(p);
+    para = [];
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) {
+      flushPara();
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      i += 1;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = codeLines.join("\n");
+      pre.appendChild(code);
+      root.appendChild(pre);
+      continue;
+    }
+    if (/^---\s*$/.test(line)) {
+      flushPara();
+      root.appendChild(document.createElement("hr"));
+      i += 1;
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushPara();
+      // Every level maps to the same small, bold block rather than a
+      // real h1..h6 - a hover tooltip is a few hundred pixels wide at
+      // most, so a doc's own `#`/`##` structure is never deep enough
+      // here to need visually distinct sizes.
+      const h = document.createElement("div");
+      h.className = "pg-md-heading";
+      appendInlineMarkdown(h, heading[2].trim(), onLink);
+      root.appendChild(h);
+      i += 1;
+      continue;
+    }
+    if (/^[-*]\s+/.test(line)) {
+      flushPara();
+      const ul = document.createElement("ul");
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        const li = document.createElement("li");
+        appendInlineMarkdown(li, lines[i].replace(/^[-*]\s+/, "").trim(), onLink);
+        ul.appendChild(li);
+        i += 1;
+      }
+      root.appendChild(ul);
+      continue;
+    }
+    if (line.trim() === "") {
+      flushPara();
+      i += 1;
+      continue;
+    }
+    para.push(line.trim());
+    i += 1;
+  }
+  flushPara();
+  return root;
+}
+
 type ProjectFiles = Record<string, string>;
 
 type Sample = { title: string; code: string };
@@ -316,9 +436,32 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     if (targetPath === path) {
       const off = offsetFor(view.state.doc, targetLine, targetCharacter);
       view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      view.focus();
       return;
     }
     pendingJumpRef.current = { line: targetLine, character: targetCharacter };
+    setActiveFile(targetPath);
+  };
+
+  // A hover/completion doc's own "See also" link (`file:///path#L3`,
+  // built by `_see_also_footer` in `navigation.fn`) already names its
+  // target directly - no `getDefinition` round-trip needed, just the
+  // same same-file-vs-cross-file jump `gotoDefinition` uses. `#L3` is
+  // 1-indexed (a GitHub-style anchor, matching `td.pos.line`'s own
+  // convention), so it's converted to 0-indexed before use here.
+  const navigateToDocLink = (view: EditorView, currentPath: string, href: string) => {
+    const m = href.match(/^file:\/\/\/(.+?)(?:#L(\d+))?$/);
+    if (!m) return;
+    const targetPath = decodeURIComponent(m[1]);
+    if (filesRef.current[targetPath] === undefined) return;
+    const targetLine = m[2] ? Math.max(0, parseInt(m[2], 10) - 1) : 0;
+    if (targetPath === currentPath) {
+      const off = offsetFor(view.state.doc, targetLine, 0);
+      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      view.focus();
+      return;
+    }
+    pendingJumpRef.current = { line: targetLine, character: 0 };
     setActiveFile(targetPath);
   };
 
@@ -350,7 +493,15 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         label: it.label,
         type: completionKind(it.kind),
         detail: it.detail,
-        info: contentsToText(it.documentation) || undefined,
+        info: () => {
+          const text = contentsToText(it.documentation);
+          if (!text) return null;
+          const view = context.view ?? viewRef.current;
+          const dom = renderDocMarkdown(text, (href) => {
+            if (view) navigateToDocLink(view, path, href);
+          });
+          return { dom };
+        },
         apply: it.insertText || it.label,
       }));
       return { from, options };
@@ -405,11 +556,8 @@ export default function Playground({ samples }: { samples: Sample[] }) {
             end: Math.max(from, to),
             above: true,
             create: () => {
-              const dom = document.createElement("div");
-              dom.className = "pg-hover-tooltip";
-              const pre = document.createElement("pre");
-              pre.textContent = text.replace(/^```fun\n?/, "").replace(/\n?```$/, "");
-              dom.appendChild(pre);
+              const dom = renderDocMarkdown(text, (href) => navigateToDocLink(view, path, href));
+              dom.classList.add("pg-hover-tooltip");
               return { dom };
             },
           };
@@ -497,6 +645,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       pendingJumpRef.current = null;
       const off = offsetFor(view.state.doc, jump.line, jump.character);
       view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      view.focus();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFile, generation]);

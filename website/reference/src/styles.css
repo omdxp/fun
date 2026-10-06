@@ -822,10 +822,16 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .pg-editor-host .cm-lintRange-info { background-image: none; border-bottom: 2px solid var(--accent); }
 .pg-editor-host .cm-gutterLintMarker { width: 14px; }
 
-/* CodeMirror mounts every tooltip (lint, hover, signature help,
-   autocomplete) in a portal on `document.body`, not nested inside
-   `.pg-editor-host` - these are deliberately unscoped, not a typo, and
-   there is only ever one CodeMirror instance on this page. */
+/* Every tooltip (lint, hover, signature help, autocomplete) mounts as
+   a `position: fixed` descendant of `.cm-editor` itself (confirmed
+   directly, not assumed - not a `document.body` portal as an earlier
+   version of this comment claimed) - these are deliberately
+   unscoped, not a typo, and there is only ever one CodeMirror
+   instance on this page. Its `z-index` (set in `funLanguage.ts`'s
+   `funEditorTheme`, not here) has to clear the Playground's own
+   highest overlay - the "Full screen" mode - not just ordinary page
+   content, which is why it's higher than it looks like it needs to
+   be for the common case. */
 .cm-tooltip {
   background: var(--surface-3);
   border: 1px solid var(--border-strong);
@@ -848,8 +854,47 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   padding: 6px 9px;
   max-width: 420px;
 }
-.pg-hover-tooltip pre { margin: 0; white-space: pre-wrap; }
 .pg-signature-tooltip { color: var(--accent); }
+
+/* A long doc comment (or several "See also" targets) can outgrow the
+   vertical room CodeMirror found for it when it first positioned the
+   tooltip - scrolling inside it, rather than letting it keep growing,
+   is what actually keeps it fully on screen either way. */
+.pg-hover-tooltip { max-height: 280px; overflow-y: auto; }
+.cm-completionInfo { max-height: 280px; overflow-y: auto; }
+
+/* Shared by the hover tooltip and the completion `info` panel - both
+   render fls's own doc markdown via `renderDocMarkdown` (real DOM,
+   never `innerHTML`), this just styles the handful of block types it
+   produces: a signature's own fenced code, a plain doc paragraph, the
+   "See also" footer's rule and links. */
+.pg-md p { margin: 0 0 6px; white-space: pre-wrap; }
+.pg-md p:last-child { margin-bottom: 0; }
+.pg-md pre {
+  margin: 0 0 6px;
+  padding: 5px 7px;
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 5px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+.pg-md pre:last-child { margin-bottom: 0; }
+.pg-md code { font: inherit; }
+.pg-md p code {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.pg-md hr { border: none; border-top: 1px solid var(--border-strong); margin: 6px 0; }
+.pg-md a { color: var(--accent); text-decoration: none; cursor: pointer; }
+.pg-md a:hover { text-decoration: underline; }
+.pg-md-heading { font-weight: 700; color: var(--text); margin: 0 0 4px; }
+.pg-md ul { margin: 0 0 6px; padding-left: 16px; }
+.pg-md ul:last-child { margin-bottom: 0; }
+.pg-md li { margin: 0 0 2px; }
+
+:root[data-theme="light"] .pg-md pre { background: rgba(0, 0, 0, 0.05); }
+:root[data-theme="light"] .pg-md p code { background: rgba(0, 0, 0, 0.06); }
 
 .cm-tooltip-autocomplete {
   font: 500 13px/1.4 var(--mono);
