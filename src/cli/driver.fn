@@ -634,26 +634,51 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     // shapes below, but not the rest.
     //
     // `main()`'s own generated wrapper calls straight through for this
-    // target with no worker thread at all (`emit_main_thread_wrapper` in
-    // codegen.fn, gated on `emscripten_mode`) - a browser's own main
+    // target with no *Fun-generated* worker thread (`emit_main_thread_wrapper`
+    // in codegen.fn, gated on `emscripten_mode`) - a browser's own main
     // (document) thread must never block synchronously on `pthread_join`
-    // the way every OTHER platform's wrapper does for its own big-stack
-    // trick; confirmed directly, in a real browser via Playwright, not
-    // just reasoned about: doing so anyway produced a real runtime
-    // warning and the module never completed. `-sSTACK_SIZE` sizes the
-    // main thread's own stack directly at compile time instead, taking
-    // over the job that worker thread existed for elsewhere.
+    // the way every other platform's wrapper does for its own big-stack
+    // trick, confirmed directly in a real browser via Playwright: doing
+    // so anyway produced a real runtime warning and the module never
+    // completed.
+    //
+    // That's only half of the same hazard, though - confirmed directly,
+    // the hard way: *any* blocking wait reachable from `main()` on this
+    // target hangs the same way once `main()` itself runs on the real
+    // document thread, not just an explicit `pthread_join`. A plain
+    // `fork`-and-channel-receive program and a plain `async`/`await`
+    // program (neither one using `emit_main_thread_wrapper`'s own
+    // pthread_join at all) both hung real browser tabs indefinitely,
+    // confirmed via Playwright against the real deployed site, while
+    // compiling and running correctly under Node every time - Node has
+    // no "the UI thread can never block" constraint, so it never
+    // reproduced what a real browser does.
+    //
+    // `-sPROXY_TO_PTHREAD` is emscripten's own, intended fix for exactly
+    // this: it moves the *entire* `main()` execution onto a dedicated,
+    // real pthread automatically (via its own `crt1_proxy_main.o`
+    // startup object, not anything Fun generates), keeping the real
+    // document thread free to only pump the event loop and service
+    // proxied worker-spawn requests - so blocking waits inside `main()`
+    // are safe again, the same way they already are on every other
+    // platform. Confirmed directly: both programs above run correctly
+    // with this added, in a real browser. `-sDEFAULT_PTHREAD_STACK_SIZE`
+    // sizes *that* proxied thread - where `main()` now actually runs -
+    // matching the same size `-sSTACK_SIZE` already gives the
+    // surrounding primordial thread.
     //
     // `-pthread` is kept regardless: `Atomic<T>`'s own builtins need the
     // wasm atomics target feature it enables even when nothing ever
     // spawns a real thread, and a program that genuinely uses
     // `fork`/`Guarded<T>`/`std.thread_pool` (confirmed working under
-    // Node in #185) still needs it for real. No `-lm`/`-lws2_32`
-    // (emscripten's own libc already bundles libm, and Winsock is
-    // native-Windows-only), and no OpenSSL linking (no such library
-    // exists for this target).
+    // Node in #185, and now in a real browser too) still needs it for
+    // real. No `-lm`/`-lws2_32` (emscripten's own libc already bundles
+    // libm, and Winsock is native-Windows-only), and no OpenSSL linking
+    // (no such library exists for this target).
     argv_args.push("-pthread");
+    argv_args.push("-sPROXY_TO_PTHREAD");
     argv_args.push("-sSTACK_SIZE=134217728");
+    argv_args.push("-sDEFAULT_PTHREAD_STACK_SIZE=134217728");
     // emcc rejects the combination outright (a real link-time check, not
     // just a warning: "INITIAL_MEMORY must be larger than STACK_SIZE")
     // unless the initial linear memory already exceeds the stack size -
