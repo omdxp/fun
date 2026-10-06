@@ -32,7 +32,30 @@ const funBinary = path.join(
 const stdlibDir = path.join(repoRoot, "stdlib");
 const outputDir = path.join(siteRoot, "public", "wasm");
 
-const FENCE_RE = /^```fun\r?\n([\s\S]*?)\r?\n```/gm;
+// Captures the fence marker's own leading indentation (group 1) and
+// requires the closing fence to match it - exactly how a fenced code
+// block nested inside a list item is written in this project's docs
+// (indented to the list content's column, not column 0). Plain
+// `^```fun` alone misses every such block entirely: confirmed directly
+// as a real bug - the site still renders a Run button for one (remark
+// dedents list-item code automatically, so it never needed this), but
+// this script silently never built it, so clicking Run 404'd on a wasm
+// module that was never produced.
+const FENCE_RE = /^([ \t]*)```fun\r?\n([\s\S]*?)\r?\n\1```/gm;
+
+// Strips exactly the fence's own indentation from every line, mirroring
+// what remark does when it hands a list-item code block's text to the
+// site's renderer - without this, the extracted code and the site's
+// own `initialCode` hash to two different things even though a person
+// reading the page sees identical code.
+function dedent(code, indent) {
+  if (!indent) return code;
+  return code
+    .split("\n")
+    .map((line) => (line.startsWith(indent) ? line.slice(indent.length) : line))
+    .join("\n");
+}
+
 const FILE_MARKER = /^\s*\/\/\s*file:\s*(.+?)\s*$/i;
 
 function normalizeSnippetPath(rawPath) {
@@ -110,7 +133,7 @@ async function collectBlocks() {
   for (const rel of docFiles) {
     const text = await fs.readFile(path.join(repoRoot, rel), "utf8");
     for (const match of text.matchAll(FENCE_RE)) {
-      const code = match[1];
+      const code = dedent(match[2], match[1]);
       // The identical marker `MarkdownWithPlayground.tsx` checks for -
       // a deliberate fragment, never offered a Run button at all, so
       // pre-baking it would just be a doomed compile attempt.
@@ -199,7 +222,7 @@ async function compileOne(hash, code) {
       // compile, and confirmed directly to blow past the previous
       // 30s budget under load even though it completes (and runs
       // correctly) well within it when the machine isn't busy.
-      timeout: 60000,
+      timeout: 90000,
       maxBuffer: 1024 * 1024,
     });
 

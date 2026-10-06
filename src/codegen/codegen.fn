@@ -841,6 +841,54 @@ pub fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
   ret false;
 }
 
+// True when `node` is, or (for an `impl` block) declares, an `async`
+// function - `await` is only legal inside an `async fun` body (see
+// `docs/language.md`'s own rule), and `await` on any async call -
+// `emit_fn_call`'s own `emit_async_or_fork_call(operand,
+// "__fun_async_call_")` - enqueues onto the real scheduler via
+// `__fun_go`, the identical real-OS-thread mechanism an explicit
+// `fork` statement uses (see that function's own doc comment: "Lowers
+// like `await`"). `node_contains_fork` alone only catches the literal
+// `fork` keyword, missing this entire other way to need real threads
+// - confirmed directly as a real gap: a real `async`/`await` example
+// with no `fork` anywhere in it hung the deployed Playground's tab
+// exactly like an explicit `fork` program did before that was fixed.
+fun node_declares_async(Node* node) flag {
+  fit node.kind {
+    .Function(fnv) -> { ret fnv.is_async; }
+    .Impl(i) -> {
+      for m : i.methods {
+        if node_declares_async(m) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+}
+
+// The real signal a browser-run caller (one whose compiled output
+// runs somewhere with no real OS threads at all) needs: `fork` or any
+// `async` declaration, either one enough on its own to need the real
+// scheduler. `uses_fork_in` alone, correct and sufficient for every
+// *other* caller (gating whether the scheduler's own C is emitted at
+// all - emitted unconditionally whenever `async` is declared,
+// regardless of this flag, so omitting it there was never a bug;
+// `uses_fork_in` only decides whether `fork`'s own *statement* form
+// needs support), under-detects for this one.
+pub fun uses_concurrency_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
+  if uses_fork_in(nodes, test_mode, fuzz_mode) {
+    ret true;
+  }
+  for n : nodes {
+    if node_declares_async(&n) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
 // True when `node` was declared in a `std/c/*.fn` binding file.
 fun node_is_std_c_binding(Node n) flag {
   if !n.has_pos {

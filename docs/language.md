@@ -199,6 +199,8 @@ fun main() {
   A later branch is only reached when an earlier one's guard positions
   don't all match:
   ```fun
+  use std.io;
+
   fun main() {
     (num, str) t = (0, "go");
     fit t {
@@ -365,6 +367,7 @@ fun main() {
   enum (plain or tagged-union) with no `impl` of its own needed:
 
   ```fun
+  // fun:no-run
   enum HttpStatus { Ok = 200, NotFound = 404, Unknown(num) = -1 }
 
   fun code(HttpStatus s) num {
@@ -381,6 +384,7 @@ Sugar over `std.option`/`std.result`, replacing the repeated
 check-then-unwrap shape with a single postfix operator:
 
 ```fun
+// fun:no-run
 use std.option;
 use std.result;
 
@@ -431,6 +435,7 @@ fun combine_result(num x) Result<num, str> {
   needed:
 
   ```fun
+  // fun:no-run
   fun describe(num x) Option<str> {
     fit half(x)? {
       0 -> { ret .Some("zero"); }
@@ -446,6 +451,7 @@ an outer `.None`, an inner `.Err(e)` becomes an outer `.Err(e)`. `?!`
 and `!?` bridge the other direction, between `Option` and `Result`:
 
 ```fun
+// fun:no-run
 fun find(num x) Option<num> {
   if x > 0 { ret .Some(x); }
   ret .None;
@@ -479,6 +485,7 @@ fun safe_parse(num x) Option<num> {
   against its return type.
 
   ```fun
+  // fun:no-run
   enum LookupError { NotFound, Broken(num) }
 
   fun combine(num x) Result<num, LookupError> {
@@ -508,6 +515,7 @@ fun safe_parse(num x) Option<num> {
   value with no intermediate `let`:
 
   ```fun
+  // fun:no-run
   fun label(num x) Result<str, LookupError> {
     fit find(x)?!(.NotFound) {
       0 -> { ret .Ok("zero"); }
@@ -987,6 +995,7 @@ impls of its own. Every other iterable dispatches structurally through
 #### Iterator\<T\>
 
 ```fun
+// fun:no-run
 pub shape Iterator<T> {
   next() Option<T>;
 }
@@ -1061,6 +1070,7 @@ a custom counter, ...), implement `Steppable<T>` and use `StepRange<T>`
 directly; there's no `..` syntax for it, only explicit construction.
 
 ```fun
+// fun:no-run
 pub shape Steppable<T> {
   succ() T;
   reached(T end) flag;

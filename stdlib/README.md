@@ -17,6 +17,7 @@ Reference docs for stdlib modules are generated from source comments in `stdlib/
 Example:
 
 ```fun
+// fun:no-run
 // Generic map with typed keys and values.
 pub compound Map<K, V> {
 	// Key storage array.
