@@ -20,6 +20,7 @@ use std.range;
 use std.ctype;
 use std.set;
 use ..semantics.warnings;
+use ..semantics.typecheck;
 
 pub enum CodegenErrorKind {
   UnsupportedNode,
@@ -62,6 +63,14 @@ compound ChainResolution {
   // than an addressable lvalue. A caller that needs `&text` must hoist
   // it into a temp first.
   flag is_call_result;
+}
+
+// An operator's resolved overload: the receiver (already carrying
+// its own address-of-vs-hoist bookkeeping) and the mangled C function
+// name to call instead of emitting the operator as raw C infix.
+compound OperatorDispatchTarget {
+  ChainResolution recv;
+  str mangled;
 }
 
 // Which mangled `to_string` function to call for a `Display` argument in
@@ -4848,6 +4857,86 @@ impl Codegen {
     ret .None;
   }
 
+  // Binary/unary operator overloading: `left op right` (or a unary
+  // `op operand`) emits as `Mangled(&left, right)` when `left`'s own
+  // (or, for unary, the operand's own) static type defines
+  // `typecheck.operator_method_name(op)` as a real `impl` method -
+  // mirrors `emit_method_call`'s own receiver-address convention
+  // exactly (a pointer receiver as-is, a call-result receiver hoisted
+  // to a temp first, anything else prefixed with `&`), just for one
+  // fixed argument instead of an arbitrary list. `right` is `.None`
+  // for a unary operator.
+  emit_operator_call(ChainResolution recv_r, str mangled, Option<Node*> right) Option<CodegenErrorKind> {
+    self.state.write(mangled);
+    self.state.write("(");
+    if recv_r.is_pointer {
+      self.state.write(recv_r.text);
+    } elif recv_r.is_call_result {
+      str recv_tmp_name = self.hoist_call_result_operand(
+        recv_r.text,
+        recv_r.type_name,
+        recv_r.is_pointer
+      );
+      self.state.write("&");
+      self.state.write(recv_tmp_name);
+    } else {
+      self.state.write("&");
+      self.state.write(recv_r.text);
+    }
+    if right.is_some() {
+      self.state.write(", ");
+      let rerr = self.emit_expr(*right.unwrap());
+      if rerr.is_some() {
+        ret rerr;
+      }
+    }
+    self.state.write(")");
+    ret .None;
+  }
+
+  // The resolved dispatch target for `op` on `operand`'s own static
+  // type, if codegen can name both - `.None` either means `operand`'s
+  // type can't be resolved here at all (only a bare local variable is
+  // attempted - see below), that type simply has no matching `impl`
+  // method (a builtin numeric/`str`/pointer operand, the overwhelming
+  // common case), or that `op` has no operator-overload mapping at
+  // all. Either way the caller's own meaning is identical: fall back
+  // to the builtin operator unchanged.
+  //
+  // Restricted to a bare `.Identifier` operand on purpose, not every
+  // shape `resolve_field_chain` can resolve (a field chain, a call
+  // result, ...) - this runs *speculatively*, for every binary
+  // operator in the entire codebase, including deep inside stdlib
+  // generics that have nothing to do with operator overloading
+  // (`Map<K,V>`'s own `%`/`==` on its internal fields among them), so
+  // it must never have a side effect when it doesn't end up
+  // dispatching. A plain local's own resolution is pure table lookups
+  // (`lookup_local_type_name`/`lookup_local_dtype`); `resolve_field_
+  // chain`'s other cases are not - its call-result case in particular
+  // hoists into a scratch buffer and can trigger a generic impl
+  // method's lazy emission, confirmed directly as a real, severe
+  // regression: calling it speculatively on an arbitrary expression
+  // disrupted forward-declaration ordering inside `Map<str, Vec<str>>`
+  // internals, breaking its *own*, otherwise-unrelated codegen. A
+  // chained `a + b + c` or `self.pos + other.pos` is real, scoped-out
+  // v1 territory, not a silent gap - see the operator-overloading docs.
+  resolve_operator_dispatch(str op, Node* operand) Option<OperatorDispatchTarget> {
+    let method = operator_method_name(op);
+    if equals(method, "") {
+      ret .None;
+    }
+    fit operand.kind {
+      .Identifier(_) -> {}
+      _ -> { ret .None; }
+    }
+    let recv_r = self.resolve_field_chain(operand)?;
+    let mangled = self.lookup_impl_method(recv_r.type_name, method)?;
+    OperatorDispatchTarget t;
+    t.recv = recv_r;
+    t.mangled = mangled;
+    ret .Some(t);
+  }
+
   // Looks up `bare_name`'s fully mangled C call-site name on `owner_type`.
   lookup_impl_method(str owner_type, str bare_name) Option<str> {
     num i = 0;
@@ -5764,6 +5853,38 @@ impl Codegen {
         if u.is_left_operanded_unary && is_propagation_op(u.op) {
           ret self.emit_propagation(u);
         }
+        // Unary operator overloading (`-x`, `!x`): not through
+        // `resolve_operator_dispatch`/`operator_method_name` - those
+        // map the same `"-"` text to `op_sub`, the *binary* operator's
+        // own method name, so the lookup is inlined here with the
+        // right name instead. Restricted to a bare `.Identifier`
+        // operand, same as `resolve_operator_dispatch`'s own doc
+        // comment explains for the binary case: this runs
+        // speculatively for every unary `-`/`!` in the whole codebase,
+        // so `resolve_field_chain`'s non-trivial, side-effecting cases
+        // (a call result's own hoisting in particular) must never run
+        // here on spec.
+        flag unary_operand_is_identifier = false;
+        fit u.operand.kind {
+          .Identifier(_) -> { unary_operand_is_identifier = true; }
+          _ -> {}
+        }
+        if !u.is_left_operanded_unary && !u.has_indirection &&
+        unary_operand_is_identifier &&
+        (equals(u.op, "-") || equals(u.op, "!")) {
+          str op_method = "op_neg";
+          if equals(u.op, "!") {
+            op_method = "op_not";
+          }
+          let recv_r_opt = self.resolve_field_chain(u.operand);
+          if recv_r_opt.is_some() {
+            let recv_r = recv_r_opt.unwrap();
+            let mangled_opt = self.lookup_impl_method(recv_r.type_name, op_method);
+            if mangled_opt.is_some() {
+              ret self.emit_operator_call(recv_r, mangled_opt.unwrap(), .None);
+            }
+          }
+        }
         self.state.write("(");
         if u.is_left_operanded_unary {
           // Postfix: `x++`/`x--`.
@@ -5897,6 +6018,17 @@ impl Codegen {
             }
             ret .None;
           }
+        }
+        // Operator overloading: `left op right` on a type with a
+        // matching `impl` method (`op_add`, `op_eq`, ...) emits as a
+        // plain call instead of raw infix - already self-delimiting,
+        // so `suppress_next_expr_parens` is simply cleared rather than
+        // consumed the way the raw-infix path below consumes it.
+        let dispatched = self.resolve_operator_dispatch(e.op, e.left);
+        if dispatched.is_some() {
+          self.suppress_next_expr_parens = false;
+          let target = dispatched.unwrap();
+          ret self.emit_operator_call(target.recv, target.mangled, .Some(e.right));
         }
         // Consumed here, one shot: only this outermost pair is skipped,
         // never `e.left`/`e.right`'s own recursive `emit_expr` calls.
@@ -8177,6 +8309,27 @@ impl Codegen {
   emit_index(ExprNode e) Option<CodegenErrorKind> {
     if !e.has_left || !e.has_right {
       ret .Some(.InvalidNode);
+    }
+    // Operator overloading: `recv[index]` on a type with a matching
+    // `op_index` impl method emits as a plain call instead of a raw C
+    // `[]` - the index itself is `e.right`'s own `.Bracket` wrapper
+    // unwrapped first, since that's a syntax marker `emit_expr` has no
+    // other case for, not a real expression kind of its own.
+    flag has_bracket_inner = false;
+    Node* index_node = e.right;
+    fit e.right.kind {
+      .Bracket(inner) -> {
+        index_node = inner;
+        has_bracket_inner = true;
+      }
+      _ -> {}
+    }
+    if has_bracket_inner {
+      let dispatched = self.resolve_operator_dispatch("[]", e.left);
+      if dispatched.is_some() {
+        let target = dispatched.unwrap();
+        ret self.emit_operator_call(target.recv, target.mangled, .Some(index_node));
+      }
     }
     let lerr = self.emit_expr(*e.left);
     if lerr.is_some() {
