@@ -18,6 +18,27 @@
 
 type RunOutcome = { stdout: string; stderr: string };
 
+// Resolves once to this build's content hash (`prebake-wasm-frontend.mjs`
+// writes it alongside the artifacts it hashes). `wasm_frontend_main.js`/
+// `.wasm`/`.data` live at a fixed path, so a returning visitor's browser
+// would otherwise keep serving last release's cached copy forever - the
+// hash is appended as a `?v=` query param to every request for these
+// files instead, the same cache-busting effect `Vite`'s own hashed asset
+// filenames get everywhere else on this site. `cache: "no-store"` on the
+// manifest itself (the one thing that must never be stale) costs nothing:
+// it's a few bytes, fetched at most once per page load.
+let frontendHashPromise: Promise<string> | null = null;
+function frontendHash(): Promise<string> {
+  if (!frontendHashPromise) {
+    const base = import.meta.env.BASE_URL || "/";
+    frontendHashPromise = fetch(`${base}wasm-frontend/manifest.json`, { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => data.hash as string)
+      .catch(() => "");
+  }
+  return frontendHashPromise;
+}
+
 // A real Fun-level compile error (bad syntax, a real type error, a
 // rejected `std.net`/`std.process` import for this target) is the
 // authoritative answer - the backend would return the exact same
@@ -37,7 +58,9 @@ export class FunCompileError extends Error {}
 // expected to succeed.
 async function runFrontend(source: string): Promise<string> {
   const base = import.meta.env.BASE_URL || "/";
-  const src = `${base}wasm-frontend/wasm_frontend_main.js`;
+  const hash = await frontendHash();
+  const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
+  const src = versioned(`${base}wasm-frontend/wasm_frontend_main.js`);
   const stdoutLines: string[] = [];
   const stderrLines: string[] = [];
 
@@ -93,7 +116,7 @@ async function runFrontend(source: string): Promise<string> {
       // wrong path instead of a real 404, and the stdlib tree never
       // actually mounts - every import then fails as if the stdlib
       // simply didn't exist, with no clearer signal than that.
-      locateFile: (path: string) => `${base}wasm-frontend/${path}`,
+      locateFile: (path: string) => versioned(`${base}wasm-frontend/${path}`),
       print: (line: string) => stdoutLines.push(line),
       printErr: (line: string) => stderrLines.push(line),
       // Writes the source into the module's own virtual filesystem
@@ -178,6 +201,28 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
   } finally {
     await runSandbox.close();
   }
+}
+
+// Starts loading both wasm modules in the background, well before any
+// click needs them - called once from `App.tsx` shortly after the page
+// itself has settled (not blocking first paint). A run still works
+// without this (`getClang`/`runFrontend` load lazily on demand either
+// way); this just means the first real click usually finds both already
+// warm instead of starting a ~105 MB download right when the person is
+// waiting on it. Every failure here is swallowed: a warm-up that
+// couldn't reach the network changes nothing about correctness, the
+// same path just tries again, for real, on the next actual run.
+export function warmPlaygroundRuntime(): void {
+  getClang().catch(() => {});
+  frontendHash()
+    .then((hash) => {
+      const base = import.meta.env.BASE_URL || "/";
+      const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
+      for (const name of ["wasm_frontend_main.js", "wasm_frontend_main.wasm", "wasm_frontend_main.data"]) {
+        fetch(versioned(`${base}wasm-frontend/${name}`), { cache: "force-cache" }).catch(() => {});
+      }
+    })
+    .catch(() => {});
 }
 
 // The full pipeline for a piece of freshly-edited Fun source. Throws

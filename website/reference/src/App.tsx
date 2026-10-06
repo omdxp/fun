@@ -5,6 +5,7 @@ import RunCodeBlock from "./components/RunCodeBlock";
 import HighlightedCode from "./components/HighlightedCode";
 import { copyTextToClipboard } from "./utils/clipboard";
 import { getSiteHighlighter } from "./utils/shikiHighlighter";
+import { warmPlaygroundRuntime } from "./utils/compileInBrowser";
 import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
@@ -526,6 +527,20 @@ export default function App() {
     handleChange();
     mql.addEventListener("change", handleChange);
     return () => mql.removeEventListener("change", handleChange);
+  }, []);
+  // Starts the Playground's two wasm modules loading the moment the page
+  // is idle, not gated behind opening the Playground tab or clicking
+  // Run - by the time either happens, both are usually already warm.
+  // `requestIdleCallback` (falling back to a short timeout where it's
+  // unavailable, e.g. Safari) keeps this off the critical first-paint
+  // path.
+  useEffect(() => {
+    const ric = (window as any).requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500));
+    const handle = ric(() => warmPlaygroundRuntime());
+    return () => {
+      const cric = (window as any).cancelIdleCallback ?? window.clearTimeout;
+      cric(handle);
+    };
   }, []);
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);

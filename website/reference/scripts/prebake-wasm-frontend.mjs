@@ -6,12 +6,19 @@
 // client-side) is wired up separately in `RunCodeBlock.tsx`, using the
 // output this script produces as its input.
 //
-// Unlike `prebake-wasm.mjs`, this isn't content-addressed: there is
-// exactly one of these artifacts (the frontend itself doesn't change
-// per example), so it lands at a fixed path, `public/wasm-frontend/`.
+// Unlike `prebake-wasm.mjs`, this isn't content-addressed per example:
+// there is exactly one of these artifacts, so it lands at a fixed path,
+// `public/wasm-frontend/`. It still needs cache-busting across releases
+// though - a returning visitor's browser has last release's copy cached
+// under that same fixed path - so a hash of the built `.wasm` bytes is
+// written to a small manifest alongside it; the frontend appends that
+// hash as a `?v=` query parameter to every request for these files, the
+// same effect as Vite's own hashed asset filenames, without needing to
+// rename files emscripten's own generated glue expects by a fixed name.
 import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -100,7 +107,14 @@ async function main() {
   await fs.copyFile(`${builtBase}.js`, path.join(outputDir, "wasm_frontend_main.js"));
   await fs.copyFile(`${builtBase}.wasm`, path.join(outputDir, "wasm_frontend_main.wasm"));
   await fs.copyFile(`${builtBase}.data`, path.join(outputDir, "wasm_frontend_main.data"));
-  console.log("prebake-wasm-frontend: built wasm_frontend_main.js/.wasm/.data");
+
+  const wasmBytes = await fs.readFile(`${builtBase}.wasm`);
+  const hash = crypto.createHash("sha256").update(wasmBytes).digest("hex").slice(0, 10);
+  await fs.writeFile(
+    path.join(outputDir, "manifest.json"),
+    JSON.stringify({ hash }),
+  );
+  console.log(`prebake-wasm-frontend: built wasm_frontend_main.js/.wasm/.data (hash ${hash})`);
 }
 
 await main();
