@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   highlightToFragment,
@@ -229,16 +229,55 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
     if (!highlighter) return null;
     return highlightToFragment(highlighter, code, "fun");
   }, [highlighter, code]);
-  const syncScroll = () => {
-    if (!editorRef.current || !previewRef.current) return;
-    previewRef.current.scrollTop = editorRef.current.scrollTop;
-    previewRef.current.scrollLeft = editorRef.current.scrollLeft;
-  };
+  const lineCount = useMemo(() => code.split("\n").length, [code]);
+  const lineNumbers = useMemo(
+    () => Array.from({ length: lineCount }, (_, i) => i + 1).join("\n"),
+    [lineCount],
+  );
+
+  // The overlay `pre` and the real (invisible) `textarea` sit in the
+  // same CSS grid cell (`.run-surface`'s `grid-area: 1 / 1` on both),
+  // so the grid row's height always equals its tallest child. Growing
+  // the textarea to fit its own content - no fixed height, no internal
+  // scroll, no manual resize handle - is what keeps the two perfectly
+  // aligned: a mismatch here (resizing one without the other) is
+  // exactly what used to make the caret look like it landed somewhere
+  // other than where you clicked or typed.
+  useEffect(() => {
+    const ta = editorRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, [code]);
 
   return (
     <div className="run-block">
-      <div className="run-block-header">
-        <strong>{title ?? "Runnable Example"}</strong>
+      <div className="run-editor">
+        <div className="run-gutter" aria-hidden>
+          {lineNumbers}
+        </div>
+        <div className="run-surface">
+          <pre
+            ref={previewRef}
+            aria-hidden
+            className={highlighted ? "shiki" : undefined}
+            style={highlighted ? parseStyleAttr(highlighted.style) : undefined}
+          >
+            {highlighted ? (
+              <code dangerouslySetInnerHTML={{ __html: highlighted.innerHtml }} />
+            ) : (
+              <code>{code}</code>
+            )}
+          </pre>
+          <textarea
+            ref={editorRef}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            spellCheck={false}
+            wrap="soft"
+            aria-label={title ?? "Runnable Fun code"}
+          />
+        </div>
         <div className="run-actions">
           <button
             onClick={copyCode}
@@ -255,35 +294,14 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           <button
             onClick={() => setCode(initialCode.trimEnd())}
             className="ghost"
+            type="button"
           >
             Reset
           </button>
-          <button onClick={run} disabled={isRunning}>
+          <button onClick={run} disabled={isRunning} type="button">
             {isRunning ? "Running..." : "Run"}
           </button>
         </div>
-      </div>
-      <div className="run-editor">
-        <pre
-          ref={previewRef}
-          aria-hidden
-          className={highlighted ? "shiki" : undefined}
-          style={highlighted ? parseStyleAttr(highlighted.style) : undefined}
-        >
-          {highlighted ? (
-            <code dangerouslySetInnerHTML={{ __html: highlighted.innerHtml }} />
-          ) : (
-            <code>{code}</code>
-          )}
-        </pre>
-        <textarea
-          ref={editorRef}
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          onScroll={syncScroll}
-          spellCheck={false}
-          wrap="soft"
-        />
       </div>
       {hasRun && (
         <div className="output-grid">
