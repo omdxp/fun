@@ -779,6 +779,32 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .pg-editor-host .cm-content { padding: 12px 0; color: #e9eeff; }
 .pg-editor-host .cm-focused { outline: none; }
 
+/* fls diagnostics (the `linter`/`lintGutter` extensions in
+   Playground.tsx) - explicit colors for both themes rather than
+   CodeMirror's own defaults, which read too faint against this site's
+   particular surfaces in at least one of the two. Severity gets its
+   own semantic palette (error/warning/info), distinct from the site's
+   single blue accent, except "info" which reuses it - that is already
+   this site's informational color everywhere else. */
+.pg-editor-host .cm-lintRange-error { background-image: none; border-bottom: 2px solid var(--accent-strong); }
+.pg-editor-host .cm-lintRange-warning { background-image: none; border-bottom: 2px solid #e0a63a; }
+.pg-editor-host .cm-lintRange-info { background-image: none; border-bottom: 2px solid var(--accent); }
+.pg-editor-host .cm-gutterLintMarker { width: 14px; }
+.pg-editor-host .cm-tooltip-lint {
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  font: 500 12.5px/1.5 var(--mono);
+  padding: 2px 4px;
+}
+.pg-editor-host .cm-diagnostic {
+  border-left: 3px solid var(--accent);
+  padding: 4px 8px;
+}
+.pg-editor-host .cm-diagnostic-error { border-left-color: var(--accent-strong); }
+.pg-editor-host .cm-diagnostic-warning { border-left-color: #e0a63a; }
+
 :root[data-theme="light"] .pg-shell { background: var(--surface-2); }
 :root[data-theme="light"] .pg-sidebar {
   background: var(--surface-3);

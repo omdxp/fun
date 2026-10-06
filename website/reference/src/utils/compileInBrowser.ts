@@ -1,6 +1,6 @@
 // Compiles and runs arbitrary, freshly-edited Fun code entirely
 // client-side, no backend - the Tier 2 half of the project's own
-// WebAssembly initiative. Two real wasm modules running in sequence:
+// WebAssembly initiative. Three real wasm modules:
 //
 // 1. `wasm_frontend_main.js` (built by `prebake-wasm-frontend.mjs` from
 //    `src/cli/wasm_frontend_main.fn`) - the compiler's own lex/parse/
@@ -10,33 +10,47 @@
 //    the browser (`@wasmer/sdk`'s `clang/clang` package, a genuine
 //    clang+lld+wasm-ld toolchain targeting wasm32-wasi) - takes that C,
 //    produces a runnable wasm binary, and runs it.
+// 3. `wasm_fls_main.js` (built by `prebake-wasm-fls.mjs` from
+//    `src/fls/wasm_fls_main.fn`) - one real language-server request per
+//    module load (reload-per-call, not a persistent server - see that
+//    file's own doc comment for why), used for diagnostics-on-change.
 //
-// Both artifacts are large (the frontend is a few MB; `clang/clang` is
+// The first two are large (the frontend is a few MB; `clang/clang` is
 // ~105 MB) and loaded lazily, only on the first Run click for edited
 // code, and cached as module-level singletons so a second run in the
 // same page session reuses them rather than reloading either.
 
 type RunOutcome = { stdout: string; stderr: string };
 
-// Resolves once to this build's content hash (`prebake-wasm-frontend.mjs`
-// writes it alongside the artifacts it hashes). `wasm_frontend_main.js`/
-// `.wasm`/`.data` live at a fixed path, so a returning visitor's browser
-// would otherwise keep serving last release's cached copy forever - the
-// hash is appended as a `?v=` query param to every request for these
-// files instead, the same cache-busting effect `Vite`'s own hashed asset
-// filenames get everywhere else on this site. `cache: "no-store"` on the
-// manifest itself (the one thing that must never be stale) costs nothing:
-// it's a few bytes, fetched at most once per page load.
-let frontendHashPromise: Promise<string> | null = null;
-function frontendHash(): Promise<string> {
-  if (!frontendHashPromise) {
+export type Diagnostic = {
+  from: { line: number; character: number };
+  to: { line: number; character: number };
+  severity: number;
+  message: string;
+};
+
+// Resolves once per `dir` to that build's content hash (the matching
+// `prebake-*.mjs` script writes it alongside the artifacts it hashes).
+// Each module's own files live at a fixed path, so a returning
+// visitor's browser would otherwise keep serving last release's cached
+// copy forever - the hash is appended as a `?v=` query param to every
+// request for these files instead, the same cache-busting effect
+// `Vite`'s own hashed asset filenames get everywhere else on this
+// site. `cache: "no-store"` on the manifest itself (the one thing that
+// must never be stale) costs nothing: it's a few bytes, fetched at
+// most once per page load.
+const manifestHashPromises = new Map<string, Promise<string>>();
+function manifestHash(dir: string): Promise<string> {
+  let p = manifestHashPromises.get(dir);
+  if (!p) {
     const base = import.meta.env.BASE_URL || "/";
-    frontendHashPromise = fetch(`${base}wasm-frontend/manifest.json`, { cache: "no-store" })
+    p = fetch(`${base}${dir}/manifest.json`, { cache: "no-store" })
       .then((res) => res.json())
       .then((data) => data.hash as string)
       .catch(() => "");
+    manifestHashPromises.set(dir, p);
   }
-  return frontendHashPromise;
+  return p;
 }
 
 // A real Fun-level compile error (bad syntax, a real type error, a
@@ -70,7 +84,7 @@ export class FunCompileError extends Error {}
 // on a real one.
 async function runFrontend(files: Record<string, string>, entryPath: string): Promise<string> {
   const base = import.meta.env.BASE_URL || "/";
-  const hash = await frontendHash();
+  const hash = await manifestHash("wasm-frontend");
   const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
   const src = versioned(`${base}wasm-frontend/wasm_frontend_main.js`);
   const stdoutLines: string[] = [];
@@ -236,15 +250,134 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
 // same path just tries again, for real, on the next actual run.
 export function warmPlaygroundRuntime(): void {
   getClang().catch(() => {});
-  frontendHash()
-    .then((hash) => {
-      const base = import.meta.env.BASE_URL || "/";
-      const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
-      for (const name of ["wasm_frontend_main.js", "wasm_frontend_main.wasm", "wasm_frontend_main.data"]) {
-        fetch(versioned(`${base}wasm-frontend/${name}`), { cache: "force-cache" }).catch(() => {});
+  for (const [dir, base_name] of [
+    ["wasm-frontend", "wasm_frontend_main"],
+    ["wasm-fls", "wasm_fls_main"],
+  ] as const) {
+    manifestHash(dir)
+      .then((hash) => {
+        const base = import.meta.env.BASE_URL || "/";
+        const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
+        for (const ext of ["js", "wasm", "data"]) {
+          fetch(versioned(`${base}${dir}/${base_name}.${ext}`), { cache: "force-cache" }).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }
+}
+
+// Mounts every project file at its own real path (the shared
+// convention `runFrontend` also uses, so cross-file imports resolve
+// identically for both halves of the pipeline), creating intermediate
+// directories as needed.
+function mountProjectFiles(mod: any, files: Record<string, string>) {
+  const writeAt = (path: string, content: string) => {
+    const slash = path.lastIndexOf("/");
+    if (slash > 0) {
+      mod.FS.mkdirTree(path.slice(0, slash));
+    }
+    mod.FS.writeFile(path, content);
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeAt(path.startsWith("/") ? path : `/${path}`, content);
+  }
+}
+
+// One `textDocument/didOpen` against `wasm_fls_main.js` (see that
+// file's own doc comment: reload-per-call, not a persistent server),
+// for `activePath`'s current content within the project `files` holds
+// (mounted so any cross-file reference the language server's own
+// analysis follows still resolves). Returns `[]` for any failure at
+// all - a module that failed to load, a timeout, a malformed response,
+// anything - diagnostics are a nice-to-have overlay on top of the
+// editor, never something that should visibly break it or compete
+// with a real compile error for the person's attention.
+export async function getDiagnostics(
+  files: Record<string, string>,
+  activePath: string,
+): Promise<Diagnostic[]> {
+  try {
+    const base = import.meta.env.BASE_URL || "/";
+    const hash = await manifestHash("wasm-fls");
+    const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
+    const src = versioned(`${base}wasm-fls/wasm_fls_main.js`);
+    const uri = `file:///${activePath.replace(/^\/+/, "")}`;
+    const text = files[activePath] ?? "";
+    const stdoutChunks: string[] = [];
+
+    const raw = await new Promise<string>((resolve, reject) => {
+      let settled = false;
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none";
+      document.body.appendChild(iframe);
+
+      const cleanup = () => {
+        window.clearTimeout(timeoutId);
+        window.setTimeout(() => iframe.remove(), 0);
+      };
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(stdoutChunks.join("\n"));
+      };
+      const fail = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("diagnostics unavailable"));
+      };
+
+      const timeoutId = window.setTimeout(fail, 10000);
+
+      const iframeWindow = iframe.contentWindow as any;
+      const iframeDocument = iframe.contentDocument;
+      if (!iframeWindow || !iframeDocument) {
+        fail();
+        return;
       }
-    })
-    .catch(() => {});
+
+      iframeWindow.Module = {
+        locateFile: (path: string) => versioned(`${base}wasm-fls/${path}`),
+        print: (line: string) => stdoutChunks.push(line),
+        printErr: () => {},
+        preRun: [
+          (mod: any) => {
+            mountProjectFiles(mod, files);
+            mod.FS.writeFile("/fls_request.json", JSON.stringify({ uri, text }));
+          },
+        ],
+        onExit: () => finish(),
+        onAbort: () => fail(),
+      };
+
+      const script = iframeDocument.createElement("script");
+      script.src = src;
+      script.onerror = fail;
+      iframeDocument.body.appendChild(script);
+    });
+
+    // `write_message`'s own wire format: a `Content-Length` header, a
+    // blank line, then exactly that many bytes of JSON body with no
+    // trailing newline - `print()`'s per-line calls, rejoined with
+    // `\n`, reconstruct this exactly (the header line itself ends in
+    // a real newline; the unterminated JSON body arrives as emscripten's
+    // own buffered-stdout flush at exit, one final `print()` call).
+    const match = raw.match(/Content-Length: (\d+)\r?\n\r?\n([\s\S]*)$/);
+    if (!match) return [];
+    const body = match[2].slice(0, Number(match[1]));
+    const parsed = JSON.parse(body);
+    const items = parsed?.params?.diagnostics;
+    if (!Array.isArray(items)) return [];
+    return items.map((d: any) => ({
+      from: { line: d.range.start.line, character: d.range.start.character },
+      to: { line: d.range.end.line, character: d.range.end.character },
+      severity: d.severity ?? 1,
+      message: d.message ?? "",
+    }));
+  } catch {
+    return [];
+  }
 }
 
 // The full pipeline for a Playground project - every file the person's

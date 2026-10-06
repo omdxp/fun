@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { EditorState } from "@codemirror/state";
+import { EditorState, type Text } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { syntaxHighlighting, defaultHighlightStyle, indentUnit } from "@codemirror/language";
+import { linter, lintGutter, type Diagnostic as CMDiagnostic } from "@codemirror/lint";
 
 import { funLanguage } from "../utils/funLanguage";
-import { FunCompileError, runEditedCode } from "../utils/compileInBrowser";
+import { FunCompileError, runEditedCode, getDiagnostics } from "../utils/compileInBrowser";
 
 type ProjectFiles = Record<string, string>;
 
@@ -188,6 +189,20 @@ export default function Playground({ samples }: { samples: Sample[] }) {
 
   const tree = useMemo(() => buildTree(Object.keys(files)), [files]);
 
+  // LSP positions are `{line, character}` (0-indexed); CodeMirror wants
+  // a flat document offset. Clamped to the document's own current
+  // length - the diagnostics call is async and debounced, so by the
+  // time a response comes back the document the position was computed
+  // against may already be shorter.
+  const offsetFor = (doc: Text, line: number, character: number): number => {
+    const clampedLine = Math.min(Math.max(line, 0), doc.lines - 1);
+    const lineInfo = doc.line(clampedLine + 1);
+    return Math.min(lineInfo.from + Math.max(character, 0), lineInfo.to);
+  };
+
+  const severityFor = (n: number): "error" | "warning" | "info" =>
+    n === 2 ? "warning" : n >= 3 ? "info" : "error";
+
   const stateFor = (path: string, content: string): EditorState => {
     const existing = statesRef.current.get(path);
     if (existing) return existing;
@@ -202,6 +217,20 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         indentUnit.of("  "),
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
         EditorView.lineWrapping,
+        lintGutter(),
+        linter(
+          async (view) => {
+            const diags = await getDiagnostics(filesRef.current, path);
+            const out: CMDiagnostic[] = [];
+            for (const d of diags) {
+              const from = offsetFor(view.state.doc, d.from.line, d.from.character);
+              const to = Math.max(from, offsetFor(view.state.doc, d.to.line, d.to.character));
+              out.push({ from, to, severity: severityFor(d.severity), message: d.message });
+            }
+            return out;
+          },
+          { delay: 600 },
+        ),
         EditorView.updateListener.of((update) => {
           if (!update.docChanged) return;
           const text = update.state.doc.toString();
