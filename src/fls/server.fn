@@ -113,8 +113,11 @@ impl Server {
   }
 
   // Answers one message. A request carries an id and expects a reply; a
-  // notification carries none and expects none.
-  handle(str body) {
+  // notification carries none and expects none. `pub` so a non-stdio
+  // embedder (the wasm entry point, `wasm_fls_main.fn`) can drive one
+  // message at a time directly, instead of only through `serve`'s own
+  // blocking stdin loop.
+  pub handle(str body) {
     let parsed = parse(body);
     free(body);
     if parsed.is_err() {

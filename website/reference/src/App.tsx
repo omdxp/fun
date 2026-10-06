@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import MarkdownWithPlayground from "./components/MarkdownWithPlayground";
 import RunCodeBlock from "./components/RunCodeBlock";
+import Playground from "./components/Playground";
 import HighlightedCode from "./components/HighlightedCode";
 import { copyTextToClipboard } from "./utils/clipboard";
 import { getSiteHighlighter } from "./utils/shikiHighlighter";
+import { warmPlaygroundRuntime } from "./utils/compileInBrowser";
 import bundledContentUrl from "./generated/content.json?url";
 
 type DocsSections = {
@@ -526,6 +528,20 @@ export default function App() {
     handleChange();
     mql.addEventListener("change", handleChange);
     return () => mql.removeEventListener("change", handleChange);
+  }, []);
+  // Starts the Playground's two wasm modules loading the moment the page
+  // is idle, not gated behind opening the Playground tab or clicking
+  // Run - by the time either happens, both are usually already warm.
+  // `requestIdleCallback` (falling back to a short timeout where it's
+  // unavailable, e.g. Safari) keeps this off the critical first-paint
+  // path.
+  useEffect(() => {
+    const ric = (window as any).requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 1500));
+    const handle = ric(() => warmPlaygroundRuntime());
+    return () => {
+      const cric = (window as any).cancelIdleCallback ?? window.clearTimeout;
+      cric(handle);
+    };
   }, []);
   const [theme, setTheme] = useState<"light" | "dark">(getInitialTheme);
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -2161,16 +2177,13 @@ export default function App() {
               code and run that too - no backend involved either way.
             </p>
             <div className="hint">
-              Everything here runs entirely in your browser: curated
-              samples via a pre-baked wasm build, and edited code through
-              the Fun compiler's own frontend plus a real C compiler, both
-              compiled to WebAssembly. The first edited run downloads a
-              real C toolchain (around 100 MB, once per session) before it
-              can compile anything.
+              Everything here runs entirely in your browser: the Fun
+              compiler's own frontend plus a real C compiler, both
+              compiled to WebAssembly. The first run downloads a real C
+              toolchain (around 100 MB, once per session, and loading in
+              the background already) before it can compile anything.
             </div>
-            {content.samples.map((s) => (
-              <RunCodeBlock key={s.title} title={s.title} initialCode={s.code} />
-            ))}
+            <Playground samples={content.samples} />
             <details>
               <summary>Raw stdlib docs source</summary>
               <MarkdownWithPlayground

@@ -8,6 +8,7 @@ website/reference/src/generated/
 website/reference/public/versions/
 website/reference/public/wasm/
 website/reference/public/wasm-frontend/
+website/reference/public/wasm-fls/
 
 # Example-run scratch output written to the repo root by std demo programs
 _tmp_*.txt

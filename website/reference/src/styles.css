@@ -482,70 +482,91 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   background: var(--code-surface);
   overflow: hidden;
 }
-.run-block-header {
+
+.run-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
   display: flex;
+  gap: 6px;
   flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(22, 34, 74, 0.55);
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
-.run-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.run-block:hover .run-actions,
+.run-actions:focus-within {
+  opacity: 1;
+}
 .run-actions button {
   border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: 7px;
+  background: rgba(14, 20, 38, 0.82);
+  backdrop-filter: blur(2px);
   color: #dce6ff;
-  padding: 6px 10px;
+  padding: 5px 9px;
+  font-size: 0.82rem;
   cursor: pointer;
 }
 .run-actions button:hover { border-color: var(--accent); }
-.run-actions button.ghost { background: rgba(255, 255, 255, 0.03); }
+.run-actions button.ghost { background: rgba(14, 20, 38, 0.6); }
 .run-actions button:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .run-editor {
   position: relative;
+  display: flex;
   width: 100%;
-  min-height: 210px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--code-surface);
 }
 
-.run-editor pre {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  padding: 12px;
-  overflow: auto;
+.run-gutter {
+  flex: 0 0 auto;
+  padding: 12px 10px 12px 14px;
+  text-align: right;
   font: 500 13px/1.5 var(--mono);
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  color: #e9eeff;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  user-select: none;
+  white-space: pre;
+}
+
+.run-surface {
+  position: relative;
+  flex: 1 1 auto;
+  display: grid;
+  min-width: 0;
+}
+
+.run-surface pre,
+.run-surface textarea {
+  grid-area: 1 / 1;
+  margin: 0;
+  padding: 12px 14px;
+  font: 500 13px/1.5 var(--mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  border: none;
+  border-radius: 0;
+}
+
+.run-surface pre {
+  background: transparent;
+  color: #e9eeff;
   pointer-events: none;
 }
 
-.run-editor textarea {
-  position: relative;
+.run-surface textarea {
   width: 100%;
-  min-height: 210px;
-  border: none;
+  resize: none;
+  overflow: hidden;
   background: transparent;
   color: transparent;
   caret-color: #e9eeff;
   -webkit-text-fill-color: transparent;
-  font: 500 13px/1.5 var(--mono);
-  padding: 12px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  resize: vertical;
 }
 
-.run-editor textarea::selection {
+.run-surface textarea::selection {
   background: rgba(106, 164, 255, 0.35);
 }
 
@@ -621,37 +642,218 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   background: var(--surface-2);
 }
 
-:root[data-theme="light"] .run-block-header {
-  background: var(--surface-3);
-  border-bottom-color: var(--border-soft);
-  color: var(--text);
-}
-
 :root[data-theme="light"] .run-actions button {
-  background: var(--surface);
+  background: rgba(255, 255, 255, 0.92);
   border-color: var(--border-strong);
   color: var(--text);
 }
 
 :root[data-theme="light"] .run-actions button.ghost {
-  background: var(--surface-2);
+  background: rgba(255, 255, 255, 0.7);
 }
 
 :root[data-theme="light"] .run-editor {
   background: var(--surface-2);
-  border-bottom-color: var(--border-soft);
 }
 
-:root[data-theme="light"] .run-editor pre {
+:root[data-theme="light"] .run-gutter {
+  background: var(--surface-3);
+  border-right-color: var(--border-soft);
+}
+
+:root[data-theme="light"] .run-surface pre {
   color: var(--text);
 }
 
-:root[data-theme="light"] .run-editor textarea {
+:root[data-theme="light"] .run-surface textarea {
   caret-color: var(--text);
 }
 
-:root[data-theme="light"] .run-editor textarea::selection {
+:root[data-theme="light"] .run-surface textarea::selection {
   background: rgba(47, 75, 134, 0.18);
+}
+
+.pg-shell {
+  display: flex;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--code-surface);
+  overflow: hidden;
+  min-height: 480px;
+  margin: 16px 0;
+}
+
+.pg-sidebar {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.015);
+  overflow-y: auto;
+}
+
+.pg-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 6px;
+  font-size: 0.85rem;
+}
+
+.pg-small { padding: 3px 7px; font-size: 0.78rem; }
+
+.pg-tree { padding: 0 6px 10px; }
+
+.pg-tree-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font: 500 13px/1.4 var(--mono);
+  cursor: pointer;
+  color: var(--text);
+}
+.pg-tree-row:hover { background: rgba(255, 255, 255, 0.06); }
+.pg-tree-row.active { background: rgba(106, 164, 255, 0.16); color: var(--accent-strong); }
+.pg-tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-tree-actions { display: none; gap: 3px; flex: 0 0 auto; }
+.pg-tree-row:hover .pg-tree-actions { display: flex; }
+.pg-tree-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  background: rgba(14, 20, 38, 0.6);
+  color: var(--muted);
+  font-size: 0.72rem;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+.pg-tree-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+.pg-samples { border-top: 1px solid rgba(255, 255, 255, 0.08); margin-top: auto; }
+.pg-sample-list { display: flex; flex-direction: column; padding: 0 6px 10px; max-height: 220px; overflow-y: auto; }
+.pg-sample-item {
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.82rem;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pg-sample-item:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+
+.pg-main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pg-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.pg-active-file { font: 500 13px var(--mono); color: var(--muted); }
+.pg-static-actions { position: static; opacity: 1; }
+
+.pg-editor-host {
+  flex: 1 1 auto;
+  min-height: 320px;
+  overflow: auto;
+}
+.pg-editor-host .cm-editor { height: 100%; font: 500 13px/1.5 var(--mono); }
+.pg-editor-host .cm-scroller { overflow: auto; }
+.pg-editor-host .cm-gutters {
+  background: rgba(255, 255, 255, 0.02);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+}
+.pg-editor-host .cm-activeLine { background: rgba(106, 164, 255, 0.06); }
+.pg-editor-host .cm-activeLineGutter { background: rgba(106, 164, 255, 0.1); }
+.pg-editor-host .cm-content { padding: 12px 0; color: #e9eeff; }
+.pg-editor-host .cm-focused { outline: none; }
+
+/* fls diagnostics (the `linter`/`lintGutter` extensions in
+   Playground.tsx) - explicit colors for both themes rather than
+   CodeMirror's own defaults, which read too faint against this site's
+   particular surfaces in at least one of the two. Severity gets its
+   own semantic palette (error/warning/info), distinct from the site's
+   single blue accent, except "info" which reuses it - that is already
+   this site's informational color everywhere else. */
+.pg-editor-host .cm-lintRange-error { background-image: none; border-bottom: 2px solid var(--accent-strong); }
+.pg-editor-host .cm-lintRange-warning { background-image: none; border-bottom: 2px solid #e0a63a; }
+.pg-editor-host .cm-lintRange-info { background-image: none; border-bottom: 2px solid var(--accent); }
+.pg-editor-host .cm-gutterLintMarker { width: 14px; }
+
+/* CodeMirror mounts every tooltip (lint, hover, signature help,
+   autocomplete) in a portal on `document.body`, not nested inside
+   `.pg-editor-host` - these are deliberately unscoped, not a typo, and
+   there is only ever one CodeMirror instance on this page. */
+.cm-tooltip {
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+}
+.cm-tooltip-lint {
+  font: 500 12.5px/1.5 var(--mono);
+  padding: 2px 4px;
+}
+.cm-diagnostic {
+  border-left: 3px solid var(--accent);
+  padding: 4px 8px;
+}
+.cm-diagnostic-error { border-left-color: var(--accent-strong); }
+.cm-diagnostic-warning { border-left-color: #e0a63a; }
+
+.pg-hover-tooltip, .pg-signature-tooltip {
+  font: 500 12.5px/1.5 var(--mono);
+  padding: 6px 9px;
+  max-width: 420px;
+}
+.pg-hover-tooltip pre { margin: 0; white-space: pre-wrap; }
+.pg-signature-tooltip { color: var(--accent); }
+
+.cm-tooltip-autocomplete {
+  font: 500 13px/1.4 var(--mono);
+}
+.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: rgba(106, 164, 255, 0.18);
+  color: var(--text);
+}
+.cm-completionLabel { color: var(--text); }
+.cm-completionDetail { color: var(--muted); font-style: normal; margin-left: 6px; }
+.cm-completionInfo {
+  background: var(--surface-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  font: 500 12.5px/1.5 var(--mono);
+  padding: 6px 9px;
+}
+
+:root[data-theme="light"] .pg-shell { background: var(--surface-2); }
+:root[data-theme="light"] .pg-sidebar {
+  background: var(--surface-3);
+  border-right-color: var(--border-soft);
+}
+:root[data-theme="light"] .pg-tree-row { color: var(--text); }
+:root[data-theme="light"] .pg-toolbar { border-bottom-color: var(--border-soft); }
+:root[data-theme="light"] .pg-editor-host .cm-content { color: var(--text); }
+:root[data-theme="light"] .pg-editor-host .cm-gutters {
+  background: var(--surface-3);
+  border-right-color: var(--border-soft);
+}
+
+@media (max-width: 760px) {
+  .pg-shell { flex-direction: column; }
+  .pg-sidebar { flex: 0 0 auto; max-height: 200px; border-right: none; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
 }
 
 .output-grid {
@@ -659,6 +861,7 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   grid-template-columns: 1fr 1fr;
   gap: 10px;
   padding: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 .output-title { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 pre {

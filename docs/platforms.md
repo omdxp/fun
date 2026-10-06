@@ -113,8 +113,34 @@ Both pieces are real, general-purpose builds, not special-cased for
 this one use - the first is the same `FUN_CC=emcc` target described
 above, applied to the compiler's own source; the second is an ordinary
 C compiler that happens to run as wasm. The second module is large
-(~105 MB) and fetched lazily, only on the first edited run, and cached
-for the rest of that page session.
+(~105 MB) and fetched lazily, well before any click needs it (the page
+starts warming both wasm modules once it's idle), and cached for the
+rest of that page session.
+
+The Playground is a real multi-file project, not a single text box: a
+file tree in the sidebar holds every file, any one of them can be the
+entry point, and `use`-ing a sibling file resolves exactly as it would
+on disk - every project file is mounted into the compile frontend's own
+virtual filesystem at its real path before each run.
+
+A third wasm module, built from `src/fls/wasm_fls_main.fn`, drives
+real fls diagnostics as the active file is edited (debounced, not on
+every keystroke). It is deliberately *not* the same long-running
+server a real editor keeps alive over stdio: that would need the
+built-in emscripten runtime to stay resident across calls (every wasm
+build this project produces tears its runtime down when `main`
+returns, exactly so a run-once CLI-style program still prints its
+output) and a way to call a function other than `main` from JavaScript,
+neither of which exists yet for any target. Each keystroke instead
+reloads the module fresh, writes one `textDocument/didOpen` into it,
+and reads back the one `textDocument/publishDiagnostics` notification
+`Server.opened` always answers it with - simpler and correct, at the
+cost of re-parsing the whole project (plus the stdlib) from scratch
+every time, with none of `Server`'s own incremental caching ever
+getting to help. A persistent, repeatedly-callable module (real
+caching, hover, completion, go-to-definition) is a materially bigger
+project - genuinely new build-pipeline support, not an extension of
+this one - and stays out of scope here.
 
 This is also why `_preload_and_collect_source`'s parallel import
 preloading (`fork`ing a fixed worker pool to read a program's import

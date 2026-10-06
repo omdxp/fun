@@ -13326,7 +13326,7 @@ impl Codegen {
         // lives in the wrapper functions `emit_async_function_support`
         // generates around it. `main` is excluded, since nothing `await`s
         // it.
-        if f.is_async && !equals(emit_name, "main") {
+        if f.is_async && !equals(f.name, "main") {
           let aserr = self.emit_async_function_support(node, emit_name);
           if aserr.is_some() {
             ret aserr;
