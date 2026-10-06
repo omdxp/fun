@@ -130,6 +130,30 @@ fun main() {
 
 Array literals require uniform element types: `num[] arr = [1, 2, 3];`.
 
+A bracketed size makes it a fixed-size array instead: `num[3] c;` is a
+real, inline, stack-allocated C array, not a pointer and not
+`Vec<T>` (the separate, heap-backed, growable stdlib type) - a
+compound holding one has no indirection to its own fields:
+
+```fun
+use std.io;
+
+compound Vec3 {
+  num[3] c;
+}
+
+fun main() {
+  Vec3 v;
+  v.c[0] = 1;
+  v.c[1] = 2;
+  v.c[2] = 3;
+  println_fmt("{num} {num} {num}", v.c[0], v.c[1], v.c[2]);
+}
+```
+
+The size can be any expression, including a named `const`, and
+brackets can repeat for a multi-dimensional array: `num[N][N] m;`.
+
 ### Pointers
 
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
