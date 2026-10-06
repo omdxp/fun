@@ -105,7 +105,7 @@ entirely client-side, no backend server involved, by running the
    typecheck, codegen-to-C - stops there, never invokes a real C
    compiler itself) runs first, lowering the typed source to C.
 2. A real C compiler, itself compiled to WebAssembly and running in
-   the same page ([`@wasmer/sdk`](https://docs.wasmer.io/javascript-sdk)'s
+   the same page ([`@wasmer/sdk`](https://docs.wasmer.io/runtime/js)'s
    `clang/clang` package - genuine clang, lld, and wasm-ld, targeting
    wasm32-wasi), compiles that C and runs the result.
 
