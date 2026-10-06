@@ -14,7 +14,7 @@ import { syntaxHighlighting, indentUnit } from "@codemirror/language";
 import { linter, lintGutter, type Diagnostic as CMDiagnostic } from "@codemirror/lint";
 import { autocompletion, type CompletionSource, type Completion } from "@codemirror/autocomplete";
 
-import { funLanguage, funHighlightDark, funHighlightLight } from "../utils/funLanguage";
+import { funLanguage, funHighlightDark, funHighlightLight, funEditorTheme } from "../utils/funLanguage";
 import {
   FunCompileError,
   runEditedCode,
@@ -23,6 +23,7 @@ import {
   getCompletions,
   getDefinition,
   getSignatureHelp,
+  warmPlaygroundRuntime,
 } from "../utils/compileInBrowser";
 
 // Fun Web/Fun Web Light (the same two editor themes this project ships
@@ -240,12 +241,35 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const [stderr, setStderr] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [hasRun, setHasRun] = useState(false);
+  // Gates the live-as-you-type fls features (diagnostics, hover,
+  // completion, signature help): false until `wasm_fls_main`'s own
+  // assets are confirmed fetched at least once. Each extension checks
+  // `flsReadyRef` (not this state directly - they're created once per
+  // file and cached, so a plain closure over `flsReady` would freeze
+  // whatever its value was at that moment) and returns nothing rather
+  // than attempting a session while this is still false, so the very
+  // first real session a person triggers isn't also racing a cold
+  // download of the module it needs.
+  const [flsReady, setFlsReady] = useState(false);
+  const flsReadyRef = useRef(false);
 
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const statesRef = useRef<Map<string, EditorState>>(new Map());
   const filesRef = useRef(files);
   filesRef.current = files;
+
+  useEffect(() => {
+    let cancelled = false;
+    warmPlaygroundRuntime().flsReady.then(() => {
+      if (cancelled) return;
+      flsReadyRef.current = true;
+      setFlsReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Set by a goto-definition jump that lands on a *different* file -
   // the active-file sync effect applies it (moving the cursor there)
   // right after it swaps in that file's freshly-created state, then
@@ -315,6 +339,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     });
 
     const completionSource: CompletionSource = async (context) => {
+      if (!flsReadyRef.current) return null;
       const { line, character } = posFor(context.state.doc, context.pos);
       const result = await getCompletions(filesRef.current, path, line, character);
       const items = Array.isArray(result) ? result : result?.items;
@@ -340,6 +365,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         history(),
         highlightActiveLine(),
         syntaxHighlighting(isDarkTheme() ? funHighlightDark : funHighlightLight, { fallback: true }),
+        funEditorTheme(isDarkTheme()),
         funLanguage,
         indentUnit.of("  "),
         keymap.of([
@@ -353,6 +379,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         lintGutter(),
         linter(
           async (view) => {
+            if (!flsReadyRef.current) return [];
             const diags = await getDiagnostics(filesRef.current, path);
             const out: CMDiagnostic[] = [];
             for (const d of diags) {
@@ -365,6 +392,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           { delay: 600 },
         ),
         hoverTooltip(async (view, pos) => {
+          if (!flsReadyRef.current) return null;
           const { line, character } = posFor(view.state.doc, pos);
           const result = await getHover(filesRef.current, path, line, character);
           const text = contentsToText(result?.contents);
@@ -411,6 +439,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           if (update.docChanged || update.selectionSet) {
             window.clearTimeout(signatureTimer);
             signatureTimer = window.setTimeout(async () => {
+              if (!flsReadyRef.current) return;
               const view = update.view;
               const pos = view.state.selection.main.head;
               const { line, character } = posFor(view.state.doc, pos);
@@ -607,7 +636,14 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       </div>
       <div className="pg-main">
         <div className="pg-toolbar">
-          <span className="pg-active-file">{activeFile}</span>
+          <span className="pg-active-file">
+            {activeFile}
+            {!flsReady && (
+              <span className="pg-loading-badge" title="Diagnostics, hover, completion, and signature help become available once this finishes loading">
+                loading language features...
+              </span>
+            )}
+          </span>
           <div className="run-actions pg-static-actions">
             <button type="button" className="ghost" onClick={resetProject}>
               Reset
