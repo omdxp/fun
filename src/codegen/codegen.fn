@@ -815,7 +815,7 @@ fun program_uses_std_c_header(Vec<Node> nodes, str file) flag {
   ret false;
 }
 
-fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
+pub fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
   for n : nodes {
     if node_contains_fork(&n) {
       ret true;

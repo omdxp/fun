@@ -111,6 +111,10 @@ async function collectBlocks() {
     const text = await fs.readFile(path.join(repoRoot, rel), "utf8");
     for (const match of text.matchAll(FENCE_RE)) {
       const code = match[1];
+      // The identical marker `MarkdownWithPlayground.tsx` checks for -
+      // a deliberate fragment, never offered a Run button at all, so
+      // pre-baking it would just be a doomed compile attempt.
+      if (/^\/\/\s*fun:no-run\s*\r?\n/.test(code)) continue;
       const hash = hashCode(code);
       if (!seen.has(hash)) {
         seen.set(hash, code);
@@ -171,10 +175,31 @@ async function compileOne(hash, code) {
     // part of `fun -in`'s own ordinary flow) is a real safety check, not
     // just a compile - an example that crashes or hangs when actually run
     // is correctly skipped instead of shipped as a broken "working" module.
-    await execFileAsync(funBinary, ["-in", entryPath], {
+    // `-D PACKAGE_NAME=.../-D PACKAGE_VERSION=...`: a real `fun build`
+    // makes both available as ordinary string constants, read from
+    // `fun.toml` - there is no real manifest here (`tempDir` is a
+    // scratch directory holding just this one example), so without
+    // this, any doc example demonstrating that real feature (there is
+    // one) would fail to compile at all. Placeholders, same as the
+    // Playground's own edited-code frontend injects for the identical
+    // reason (`wasm_frontend_main.fn`).
+    await execFileAsync(funBinary, [
+      "-in",
+      entryPath,
+      "-D",
+      "PACKAGE_NAME=playground",
+      "-D",
+      "PACKAGE_VERSION=0.0.0",
+    ], {
       cwd: tempDir,
       env: { ...process.env, FUN_STDLIB_DIR: stdlibDir, FUN_CC: "emcc" },
-      timeout: 30000,
+      // A real concurrency example spins up several real OS threads
+      // through Node's own `worker_threads`-backed pthread emulation -
+      // genuinely slower to start than an ordinary single-threaded
+      // compile, and confirmed directly to blow past the previous
+      // 30s budget under load even though it completes (and runs
+      // correctly) well within it when the machine isn't busy.
+      timeout: 60000,
       maxBuffer: 1024 * 1024,
     });
 

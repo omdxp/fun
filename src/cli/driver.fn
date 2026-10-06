@@ -343,9 +343,17 @@ pub fun parse_args(str[] argv) Options {
     o.keep_c = true;
   }
 
-  let define = parsed.at("D");
-  if define.is_some() {
-    str pair = define.unwrap();
+  // `-D` is repeatable (one program can want several injected
+  // constants); `.all()` reports every occurrence in order, where
+  // `.at()` would silently keep only the last one - confirmed
+  // directly as a real bug this way, not a hypothetical: a second
+  // `-D` flag made the first one's constant vanish entirely, with no
+  // error at all.
+  let define_pairs = parsed.all("D");
+  num dpi = 0;
+  for dpi < define_pairs.len {
+    str pair = define_pairs.get(dpi);
+    dpi = dpi + 1;
     let eq = index_of_char(pair, '=');
     if eq == -1 {
       o.has_error = true;
@@ -553,7 +561,8 @@ pub fun compile_to_c_cover(
     compiler_is_msvc(cc),
     compiler_is_emscripten(cc),
     host_arch_name(),
-    true
+    true,
+    false
   );
 }
 

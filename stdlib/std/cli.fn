@@ -11,6 +11,14 @@ use std.c.mem;
 pub compound CliArgs {
   // parsed --key/--key=value flags
   Map<str, str> opts;
+  // Every value a repeatable flag (`-D name=value`, given more than
+  // once) was seen with, in order - `opts` alone only ever keeps the
+  // last one, a real and otherwise silent data-loss bug for any flag
+  // meant to be given multiple times. `at`/`get`/`get_or`/`has` stay
+  // exactly as they were (`opts` is still populated the same way, for
+  // whichever caller only ever wants one value); `all()` is the new,
+  // additional way to read every occurrence.
+  Map<str, Vec<str>> all_opts;
   // non-flag arguments
   Vec<str> positionals;
   // Set by cli_parse_flags when a value flag was the last argument, with
@@ -19,10 +27,28 @@ pub compound CliArgs {
   str missing_value_flag;
 }
 
+// Records `value` under `key` in `m`, alongside whatever `key` already
+// held - `Map`'s own value semantics mean a fetched `Vec` must be
+// pushed to and put back, not mutated through a reference into the
+// map's own storage.
+fun _push_multi(Map<str, Vec<str>>* m, str key, str value) {
+  if m.has(key) {
+    Vec<str> existing = m.get(key);
+    existing.push(value);
+    m.put(key, existing);
+  } else {
+    Vec<str> fresh;
+    fresh.init(2);
+    fresh.push(value);
+    m.put(key, fresh);
+  }
+}
+
 // Parses argv-style `args` (args[0] is program name) into options and positionals.
 pub fun cli_parse(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);
+  out.all_opts.init(8);
   out.positionals.init(8);
   out.missing_value = false;
   out.missing_value_flag = "";
@@ -36,11 +62,13 @@ pub fun cli_parse(str[] args) CliArgs {
       if eq_idx == -1 {
         let key = substr(arg, 2, len(arg) - 2);
         out.opts.put(key, "1");
+        _push_multi(&out.all_opts, key, "1");
       } else {
         let key_len = eq_idx - 2;
         let key = substr(arg, 2, key_len);
         let val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
         out.opts.put(key, val);
+        _push_multi(&out.all_opts, key, val);
       }
     } else {
       out.positionals.push(arg);
@@ -59,6 +87,7 @@ pub fun cli_parse(str[] args) CliArgs {
 pub fun cli_parse_ext(str[] args) CliArgs {
   CliArgs out;
   out.opts.init(8);
+  out.all_opts.init(8);
   out.positionals.init(8);
   out.missing_value = false;
   out.missing_value_flag = "";
@@ -88,15 +117,18 @@ pub fun cli_parse_ext(str[] args) CliArgs {
         let next_arg = args[i + 1];
         if next_arg != 0 && next_arg[0] != '-' {
           out.opts.put(key, next_arg);
+          _push_multi(&out.all_opts, key, next_arg);
           i = i + 2;
           continue;
         }
         out.opts.put(key, "1");
+        _push_multi(&out.all_opts, key, "1");
       } else {
         let key_len = eq_idx - 2;
         let key = substr(arg, 2, key_len);
         let val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
         out.opts.put(key, val);
+        _push_multi(&out.all_opts, key, val);
       }
     } elif arg[0] == '-' {
       // -k or -k=value or -abc or -k value
@@ -105,20 +137,24 @@ pub fun cli_parse_ext(str[] args) CliArgs {
         let key = substr(arg, 1, eq_idx - 1);
         let val = substr(arg, eq_idx + 1, len(arg) - (eq_idx + 1));
         out.opts.put(key, val);
+        _push_multi(&out.all_opts, key, val);
       } elif len(arg) == 2 {
         let key = substr(arg, 1, 1);
         let next_arg = args[i + 1];
         if next_arg != 0 && next_arg[0] != '-' {
           out.opts.put(key, next_arg);
+          _push_multi(&out.all_opts, key, next_arg);
           i = i + 2;
           continue;
         }
         out.opts.put(key, "1");
+        _push_multi(&out.all_opts, key, "1");
       } else {
         num j = 1;
         for j < len(arg) {
           let key = substr(arg, j, 1);
           out.opts.put(key, "1");
+          _push_multi(&out.all_opts, key, "1");
           j = j + 1;
         }
       }
@@ -141,6 +177,7 @@ pub fun cli_parse_ext(str[] args) CliArgs {
 pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
   CliArgs out;
   out.opts.init(8);
+  out.all_opts.init(8);
   out.positionals.init(8);
   out.missing_value = false;
   out.missing_value_flag = "";
@@ -175,6 +212,7 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
     let eq = index_of_char(body, '=');
     if eq != -1 {
       out.opts.put(substr(body, 0, eq), substr(body, eq + 1, len(body) - (eq + 1)));
+      _push_multi(&out.all_opts, substr(body, 0, eq), substr(body, eq + 1, len(body) - (eq + 1)));
       i = i + 1;
       continue;
     }
@@ -182,6 +220,7 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
     if value_flags.contains(body) {
       if args[i + 1] != 0 {
         out.opts.put(body, args[i + 1]);
+        _push_multi(&out.all_opts, body, args[i + 1]);
         i = i + 2;
         continue;
       }
@@ -191,6 +230,7 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
       continue;
     }
     out.opts.put(body, "1");
+    _push_multi(&out.all_opts, body, "1");
     i = i + 1;
   }
   ret out;
@@ -224,6 +264,19 @@ impl CliArgs {
     ret self.opts.at(key);
   }
 
+  // Every value a repeatable flag was given with, in order - empty
+  // when `key` was never seen. `at`/`get`/`get_or` all report only
+  // the last one; use this for a flag meant to be given more than
+  // once (`-D name=value`, say).
+  pub all(str key) Vec<str> {
+    if self.all_opts.has(key) {
+      ret self.all_opts.get(key);
+    }
+    Vec<str> empty;
+    empty.init(0);
+    ret empty;
+  }
+
   // Get an option value or default if missing.
   pub get_or(str key, str default_value) str {
     if self.opts.has(key) {
@@ -246,6 +299,14 @@ impl CliArgs {
   // Free internal storage.
   pub free() {
     self.opts.free();
+    let vecs = self.all_opts.values();
+    num vi = 0;
+    for vi < vecs.len {
+      vecs.get(vi).free();
+      vi = vi + 1;
+    }
+    vecs.free();
+    self.all_opts.free();
     self.positionals.free();
   }
 }
@@ -296,6 +357,18 @@ fun _argv_of3(str a, str b, str c) str[] {
   ret _test_argv(&parts);
 }
 
+fun _argv_of5(str a, str b, str c, str d, str e) str[] {
+  Vec<str> parts;
+  parts.init(0);
+  defer parts.free();
+  parts.push(a);
+  parts.push(b);
+  parts.push(c);
+  parts.push(d);
+  parts.push(e);
+  ret _test_argv(&parts);
+}
+
 test "cli_parse_flags reads a value flag written as two arguments" {
   Vec<str> value_flags;
   value_flags.init(0);
@@ -334,6 +407,26 @@ test "cli_parse_flags keeps a multi-character flag whole" {
   defer c.free();
   assert c.has("outf"), "expected the flag to stay whole rather than bundling";
   assert !c.has("o"), "expected no bundled single-character flag";
+}
+
+test "a repeatable flag's every value survives, not just the last one" {
+  // Real regression: `-D PACKAGE_NAME=x -D PACKAGE_VERSION=y` silently
+  // kept only `PACKAGE_VERSION` before `all()` existed - `opts` is a
+  // plain `Map<str, str>`, so a second `-D` just overwrote the first
+  // one's entry with no error at all.
+  Vec<str> value_flags;
+  value_flags.init(0);
+  defer value_flags.free();
+  value_flags.push("D");
+  let c = cli_parse_flags(_argv_of5("fun", "-D", "a=1", "-D", "b=2"), &value_flags);
+  defer c.free();
+  let all = c.all("D");
+  assert all.len == 2, "expected both occurrences, not just the last one";
+  assert equals(all.get(0), "a=1"), "expected the first value in order";
+  assert equals(all.get(1), "b=2"), "expected the second value in order";
+  // `at`/`get` keep their own, deliberately different contract (the
+  // single value a caller who only ever wants one gets) - last one in.
+  assert equals(c.get("D"), "b=2"), "expected get() to still report the last value";
 }
 
 test "cli_parse_flags sends everything after -- to positionals" {

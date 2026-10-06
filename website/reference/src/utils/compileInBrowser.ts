@@ -248,22 +248,63 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
 // waiting on it. Every failure here is swallowed: a warm-up that
 // couldn't reach the network changes nothing about correctness, the
 // same path just tries again, for real, on the next actual run.
-export function warmPlaygroundRuntime(): void {
-  getClang().catch(() => {});
-  for (const [dir, base_name] of [
-    ["wasm-frontend", "wasm_frontend_main"],
-    ["wasm-fls", "wasm_fls_main"],
-  ] as const) {
-    manifestHash(dir)
-      .then((hash) => {
-        const base = import.meta.env.BASE_URL || "/";
-        const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
-        for (const ext of ["js", "wasm", "data"]) {
-          fetch(versioned(`${base}${dir}/${base_name}.${ext}`), { cache: "force-cache" }).catch(() => {});
-        }
-      })
-      .catch(() => {});
+async function warmDir(dir: string, baseName: string): Promise<void> {
+  const hash = await manifestHash(dir);
+  const base = import.meta.env.BASE_URL || "/";
+  const versioned = (path: string) => (hash ? `${path}?v=${hash}` : path);
+  await Promise.all(
+    ["js", "wasm", "data"].map((ext) =>
+      fetch(versioned(`${base}${dir}/${baseName}.${ext}`), { cache: "force-cache" }).catch(() => {}),
+    ),
+  );
+}
+
+export type PlaygroundReadiness = {
+  // Resolves once `wasm_fls_main`'s own (small) assets are fetched at
+  // least once - the signal every live-as-you-type feature
+  // (diagnostics/hover/completion/signature help) waits on before its
+  // first real call, rather than racing a cold download against
+  // whatever the person happens to be doing right then. Confirmed
+  // directly as worth gating on: before this, typing into a fresh page
+  // load could fire several *overlapping* first-time module loads
+  // (lint, hover, signature help each independently triggering), heavy
+  // enough together to make the page feel unresponsive - the queue in
+  // `runFlsSessionQueued` prevents the overlap now regardless, but
+  // starting from a warm cache is still strictly better than starting
+  // cold the moment someone's mid-keystroke.
+  flsReady: Promise<void>;
+  // Resolves once `wasm_frontend_main`'s own (small) assets are
+  // fetched - not `clang/clang` itself (~105 MB, `getClang()`'s own
+  // job, still lazy): Run already shows its own "Running..." state
+  // while that downloads, which is the right affordance for something
+  // that large; this is only about the much smaller frontend module.
+  compileReady: Promise<void>;
+};
+
+// Starts loading every wasm module in the background, well before any
+// click needs them - called once from `App.tsx` shortly after the page
+// itself has settled (not blocking first paint). Every individual
+// fetch failure is swallowed: a warm-up that couldn't reach the
+// network changes nothing about correctness, the same path just tries
+// again, for real, on the next actual use. Returns promises a caller
+// can use to gate a loading indicator on, rather than only firing
+// fetches blind.
+// Memoized: `App.tsx` calls this once on page mount to start the warm-up
+// as early as possible, and `Playground.tsx` calls it again on its own
+// mount to get the same readiness promises to gate its loading
+// indicator on (the Playground tab may not even be the one the page
+// opened on). A second call must not re-issue the warm-up fetches.
+let playgroundReadiness: PlaygroundReadiness | null = null;
+
+export function warmPlaygroundRuntime(): PlaygroundReadiness {
+  if (!playgroundReadiness) {
+    getClang().catch(() => {});
+    playgroundReadiness = {
+      compileReady: warmDir("wasm-frontend", "wasm_frontend_main").catch(() => {}),
+      flsReady: warmDir("wasm-fls", "wasm_fls_main").catch(() => {}),
+    };
   }
+  return playgroundReadiness;
 }
 
 // Mounts every project file at its own real path (the shared
@@ -396,6 +437,54 @@ async function runFlsSession(files: Record<string, string>, messages: string[]):
   return parseFramedMessages(raw);
 }
 
+// Every fls feature (diagnostics, hover, completion, signature help,
+// goto-definition) independently debounces its own trigger and then
+// calls into `wasm_fls_main.js` - each call spins up a fresh iframe
+// and instantiates a fresh wasm module (see `runFlsSession`'s own doc
+// comment for why it's reload-per-call, not persistent). Nothing
+// previously stopped several of these from firing within the same
+// couple hundred milliseconds - confirmed directly against the real
+// deployed site: typing a short program at a normal pace fired three
+// *overlapping* `wasm_fls_main.js` loads, two of them 191ms apart.
+// Three concurrent wasm instantiations is genuinely heavy, and was
+// the real cause of the page going sluggish-to-unusable while typing.
+//
+// This serializes every fls call through one queue (never more than
+// one iframe/wasm instantiation in flight at a time) and additionally
+// drops a call outright, before it ever reaches the expensive part, if
+// a newer call for the same `key` (feature + file) has superseded it
+// while it was waiting its turn - fast typing shouldn't leave a long
+// backlog of now-irrelevant diagnostics/signature-help requests still
+// grinding through one at a time.
+const latestFlsRequestToken = new Map<string, number>();
+let flsRequestCounter = 0;
+let flsQueueTail: Promise<void> = Promise.resolve();
+
+async function runFlsSessionQueued(
+  key: string,
+  files: Record<string, string>,
+  messages: string[],
+): Promise<any[]> {
+  const myToken = ++flsRequestCounter;
+  latestFlsRequestToken.set(key, myToken);
+
+  const prevTail = flsQueueTail;
+  let releaseNext: () => void = () => {};
+  flsQueueTail = new Promise((resolve) => {
+    releaseNext = resolve;
+  });
+  await prevTail;
+
+  try {
+    if (latestFlsRequestToken.get(key) !== myToken) {
+      return [];
+    }
+    return await runFlsSession(files, messages);
+  } finally {
+    releaseNext();
+  }
+}
+
 // One request (hover/definition/completion/signatureHelp, all the
 // same shape: a document position in, one response back) against
 // `activePath`'s current content. Returns `null` for any failure at
@@ -417,7 +506,7 @@ async function flsPositionRequest(
       didOpenMessage(uri, text),
       requestMessage(id, method, { textDocument: { uri }, position: { line, character } }),
     ];
-    const results = await runFlsSession(files, messages);
+    const results = await runFlsSessionQueued(`${method}:${activePath}`, files, messages);
     const response = results.find((r) => r && r.id === id);
     return response?.result ?? null;
   } catch {
@@ -471,7 +560,9 @@ export async function getDiagnostics(
   try {
     const uri = uriFor(activePath);
     const text = files[activePath] ?? "";
-    const results = await runFlsSession(files, [didOpenMessage(uri, text)]);
+    const results = await runFlsSessionQueued(`diagnostics:${activePath}`, files, [
+      didOpenMessage(uri, text),
+    ]);
     const published = results.find((r) => r?.method === "textDocument/publishDiagnostics");
     const items = published?.params?.diagnostics;
     if (!Array.isArray(items)) return [];
