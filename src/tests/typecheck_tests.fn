@@ -2958,3 +2958,93 @@ test "a shape-downcast fit rejects a bare generic name with two concrete instant
   assert contains(msg, "write the generic arguments explicitly"),
   "expected the ambiguous message to point at the <Args> fix";
 }
+
+test "operator overloading: a binary operator infers the impl method's own return type" {
+  accepts(
+    `compound Vec3 { num x; num y; num z; }
+    `impl Vec3 {
+    `  op_add(Vec3 other) Vec3 { ret *self; }
+    `}
+    `fun main() {
+    `  Vec3 a; Vec3 b;
+    `  Vec3 c = a + b;
+    `}`,
+    "expected `a + b` to type-check as Vec3, the op_add method's own return type"
+  );
+}
+
+test "operator overloading: a mismatched operand type is rejected, naming the resolved method" {
+  str msg = check(
+    `compound Vec3 { num x; num y; num z; }
+    `impl Vec3 {
+    `  op_add(Vec3 other) Vec3 { ret *self; }
+    `}
+    `fun main() {
+    `  Vec3 a;
+    `  Vec3 b = a + 5;
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "op_add"), "expected the error to name the resolved operator method";
+  assert contains(msg, "Vec3") && contains(msg, "num"),
+  "expected the error to name both the expected and the found type";
+}
+
+test "operator overloading: a type with no matching operator keeps today's behavior" {
+  // No `impl` at all - a plain compound with mismatched field types
+  // added together must still behave exactly as it always has
+  // (no diagnostic from this path at all, same as before this feature
+  // existed), completely unaffected by operator dispatch ever being
+  // attempted and finding nothing to dispatch to.
+  accepts(
+    `compound Plain { num x; }
+    `fun main() {
+    `  num a = 3;
+    `  num b = 4;
+    `  num c = a + b;
+    `}`,
+    "expected ordinary numeric addition to type-check exactly as before"
+  );
+}
+
+test "operator overloading: comparison operators dispatch through op_eq/op_lt too" {
+  accepts(
+    `compound Vec3 { num x; num y; num z; }
+    `impl Vec3 {
+    `  op_eq(Vec3 other) flag { ret self.x == other.x; }
+    `}
+    `fun main() {
+    `  Vec3 a; Vec3 b;
+    `  flag same = a == b;
+    `}`,
+    "expected a == b to resolve through op_eq, not fall through to a raw comparison on two structs"
+  );
+}
+
+test "operator overloading: unary op_neg and op_not dispatch to the impl method" {
+  accepts(
+    `compound Vec3 { num x; num y; num z; }
+    `impl Vec3 {
+    `  op_neg() Vec3 { ret *self; }
+    `}
+    `fun main() {
+    `  Vec3 a;
+    `  Vec3 b = -a;
+    `}`,
+    "expected -a to resolve through op_neg"
+  );
+}
+
+test "operator overloading: op_index dispatches a[i] through the impl method" {
+  accepts(
+    `compound Vec3 { num x; num y; num z; }
+    `impl Vec3 {
+    `  op_index(num i) num { ret self.x; }
+    `}
+    `fun main() {
+    `  Vec3 a;
+    `  num v = a[0];
+    `}`,
+    "expected a[0] to resolve through op_index"
+  );
+}

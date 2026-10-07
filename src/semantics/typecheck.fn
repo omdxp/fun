@@ -1324,6 +1324,12 @@ impl Checker {
     }
     CheckedType left = self.infer(e.left, env);
     CheckedType right = self.infer(e.right, env);
+    if _is_comparison(e.op) {
+      let dispatched = self.try_operator_dispatch(node, left, e.op, .Some(right));
+      if dispatched.is_some() || self.failed {
+        ret;
+      }
+    }
     self.check_shorthand_variant(e.right, left, env);
     self.check_shorthand_variant(e.left, right, env);
     if self.failed {
@@ -2043,7 +2049,25 @@ impl Checker {
       t.pointer_depth = operand.pointer_depth - 1;
       ret t;
     }
+    if equals(u.op, "-") {
+      // Not `operator_method_name` - that maps the same `"-"` text to
+      // `op_sub`, the *binary* operator's own method name, which would
+      // collide here.
+      if operand.pointer_depth == 0 && !operand.is_array && !equals(operand.name, "") {
+        let sig = self.receiver_method(operand, "op_neg");
+        if sig.is_some() && sig.unwrap().args.len == 0 {
+          ret sig.unwrap().rtype;
+        }
+      }
+      ret operand;
+    }
     if equals(u.op, "!") {
+      if operand.pointer_depth == 0 && !operand.is_array && !equals(operand.name, "") {
+        let sig = self.receiver_method(operand, "op_not");
+        if sig.is_some() && sig.unwrap().args.len == 0 {
+          ret sig.unwrap().rtype;
+        }
+      }
       ret checked_of(.Bin);
     }
     ret operand;
@@ -2215,6 +2239,23 @@ impl Checker {
         ret checked_of(.Chr);
       }
       if !base.is_array {
+        if !e.has_right {
+          ret checked_unknown();
+        }
+        // `e.right` is the index's `.Bracket` wrapper, not the index
+        // expression itself - unwrapped first, since `infer()`'s own
+        // `.Bracket` case (`infer_bracket`) means an array *literal*
+        // (`[1, 2, 3]`), not "infer whatever's inside these brackets."
+        Node* index_node = e.right;
+        fit e.right.kind {
+          .Bracket(inner) -> { index_node = inner; }
+          _ -> {}
+        }
+        CheckedType index = self.infer(index_node, env);
+        let dispatched = self.try_operator_dispatch(node, base, "[]", .Some(index));
+        if dispatched.is_some() {
+          ret dispatched.unwrap();
+        }
         ret checked_unknown();
       }
       CheckedType held = base;
@@ -2237,6 +2278,10 @@ impl Checker {
       ret left;
     }
     CheckedType right = self.infer(e.right, env);
+    let dispatched = self.try_operator_dispatch(node, left, e.op, .Some(right));
+    if dispatched.is_some() {
+      ret dispatched.unwrap();
+    }
     // Arithmetic on two numeric kinds widens to the wider one.
     if right.base == .Dec && left.base == .Num {
       ret right;
@@ -2385,6 +2430,57 @@ impl Checker {
       }
     }
     ret self.method_signature(receiver.name, method);
+  }
+
+  // Resolves `op` to `left`'s own `impl`-defined operator method (see
+  // `operator_method_name`) when one exists, validating `right` -
+  // `.None` for a unary operator - against its one declared
+  // parameter. `.None` means "no such operator on this type," which
+  // every call site treats as "fall through to the builtin behavior
+  // unchanged," never an error by itself - a pointer or array isn't
+  // offered operator dispatch at all (pointer arithmetic keeps its
+  // own existing meaning), and neither is a builtin (empty type
+  // name). Once a match IS found, though, a wrong argument type is a
+  // real error, the same quality `check_fn_sig_args` already gives an
+  // ordinary call - this path only ever runs for a type the user
+  // explicitly wrote an operator for, so there is no legacy behavior
+  // to protect by staying silent on a bad call.
+  try_operator_dispatch(
+    Node* node,
+    CheckedType left,
+    str op,
+    Option<CheckedType> right
+  ) Option<CheckedType> {
+    if left.pointer_depth > 0 || left.is_array || equals(left.name, "") {
+      ret .None;
+    }
+    str method = operator_method_name(op);
+    if equals(method, "") {
+      ret .None;
+    }
+    let sig = self.receiver_method(left, method)?;
+    if right.is_some() {
+      if sig.args.len != 1 {
+        ret .None;
+      }
+      CheckedType want_right = right.unwrap();
+      if !self.assignable(sig.args.get(0), want_right) {
+        self.fail(
+          format(
+          "'{str}' on {str} ({str}) expects {str}, found {str}",
+          op,
+          left.name,
+          method,
+          type_name(sig.args.get(0)),
+          type_name(want_right)
+          ),
+          node
+        );
+      }
+    } elif sig.args.len != 0 {
+      ret .None;
+    }
+    ret .Some(sig.rtype);
   }
 
   // True when the checker has seen what methods a type has, which is
@@ -3328,6 +3424,56 @@ fun _shape_destructure_type_name(FitBranch branch) str {
   fit branch.condition.kind {
     .Identifier(name) -> { ret name; }
     _ -> {}
+  }
+  ret "";
+}
+
+// The `impl` method name operator overloading dispatches a *binary*
+// operator to (`+` to `op_add`, `==` to `op_eq`, and so on) - unary
+// `-`/`!` map to `op_neg`/`op_not` instead, resolved directly where
+// `infer_unary` needs them, since the same `"-"` text means a
+// different method name in each position. "" for an operator that
+// can't be overloaded (no entry here), which every call site treats
+// as "fall through to the builtin behavior unchanged" rather than an
+// error - there is no other meaning to an empty result. `pub` so
+// codegen's own binary-operator emission can mirror this exact
+// mapping instead of keeping a second copy of it.
+pub fun operator_method_name(str op) str {
+  if equals(op, "+") {
+    ret "op_add";
+  }
+  if equals(op, "-") {
+    ret "op_sub";
+  }
+  if equals(op, "*") {
+    ret "op_mul";
+  }
+  if equals(op, "/") {
+    ret "op_div";
+  }
+  if equals(op, "%") {
+    ret "op_mod";
+  }
+  if equals(op, "==") {
+    ret "op_eq";
+  }
+  if equals(op, "!=") {
+    ret "op_ne";
+  }
+  if equals(op, "<") {
+    ret "op_lt";
+  }
+  if equals(op, "<=") {
+    ret "op_le";
+  }
+  if equals(op, ">") {
+    ret "op_gt";
+  }
+  if equals(op, ">=") {
+    ret "op_ge";
+  }
+  if equals(op, "[]") {
+    ret "op_index";
   }
   ret "";
 }

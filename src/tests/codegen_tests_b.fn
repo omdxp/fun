@@ -2587,3 +2587,106 @@ test "the prelude turns off the MS CRT's deprecation warnings on Windows only" {
   assert contains(out.unwrap(), "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"), "expected the define";
   assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(out.unwrap(), "#include <stdio.h>"), "expected the define before the first include, where it takes effect";
 }
+
+test "operator overloading: op_add dispatches to the impl method, not raw C +" {
+  str src = `use std.io;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_add(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x + other.x; r.y = self.y + other.y; r.z = self.z + other.z; ret r;
+  `  }
+  `}
+  `fun main() {
+  `  Vec3 a; a.x = 1; a.y = 2; a.z = 3;
+  `  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  `  Vec3 c = a + b;
+  `  println_fmt("{num} {num} {num}", c.x, c.y, c.z);
+  `}`;
+  let out = emit_c(src, "op_add dispatch");
+  assert contains(out, "Vec3__op_add(&a, b)"), "expected the + to compile to a direct call to the impl method";
+  assert !contains(out, "(a + b)"), "expected no raw C + between two structs";
+  let ran = run_source(src, "op_add_dispatch", "op_add dispatches to the impl method, not raw C +");
+  assert equals(ran, "11 22 33\n"), "expected componentwise addition";
+}
+
+test "operator overloading: every supported binary/unary/index operator" {
+  str src = `use std.io;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_sub(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x - other.x; r.y = self.y - other.y; r.z = self.z - other.z; ret r;
+  `  }
+  `  op_mul(num s) Vec3 {
+  `    Vec3 r; r.x = self.x * s; r.y = self.y * s; r.z = self.z * s; ret r;
+  `  }
+  `  op_eq(Vec3 other) flag {
+  `    ret self.x == other.x && self.y == other.y && self.z == other.z;
+  `  }
+  `  op_neg() Vec3 {
+  `    Vec3 r; r.x = -self.x; r.y = -self.y; r.z = -self.z; ret r;
+  `  }
+  `  op_index(num i) num {
+  `    if i == 0 { ret self.x; }
+  `    if i == 1 { ret self.y; }
+  `    ret self.z;
+  `  }
+  `}
+  `fun main() {
+  `  Vec3 a; a.x = 1; a.y = 2; a.z = 3;
+  `  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  `  Vec3 diff = b - a;
+  `  Vec3 scaled = a * 3;
+  `  Vec3 a2; a2.x = 1; a2.y = 2; a2.z = 3;
+  `  Vec3 neg = -a;
+  `  println_fmt(
+  `    "{num} {num} {num} / {num} {num} {num} / {flag} {flag} / {num} {num} {num} / {num} {num} {num}",
+  `    diff.x, diff.y, diff.z,
+  `    scaled.x, scaled.y, scaled.z,
+  `    a == a2, a == b,
+  `    neg.x, neg.y, neg.z,
+  `    a[0], a[1], a[2]
+  `  );
+  `}`;
+  let out = run_source(
+    src,
+    "op_full_set",
+    "every supported binary/unary/index operator"
+  );
+  assert equals(out, "9 18 27 / 3 6 9 / true false / -1 -2 -3 / 1 2 3\n"), "expected every operator to dispatch correctly";
+
+  // The strict, non-GNU (MSVC-shaped) compile: `op_index`'s own return
+  // type (`num`) differs from its receiver's type (`Vec3`), the one
+  // shape `infer_arg_type_name`'s generic "`[]` keeps the left operand's
+  // type" fallback gets wrong, surfacing only through MSVC's va-hoist
+  // path (`a[0]` passed straight into `println_fmt` hoists a wrongly
+  // `Vec3`-typed temp initialized from an `int64_t` call). Caught
+  // exactly this way, with no real Windows host needed - see
+  // `run_source_forcing_msvc`'s own doc comment.
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "op_full_set_strict",
+    "every supported binary/unary/index operator (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "9 18 27 / 3 6 9 / true false / -1 -2 -3 / 1 2 3"), format(
+    "expected every operator to dispatch correctly under the strict MSVC-shaped compile too, got {str}",
+    out_msvc
+  );
+}
+
+test "operator overloading: a type with no matching operator keeps today's behavior" {
+  // No `impl` at all - `+` on two plain numbers must still behave
+  // exactly as it always has, completely unaffected by operator
+  // dispatch ever being attempted and finding nothing.
+  str src = `use std.io;
+  `fun main() {
+  `  num a = 3;
+  `  num b = 4;
+  `  println_fmt("{num}", a + b);
+  `}`;
+  let out = run_source(
+    src,
+    "op_no_overload_unaffected",
+    "a type with no matching operator keeps today's behavior"
+  );
+  assert equals(out, "7\n"), "expected ordinary numeric addition, unaffected by operator dispatch";
+}

@@ -130,6 +130,30 @@ fun main() {
 
 Array literals require uniform element types: `num[] arr = [1, 2, 3];`.
 
+A bracketed size makes it a fixed-size array instead: `num[3] c;` is a
+real, inline, stack-allocated C array, not a pointer and not
+`Vec<T>` (the separate, heap-backed, growable stdlib type) - a
+compound holding one has no indirection to its own fields:
+
+```fun
+use std.io;
+
+compound Vec3 {
+  num[3] c;
+}
+
+fun main() {
+  Vec3 v;
+  v.c[0] = 1;
+  v.c[1] = 2;
+  v.c[2] = 3;
+  println_fmt("{num} {num} {num}", v.c[0], v.c[1], v.c[2]);
+}
+```
+
+The size can be any expression, including a named `const`, and
+brackets can repeat for a multi-dimensional array: `num[N][N] m;`.
+
 ### Pointers
 
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
@@ -650,6 +674,80 @@ fun main() {
 
 A plain `impl Point { ... }` attaches methods to a compound directly;
 `impl Rectangle as HasArea { ... }` implements a shape for it.
+
+### Operator Overloading
+
+An `impl` method with one of the following names is called for the
+matching operator instead of being written as a `.method()` call:
+
+| Operator | Method name | Operator | Method name |
+| --- | --- | --- | --- |
+| `+` | `op_add` | `==` | `op_eq` |
+| `-` (binary) | `op_sub` | `!=` | `op_ne` |
+| `*` | `op_mul` | `<` | `op_lt` |
+| `/` | `op_div` | `<=` | `op_le` |
+| `%` | `op_mod` | `>` | `op_gt` |
+| `-` (unary) | `op_neg` | `>=` | `op_ge` |
+| `!` (unary) | `op_not` | `[]` | `op_index` |
+
+```fun
+use std.io;
+
+compound Vec3 {
+  num x;
+  num y;
+  num z;
+}
+
+impl Vec3 {
+  op_add(Vec3 other) Vec3 {
+    Vec3 r;
+    r.x = self.x + other.x;
+    r.y = self.y + other.y;
+    r.z = self.z + other.z;
+    ret r;
+  }
+  op_mul(num s) Vec3 {
+    Vec3 r;
+    r.x = self.x * s;
+    r.y = self.y * s;
+    r.z = self.z * s;
+    ret r;
+  }
+}
+
+fun main() {
+  Vec3 a; a.x = 1; a.y = 2; a.z = 3;
+  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  Vec3 scaled = a * 2;
+  Vec3 sum = scaled + b;
+  println_fmt("{num} {num} {num}", sum.x, sum.y, sum.z);
+}
+```
+
+- A binary operator's one declared parameter is the right-hand operand
+  (taken by value, like any other method parameter); a unary `-`/`!`
+  takes none. The result type is whatever the method declares.
+- There is no overloading *by parameter type* - a type gets exactly
+  one `op_mul`, for instance, not one for `Vec3 * Vec3` and a separate
+  one for `Vec3 * num`. This matches `impl`'s own existing rule (one
+  method per name per type); pick whichever single operand type suits
+  the type best.
+- A mismatched operand is a real compile error naming the resolved
+  method, the same as calling any other method with the wrong
+  argument type.
+- A type with no matching `impl` method keeps the operator's ordinary
+  builtin meaning completely unchanged - this only ever adds a new
+  capability, never changes what `+`/`==`/etc. already do on `num`,
+  `str`, and every other type that doesn't define one.
+- **Only a bare local variable is dispatched** - `a + b` and `-a`
+  work, but a chained `a * 2 + b` or a field access used directly as
+  an operand (`self.pos + other.pos`) does not yet resolve; bind the
+  intermediate value to its own `let` first (`let scaled = a * 2; let
+  sum = scaled + b;`).
+- `op_index` only covers reading (`a[i]`); assigning through an index
+  (`a[i] = v`) on a type with no real array/`Vec<T>` field is not yet
+  supported.
 
 ### Generics
 
