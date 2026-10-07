@@ -3695,6 +3695,12 @@ impl Parser {
     Node* node_ptr = malloc(sizeof(Node));
     *node_ptr = node;
     self.create_node(node_ptr);
+    // Unlike `parse_variable`'s own matching wrapper, nothing keeps
+    // `node_ptr` around afterward - this statement has no scope entity
+    // of its own (each destructured name below gets its own, separate
+    // one); `create_node` already copied its value into `state.nodes`,
+    // so the wrapper itself is this call's own to free.
+    free(node_ptr);
 
     // A declared tuple type with a matching arity gives each name its own
     // real element type directly - real precision fls hover, unlike the
