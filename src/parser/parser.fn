@@ -2050,10 +2050,18 @@ impl Parser {
             new_left.pos = node.pos;
             new_left.has_pos = true;
 
+            // `exp.right` (the old right-child wrapper) is about to be
+            // overwritten below; its own fields (`right_exp.left`/`.right`)
+            // are already absorbed into `new_left`/the rotated `exp` by
+            // value, so only the now-empty wrapper itself - never its
+            // former contents - needs freeing, same shallow `free()`
+            // `node_free` itself uses once `_free_node_contents` is done.
+            Node* old_right = exp.right;
             exp.left = new_left;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
             node.kind = .Expression(exp);
+            free(old_right);
           }
           _ -> {}
         }
@@ -2089,10 +2097,16 @@ impl Parser {
             completed.pos = node.pos;
             completed.has_pos = true;
 
+            // Same reasoning as `parse_node_shift_children_left`'s own
+            // `old_right` free: this wrapper's former contents are
+            // already absorbed by value into `completed`/the rotated
+            // `exp`, so only the now-empty wrapper itself needs freeing.
+            Node* old_right = exp.right;
             exp.left = completed;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
             node.kind = .Expression(exp);
+            free(old_right);
           }
           _ -> {}
         }
@@ -2140,7 +2154,15 @@ impl Parser {
 
             UnaryNode new_u = ru;
             new_u.operand = new_inner;
+            // `exp.right` (the old `.Unary(ru)` wrapper) is now an empty
+            // shell: `ru`'s own fields are carried over by value into
+            // `new_u` above (`ru.operand` into `new_inner` specifically),
+            // so only the wrapper itself - same reasoning as
+            // `parse_node_shift_children_left`'s own `old_right` free -
+            // needs freeing, not its former contents.
+            Node* old_right = exp.right;
             node.kind = .Unary(new_u);
+            free(old_right);
             ret true;
           }
           _ -> { ret false; }
@@ -2616,6 +2638,12 @@ impl Parser {
         outer_e.right = frac_num;
         outer_e.has_right = true;
         outer_e.op = ".";
+        // `e.right` (the original decimal-number node, e.g. the `0.1` in
+        // `t.0.1`) is now replaced by `whole_num`/`frac_num` above and
+        // never read again - a leaf node with no children of its own to
+        // preserve, so freeing it here is a plain, complete `node_free`,
+        // not the shallow `free()` the rotation functions above need.
+        node_free(e.right);
         node.kind = .Expression(outer_e);
       }
       .ExpressionParenthesis(inner) -> { self._fix_chained_tuple_access(inner); }
@@ -8881,12 +8909,18 @@ test "parse_reorder_expression rotates a right-heavy naive parse when the outer 
   inner_e.right = &c;
   inner_e.has_right = true;
   inner_e.op = "+";
-  Node inner = node_new(.Expression(inner_e));
+  // Heap-allocated, matching every real right-hand child the parser
+  // itself ever builds (`make_expression_node` always mallocs): a
+  // rotation here frees this exact wrapper once its own contents are
+  // absorbed into the rotated tree, same as it would for real parsed
+  // input.
+  Node* inner = malloc(sizeof(Node));
+  *inner = node_new(.Expression(inner_e));
 
   ExprNode outer_e = expr_node_new();
   outer_e.left = &a;
   outer_e.has_left = true;
-  outer_e.right = &inner;
+  outer_e.right = inner;
   outer_e.has_right = true;
   outer_e.op = "*";
   Node outer = node_new(.Expression(outer_e));
@@ -8977,31 +9011,38 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
 
-  // Innermost first: (c * d).
+  // Innermost first: (c * d). Heap-allocated, same as `inner` in the
+  // single-rotation test above: `cd` becomes `bcd`'s own right child
+  // below, and a rotation there frees this wrapper once its contents
+  // are absorbed, matching every real right-hand child the parser
+  // itself builds.
   ExprNode e_cd = expr_node_new();
   e_cd.left = &c;
   e_cd.has_left = true;
   e_cd.right = &d;
   e_cd.has_right = true;
   e_cd.op = "*";
-  Node cd = node_new(.Expression(e_cd));
-  p.parse_reorder_expression(&cd);
+  Node* cd = malloc(sizeof(Node));
+  *cd = node_new(.Expression(e_cd));
+  p.parse_reorder_expression(cd);
 
-  // Then (b * (c * d)) -> rotates to ((b * c) * d).
+  // Then (b * (c * d)) -> rotates to ((b * c) * d). Heap-allocated too:
+  // `bcd` becomes the top call's own right child next.
   ExprNode e_bcd = expr_node_new();
   e_bcd.left = &b;
   e_bcd.has_left = true;
-  e_bcd.right = &cd;
+  e_bcd.right = cd;
   e_bcd.has_right = true;
   e_bcd.op = "*";
-  Node bcd = node_new(.Expression(e_bcd));
-  p.parse_reorder_expression(&bcd);
+  Node* bcd = malloc(sizeof(Node));
+  *bcd = node_new(.Expression(e_bcd));
+  p.parse_reorder_expression(bcd);
 
   // Then (a * ((b * c) * d)) -> rotates to (((a * b) * c) * d).
   ExprNode e_top = expr_node_new();
   e_top.left = &a;
   e_top.has_left = true;
-  e_top.right = &bcd;
+  e_top.right = bcd;
   e_top.has_right = true;
   e_top.op = "*";
   Node n1 = node_new(.Expression(e_top));
@@ -9064,7 +9105,11 @@ test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
   comma_e.right = &y;
   comma_e.has_right = true;
   comma_e.op = ",";
-  Node comma_node = node_new(.Expression(comma_e));
+  // Heap-allocated: this becomes `top`'s own right child below, and the
+  // rotation frees this exact wrapper once its contents are absorbed,
+  // matching every real right-hand child the parser itself builds.
+  Node* comma_node = malloc(sizeof(Node));
+  *comma_node = node_new(.Expression(comma_e));
 
   // The rotation carries the top node's own op onto the new left child,
   // not `call_node`'s, so `top`'s own op must be "()" for the new left
@@ -9072,7 +9117,7 @@ test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
   ExprNode top_e = expr_node_new();
   top_e.left = &call_node;
   top_e.has_left = true;
-  top_e.right = &comma_node;
+  top_e.right = comma_node;
   top_e.has_right = true;
   top_e.op = "()";
   Node top = node_new(.Expression(top_e));
