@@ -905,7 +905,7 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .pg-inlay-hint {
   font: 500 11.5px/1 var(--mono);
   color: var(--muted);
-  background: rgba(127, 127, 127, 0.14);
+  background: var(--surface-3);
   border-radius: 4px;
   padding: 1px 4px;
   margin: 0 1px;
