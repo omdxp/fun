@@ -507,13 +507,50 @@ fun _method_table_new() MethodTable {
   ret t;
 }
 
-// Frees a signature's own scratch. Shallow throughout: `.args`'s own
-// CheckedType values, `.type_params`'s own strings, and each inner
-// Vec `.bounds` holds all alias the declaring FunctionNode's own AST
-// fields (or a token's text, transitively) rather than owning fresh
-// copies - only the four Vec containers themselves are this call's
-// own to free, never what's inside them.
+// A `CheckedType`'s own nested structure: `.generic_args`/
+// `.tuple_members` are both fresh Vecs `checked_from_dtype` builds
+// recursively (`Vec<CheckedType> t.generic_args.push(checked_from_dtype(...))`),
+// never borrowed - unlike `.name` (aliased from the declaring
+// `DataType`'s own `type_str`) and `.fn_sig` (the exact same pointer
+// as the declaring `DataType`'s own `fn_sig`, left for the AST to
+// free), which this never touches. Left unfreed, every signature
+// registered for a program this typechecks - every function, every
+// method - leaked its own return and argument types' entire generic/
+// tuple structure (an `Option<T>`, a `Vec<T>`, a `(num, str)`, and so
+// on through anything nested inside one of those), for as long as the
+// server (or a single build's own compile) kept running.
+fun _free_checked_type_contents(CheckedType* t) {
+  num i = 0;
+  for i < t.generic_args.len {
+    CheckedType ga = t.generic_args.get(i);
+    _free_checked_type_contents(&ga);
+    i = i + 1;
+  }
+  t.generic_args.free();
+  num j = 0;
+  for j < t.tuple_members.len {
+    CheckedType tm = t.tuple_members.get(j);
+    _free_checked_type_contents(&tm);
+    j = j + 1;
+  }
+  t.tuple_members.free();
+}
+
+// Frees a signature's own scratch: `.rtype` and each of `.args`'s own
+// `CheckedType`s have their own nested structure to free (see
+// `_free_checked_type_contents`); `.type_params`'s own strings and
+// each inner Vec `.bounds` holds all alias the declaring
+// FunctionNode's own AST fields (or a token's text, transitively)
+// rather than owning fresh copies, so only the containers themselves
+// are this call's own to free for those two.
 fun _free_fn_sig(FnSig* sig) {
+  _free_checked_type_contents(&sig.rtype);
+  num i = 0;
+  for i < sig.args.len {
+    CheckedType a = sig.args.get(i);
+    _free_checked_type_contents(&a);
+    i = i + 1;
+  }
   sig.args.free();
   sig.type_params.free();
   sig.bounds.free();
@@ -534,11 +571,39 @@ fun _free_borrowed_vec_map_str(Map<str, Vec<str>>* m) {
   m.free();
 }
 
+// Frees a whole `Map<str, CheckedType>`: each value's own nested
+// structure (see `_free_checked_type_contents`), then each key (built
+// fresh by `format`/`StringBuilder` at every call site that populates
+// one of these - never a borrowed AST string, unlike most other map
+// keys in this file), then the map itself.
+fun _free_checked_type_map(Map<str, CheckedType>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    CheckedType ct = m.at(name).unwrap();
+    _free_checked_type_contents(&ct);
+  }
+  for name : names {
+    free(name);
+  }
+  m.free();
+}
+
 fun _free_variant_payloads_map(Map<str, Vec<CheckedType>>* m) {
   Vec<str> names = m.keys();
   defer names.free();
   for name : names {
     Vec<CheckedType> bucket = m.at(name).unwrap();
+    // Each payload type is a fresh `checked_from_dtype` build, the
+    // same as an `FnSig`'s own `.args`/`.rtype` - see
+    // `_free_checked_type_contents`'s own note on why this is never
+    // just the bucket itself to free.
+    num i = 0;
+    for i < bucket.len {
+      CheckedType ct = bucket.get(i);
+      _free_checked_type_contents(&ct);
+      i = i + 1;
+    }
     bucket.free();
   }
   // The keys are the map's own lookup keys, so they stay alive until every
@@ -4845,7 +4910,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer checker.shapes.free();
   defer _free_shape_implementors_map(&checker.shape_implementors);
   defer _free_shape_impl_type_params_map(&checker.shape_impl_type_params);
-  defer checker.shape_elem_by_type.free();
+  defer _free_checked_type_map(&checker.shape_elem_by_type);
   defer checker.plain_enums.free();
   defer checker.globals.free();
   defer checker.enum_names.free();
