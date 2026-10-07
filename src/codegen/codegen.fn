@@ -14689,6 +14689,31 @@ impl Codegen {
           // such as `nbox.value` resolves via `resolve_field_chain`.
           ret .Some(self.resolve_field_chain(arg)?.type_name);
         }
+        if equals(e.op, "[]") && e.has_left {
+          // `recv[index]`'s own type is the element type, never the
+          // receiver's own - falling into the generic "other binary
+          // operators keep the left operand's type" case below (correct
+          // for `n - 1`, wrong here) would report a bare array/compound
+          // receiver's indexing as its own container type. An `op_index`
+          // impl method's declared return type is resolved explicitly
+          // when the receiver dispatches to one (the only shape that can
+          // diverge from the receiver's own type name); a plain array
+          // keeps today's fallback below, since its element type already
+          // *is* `e.left`'s own resolved type name.
+          fit e.left.kind {
+            .Identifier(_) -> {
+              let dispatched = self.resolve_operator_dispatch("[]", e.left);
+              if dispatched.is_some() {
+                let target = dispatched.unwrap();
+                let rt = self.lookup_impl_method_rtype(target.recv.type_name, "op_index");
+                if rt.is_some() {
+                  ret .Some(rt.unwrap().type_str);
+                }
+              }
+            }
+            _ -> {}
+          }
+        }
         if !equals(e.op, "()") || !e.has_left {
           // A comparison yields `flag`; other binary operators yield
           // whichever operand resolves, so an argument like `n - 1`

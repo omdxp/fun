@@ -2653,6 +2653,21 @@ test "operator overloading: every supported binary/unary/index operator" {
     "every supported binary/unary/index operator"
   );
   assert equals(out, "9 18 27 / 3 6 9 / true false / -1 -2 -3 / 1 2 3\n"), "expected every operator to dispatch correctly";
+
+  // The strict, non-GNU (MSVC-shaped) compile: `op_index`'s own return
+  // type (`num`) differs from its receiver's type (`Vec3`), the one
+  // shape `infer_arg_type_name`'s generic "`[]` keeps the left operand's
+  // type" fallback gets wrong, surfacing only through MSVC's va-hoist
+  // path (`a[0]` passed straight into `println_fmt` hoists a wrongly
+  // `Vec3`-typed temp initialized from an `int64_t` call). Caught
+  // exactly this way, with no real Windows host needed - see
+  // `run_source_forcing_msvc`'s own doc comment.
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "op_full_set_strict",
+    "every supported binary/unary/index operator (strict MSVC-shaped compile)"
+  );
+  assert equals(out_msvc, "9 18 27 / 3 6 9 / true false / -1 -2 -3 / 1 2 3\n"), "expected every operator to dispatch correctly under the strict MSVC-shaped compile too";
 }
 
 test "operator overloading: a type with no matching operator keeps today's behavior" {
