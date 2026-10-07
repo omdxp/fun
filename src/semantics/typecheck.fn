@@ -219,6 +219,11 @@ pub fun type_name(CheckedType t) str {
 // The name an instantiation is registered under, which carries its
 // arguments the way an impl on a concrete instantiation is written
 // (`impl Vec<str>` registers as `Vec__str`).
+// Borrows `t.name` when `t` has no generic args at all (the common
+// case); allocates a fresh string otherwise. Every caller needs to
+// check `t.generic_args.len` itself (or a nested arg's own, for the
+// recursive case just below) before deciding whether the result is
+// theirs to free - mirrors `canonical_type_name`'s identical contract.
 pub fun mangled_name(CheckedType t) str {
   if t.generic_args.len == 0 {
     ret t.name;
@@ -228,7 +233,12 @@ pub fun mangled_name(CheckedType t) str {
   num i = 0;
   for i < t.generic_args.len {
     b.append("__");
-    b.append(mangled_name(t.generic_args.get(i)));
+    CheckedType arg = t.generic_args.get(i);
+    str arg_mangled = mangled_name(arg);
+    b.append(arg_mangled);
+    if arg.generic_args.len > 0 {
+      free(arg_mangled);
+    }
     i = i + 1;
   }
   ret b.build();
@@ -1142,6 +1152,12 @@ impl Checker {
     CheckedType named = t;
     named.name = self.canonical_type_name(t.name);
     str mangled = mangled_name(named);
+    flag mangled_is_fresh = named.generic_args.len > 0;
+    defer {
+      if mangled_is_fresh {
+        free(mangled);
+      }
+    }
     if !equals(mangled, named.name) && implementors.has(mangled) {
       ret true;
     }
@@ -1162,11 +1178,17 @@ impl Checker {
     CheckedType named = t;
     named.name = self.canonical_type_name(t.name);
     str mangled = mangled_name(named);
+    flag mangled_is_fresh = named.generic_args.len > 0;
     StringBuilder mangled_key_sb = string_builder_init(24);
     mangled_key_sb.append(mangled);
     mangled_key_sb.append("::");
     mangled_key_sb.append(shape_name);
-    let by_mangled = self.shape_elem_by_type.at(mangled_key_sb.build());
+    if mangled_is_fresh {
+      free(mangled);
+    }
+    str mangled_key = mangled_key_sb.build();
+    let by_mangled = self.shape_elem_by_type.at(mangled_key);
+    free(mangled_key);
     if by_mangled.is_some() {
       ret by_mangled;
     }
@@ -1174,7 +1196,9 @@ impl Checker {
     bare_key_sb.append(named.name);
     bare_key_sb.append("::");
     bare_key_sb.append(shape_name);
-    let by_bare = self.shape_elem_by_type.at(bare_key_sb.build());
+    str bare_key = bare_key_sb.build();
+    let by_bare = self.shape_elem_by_type.at(bare_key);
+    free(bare_key);
     if by_bare.is_none() {
       ret .None;
     }
@@ -2430,6 +2454,12 @@ impl Checker {
   receiver_method(CheckedType receiver, str method) Option<FnSig> {
     receiver.name = self.canonical_type_name(receiver.name);
     str instantiated = mangled_name(receiver);
+    flag instantiated_is_fresh = receiver.generic_args.len > 0;
+    defer {
+      if instantiated_is_fresh {
+        free(instantiated);
+      }
+    }
     if !equals(instantiated, receiver.name) {
       let found = self.method_signature(instantiated, method);
       if found.is_some() {
