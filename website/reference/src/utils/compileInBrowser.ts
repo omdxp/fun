@@ -550,6 +550,35 @@ export async function getCompletions(
   return flsPositionRequest(files, activePath, "textDocument/completion", line, character);
 }
 
+// `textDocument/inlayHint` takes a range, not a position, and answers
+// with a list rather than one result - its own shape, not
+// `flsPositionRequest`'s. `[]` on any failure, same reasoning as every
+// other fls feature here: an overlay the editor works fine without.
+export async function getInlayHints(
+  files: Record<string, string>,
+  activePath: string,
+  startLine: number,
+  endLine: number,
+): Promise<any[]> {
+  try {
+    const uri = uriFor(activePath);
+    const text = files[activePath] ?? "";
+    const id = "1";
+    const messages = [
+      didOpenMessage(uri, text),
+      requestMessage(id, "textDocument/inlayHint", {
+        textDocument: { uri },
+        range: { start: { line: startLine, character: 0 }, end: { line: endLine, character: 0 } },
+      }),
+    ];
+    const results = await runFlsSessionQueued(`inlayHint:${activePath}`, files, messages);
+    const response = results.find((r) => r && r.id === id);
+    return Array.isArray(response?.result) ? response.result : [];
+  } catch {
+    return [];
+  }
+}
+
 // `textDocument/didOpen` alone - `Server.opened`'s own synchronous
 // `report()` always publishes exactly one `publishDiagnostics`
 // notification as a side effect, so no second message is needed.

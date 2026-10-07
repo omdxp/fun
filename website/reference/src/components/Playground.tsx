@@ -7,6 +7,9 @@ import {
   highlightActiveLine,
   hoverTooltip,
   showTooltip,
+  Decoration,
+  type DecorationSet,
+  WidgetType,
   type Tooltip,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
@@ -23,6 +26,7 @@ import {
   getCompletions,
   getDefinition,
   getSignatureHelp,
+  getInlayHints,
   warmPlaygroundRuntime,
 } from "../utils/compileInBrowser";
 
@@ -68,6 +72,49 @@ function contentsToText(contents: any): string {
   if (Array.isArray(contents)) return contents.map(contentsToText).join("\n\n");
   return "";
 }
+
+// One `textDocument/inlayHint` result rendered as CodeMirror ghost
+// text - a `let`-inferred local's own real type, a call's own
+// parameter name, exactly as VS Code already shows them for the same
+// server. `InlayHintKind` (LSP's own numbering): 2 is a parameter
+// name, anything else (1, or absent) a type.
+class InlayHintWidget extends WidgetType {
+  constructor(
+    private readonly label: string,
+    private readonly kind: number | undefined,
+  ) {
+    super();
+  }
+  eq(other: InlayHintWidget) {
+    return other.label === this.label && other.kind === this.kind;
+  }
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "pg-inlay-hint" + (this.kind === 2 ? " pg-inlay-hint-param" : "");
+    span.textContent = this.label;
+    return span;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+const setInlayHints = StateEffect.define<DecorationSet>();
+const inlayHintsField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setInlayHints)) return e.value;
+    }
+    // An edit without a fresh response yet (still in flight, or this
+    // file isn't the active fls session) keeps showing the last known
+    // hints, remapped across the change, rather than flashing empty -
+    // the same tolerance every other fls-backed feature here already
+    // has for a stale-but-still-roughly-right answer.
+    return value.map(tr.changes);
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 // Inline markdown within one line/paragraph: a link (`[label](url)`,
 // fls's own "See also" footer wraps the label in backticks too, which
@@ -465,6 +512,33 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setActiveFile(targetPath);
   };
 
+  // Whatever's actually scrolled into view, not the whole document - a
+  // long file would otherwise pay for (and show stale types for)
+  // hundreds of off-screen lines every single edit. Component-level
+  // rather than closed over inside `stateFor` so both an edit/scroll
+  // (through the state's own updateListener) and a fresh mount/file
+  // switch (no update event of its own to hook) can call the same
+  // function instead of duplicating it.
+  const refreshInlayHints = async (view: EditorView, path: string) => {
+    if (!flsReadyRef.current) return;
+    const firstLine = view.state.doc.lineAt(view.viewport.from).number - 1;
+    const lastLine = view.state.doc.lineAt(view.viewport.to).number - 1;
+    const hints = await getInlayHints(filesRef.current, path, firstLine, lastLine);
+    if (!Array.isArray(hints) || hints.length === 0) {
+      view.dispatch({ effects: setInlayHints.of(Decoration.none) });
+      return;
+    }
+    const decorations = hints
+      .filter((h) => h?.position)
+      .map((h) => {
+        const pos = offsetFor(view.state.doc, h.position.line, h.position.character);
+        const label = (h.paddingLeft ? " " : "") + String(h.label) + (h.paddingRight ? " " : "");
+        return Decoration.widget({ widget: new InlayHintWidget(label, h.kind), side: 1 }).range(pos);
+      })
+      .sort((a, b) => a.from - b.from);
+    view.dispatch({ effects: setInlayHints.of(Decoration.set(decorations)) });
+  };
+
   const stateFor = (path: string, content: string): EditorState => {
     const existing = statesRef.current.get(path);
     if (existing) return existing;
@@ -508,6 +582,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     };
 
     let signatureTimer: number | undefined;
+    let inlayHintTimer: number | undefined;
 
     const state = EditorState.create({
       doc: content,
@@ -579,6 +654,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           },
         }),
         signatureTooltipField,
+        inlayHintsField,
         EditorView.updateListener.of((update) => {
           // `stateFor` caches one `EditorState` per path and reuses it
           // unconditionally on every later visit to that file (so undo
@@ -625,6 +701,14 @@ export default function Playground({ samples }: { samples: Sample[] }) {
               });
             }, 400);
           }
+          // Re-requested on scroll too (`viewportChanged`, with no doc
+          // edit), not just on edit - a file long enough to scroll
+          // means the lines just scrolled into view were never in any
+          // earlier request's own range.
+          if (update.docChanged || update.viewportChanged) {
+            window.clearTimeout(inlayHintTimer);
+            inlayHintTimer = window.setTimeout(() => refreshInlayHints(update.view, path), 400);
+          }
         }),
       ],
     });
@@ -661,8 +745,13 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
       view.focus();
     }
+    // A freshly created/restored state has no inlay hints of its own
+    // yet - nothing dispatches an update here, so without this a newly
+    // opened or switched-to file would stay blank until the next edit
+    // or scroll.
+    refreshInlayHints(view, activeFile);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFile, generation]);
+  }, [activeFile, generation, flsReady]);
 
   // The dark/light Fun Web highlight style is baked into each file's
   // `EditorState` at creation time (no reconfigurable compartment -
