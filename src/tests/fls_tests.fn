@@ -1462,6 +1462,56 @@ test "completion offers a declared type alias name alongside compound/enum/shape
   assert contains(out, `"label":"Meters"`), "expected the alias offered among general completions";
 }
 
+test "top-level completion offers an imported module's pub names, never its own private helpers" {
+  // Regression: `_declared` walked the whole merged program (every
+  // transitively imported file's own top-level declarations) and
+  // offered every name it found, with no regard for `pub` - a reader
+  // typing in their own file was offered another module's private
+  // helpers (`_string_len`, `_is_space`, ...), which fails to compile
+  // the instant one is accepted (`check_visibility`, typecheck.fn).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///pubonlycompletion.fn";
+  doc.path = "pubonlycompletion.fn";
+  doc.text = `use std.string;
+  `fun main() {
+  `  l
+  `}`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 2, 3, false);
+  assert contains(out, `"label":"len"`), "expected std.string's own pub 'len' to be offered";
+  assert !contains(out, `"label":"_string_len"`), "expected a private helper from an imported file to be filtered out";
+  assert !contains(out, `"label":"_is_space"`), "expected every private helper filtered, not just one";
+}
+
+test "dot-completion on a stdlib receiver offers its pub methods, never its own private internals" {
+  // Same root cause as the top-level case just above, but for
+  // `_members_of`'s own impl-method walk: `Map<K, V>`'s own internal
+  // helpers (`alloc`, `hash_key`, `find_insert_index`, ...) are plain,
+  // non-`pub` methods on the same impl block as `init`/`put`/`at` -
+  // offering them suggests a call that can never compile from outside
+  // map.fn.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///maprecv.fn";
+  doc.path = "maprecv.fn";
+  doc.text = `use std.map;
+  `fun main() {
+  `  Map<str, num> m;
+  `  m.
+  `}`;
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 3, 4, false);
+  assert contains(out, `"label":"init"`), "expected Map's own pub 'init' to be offered";
+  assert contains(out, `"label":"put"`), "expected every pub method, not just one";
+  assert !contains(out, `"label":"alloc"`), "expected a private internal method filtered out";
+  assert !contains(out, `"label":"hash_key"`), "expected every private internal filtered, not just one";
+}
+
 test "go-to-definition on a shape-typed receiver's method lands on the method's own line, not the shape's" {
   // User-reported. ShapeMethodSig carried no position of its own -
   // shape_method_declaration fell back to the whole shape node's
