@@ -1836,7 +1836,12 @@ impl Parser {
         if is_sizeof_type_operand {
           StringBuilder named = string_builder_init(len(name) + 4);
           named.append(name);
-          named.append(self.state.take_sizeof_pointer_stars());
+          // `append` copies bytes, not ownership - the fresh star-run
+          // string needs freeing right after, the same gap `_read_digits`
+          // callers had.
+          str stars = self.state.take_sizeof_pointer_stars();
+          named.append(stars);
+          free(stars);
           name = named.build();
         }
 
@@ -2493,7 +2498,9 @@ impl Parser {
               self.state.token_next(); // consume the type keyword
               StringBuilder named = string_builder_init(8);
               named.append(kw);
-              named.append(self.state.take_sizeof_pointer_stars());
+              str stars2 = self.state.take_sizeof_pointer_stars();
+              named.append(stars2);
+              free(stars2);
               str operand = named.build();
               Node node = node_new(.Identifier(operand));
               node.pos = t.pos;
