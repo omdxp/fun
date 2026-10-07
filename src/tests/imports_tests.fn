@@ -191,3 +191,20 @@ test "a public accessor reaching a leading-underscore field compiles" {
   );
   assert contains(out, "balance"), "expected the accessor method to be emitted";
 }
+
+test "'let' from an imported untyped const resolves a real type, not the __let_infer__ sentinel" {
+  // Regression: `register_top_level_consts` registered an untyped
+  // `pub const`'s own `__let_infer__` sentinel verbatim, unresolved -
+  // every OTHER file's own reference to it (through `let x = MAX;`)
+  // read that same literal string back as if it were the const's real
+  // type, and wrote it straight into the generated C as `x`'s own
+  // declared type: a guaranteed compile error, not just an imprecise
+  // one. `emit_global_variable` already resolved this correctly for
+  // the const's own declaration; the registry just never matched it.
+  let out = emit_file(
+    "src/tests/fixtures/untyped_const_main.fn",
+    "'let' from an imported untyped const resolves a real type, not the __let_infer__ sentinel"
+  );
+  assert !contains(out, "__let_infer__"), "expected the sentinel never to reach the generated C";
+  assert contains(out, "int64_t x = MAX;"), "expected 'x' to be declared with MAX's own real inferred type";
+}

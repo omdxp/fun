@@ -1,0 +1,8 @@
+use untyped_const_lib;
+use std.c.io;
+
+fun main() num {
+  let x = MAX;
+  printf("%lld\n", x);
+  ret 0;
+}
