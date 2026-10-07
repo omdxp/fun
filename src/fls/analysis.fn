@@ -196,5 +196,6 @@ impl AnalysisCache {
   pub free() {
     self.entries.free();
     self.imports.files.free();
+    self.imports.preload_cache.free();
   }
 }

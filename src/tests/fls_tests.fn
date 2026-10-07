@@ -357,6 +357,66 @@ test "diagnose caches per document revision, and drops the cache once the revisi
   third.free();
 }
 
+test "editing a document through the real edit lifecycle never re-serves a stale entry-file parse" {
+  // Regression: `_parse_and_merge_source`'s own entry-file cache entry
+  // (`cache.files[doc.path]`) used to store `fresh.source` as the
+  // caller's own live document text directly, not an owned copy of
+  // it. `Documents.replaced`/`.edited` free and rebuild that exact
+  // text on every edit, so the cached `.source` this file's own next
+  // edit checks against became a dangling pointer the moment this
+  // document was edited again - and the allocator very often hands
+  // the next edit's own new buffer back at that same freed address,
+  // so the "has this file changed" comparison kept reporting "no"
+  // and silently reused the previous edit's own stale parse instead
+  // of ever noticing the real change. Goes through the real
+  // `Documents` API (not a hand-built `Document` literal, which
+  // never exercises `free()`+rebuild at all) so this actually
+  // reproduces the lifecycle the bug depended on.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  str uri = "file:///stale_entry_cache.fn";
+  docs.opened(
+    uri,
+    `fun helper() num {
+    `  ret 1;
+    `}
+    `fun main() num {
+    `  ret helper();
+    `}`,
+    1
+  );
+  let d1 = docs.at(uri);
+  assert d1.is_some(), "expected the opened document to be tracked";
+  Vec<Diagnostic> first = diagnose(&reads, &dcache, d1.unwrap());
+  assert first.len == 0, "expected no unused-function warning while 'main' still calls 'helper'";
+  first.free();
+
+  // A real whole-document replace, same byte-length ballpark as the
+  // original - the shape most likely to have the allocator hand back
+  // the exact address `free()` on the old text just released.
+  docs.replaced(
+    uri,
+    `fun helper() num {
+    `  ret 1;
+    `}
+    `fun main() num {
+    `  ret 2;
+    `}`,
+    2
+  );
+  let d2 = docs.at(uri);
+  Document doc2 = d2.unwrap();
+  assert !contains(doc2.text, "helper();"), "expected the real edit to have actually landed";
+  Vec<Diagnostic> second = diagnose(&reads, &dcache, doc2);
+  assert second.len > 0, "expected 'helper' to now be reported unused - a stale reused parse would still see it called";
+  second.free();
+}
+
 test "an unmet expect diagnoses as an error, at the expect statement's own position" {
   // `analyze`'s own unmet-expectation case used to surface as
   // DIAG_SEVERITY_WARNING at file start (0,0), always - it's a genuine
