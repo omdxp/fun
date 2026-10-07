@@ -307,6 +307,17 @@ pub compound ParsedFile {
   str source;
   str symbols_key;
   Vec<Node> nodes;
+  // The tokens `nodes` was parsed from, kept alive rather than freed:
+  // `nodes`'s own string fields (an `Identifier`, an `ExprNode.op`, ...)
+  // point directly into these tokens' `Sval` content rather than owning
+  // copies of their own (the whole-codebase convention - neither
+  // `node_free` nor a clone of `nodes` ever frees a node's own string
+  // content). Freeing only `nodes` and never these would leak every
+  // string this file's text contains, for as long as the server keeps
+  // running; freeing both together, exactly once, on replacement (see
+  // `_parse_and_merge_source`'s own stale-entry handling below) is what
+  // actually releases them.
+  Vec<Token> tokens;
 }
 
 // What has been parsed, by resolved path. A long-running server keeps
@@ -467,10 +478,29 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
   if err.is_some() {
     ret .Err(err.unwrap());
   }
-  // The entry file is parsed once more here only to keep its own nodes,
-  // which the merge settles and then drops.
+  // The call above just parsed (or confirmed unchanged and reused) the
+  // entry file under its own path, with `current_alias` the empty
+  // string - exactly `_parse_and_merge_source`'s own `cacheable`
+  // condition - so `cache.files` now holds it. Cloning that straight
+  // out, the same safe, string-sharing way every import's own cached
+  // entry already gets reused across the documents that import it, is
+  // strictly cheaper than this used to be (a second full tokenize and
+  // parse of the same text, every single call) and, just as important,
+  // no longer leaks that second parse's own tokens the way the entry
+  // file's first parse used to before `ParsedFile.tokens` existed - see
+  // its own note just above. Falling back to a fresh, independent parse
+  // covers the one case where this path's own entry isn't cacheable
+  // (practically unreachable here, since `current_alias` is always ""
+  // for a top-level entry) rather than ever returning no entry nodes.
   ProgramMergeResult r;
-  r.entry_nodes = _entry_nodes(entry_path, entry_source);
+  str normalized_entry_path = _normalize_path(entry_path);
+  let cached_entry = cache.files.at(normalized_entry_path);
+  if cached_entry.is_some() {
+    ParsedFile held_entry = cached_entry.unwrap();
+    r.entry_nodes = clone_node_tree(&held_entry.nodes);
+  } else {
+    r.entry_nodes = _entry_nodes(entry_path, entry_source);
+  }
   r.nodes = merged;
   r.aliases = aliases;
   r.alias_rename_keys = rename_keys;
@@ -951,12 +981,15 @@ fun _parse_and_merge_source(
     state.global_symbols = *global_symbols;
     Parser p = parser_new(&state);
     let perr = p.parse();
-    // Just the backing array - see the identical note in `_entry_nodes`.
-    state.tokens.free();
     // Not `global_symbols.free()`: it's `*global_symbols` above, the
     // caller's own map, not this call's to free.
     free_parse_state_internal(&state);
     if perr.is_some() {
+      // Not cached either way below, so nothing else will ever reach
+      // `state.nodes` to read its borrowed strings - safe to fully free
+      // here, tokens included, unlike the success path just below.
+      free_node_tree(&state.nodes);
+      free_token_vec(&state.tokens);
       ret .Some(format("parse error in {str}", path));
     }
     parsed_nodes = state.nodes;
@@ -965,17 +998,39 @@ fun _parse_and_merge_source(
       // freed first: every consumer of a cached entry's own `nodes`
       // clones it rather than borrowing (`_parse_and_merge_source`'s
       // own push loop below), so nothing outside this cache still
-      // points into the entry being replaced.
+      // points into the entry being replaced. Its own `tokens` are
+      // freed deeply here too (see `ParsedFile.tokens`'s own note) -
+      // this is the one point that's safe, since nothing but `old`
+      // itself and clones of its *nodes* (which never touch strings)
+      // ever reached these strings.
       let stale = cache.files.at(path);
       if stale.is_some() {
         ParsedFile old = stale.unwrap();
         free_node_tree(&old.nodes);
+        free_token_vec(&old.tokens);
       }
       ParsedFile fresh;
       fresh.source = src;
       fresh.symbols_key = symbols_key;
+      // `state.tokens` moves in whole: `fresh.tokens` is now its sole
+      // owner, freed only above, the next time this path's entry is
+      // replaced (or, for the process's very last revision of it,
+      // never - no different from any other resource still live when
+      // the server exits).
+      fresh.tokens = state.tokens;
       fresh.nodes = parsed_nodes;
       cache.files.put(path, fresh);
+    } else {
+      // An aliased import, reparsed fresh every time and never cached
+      // (see this function's own note above on why) - its `nodes` is
+      // about to be cloned into `merged` below and then is itself
+      // discarded with nothing left pointing at it, but nothing downstream
+      // of this whole call ever frees its *tokens* either, so this one
+      // path still leaks that text's own strings on every call. Narrower,
+      // pre-existing, and separate from the unbounded cacheable-path leak
+      // this change fixes - left as-is rather than widening this change's
+      // own blast radius.
+      state.tokens.free();
     }
   }
 

@@ -64,7 +64,11 @@ impl AnalysisCache {
       // merged cross-file program) is safe to free this deeply too,
       // not just `entry_nodes`: `_parse_and_merge_source` clones every
       // node it pulls from `self.imports` rather than sharing it, so
-      // this document's own copy is exclusively its own.
+      // this document's own copy is exclusively its own. Neither this
+      // nor `free_node_tree` below touches a node's own string content
+      // (an `Identifier`, an `ExprNode.op`, ...) - that's `self.imports`'
+      // own `ParsedFile.tokens` to free, on its own schedule (see that
+      // field's note), not tied to this document's revision at all.
       if found.lexed {
         // Deep: this is AnalysisCache's own independent tokenize()
         // call below, not the tokens a parse ran against, so nothing
