@@ -273,11 +273,15 @@ impl ParseState {
         if !is_shr {
           ret;
         }
+        // `substr` forces a genuine heap copy, not a bare C string
+        // literal: token cleanup frees every token's own text as owned
+        // heap memory, which crashes on a literal (see
+        // `split_angle_closer_equals_token_if_needed`'s identical note).
         Token first = t;
-        first.data = .Sval(">");
+        first.data = .Sval(substr(">", 0, 1));
         self.tokens.set(self.pindex, first);
         Token second = t;
-        second.data = .Sval(">");
+        second.data = .Sval(substr(">", 0, 1));
         self.tokens.insert(self.pindex + 1, second);
       }
       .None -> {}
@@ -339,11 +343,15 @@ impl ParseState {
         if !is_shl {
           ret;
         }
+        // `substr` forces a genuine heap copy, not a bare C string
+        // literal: token cleanup frees every token's own text as owned
+        // heap memory, which crashes on a literal (see
+        // `split_angle_closer_equals_token_if_needed`'s identical note).
         Token first = t;
-        first.data = .Sval("<");
+        first.data = .Sval(substr("<", 0, 1));
         self.tokens.set(self.pindex, first);
         Token second = t;
-        second.data = .Sval("<");
+        second.data = .Sval(substr("<", 0, 1));
         self.tokens.insert(self.pindex + 1, second);
       }
       .None -> {}
