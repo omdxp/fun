@@ -3570,6 +3570,13 @@ impl Parser {
     Node* node_ptr = malloc(sizeof(Node));
     *node_ptr = node;
     ScopeEntity* entity = self.new_scope_entity(node_ptr);
+    // `create_node` below copies `*node_ptr` by value into
+    // `state.nodes` - this entity and that copy now share every
+    // nested `Node*`/`DataType*` field value, so only that copy's
+    // own teardown may free what they point to; this entity's own
+    // `node` is freed as a bare wrapper on scope exit (see
+    // `free_scope_entity`).
+    entity.node_is_shared = true;
 
     self.create_node(node_ptr);
     self.state.push_scope_entity(entity);
@@ -7954,6 +7961,12 @@ impl Parser {
     Node* self_node_ptr = malloc(sizeof(Node));
     *self_node_ptr = self_node;
     ScopeEntity* self_entity = self.new_scope_entity(self_node_ptr);
+    // Unlike a destructuring/`vargs` binding's own entity, `self`'s
+    // own node is pushed below by the exact same pointer (not a
+    // value copy) into `margs`/the method's own `args` - that Vec's
+    // own entry is the sole copy that exists at all, so this entity
+    // must not free any part of it, not even its own wrapper.
+    self_entity.node_is_borrowed = true;
     self.state.push_scope_entity(self_entity);
 
     Vec<Node*> margs;
