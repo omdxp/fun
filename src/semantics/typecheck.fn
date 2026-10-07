@@ -2397,6 +2397,13 @@ impl Checker {
   // name misses; this resolves it back to the bare name once doing so
   // actually helps, and leaves anything else (a generic mangled name, a
   // genuinely unknown type) untouched.
+  // Always borrows `name` - never a fresh allocation, even on the
+  // stripped-suffix path, since every caller throughout this file treats
+  // the result as borrowed and never frees it (this is called from deep
+  // inside hot paths like `receiver_method`/`has_method`, many times per
+  // typecheck pass): offsetting straight into `name`'s own buffer rather
+  // than `substr`-copying it is safe exactly because `name` itself
+  // already outlives every use of the returned pointer.
   canonical_type_name(str name) str {
     if self.compounds.at(name).is_some() || self.methods.at(name).is_some() ||
       self.shapes.has(name) || self.plain_enums.has(name) {
@@ -2406,7 +2413,7 @@ impl Checker {
     if sep < 0 {
       ret name;
     }
-    ret substr(name, sep + 2, len(name) - sep - 2);
+    ret name + sep + 2;
   }
 
   has_method(str type_name, str method) flag {
