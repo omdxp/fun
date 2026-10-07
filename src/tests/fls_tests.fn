@@ -6835,6 +6835,32 @@ test "hover on a 'let'-inferred top-level const shows its character-literal type
   assert contains(hovered, "chr CHAR"), "expected the character-literal const to hover as chr";
 }
 
+test "hover on a 'let' local bound to an imported untyped const shows its own concrete type, not the const's" {
+  // Regression: `_full_declared_type` assumed a `Declaration.detail`
+  // always ends in the bare name ("Type name") - true for a field or
+  // param, but a const's own detail is "const Type name = literal"
+  // (`lookup_top_level`'s own `.Variable` case). Resolving `x`'s type
+  // from `MAX`'s own detail by just cutting off `x`'s name length from
+  // the end chopped characters out of MAX's own literal instead, and
+  // even once that was fixed, the leading "const " qualifier leaked
+  // into `x`'s own hover - correct for MAX itself, wrong for `x`,
+  // which is an ordinary mutable `let`, not a const.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///src/tests/fixtures/untyped_const_probe.fn";
+  doc.path = "src/tests/fixtures/untyped_const_probe.fn";
+  doc.text = `use untyped_const_lib;
+  `fun main() {
+  `  let x = MAX;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 2, 6);
+  assert contains(hovered, "num x"), "expected x's own hover to show its real inferred type";
+  assert !contains(hovered, "const"), "expected no 'const' qualifier leaked from MAX onto x, an ordinary mutable let";
+}
+
 test "completion offers 'sizeof', never a real lexer keyword but contextual at a call site" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
