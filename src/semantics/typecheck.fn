@@ -1688,6 +1688,10 @@ fun _is_type_param(FunctionNode f, str name) flag {
 
 fun _erase_type_params(FunctionNode f, CheckedType t) CheckedType {
   if _is_type_param(f, t.name) {
+    // `t` is owned outright by every caller (see each call site's own
+    // note), and is about to be replaced wholesale, not returned - its
+    // own contents, if any, have nowhere else to go but freed here.
+    _free_checked_type_contents(&t);
     ret checked_unknown();
   }
   ret t;
