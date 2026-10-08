@@ -1907,14 +1907,34 @@ fun _fun_format_specs(str fmt) Vec<str> {
     }
     if close > 0 {
       str word = substr(fmt, i + 1, close - i - 1);
-      if equals(word, "str") || equals(word, "num") || equals(word, "dec") ||
-        equals(word, "flag") || equals(word, "chr") || equals(word, "ptr") ||
-        equals(word, "raw") {
-        out.push(word);
+      // Pushes the matched literal, not `word` itself: every entry
+      // `out` ever holds is either this fixed vocabulary or the plain
+      // literal `""` above, never a fresh allocation, so a caller
+      // freeing `out` only needs to free its own backing array - the
+      // same convention `_c_format_specs` already follows.
+      flag matched = true;
+      if equals(word, "str") {
+        out.push("str");
+      } elif equals(word, "num") {
+        out.push("num");
+      } elif equals(word, "dec") {
+        out.push("dec");
+      } elif equals(word, "flag") {
+        out.push("flag");
+      } elif equals(word, "chr") {
+        out.push("chr");
+      } elif equals(word, "ptr") {
+        out.push("ptr");
+      } elif equals(word, "raw") {
+        out.push("raw");
+      } else {
+        matched = false;
+      }
+      free(word);
+      if matched {
         i = close + 1;
         continue;
       }
-      free(word);
     }
     i = i + 1;
   }
