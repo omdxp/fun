@@ -645,6 +645,11 @@ fun _preload_claim(PreloadShared* shared, str path) {
   if !shared.visited.has(norm) {
     shared.visited.add(norm);
     _preload_enqueue_locked(shared, norm);
+  } else {
+    // Already claimed by an earlier call (common: many files import
+    // the same shared module) - `norm` has nowhere to go but freed
+    // here, or every such call leaks its own normalized copy.
+    free(norm);
   }
   shared.mu.unlock();
 }
