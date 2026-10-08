@@ -407,11 +407,22 @@ impl TypeEnv {
     self.scopes.push(scope);
   }
 
+  // Every binding this scope holds owns an independent, deep-cloned
+  // `CheckedType` (see `bind`'s own note on why), so freeing each one
+  // here can never reach back into a still-live outer scope's own
+  // binding, or into whatever `infer()` call site originally produced
+  // the value a binding started from.
   pub pop() {
     if self.scopes.len == 0 {
       ret;
     }
     Map<str, Binding> scope = self.scopes.pop();
+    Vec<str> names = scope.keys();
+    defer names.free();
+    for name : names {
+      Binding b = scope.at(name).unwrap();
+      _free_checked_type_contents(&b.type);
+    }
     scope.free();
   }
 
@@ -419,12 +430,23 @@ impl TypeEnv {
     self.bind(name, type, false);
   }
 
+  // `type` is deep-cloned before storing: a bare `let y = x;` infers
+  // `y`'s own type by looking `x` up, and that lookup returns `x`'s
+  // own stored `CheckedType` by value - its `generic_args`/
+  // `tuple_members` Vecs are shallow copies of the *same* backing
+  // arrays `x`'s own binding holds, not independent ones. Storing
+  // that straight into `y`'s own binding would leave two scopes'
+  // worth of bindings sharing one allocation, which `pop`'s own
+  // per-binding free (see its note) would then free twice the moment
+  // both scopes eventually pop - once safely, once as a double free.
+  // A clone here means every binding, however it was produced, owns
+  // its own copy from the moment it's stored.
   pub bind(str name, CheckedType type, flag is_const) {
     if self.scopes.len == 0 {
       self.push();
     }
     Binding b;
-    b.type = type;
+    b.type = _clone_checked_type(type);
     b.is_const = is_const;
     self.scopes.data[self.scopes.len - 1].put(name, b);
   }
@@ -534,6 +556,33 @@ fun _free_checked_type_contents(CheckedType* t) {
     j = j + 1;
   }
   t.tuple_members.free();
+}
+
+// A deep, independently-owned copy of `t`: `.generic_args`/
+// `.tuple_members` get their own fresh Vecs, each element cloned the
+// same way, rather than the shallow struct copy an ordinary `CheckedType
+// x = y;` assignment already does (same backing arrays as `y`'s own,
+// per the whole-codebase Vec-is-a-value-type convention). `.name` and
+// `.fn_sig` stay aliased, same as `_free_checked_type_contents` never
+// touches them - both are borrowed from the AST either way, cloned or
+// not. Used by `TypeEnv.bind` so every binding owns its own copy,
+// independent of whatever `infer()` called site (an `env.lookup`
+// among them) originally produced the value from.
+fun _clone_checked_type(CheckedType t) CheckedType {
+  CheckedType c = t;
+  c.generic_args.init(t.generic_args.len);
+  num i = 0;
+  for i < t.generic_args.len {
+    c.generic_args.push(_clone_checked_type(t.generic_args.get(i)));
+    i = i + 1;
+  }
+  c.tuple_members.init(t.tuple_members.len);
+  num j = 0;
+  for j < t.tuple_members.len {
+    c.tuple_members.push(_clone_checked_type(t.tuple_members.get(j)));
+    j = j + 1;
+  }
+  ret c;
 }
 
 // Frees a signature's own scratch: `.rtype` and each of `.args`'s own
@@ -920,23 +969,42 @@ fun _without_self(FnSig sig, FunctionNode f) FnSig {
     ret sig;
   }
   FnSig out = sig;
+  // `out.args`/`.arg_params` below are about to be overwritten with a
+  // fresh Vec, same shape as `TypeEnv.bind`'s own aliasing concern:
+  // `out = sig;` just shallow-copied `sig`'s own backing arrays, not
+  // cloned them, so `.init()` replacing that copy here would abandon
+  // `sig`'s own original ones - still reachable only through `sig`,
+  // which nothing past this function ever reads again once this
+  // returns. `self`'s own slot (element 0, the only one actually
+  // dropped - every other element is transferred below, not copied
+  // again) is the one entry here whose own nested structure needs
+  // freeing explicitly; the rest travel into `out.args` by value and
+  // stay owned exactly once, same as before this change.
+  Vec<CheckedType> old_args = out.args;
+  if old_args.len > 0 {
+    CheckedType self_type = old_args.get(0);
+    _free_checked_type_contents(&self_type);
+  }
   out.args.init(sig.args.len);
   num i = 1;
   for i < sig.args.len {
     out.args.push(sig.args.get(i));
     i = i + 1;
   }
+  old_args.free();
   // What each argument was written as has to lose its first entry too:
   // a call names arguments after `self`, and the two lists are read
   // side by side. Leaving this one long shifted every argument by a
   // place, so a method's own bound was tested against `self` and never
   // against what the call supplied.
+  Vec<str> old_arg_params = out.arg_params;
   out.arg_params.init(sig.arg_params.len);
   num a = 1;
   for a < sig.arg_params.len {
     out.arg_params.push(sig.arg_params.get(a));
     a = a + 1;
   }
+  old_arg_params.free();
   out.min_args = sig.min_args;
   if out.min_args > 0 {
     out.min_args = out.min_args - 1;
@@ -3407,15 +3475,11 @@ fun _is_assignment(str op) flag {
     ret false;
   }
   str head = substr(op, 0, len(op) - 1);
-  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") ||
-    equals(
-    head,
-    "%"
-  ) || equals(head, "&") || equals(head, "|") || equals(head, "^") || equals(head, "<<") ||
-    equals(
-    head,
-    ">>"
-  );
+  flag matched = equals(head, "+") || equals(head, "-") || equals(head, "*") ||
+    equals(head, "/") || equals(head, "%") || equals(head, "&") || equals(head, "|") ||
+    equals(head, "^") || equals(head, "<<") || equals(head, ">>");
+  free(head);
+  ret matched;
 }
 
 // The value an expression is known to hold when it is written out of
