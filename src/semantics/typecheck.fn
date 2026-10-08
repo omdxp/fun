@@ -1706,6 +1706,8 @@ fun _erase_named(CheckedType t, Vec<str>* names) CheckedType {
   num i = 0;
   for i < names.len {
     if equals(names.get(i), t.name) {
+      // Same reasoning as `_erase_type_params`'s own discard above.
+      _free_checked_type_contents(&t);
       ret checked_unknown();
     }
     i = i + 1;
