@@ -3400,6 +3400,15 @@ impl Parser {
     bn.statements = stmts;
     bnode_ptr.kind = .Body(bn);
     self.state.nodes.push(*bnode_ptr);
+    // `bnode_ptr` was only ever a stable address for `self.current_body`
+    // to point at while this block's own statements were being parsed
+    // (restored to `prev_body` above, before this point) - its value is
+    // now copied into `state.nodes`, so the wrapper itself is this
+    // call's own to free. Every `{ ... }` block in the whole program
+    // leaked one of these - a function body, a test body, an if/for/
+    // while/fit block, however deeply nested - for as long as the
+    // server (or a single build's own compile) kept running.
+    free(bnode_ptr);
     ret .None;
   }
 
@@ -4480,6 +4489,14 @@ impl Parser {
 
     self.has_current_function = false;
     self.state.nodes.push(*fn_node_ptr);
+    // Same reasoning as `parse_body_multiple_statements`'s own
+    // `bnode_ptr`: this wrapper only ever existed to give
+    // `self.current_function` a stable address while the signature and
+    // body were being parsed (both attached by mutating `fn_node_ptr`
+    // in place above); its value is now copied into `state.nodes`, so
+    // the wrapper itself is this call's own to free. Every top-level
+    // function declaration in the whole program leaked one of these.
+    free(fn_node_ptr);
     self.state.finish_scope();
     ret .None;
   }
