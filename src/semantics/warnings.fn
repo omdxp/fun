@@ -2122,8 +2122,11 @@ fun _unmangled_method_name(str mangled, str type_name) str {
   b.append("__");
   str prefix = b.build();
   if starts_with(mangled, prefix) {
-    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+    str unmangled = substr(mangled, len(prefix), len(mangled) - len(prefix));
+    free(prefix);
+    ret unmangled;
   }
+  free(prefix);
   ret mangled;
 }
 
