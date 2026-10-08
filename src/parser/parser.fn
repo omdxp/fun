@@ -3948,6 +3948,12 @@ impl Parser {
           cond_ptr = e.left;
           msg_ptr = e.right;
           has_msg = true;
+          // `exp_val` itself - the comma wrapper - is discarded below,
+          // its two children taken over directly rather than copied;
+          // only its own `binded` context still needs freeing, same as
+          // every other wrapper a parser-side rotation discards this
+          // way.
+          free_node_binded_only(&exp_val);
         }
         _ -> {}
       }
