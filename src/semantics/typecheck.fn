@@ -2807,6 +2807,9 @@ impl Checker {
     // `sig.type_params` is empty for a non-generic method like this one.
     Vec<str> receiver_type_params;
     receiver_type_params.init(0);
+    // Shallow only: every pushed name below is borrowed straight from
+    // the compound's own declared `type_params`, not a copy of its own.
+    defer receiver_type_params.free();
     let compound_info = self.compounds.at(self.canonical_type_name(found.receiver.name));
     if compound_info.is_some() {
       for p : compound_info.unwrap().type_params {
@@ -4885,7 +4888,14 @@ impl Checker {
     for g < nodes.len {
       fit nodes.data[g].kind {
         .Variable(v) -> {
-          env.bind(v.name, checked_from_dtype(v.var_type), v.is_const);
+          // `bind` stores its own clone (see its own note on why), so
+          // this fresh value is redundant - and, unlike every other
+          // caller here, which passes an alias shared with something
+          // that outlives this call, this one owns it outright and
+          // nothing else ever frees it otherwise.
+          CheckedType vt = checked_from_dtype(v.var_type);
+          env.bind(v.name, vt, v.is_const);
+          _free_checked_type_contents(&vt);
         }
         _ -> {}
       }
@@ -4900,7 +4910,13 @@ impl Checker {
     for a : f.args {
       fit a.kind {
         .Variable(v) -> {
-          env.define(v.name, _erase_type_params(f, checked_from_dtype(v.var_type)));
+          // Same reasoning as this function's own `env.bind` call above:
+          // `define` (via `bind`) stores its own clone, so this fresh
+          // value - owned outright, not an alias of anything else - is
+          // redundant once stored and nothing else frees it otherwise.
+          CheckedType at = _erase_type_params(f, checked_from_dtype(v.var_type));
+          env.define(v.name, at);
+          _free_checked_type_contents(&at);
         }
         _ -> {}
       }
@@ -4943,6 +4959,11 @@ impl Checker {
       self.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
     }
     self.check_statement(f.body, &env);
+    // The rtype just built above (owned outright, not an alias of
+    // `previous`) is done being checked against now - freed before
+    // it's overwritten, or every typed function body leaks its own
+    // return type on every check.
+    _free_checked_type_contents(&self.rtype);
     self.rtype = previous;
     self.in_async = previous_async;
     self.active_type_params.free();
