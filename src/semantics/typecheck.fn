@@ -1219,9 +1219,11 @@ impl Checker {
   // instantiation supplies.
   register_impl(ImplNode block) {
     let existing = self.methods.at(block.type_name);
-    MethodTable table = _method_table_new();
+    MethodTable table;
     if existing.is_some() {
       table = existing.unwrap();
+    } else {
+      table = _method_table_new();
     }
     for m : block.methods {
       fit m.kind {
