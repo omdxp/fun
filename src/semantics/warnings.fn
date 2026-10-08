@@ -242,7 +242,7 @@ impl Analysis {
     self.shape_implementors.free();
     self.functions.free();
     self.compound_decls.free();
-    self.local_types.free();
+    _free_local_types(&self.local_types);
     self.channel_element_types.free();
   }
 }
@@ -962,9 +962,11 @@ impl Analysis {
       .Variable(v) -> {
         locals.add(v.name);
         if v.var_type != nil {
-          str vtype = v.var_type.type_str;
+          str vtype = substr(v.var_type.type_str, 0, len(v.var_type.type_str));
           if v.var_type.pointer_depth > 0 || v.var_type.flags.is_pointer {
-            vtype = format("{str}*", vtype);
+            str suffixed = format("{str}*", vtype);
+            free(vtype);
+            vtype = suffixed;
           }
           self.local_types.put(v.name, vtype);
           self._record_channel_element_type(v.name, v.var_type);
@@ -1629,9 +1631,11 @@ impl Analysis {
       .Variable(av) -> {
         locals.add(av.name);
         if av.var_type != nil {
-          str atype = av.var_type.type_str;
+          str atype = substr(av.var_type.type_str, 0, len(av.var_type.type_str));
           if av.var_type.pointer_depth > 0 || av.var_type.flags.is_pointer {
-            atype = format("{str}*", atype);
+            str suffixed = format("{str}*", atype);
+            free(atype);
+            atype = suffixed;
           }
           self.local_types.put(av.name, atype);
           self._record_channel_element_type(av.name, av.var_type);
@@ -1662,7 +1666,7 @@ impl Analysis {
     }
     Set<str> locals = set_init("", 8);
     defer locals.free();
-    self.local_types.clear();
+    _clear_local_types(&self.local_types);
     self.channel_element_types.clear();
     for arg : f.args {
       self._register_param_local(arg, &locals);
@@ -1690,7 +1694,7 @@ impl Analysis {
   walk_test(TestDeclNode t) {
     Set<str> locals = set_init("", 8);
     defer locals.free();
-    self.local_types.clear();
+    _clear_local_types(&self.local_types);
     self.channel_element_types.clear();
     self.walk_declared_body(t.body, &locals);
   }
@@ -1701,7 +1705,7 @@ impl Analysis {
   walk_fuzz(FuzzDeclNode fz) {
     Set<str> locals = set_init("", 8);
     defer locals.free();
-    self.local_types.clear();
+    _clear_local_types(&self.local_types);
     self.channel_element_types.clear();
     self._register_param_local(fz.data_param, &locals);
     self._register_param_local(fz.len_param, &locals);
@@ -2328,14 +2332,38 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
 
 // Everything `Analysis` owns except `.found`, which each of `analyze`'s
 // own two exit paths above already carries out on its own. Shallow
-// only for `.functions`/`.compound_decls`/`.local_types`/
-// `.channel_element_types`: their values alias the AST `nodes`/
-// `program` (borrowed parameters, not this call's to free) or its own
-// token text, the same convention as everywhere else a Declaration or
-// its own fields get reused rather than copied. `.enum_variants`
-// values are the one exception - each `Vec<str>` is this call's own,
+// only for `.functions`/`.compound_decls`/`.channel_element_types`:
+// their values alias the AST `nodes`/`program` (borrowed parameters,
+// not this call's to free) or its own token text, the same convention
+// as everywhere else a Declaration or its own fields get reused rather
+// than copied. `.enum_variants` and `.local_types` are the exceptions -
+// each value (a `Vec<str>`, or a cloned type name) is this call's own,
 // built fresh in the walk above - so those get freed individually
-// before the map itself.
+// before their own map.
+// `local_types`' own values are always this call's independent copies
+// (see `walk_body`/`_register_param_local`'s own cloning, not an alias
+// of the AST they walked), so they need freeing individually before
+// the map is itself freed or reused for the next declaration.
+fun _free_local_types_values(Map<str, str>* m) {
+  Vec<str> keys = m.keys();
+  defer keys.free();
+  num i = 0;
+  for i < keys.len {
+    free(m.at(keys.get(i)).unwrap());
+    i = i + 1;
+  }
+}
+
+fun _free_local_types(Map<str, str>* m) {
+  _free_local_types_values(m);
+  m.free();
+}
+
+fun _clear_local_types(Map<str, str>* m) {
+  _free_local_types_values(m);
+  m.clear();
+}
+
 fun _free_analysis_scratch(Analysis* state) {
   Vec<str> enum_names = state.enum_variants.keys();
   defer enum_names.free();
@@ -2348,7 +2376,7 @@ fun _free_analysis_scratch(Analysis* state) {
   state.enum_variants.free();
   state.functions.free();
   state.compound_decls.free();
-  state.local_types.free();
+  _free_local_types(&state.local_types);
   state.channel_element_types.free();
   state.allowed.free();
   state.expected.free();
