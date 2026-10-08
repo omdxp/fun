@@ -4431,6 +4431,18 @@ impl Checker {
 
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
+    // Owned outright for as long as `declared` still holds this fresh
+    // value - `env.bind` below stores its own clone regardless (see
+    // its own note on why), so every return path here is this value's
+    // last use. Set false the one place `declared` is reassigned to
+    // `value` (an inferred type that may alias another binding's own
+    // CheckedType), where freeing it would risk a double free instead.
+    flag declared_is_fresh = true;
+    defer {
+      if declared_is_fresh {
+        _free_checked_type_contents(&declared);
+      }
+    }
     if !equals(declared.name, "") {
       str type_name = self.canonical_type_name(declared.name);
       let info = self.compounds.at(type_name);
@@ -4518,6 +4530,7 @@ impl Checker {
           ret;
         }
         declared = value;
+        declared_is_fresh = false;
       } elif !self.assignable(declared, value) {
         self.fail(
           format(
