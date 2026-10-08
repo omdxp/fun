@@ -1462,6 +1462,28 @@ fun _free_node_contents(Node* n) {
   }
 }
 
+// Frees only a node's own `binded` context (its `owner`/`function`
+// back-reference copies - see `BindedNode`), never its `kind` payload.
+// For a wrapper a parser-side rotation discards after absorbing its
+// contents elsewhere by value (its former children now live on
+// somewhere else, so freeing them here would double-free): the wrapper
+// itself still carries its own, independent binding context from when
+// it was first built, which nothing else points at or will ever free.
+pub fun free_node_binded_only(Node* n) {
+  if n == nil {
+    ret;
+  }
+  if n.has_binded && n.binded != nil {
+    if n.binded.has_owner && n.binded.owner != nil {
+      free(n.binded.owner);
+    }
+    if n.binded.has_function && n.binded.function != nil {
+      free(n.binded.function);
+    }
+    free(n.binded);
+  }
+}
+
 // Frees an individually `malloc`'d child node - every `Node*` field
 // throughout this file - contents included.
 pub fun node_free(Node* n) {

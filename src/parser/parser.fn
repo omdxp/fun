@@ -1664,6 +1664,12 @@ fun _flatten_paren_comma_chain(Node* node, Vec<Node*>* out) {
       if equals(e.op, ",") && e.has_left && e.has_right {
         _flatten_paren_comma_chain(e.left, out);
         _flatten_paren_comma_chain(e.right, out);
+        // Every element this comma node ever held now lives in `out`
+        // instead, reached directly rather than through it - this
+        // wrapper itself is never referenced again once this call
+        // returns, its own `binded` context included.
+        free_node_binded_only(node);
+        free(node);
         ret;
       }
     }
@@ -1834,15 +1840,23 @@ impl Parser {
         // A pointer written inside `sizeof(...)` belongs to the type,
         // not to the expression around it.
         if is_sizeof_type_operand {
-          StringBuilder named = string_builder_init(len(name) + 4);
-          named.append(name);
-          // `append` copies bytes, not ownership - the fresh star-run
-          // string needs freeing right after, the same gap `_read_digits`
-          // callers had.
           str stars = self.state.take_sizeof_pointer_stars();
-          named.append(stars);
+          // `name` is otherwise this token's own borrowed `Sval`, never
+          // freed by this node's own teardown (see `_free_node_contents`'s
+          // `.Identifier` case - every other path here relies on that
+          // same borrow). Rebuilding unconditionally replaced it with a
+          // fresh, independently owned string even for the overwhelmingly
+          // common `sizeof(Type)` case with no stars at all, which then
+          // had nowhere left to be freed. Skipping the rebuild whenever
+          // there's nothing to append keeps the common case borrowed, as
+          // every other identifier already is.
+          if !equals(stars, "") {
+            StringBuilder named = string_builder_init(len(name) + 4);
+            named.append(name);
+            named.append(stars);
+            name = named.build();
+          }
           free(stars);
-          name = named.build();
         }
 
         Node node = node_new(.Identifier(name));
@@ -2059,13 +2073,16 @@ impl Parser {
             // overwritten below; its own fields (`right_exp.left`/`.right`)
             // are already absorbed into `new_left`/the rotated `exp` by
             // value, so only the now-empty wrapper itself - never its
-            // former contents - needs freeing, same shallow `free()`
-            // `node_free` itself uses once `_free_node_contents` is done.
+            // former contents - needs freeing. Its own `binded` context
+            // (stamped when it was first built, independent of its
+            // contents) is still its own, though, and nothing else will
+            // ever free it once this wrapper is gone.
             Node* old_right = exp.right;
             exp.left = new_left;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
             node.kind = .Expression(exp);
+            free_node_binded_only(old_right);
             free(old_right);
           }
           _ -> {}
@@ -2105,12 +2122,14 @@ impl Parser {
             // Same reasoning as `parse_node_shift_children_left`'s own
             // `old_right` free: this wrapper's former contents are
             // already absorbed by value into `completed`/the rotated
-            // `exp`, so only the now-empty wrapper itself needs freeing.
+            // `exp`, so only the now-empty wrapper itself needs freeing -
+            // its own `binded` context included.
             Node* old_right = exp.right;
             exp.left = completed;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
             node.kind = .Expression(exp);
+            free_node_binded_only(old_right);
             free(old_right);
           }
           _ -> {}
@@ -2164,9 +2183,11 @@ impl Parser {
             // `new_u` above (`ru.operand` into `new_inner` specifically),
             // so only the wrapper itself - same reasoning as
             // `parse_node_shift_children_left`'s own `old_right` free -
-            // needs freeing, not its former contents.
+            // needs freeing, not its former contents - its own `binded`
+            // context included.
             Node* old_right = exp.right;
             node.kind = .Unary(new_u);
+            free_node_binded_only(old_right);
             free(old_right);
             ret true;
           }
