@@ -472,6 +472,13 @@ pub compound FunctionNode {
   flag is_variadic;
   Node* body;
   flag has_body;
+  // True only for an impl method's own generated `Type__method` (or
+  // `Type__Shape__method`) name, built fresh by `format` rather than
+  // borrowed from the method's own name token the way every other
+  // function's `name` is - the one case this field's own content needs
+  // freeing (see `_free_node_contents`) and cloning (see `node_clone`)
+  // instead of being treated as eternal, shared token text.
+  flag owns_name;
 }
 
 pub fun function_node_new() FunctionNode {
@@ -480,6 +487,7 @@ pub fun function_node_new() FunctionNode {
   f.has_rtype = false;
   f.name = "";
   f.has_name = false;
+  f.owns_name = false;
   f.type_params.init(0);
   f.has_type_params = false;
   f.type_param_forced_insts.init(0);
@@ -1349,6 +1357,9 @@ fun _free_node_contents(Node* n) {
       if f.has_body {
         node_free(f.body);
       }
+      if f.owns_name {
+        free(f.name);
+      }
     }
     .Body(b) -> { _free_node_vec(&b.statements); }
     .StatementReturn(inner) -> { node_free(inner); }
@@ -1866,6 +1877,9 @@ pub fun node_clone(Node n) Node {
       }
       if f.has_body {
         cf.body = node_clone_ptr(f.body);
+      }
+      if f.owns_name {
+        cf.name = substr(f.name, 0, len(f.name));
       }
       c.kind = .Function(cf);
     }

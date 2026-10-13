@@ -7944,6 +7944,7 @@ impl Parser {
     FunctionNode fnv = function_node_new();
     fnv.name = gen_name;
     fnv.has_name = true;
+    fnv.owns_name = true;
     fnv.is_async = method_is_async;
 
     Node fn_node = node_new(.Function(fnv));
