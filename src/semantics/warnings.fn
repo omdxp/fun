@@ -2142,7 +2142,16 @@ fun _import_is_read(str path, Set<str>* read) flag {
     ret true;
   }
   Vec<str> parts = split(path, '.');
-  defer parts.free();
+  // `split`'s own pieces are each a fresh substr, not borrowed from
+  // `path` - a shallow free leaked every one of them.
+  defer {
+    num fi = 0;
+    for fi < parts.len {
+      free(parts.get(fi));
+      fi = fi + 1;
+    }
+    parts.free();
+  }
   num i = 0;
   for i < parts.len {
     if read.has(parts.get(i)) {
