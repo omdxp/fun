@@ -1750,12 +1750,19 @@ fun _erase_signature(FnSig sig, Vec<str>* names) FnSig {
   }
   FnSig out = sig;
   out.rtype = _erase_named(sig.rtype, names);
+  // Same aliasing shape as `_without_self`'s own `out = sig;`: `out.args`
+  // is about to point at a fresh backing array, abandoning the one it
+  // still shares with `sig.args` here. Each element's own content
+  // already travels through `_erase_named` intact (or gets freed there
+  // when erased) - only this array's own shell is left over.
+  Vec<CheckedType> old_args = out.args;
   out.args.init(sig.args.len);
   num i = 0;
   for i < sig.args.len {
-    out.args.push(_erase_named(sig.args.get(i), names));
+    out.args.push(_erase_named(old_args.get(i), names));
     i = i + 1;
   }
+  old_args.free();
   ret out;
 }
 
