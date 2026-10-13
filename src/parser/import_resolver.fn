@@ -129,12 +129,23 @@ const num max_stdlib_search_depth = 32;
 pub fun stdlib_root(str input_file_path) str {
   str configured = env("FUN_STDLIB_DIR");
   if configured != nil && !equals(configured, "") {
-    ret configured;
+    // `env`/`getenv` hands back a pointer into the process's own
+    // environment block, never something `free` can touch - a fresh
+    // copy here is what makes every return path from this function
+    // alike: this caller's own, independent, and safe to free exactly
+    // like the directory-walk's own result below.
+    ret substr(configured, 0, len(configured));
   }
 
+  // `dir` is always this loop's own owned copy from here on, freed
+  // before every reassignment (including the literal "." substitute,
+  // copied rather than aliased so every exit can free it uniformly) -
+  // or every call up a directory tree this deep leaked one path per
+  // level, for every `std.*` import resolved.
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
-    dir = ".";
+    free(dir);
+    dir = substr(".", 0, 1);
   }
   num depth = 0;
   for depth < max_stdlib_search_depth {
@@ -142,17 +153,29 @@ pub fun stdlib_root(str input_file_path) str {
     // A directory named `stdlib` is not enough: the repository keeps
     // one holding examples of using the standard library. What makes a
     // root is the `std` it would be imported from.
-    if is_dir(path_join(candidate, "std")) {
+    str probe = path_join(candidate, "std");
+    flag found = is_dir(probe);
+    free(probe);
+    if found {
+      free(dir);
       ret candidate;
     }
+    free(candidate);
     let parent = dirname(dir);
     if equals(parent, dir) || equals(parent, "") {
+      free(parent);
       break;
     }
+    free(dir);
     dir = parent;
     depth = depth + 1;
   }
-  ret "stdlib";
+  free(dir);
+  // A fresh copy, not the bare literal: every other return from this
+  // function hands the caller something it owns and frees (see each
+  // one's own note above) - this is the one path that didn't, and
+  // freeing a literal crashes outright rather than merely leaking.
+  ret substr("stdlib", 0, 6);
 }
 
 // Where the nearest `[deps]`-declaring project root is, walking upward
@@ -163,23 +186,33 @@ pub fun stdlib_root(str input_file_path) str {
 // project with no `fun.toml` above it at all falls back to `.`, same
 // as `load_manifest`'s own working-directory assumption.
 pub fun deps_project_root(str input_file_path) str {
+  // Same ownership discipline as `stdlib_root`'s own identical walk:
+  // `dir` is always this loop's own copy, freed before every
+  // reassignment.
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
-    dir = ".";
+    free(dir);
+    dir = substr(".", 0, 1);
   }
   num depth = 0;
   for depth < max_stdlib_search_depth {
-    if exists(path_join(dir, "fun.toml")) {
+    str candidate = path_join(dir, "fun.toml");
+    flag found = exists(candidate);
+    free(candidate);
+    if found {
       ret dir;
     }
     let parent = dirname(dir);
     if equals(parent, dir) || equals(parent, "") {
+      free(parent);
       break;
     }
+    free(dir);
     dir = parent;
     depth = depth + 1;
   }
-  ret ".";
+  free(dir);
+  ret substr(".", 0, 1);
 }
 
 // `deps.<name>.<rest>` resolves against dependency `name`'s own
@@ -196,19 +229,40 @@ fun _resolve_deps_path(str input_file_path, str import_path) str {
   num dot_i = index_of_char(rest, '.');
   str name = rest;
   str remaining = "";
+  flag name_is_rest = true;
   if dot_i >= 0 {
     name = substr(rest, 0, dot_i);
     remaining = substr(rest, dot_i + 1, len(rest) - (dot_i + 1));
+    name_is_rest = false;
   }
   str project_root = deps_project_root(input_file_path);
   let root_opt = resolve_deps_import_root(name, project_root);
+  free(project_root);
   if root_opt.is_none() {
-    ret format("<unresolved-dep-{str}>/__missing__.fn", name);
+    str missing = format("<unresolved-dep-{str}>/__missing__.fn", name);
+    if !name_is_rest {
+      free(name);
+      free(remaining);
+    }
+    free(rest);
+    ret missing;
+  }
+  str root = root_opt.unwrap();
+  if !name_is_rest {
+    free(name);
   }
   if equals(remaining, "") {
-    ret root_opt.unwrap();
+    if !name_is_rest {
+      free(remaining);
+    }
+    free(rest);
+    ret root;
   }
-  ret _convert_dotted_path(root_opt.unwrap(), remaining);
+  str resolved = _convert_dotted_path(root, remaining);
+  free(root);
+  free(remaining);
+  free(rest);
+  ret resolved;
 }
 
 // Resolves one `use`-statement's dotted `path` to an actual `.fn` file
@@ -221,16 +275,22 @@ fun _resolve_deps_path(str input_file_path, str import_path) str {
 // share).
 pub fun resolve_import_path(str input_file_path, str import_path) str {
   if starts_with(import_path, "std.") {
-    ret _convert_dotted_path(stdlib_root(input_file_path), import_path);
+    str root = stdlib_root(input_file_path);
+    str resolved = _convert_dotted_path(root, import_path);
+    free(root);
+    ret resolved;
   }
   if starts_with(import_path, "deps.") {
     ret _resolve_deps_path(input_file_path, import_path);
   }
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
-    dir = ".";
+    free(dir);
+    dir = substr(".", 0, 1);
   }
-  ret _convert_dotted_path(dir, import_path);
+  str resolved = _convert_dotted_path(dir, import_path);
+  free(dir);
+  ret resolved;
 }
 
 // Recursively resolves, parses, and merges `entry_path` and every file it
@@ -726,6 +786,16 @@ fun _free_stale_preloaded(PreloadedFileSymbols* old) {
 
 fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
   str norm = _normalize_path(path);
+  // Handed off exactly once, below, to `shared.cache.preload_cache` as
+  // that entry's own key - every other exit from here (the entry file,
+  // which never reaches that line at all, a cache-hit replay, or any
+  // error return) has nowhere else for this copy to go but freed here.
+  flag norm_owned = true;
+  defer {
+    if norm_owned {
+      free(norm);
+    }
+  }
   flag is_entry = source != nil;
 
   str src = source;
@@ -831,6 +901,7 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
     fresh.tokens = state.tokens;
     fresh.symbols = my_symbols;
     fresh.import_paths = my_imports;
+    norm_owned = false;
     shared.cache.preload_cache.put(norm, fresh);
   }
   shared.mu.unlock();
