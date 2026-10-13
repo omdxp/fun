@@ -773,7 +773,10 @@ impl Lexer {
     num keep = 1;
     num k = len(text);
     for k >= 1 {
-      if op_valid(substr(text, 0, k)) {
+      str candidate = substr(text, 0, k);
+      flag valid = op_valid(candidate);
+      free(candidate);
+      if valid {
         keep = k;
         break;
       }
@@ -785,6 +788,7 @@ impl Lexer {
       self._push_back(text[bi]);
     }
     if keep == 0 {
+      free(text);
       ret err_kind(.Parse, "invalid operator", token_zero());
     }
     Pos p = start;
@@ -795,6 +799,7 @@ impl Lexer {
     t.pos = p;
     t.whitespace = false;
     t.is_raw_string = false;
+    free(text);
     ret .Ok(t);
   }
 
