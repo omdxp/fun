@@ -6995,9 +6995,19 @@ impl Parser {
     }
 
     str path = folder_name;
+    // `path` starts out borrowed from `folder_name`'s own token; every
+    // `format()` call below replaces it with a fresh, owned string -
+    // tracked so the PREVIOUS one (owned, once this flips true) gets
+    // freed before being overwritten, instead of orphaned.
+    flag path_owned = false;
     num i = 0;
     for i < leading_dots {
-      path = format("{chr}{str}", '.', path);
+      str next_path = format("{chr}{str}", '.', path);
+      if path_owned {
+        free(path);
+      }
+      path = next_path;
+      path_owned = true;
       i = i + 1;
     }
 
@@ -7026,7 +7036,12 @@ impl Parser {
         .Sval(s) -> { part_name = s; }
         _ -> {}
       }
-      path = format("{str}{str}{str}", path, dot_op, part_name);
+      str next_path = format("{str}{str}{str}", path, dot_op, part_name);
+      if path_owned {
+        free(path);
+      }
+      path = next_path;
+      path_owned = true;
     }
 
     str alias = "";
@@ -7036,6 +7051,9 @@ impl Parser {
       let alias_tok = self.state.token_next();
       if alias_tok.is_none() || alias_tok.unwrap().type != .Identifier {
         self.state.err("expected alias identifier after 'as'");
+        if path_owned {
+          free(path);
+        }
         ret .Some(.InvalidIdentifier);
       }
       fit alias_tok.unwrap().data {
@@ -7047,6 +7065,9 @@ impl Parser {
 
     let serr = self.state.expect_sym(';');
     if serr.is_some() {
+      if path_owned {
+        free(path);
+      }
       ret serr;
     }
 
@@ -7054,6 +7075,7 @@ impl Parser {
     imp_node_data.path = path;
     imp_node_data.alias = alias;
     imp_node_data.has_alias = has_alias;
+    imp_node_data.owns_path = path_owned;
 
     Node node = node_new(.Import(imp_node_data));
     fit use_tok {

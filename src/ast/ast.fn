@@ -629,6 +629,11 @@ pub compound ImportNode {
   str path;
   str alias;
   flag has_alias;
+  // `path` is a single identifier's own borrowed token string for a
+  // one-segment import ('use std;'), but a dotted or '..'-prefixed
+  // path is built fresh by `Parser.parse_import` - owns_name's own
+  // precedent for the same borrowed/owned split on FunctionNode.name.
+  flag owns_path;
 }
 
 // One `name` : `dtype` field of a compound type declaration.
@@ -1326,6 +1331,11 @@ fun _free_enum_variants(Vec<EnumVariant>* variants) {
 // `Vec<Node>`'s own backing array, never separately `malloc`'d).
 fun _free_node_contents(Node* n) {
   fit n.kind {
+    .Import(i) -> {
+      if i.owns_path {
+        free(i.path);
+      }
+    }
     .ExpressionParenthesis(inner) -> { node_free(inner); }
     .Panic(inner) -> { node_free(inner); }
     .Expression(e) -> {
