@@ -1285,6 +1285,9 @@ impl Analysis {
           stmt
         );
       }
+      if !equals(subj_type, "") {
+        free(subj_type);
+      }
       ret;
     }
     let declared = self.enum_variants.at(over);
@@ -1332,11 +1335,19 @@ impl Analysis {
     // `fit <- ch { ... }` desugars to `ch.recv()` at parse time - what
     // it matches is the channel's own element type, not the call's
     // return value read literally.
+    // `_method_receiver`'s own result is borrowed straight from the
+    // call's receiver identifier when it finds one (never freed, same
+    // as every other AST-identifier alias in this file).
     str channel = _method_receiver(f.exp, "recv");
     if !equals(channel, "") {
       let elem = self.channel_element_types.at(channel);
       if elem.is_some() {
-        ret elem.unwrap();
+        // `channel_element_types`'s own stored value is borrowed too -
+        // cloned here so every caller of `_fit_subject_type` can free
+        // its result uniformly, matching `_resolve_node_type`'s own
+        // convention.
+        str e = elem.unwrap();
+        ret substr(e, 0, len(e));
       }
     }
     ret "";
@@ -1346,6 +1357,10 @@ impl Analysis {
   // sub-expression a field access or a propagation's own operand needs
   // resolved (`b.kind`'s own `b`, `get()?.kind`'s own `get()`), not
   // just the fit's own top-level subject.
+  // Every path returns a string this call owns outright - a fresh
+  // clone even where the underlying value (a `local_types` entry) is
+  // actually borrowed, so every caller can free the result uniformly
+  // without needing to know which case produced it.
   _resolve_node_type(Node* n) str {
     if n == nil {
       ret "";
@@ -1354,7 +1369,8 @@ impl Analysis {
       .Identifier(name) -> {
         let declared = self.local_types.at(name);
         if declared.is_some() {
-          ret declared.unwrap();
+          str d = declared.unwrap();
+          ret substr(d, 0, len(d));
         }
       }
       .Unary(u) -> {
@@ -1364,7 +1380,9 @@ impl Analysis {
             ret "";
           }
           if ends_with(inner, "*") {
-            ret substr(inner, 0, len(inner) - 1);
+            str out = substr(inner, 0, len(inner) - 1);
+            free(inner);
+            ret out;
           }
           ret inner;
         }
@@ -1379,7 +1397,9 @@ impl Analysis {
             ret "";
           }
           if ends_with(recv_type, "*") {
-            recv_type = substr(recv_type, 0, len(recv_type) - 1);
+            str stripped = substr(recv_type, 0, len(recv_type) - 1);
+            free(recv_type);
+            recv_type = stripped;
           }
           str field_name = "";
           fit e.right.kind {
@@ -1387,18 +1407,22 @@ impl Analysis {
             _ -> {}
           }
           if equals(field_name, "") {
+            free(recv_type);
             ret "";
           }
           let info = self.compound_decls.at(recv_type);
           if info.is_none() {
+            free(recv_type);
             ret "";
           }
           CompoundNode c = info.unwrap();
           for field : c.fields {
             if equals(field.name, field_name) && field.dtype != nil {
+              free(recv_type);
               ret self._dtype_type_name(*field.dtype);
             }
           }
+          free(recv_type);
         }
       }
       _ -> {}
@@ -1446,12 +1470,15 @@ impl Analysis {
 
   // A `DataType`'s own bare type name, with a trailing `*` appended for
   // a pointer - the same "type_str[+*]" spelling `local_types` already
-  // stores locals under.
+  // stores locals under. Always a fresh copy, even in the non-pointer
+  // case where `dt.type_str` itself would do: every caller in this
+  // resolver chain treats its own result as owned, and a borrowed
+  // return here would be the one exception freed by mistake.
   _dtype_type_name(DataType dt) str {
     if dt.pointer_depth > 0 || dt.flags.is_pointer {
       ret format("{str}*", dt.type_str);
     }
-    ret dt.type_str;
+    ret substr(dt.type_str, 0, len(dt.type_str));
   }
 
   // Records `name`'s own element type when `dtype` declares it as a
