@@ -19,6 +19,20 @@ pub compound Document {
   // The revision the client last sent, which a stale reply can be
   // checked against.
   num version;
+  // Set only by `edited()` for a single ranged edit - `opened()`,
+  // `replaced()`, and more than one content change landing in the
+  // same `didChange` all leave it false. `AnalysisCache.of()` reads
+  // this once, for the fast incremental-reparse path; anything other
+  // than a single clean ranged edit falls back to a full reparse,
+  // which is always correct. 0-indexed, the same as the LSP range it
+  // came from - the OLD span being replaced, not the new one.
+  flag has_edit_range;
+  num edit_start_line;
+  num edit_end_line;
+  // Lines in the replacement text (its own '\n' count) - together
+  // with the two fields above, enough to compute the line delta a
+  // fast-path splice shifts the replacement subtree's own Pos by.
+  num edit_replacement_lines;
 }
 
 // Every document a client has open, by URI, plus a second store for a
@@ -53,6 +67,7 @@ impl Documents {
       free(doc.text);
       doc.text = substr(text, 0, len(text));
       doc.version = version;
+      doc.has_edit_range = false;
       self.open.put(doc.uri, doc);
       ret;
     }
@@ -68,6 +83,10 @@ impl Documents {
     }
     doc.text = substr(text, 0, len(text));
     doc.version = version;
+    doc.has_edit_range = false;
+    doc.edit_start_line = 0;
+    doc.edit_end_line = 0;
+    doc.edit_replacement_lines = 0;
     self.open.put(doc.uri, doc);
   }
 
@@ -82,6 +101,7 @@ impl Documents {
     free(doc.text);
     doc.text = substr(text, 0, len(text));
     doc.version = version;
+    doc.has_edit_range = false;
     self.open.put(document_uri, doc);
   }
 
@@ -123,6 +143,24 @@ impl Documents {
     free(doc.text);
     doc.text = b.build();
     doc.version = version;
+    doc.has_edit_range = true;
+    doc.edit_start_line = start_line;
+    doc.edit_end_line = end_line;
+    doc.edit_replacement_lines = count(replacement, "\n");
+    self.open.put(document_uri, doc);
+  }
+
+  // Forces the next `AnalysisCache.of()` call to take the full-reparse
+  // path rather than the fast one - correct for a `didChange` batch
+  // with more than one content change, where tracking a single old
+  // range would describe only the last of them.
+  pub mark_multi_edit(str document_uri) {
+    let existing = self.open.at(document_uri);
+    if existing.is_none() {
+      ret;
+    }
+    Document doc = existing.unwrap();
+    doc.has_edit_range = false;
     self.open.put(document_uri, doc);
   }
 
@@ -184,6 +222,10 @@ impl Documents {
       doc.path = substr(path, 0, len(path));
       doc.text = text;
       doc.version = 0;
+      doc.has_edit_range = false;
+      doc.edit_start_line = 0;
+      doc.edit_end_line = 0;
+      doc.edit_replacement_lines = 0;
       self.indexed.put(old.uri, doc);
       ret;
     }
@@ -192,6 +234,10 @@ impl Documents {
     doc.path = substr(path, 0, len(path));
     doc.text = text;
     doc.version = 0;
+    doc.has_edit_range = false;
+    doc.edit_start_line = 0;
+    doc.edit_end_line = 0;
+    doc.edit_replacement_lines = 0;
     self.indexed.put(doc.uri, doc);
   }
 

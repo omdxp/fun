@@ -31,13 +31,18 @@ pub compound Lexer {
 }
 
 // Creates a Lexer positioned at the start of `src` (a whole file's
-// contents, already read into memory).
-pub fun lexer_new(str src, str filename) Lexer {
+// contents, already read into memory). `start_line` defaults to 1 for
+// an ordinary whole-file lex; a caller lexing a substring extracted
+// from a larger file (fls's own isolated-declaration reparse) passes
+// that substring's real starting line instead, so every token it
+// produces carries the same absolute `Pos` a full-file lex would have
+// given it - no post-hoc line-shift over the resulting tree needed.
+pub fun lexer_new(str src, str filename, num start_line = 1) Lexer {
   Lexer l;
   l.src = src;
   l.len = len(src);
   l.pos = 0;
-  l.line = 1;
+  l.line = start_line;
   l.col = 1;
   l.filename = filename;
   l.tokens.init(64);
@@ -258,6 +263,10 @@ impl Lexer {
     if is_boolean_keyword(text) {
       t.type = .Boolean;
       t.data = .Bval(equals(text, "true"));
+      // Unlike the Keyword/Identifier branches below, nothing keeps
+      // `text` itself here - the token carries a plain bool value, not
+      // the string - so this is the one place that needs to free it.
+      free(text);
     } elif is_keyword(text) {
       t.type = .Keyword;
       t.data = .Sval(text);
@@ -336,7 +345,13 @@ impl Lexer {
     if has_sign {
       buf.append_char(sign);
     }
-    buf.append(self._read_digits());
+    // `append` copies the bytes into `buf`'s own storage rather than
+    // taking ownership, so `_read_digits`' fresh allocation needs
+    // freeing right after - appending it inline, as every other digit
+    // read here used to, leaked it on every exponent.
+    str exp_digits = self._read_digits();
+    buf.append(exp_digits);
+    free(exp_digits);
   }
 
   // Parses the fully-assembled digit text of an ordinary (non-hex,
@@ -344,6 +359,10 @@ impl Lexer {
   // integer parse depending on whether a `.`/exponent is present, and
   // consuming an optional `L`/`f` suffix (accepted but not tracked).
   _finish_number_from_string(str number_str) Result<Token, Error> {
+    // Parsed into a plain `.Num`/`.Dec` value below, on every exit path -
+    // nothing keeps the text itself, so this is the one place left to
+    // free it (every caller just hands over a fresh `StringBuilder.build()`).
+    defer free(number_str);
     let has_dot = contains(number_str, ".");
     let has_exp = contains(number_str, "e") || contains(number_str, "E");
     Token t;
@@ -391,13 +410,20 @@ impl Lexer {
   _read_number() Result<Token, Error> {
     let start = self._start_pos();
     let b = string_builder_init(16);
-    b.append(self._read_digits());
+    // `append` copies bytes into `b`'s own storage, not ownership, so
+    // each fresh `_read_digits` allocation needs freeing right after -
+    // leaked on every integer part and every fractional part otherwise.
+    str int_digits = self._read_digits();
+    b.append(int_digits);
+    free(int_digits);
 
     if self._peek() == '.' {
       let after = self._peek2();
       if is_digit(after) {
         b.append_char(self._advance()); // '.'
-        b.append(self._read_digits());
+        str frac_digits = self._read_digits();
+        b.append(frac_digits);
+        free(frac_digits);
       } elif !(_is_ident_start(after) || after == '.') {
         // Trailing dot with no fraction (`1.`), not followed by an
         // identifier-start or another dot: a decimal literal "1.0". A
@@ -428,6 +454,7 @@ impl Lexer {
     self._advance(); // 'x'
     let digits = self._read_hex_digits();
     let v = _parse_radix(digits, 16);
+    free(digits);
     Pos p = start;
     self._finish_pos(&p);
     Token t;
@@ -444,6 +471,7 @@ impl Lexer {
     self._advance(); // 'b'
     let digits = self._read_digits();
     let v = _parse_radix(digits, 2);
+    free(digits);
     Pos p = start;
     self._finish_pos(&p);
     Token t;
@@ -750,7 +778,10 @@ impl Lexer {
     num keep = 1;
     num k = len(text);
     for k >= 1 {
-      if op_valid(substr(text, 0, k)) {
+      str candidate = substr(text, 0, k);
+      flag valid = op_valid(candidate);
+      free(candidate);
+      if valid {
         keep = k;
         break;
       }
@@ -762,6 +793,7 @@ impl Lexer {
       self._push_back(text[bi]);
     }
     if keep == 0 {
+      free(text);
       ret err_kind(.Parse, "invalid operator", token_zero());
     }
     Pos p = start;
@@ -772,6 +804,7 @@ impl Lexer {
     t.pos = p;
     t.whitespace = false;
     t.is_raw_string = false;
+    free(text);
     ret .Ok(t);
   }
 
@@ -973,8 +1006,8 @@ impl Lexer {
 }
 
 // Tokenizes `src` (a whole file's contents) into a flat Vec<Token>.
-pub fun tokenize(str src, str filename) Result<Vec<Token>, Error> {
-  Lexer lex = lexer_new(src, filename);
+pub fun tokenize(str src, str filename, num start_line = 1) Result<Vec<Token>, Error> {
+  Lexer lex = lexer_new(src, filename, start_line);
 
   for {
     let r = lex.next();

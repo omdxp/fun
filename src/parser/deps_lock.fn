@@ -115,14 +115,16 @@ pub fun read_lock(str root) Vec<ResolvedDep> {
   defer names.free();
   num i = 0;
   for i < names.len() {
-    str name = names.get(i);
-    let entry_val = dt.values.get(name);
+    str borrowed_name = names.get(i);
+    let entry_val = dt.values.get(borrowed_name);
     if !entry_val.is_table() {
       i = i + 1;
       continue;
     }
     ResolvedDep d;
-    d.name = name;
+    // A fresh clone, not `names`'s own borrowed entry: `d` outlives
+    // `doc` (freed, keys included, when this function returns).
+    d.name = substr(borrowed_name, 0, len(borrowed_name));
     d.git = entry_val.table_field("git");
     d.path = entry_val.table_field("path");
     d.spec_text = entry_val.table_field("spec");

@@ -73,10 +73,12 @@ fun free_token_contents(Token* t) {
   }
 }
 
-// Frees a `Vec<Token>` this caller owns outright. Not safe on tokens a
-// parse ran against: the AST reuses their `Sval` strings directly
-// (`token_word`, the parser's own `name = s`), so freeing those here
-// would free strings the AST still needs.
+// Frees a `Vec<Token>` this caller owns outright. Safe on tokens a parse
+// ran against only when the AST built from them is being discarded at
+// the same time, with nothing else (no other document, no clone) still
+// reading their `Sval` content - the AST reuses these strings directly
+// (`token_word`, the parser's own `name = s`), rather than owning
+// copies of its own.
 pub fun free_token_vec(Vec<Token>* tokens) {
   num i = 0;
   for i < tokens.len {

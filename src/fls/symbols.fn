@@ -3883,13 +3883,27 @@ fun _infer_type_primary(
 
 // `d`'s own declared type, spelled in full (pointer star, generic
 // args, everything): whatever precedes `d`'s own name in its
-// rendered "Type name" detail.
+// rendered "Type name" detail. A `const` renders as "const Type
+// name[ = literal]" (`lookup_top_level`'s own `.Variable` case) -
+// the "const " qualifier is not part of the type itself (a `let`
+// local inferred from reading a const is not itself const - the
+// value copies, the binding doesn't), so it is stripped with the
+// same "= literal" suffix, or both leak into whatever calls this to
+// build a *different* name's own type.
 fun _full_declared_type(Declaration d) str {
+  str detail = d.detail;
+  num eq_idx = index_of_str(detail, " = ");
+  if eq_idx >= 0 {
+    detail = substr(detail, 0, eq_idx);
+  }
+  if starts_with(detail, "const ") {
+    detail = substr(detail, 6, len(detail) - 6);
+  }
   num name_len = len(d.name);
-  if len(d.detail) <= name_len {
+  if len(detail) <= name_len {
     ret "";
   }
-  ret trim(substr(d.detail, 0, len(d.detail) - name_len));
+  ret trim(substr(detail, 0, len(detail) - name_len));
 }
 
 // A parameter or local of the function containing `line` in `file`.

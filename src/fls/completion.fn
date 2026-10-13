@@ -210,10 +210,11 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
             }
             let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
             if merged.is_err() {
+              free(merged.unwrap_err());
               continue;
             }
             ProgramMergeResult target = merged.unwrap();
-            _members_of(&target.nodes, local_type, &items, snippets);
+            _members_of(&target.nodes, local_type, &items, snippets, doc.path);
           }
         }
       }
@@ -263,7 +264,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     source_line
   );
   if !equals(propagation_type, "") {
-    _members_of(&program.nodes, propagation_type, &items, snippets);
+    _members_of(&program.nodes, propagation_type, &items, snippets, doc.path);
     ret _reply(&items);
   }
 
@@ -291,7 +292,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       ret _reply(&items);
     }
     if !equals(type_name, "") {
-      _members_of(&program.nodes, type_name, &items, snippets);
+      _members_of(&program.nodes, type_name, &items, snippets, doc.path);
     } else {
       // `receiver` may be an import alias (`use std.c.math as cmath;`)
       // rather than a value at all. `cmath.` names a module, not a
@@ -365,7 +366,9 @@ fun _try_import_completions(Vec<Item>* items, str current_file, str text, num li
     // "deps" itself is never a real directory - what it names is
     // whichever dependencies this project's own fun.lock has actually
     // resolved, the same list `use deps.<name>...` can reach.
-    let locked = read_lock(deps_project_root(current_file));
+    str project_root = deps_project_root(current_file);
+    let locked = read_lock(project_root);
+    free(project_root);
     defer locked.free();
     num d = 0;
     for d < locked.len {
@@ -1034,6 +1037,7 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     }
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
+      free(merged.unwrap_err());
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -1063,6 +1067,7 @@ fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCa
     }
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
+      free(merged.unwrap_err());
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -1594,6 +1599,7 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     }
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
+      free(merged.unwrap_err());
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -2560,6 +2566,16 @@ fun _init_fields_of(Vec<Node>* program, str type_name, Vec<Item>* items) {
   }
 }
 
+// Whether a reader editing `current_file` could actually write `n`'s
+// own name and have it compile: anything declared in the file itself,
+// or anything declared elsewhere but marked `pub` - the exact rule
+// `check_visibility` (typecheck.fn) enforces for a real build.
+// Offering anything else is a suggestion that fails the moment it's
+// accepted, which is worse than not offering it at all.
+fun _visible_from(Node n, str current_file) flag {
+  ret equals(n.pos.filename, current_file) || n.flags.is_public;
+}
+
 // The top-level functions `module_path` (an aliased import's own
 // resolved file) declares, offered under its own alias the same way
 // `cmath.sqrt` actually resolves at compile time. A namespace
@@ -2573,6 +2589,11 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
     Node n = program.get(i);
     i = i + 1;
     if !equals(n.pos.filename, module_path) {
+      continue;
+    }
+    // `module_path` is always a different file from whatever named it
+    // through the alias, so only what it actually exports is real.
+    if !n.flags.is_public {
       continue;
     }
     fit n.kind {
@@ -2623,6 +2644,7 @@ fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<I
   }
   let merged = parse_program_cached(module_path, text, &cache.imports, cache.imports.parallel_preload);
   if merged.is_err() {
+    free(merged.unwrap_err());
     ret;
   }
   ProgramMergeResult target = merged.unwrap();
@@ -2727,7 +2749,7 @@ fun _tuple_element_completions(str rendered_type, Vec<Item>* items) {
   members.free();
 }
 
-fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippets) {
+fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippets, str current_file) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -2786,6 +2808,9 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippe
               if !f.has_name || equals(f.name, "") {
                 continue;
               }
+              if !_visible_from(*method, current_file) {
+                continue;
+              }
               str method_name = bare_method_name(f.name);
               str method_detail = render_function_named(f, method_name, false);
               str method_snippet = _call_snippet(method_name, method_detail, true, snippets);
@@ -2820,7 +2845,7 @@ fun _declared(
     i = i + 1;
     fit n.kind {
       .Function(f) -> {
-        if f.has_name && !equals(f.name, "") {
+        if f.has_name && !equals(f.name, "") && _visible_from(n, file) {
           str fn_detail = render_function(f);
           items.push(_snippet_item(f.name, .Function, fn_detail, _call_snippet(f.name, fn_detail, false, snippets)));
         }
@@ -2885,21 +2910,35 @@ fun _declared(
         _collect_locals(tokens, fz.body, items, program, file, line);
       }
       .Compound(c) -> {
-        items.push(
-          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, &c.type_param_defaults, snippets))
-        );
+        if _visible_from(n, file) {
+          items.push(
+            _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, &c.type_param_defaults, snippets))
+          );
+        }
       }
       .Enum(e) -> {
-        items.push(
-          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
-        );
+        if _visible_from(n, file) {
+          items.push(
+            _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
+          );
+        }
       }
-      .Shape(q) -> { items.push(_item(q.name, .Interface, "shape")); }
-      .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
+      .Shape(q) -> {
+        if _visible_from(n, file) {
+          items.push(_item(q.name, .Interface, "shape"));
+        }
+      }
+      .TypeAlias(a) -> {
+        if _visible_from(n, file) {
+          items.push(_item(a.name, .Struct, "als"));
+        }
+      }
       .Variable(v) -> {
-        str decl_type_text = render_type(v.var_type);
-        items.push(_item(v.name, .Variable, decl_type_text));
-        free(decl_type_text);
+        if _visible_from(n, file) {
+          str decl_type_text = render_type(v.var_type);
+          items.push(_item(v.name, .Variable, decl_type_text));
+          free(decl_type_text);
+        }
       }
       _ -> {}
     }

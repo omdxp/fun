@@ -339,6 +339,16 @@ impl Server {
             _ -> { self.docs.replaced(document_uri, text, version); }
           }
         }
+        // More than one change in this one notification each
+        // described a range against the text as it stood *before*
+        // that change, not the merged result - tracking only the
+        // last one as "the" edit would describe the wrong span to
+        // the fast incremental-reparse path. Falling back to a full
+        // reparse for a multi-change batch is always correct, so it
+        // is the only case handled here.
+        if items.len > 1 {
+          self.docs.mark_multi_edit(document_uri);
+        }
       }
       _ -> {}
     }
@@ -353,7 +363,12 @@ impl Server {
       ret;
     }
     Vec<Diagnostic> found = diagnose(&self.reads, &self.diagnosed, doc.unwrap());
-    defer found.free();
+    // Deep: every Diagnostic.message `diagnose` hands back is its own
+    // fresh, freeable string (see diagnostics.fn's own note on
+    // `free_diagnostics`), not aliased from the version cached
+    // internally - a shallow free here leaked every diagnostic
+    // message, every report, for as long as the server kept running.
+    defer free_diagnostics(&found);
     write_message(publish(document_uri, doc.unwrap().text, &found));
   }
 

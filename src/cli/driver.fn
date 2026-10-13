@@ -39,6 +39,9 @@ use std.sync;
 use std.time;
 use std.c.time;
 use std.thread_pool;
+use std.atomic;
+
+str _cc_cached_value = "";
 
 // What the arguments asked for.
 pub compound Options {
@@ -421,7 +424,7 @@ pub fun with_extension(str path, str ext) str {
 // executable at all - checked first since it overrides the native
 // per-platform suffix below regardless of host OS.
 pub fun exe_suffix() str {
-  if compiler_is_emscripten(resolve_c_compiler()) {
+  if compiler_is_emscripten(_resolve_c_compiler_cached()) {
     ret ".js";
   }
   if runtime_backend_is_windows() {
@@ -545,7 +548,7 @@ pub fun compile_to_c_cover(
   CoverPlan* cover,
   flag prune_unreachable = true
 ) Result<flag, str> {
-  let cc = resolve_c_compiler();
+  let cc = _resolve_c_compiler_cached();
   ret lower_to_c(
     input,
     out_path,
@@ -951,6 +954,45 @@ pub fun resolve_c_compiler() str {
     }
   }
   ret c_compiler();
+}
+
+// Guards `_resolve_c_compiler_cached`'s one-time resolution: the thread
+// whose `compare_exchange` wins runs the real probe and publishes its
+// result; every other caller (any number of parallel `fun test`/`fun
+// build` workers, all racing here at once) spins on `_cc_ready` until
+// that publish lands, rather than each repeating the same subprocess
+// probes `resolve_c_compiler` itself does. Zero-initialized at load
+// time like any other global, so both start correctly false with no
+// explicit constructor needed.
+Atomic<flag> _cc_claimed;
+Atomic<flag> _cc_ready;
+
+// `resolve_c_compiler`, memoized for this process's lifetime, but only
+// for the expensive PATH search its own fallback runs when `FUN_CC` is
+// unset - the compiler actually on PATH can't change mid-run, so every
+// caller after the first reuses that one answer instead of re-spawning
+// the same `--version` probes for every file a parallel compile
+// touches. `FUN_CC` itself is re-checked fresh on every call, cheaply
+// (one env lookup, no subprocess): a handful of tests in this same
+// file flip it mid-process (wasm's own `set_env("FUN_CC", "emcc")` /
+// `clear_env`), and a cache that ignored that would hand every compile
+// after the first whichever compiler happened to resolve first,
+// regardless of what `FUN_CC` says by the time it runs.
+fun _resolve_c_compiler_cached() str {
+  str override_cc = env_or("FUN_CC", "");
+  if !equals(override_cc, "") {
+    ret override_cc;
+  }
+  if _cc_claimed.compare_exchange(false, true) {
+    str v = resolve_c_compiler();
+    _cc_cached_value = v;
+    _cc_ready.store(true);
+    ret v;
+  }
+  for !_cc_ready.load() {
+    sleep_ms(1);
+  }
+  ret _cc_cached_value;
 }
 
 // Strips cl.exe filename echo lines from captured output, keeping only lines

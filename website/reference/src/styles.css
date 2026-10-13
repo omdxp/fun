@@ -897,6 +897,22 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .pg-signature-tooltip { color: var(--accent); }
 
+/* A `let`-inferred local's own real type, or a call's own parameter
+   name - faint enough to read as a hint, not as code someone typed
+   (VS Code's own inlay-hint treatment for the same server). The
+   parameter-name variant gets a touch less emphasis still, matching
+   how far less often it's the thing worth reading at a glance. */
+.pg-inlay-hint {
+  font: 500 11.5px/1 var(--mono);
+  color: var(--muted);
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 1px 4px;
+  margin: 0 1px;
+  user-select: none;
+}
+.pg-inlay-hint-param { opacity: 0.75; }
+
 /* A long doc comment (or several "See also" targets) can outgrow the
    vertical room CodeMirror found for it when it first positioned the
    tooltip - scrolling inside it, rather than letting it keep growing,

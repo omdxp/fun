@@ -219,6 +219,11 @@ pub fun type_name(CheckedType t) str {
 // The name an instantiation is registered under, which carries its
 // arguments the way an impl on a concrete instantiation is written
 // (`impl Vec<str>` registers as `Vec__str`).
+// Borrows `t.name` when `t` has no generic args at all (the common
+// case); allocates a fresh string otherwise. Every caller needs to
+// check `t.generic_args.len` itself (or a nested arg's own, for the
+// recursive case just below) before deciding whether the result is
+// theirs to free - mirrors `canonical_type_name`'s identical contract.
 pub fun mangled_name(CheckedType t) str {
   if t.generic_args.len == 0 {
     ret t.name;
@@ -228,7 +233,12 @@ pub fun mangled_name(CheckedType t) str {
   num i = 0;
   for i < t.generic_args.len {
     b.append("__");
-    b.append(mangled_name(t.generic_args.get(i)));
+    CheckedType arg = t.generic_args.get(i);
+    str arg_mangled = mangled_name(arg);
+    b.append(arg_mangled);
+    if arg.generic_args.len > 0 {
+      free(arg_mangled);
+    }
     i = i + 1;
   }
   ret b.build();
@@ -397,11 +407,22 @@ impl TypeEnv {
     self.scopes.push(scope);
   }
 
+  // Every binding this scope holds owns an independent, deep-cloned
+  // `CheckedType` (see `bind`'s own note on why), so freeing each one
+  // here can never reach back into a still-live outer scope's own
+  // binding, or into whatever `infer()` call site originally produced
+  // the value a binding started from.
   pub pop() {
     if self.scopes.len == 0 {
       ret;
     }
     Map<str, Binding> scope = self.scopes.pop();
+    Vec<str> names = scope.keys();
+    defer names.free();
+    for name : names {
+      Binding b = scope.at(name).unwrap();
+      _free_checked_type_contents(&b.type);
+    }
     scope.free();
   }
 
@@ -409,12 +430,23 @@ impl TypeEnv {
     self.bind(name, type, false);
   }
 
+  // `type` is deep-cloned before storing: a bare `let y = x;` infers
+  // `y`'s own type by looking `x` up, and that lookup returns `x`'s
+  // own stored `CheckedType` by value - its `generic_args`/
+  // `tuple_members` Vecs are shallow copies of the *same* backing
+  // arrays `x`'s own binding holds, not independent ones. Storing
+  // that straight into `y`'s own binding would leave two scopes'
+  // worth of bindings sharing one allocation, which `pop`'s own
+  // per-binding free (see its note) would then free twice the moment
+  // both scopes eventually pop - once safely, once as a double free.
+  // A clone here means every binding, however it was produced, owns
+  // its own copy from the moment it's stored.
   pub bind(str name, CheckedType type, flag is_const) {
     if self.scopes.len == 0 {
       self.push();
     }
     Binding b;
-    b.type = type;
+    b.type = _clone_checked_type(type);
     b.is_const = is_const;
     self.scopes.data[self.scopes.len - 1].put(name, b);
   }
@@ -468,11 +500,13 @@ compound MethodTable {
   Map<str, FnSig> methods;
 }
 
-// Frees a compound's own scratch: `.fields`'s own CheckedType values
-// alias the declaring CompoundNode's own AST fields, so only the map
-// itself needs freeing, the same shallow convention as `_free_fn_sig`.
+// Frees a compound's own scratch. `.fields`'s own values are each a
+// fresh `checked_from_dtype` build (see its own registration site),
+// not an alias of anything - freed deeply here, keys left untouched
+// since those are the declaring CompoundNode's own borrowed field
+// names.
 fun _free_compound_info(CompoundInfo* info) {
-  info.fields.free();
+  _free_checked_type_map_borrowed_keys(&info.fields);
   info.type_params.free();
   info.bounds.free();
 }
@@ -497,13 +531,77 @@ fun _method_table_new() MethodTable {
   ret t;
 }
 
-// Frees a signature's own scratch. Shallow throughout: `.args`'s own
-// CheckedType values, `.type_params`'s own strings, and each inner
-// Vec `.bounds` holds all alias the declaring FunctionNode's own AST
-// fields (or a token's text, transitively) rather than owning fresh
-// copies - only the four Vec containers themselves are this call's
-// own to free, never what's inside them.
+// A `CheckedType`'s own nested structure: `.generic_args`/
+// `.tuple_members` are both fresh Vecs `checked_from_dtype` builds
+// recursively (`Vec<CheckedType> t.generic_args.push(checked_from_dtype(...))`),
+// never borrowed - unlike `.name` (aliased from the declaring
+// `DataType`'s own `type_str`) and `.fn_sig` (the exact same pointer
+// as the declaring `DataType`'s own `fn_sig`, left for the AST to
+// free), which this never touches. Left unfreed, every signature
+// registered for a program this typechecks - every function, every
+// method - leaked its own return and argument types' entire generic/
+// tuple structure (an `Option<T>`, a `Vec<T>`, a `(num, str)`, and so
+// on through anything nested inside one of those), for as long as the
+// server (or a single build's own compile) kept running.
+fun _free_checked_type_contents(CheckedType* t) {
+  num i = 0;
+  for i < t.generic_args.len {
+    CheckedType ga = t.generic_args.get(i);
+    _free_checked_type_contents(&ga);
+    i = i + 1;
+  }
+  t.generic_args.free();
+  num j = 0;
+  for j < t.tuple_members.len {
+    CheckedType tm = t.tuple_members.get(j);
+    _free_checked_type_contents(&tm);
+    j = j + 1;
+  }
+  t.tuple_members.free();
+}
+
+// A deep, independently-owned copy of `t`: `.generic_args`/
+// `.tuple_members` get their own fresh Vecs, each element cloned the
+// same way, rather than the shallow struct copy an ordinary `CheckedType
+// x = y;` assignment already does (same backing arrays as `y`'s own,
+// per the whole-codebase Vec-is-a-value-type convention). `.name` and
+// `.fn_sig` stay aliased, same as `_free_checked_type_contents` never
+// touches them - both are borrowed from the AST either way, cloned or
+// not. Used by `TypeEnv.bind` so every binding owns its own copy,
+// independent of whatever `infer()` called site (an `env.lookup`
+// among them) originally produced the value from.
+fun _clone_checked_type(CheckedType t) CheckedType {
+  CheckedType c = t;
+  c.generic_args.init(t.generic_args.len);
+  num i = 0;
+  for i < t.generic_args.len {
+    c.generic_args.push(_clone_checked_type(t.generic_args.get(i)));
+    i = i + 1;
+  }
+  c.tuple_members.init(t.tuple_members.len);
+  num j = 0;
+  for j < t.tuple_members.len {
+    c.tuple_members.push(_clone_checked_type(t.tuple_members.get(j)));
+    j = j + 1;
+  }
+  ret c;
+}
+
+// Frees a signature's own scratch: `.rtype` and each of `.args`'s own
+// `CheckedType`s have their own nested structure to free (see
+// `_free_checked_type_contents`); `.type_params`'s own strings and
+// each inner Vec `.bounds` holds all alias the declaring
+// FunctionNode's own AST fields (or a token's text, transitively)
+// rather than owning fresh copies, so only the containers themselves
+// are this call's own to free for those two.
 fun _free_fn_sig(FnSig* sig) {
+  _free_checked_type_contents(&sig.rtype);
+  num i = 0;
+  for i < sig.args.len {
+    CheckedType a = sig.args.get(i);
+    _free_checked_type_contents(&a);
+    i = i + 1;
+  }
   sig.args.free();
   sig.type_params.free();
   sig.bounds.free();
@@ -524,11 +622,52 @@ fun _free_borrowed_vec_map_str(Map<str, Vec<str>>* m) {
   m.free();
 }
 
+// Frees a whole `Map<str, CheckedType>`: each value's own nested
+// structure (see `_free_checked_type_contents`), then each key (built
+// fresh by `format`/`StringBuilder` at every call site that populates
+// one of these - never a borrowed AST string, unlike most other map
+// keys in this file), then the map itself.
+fun _free_checked_type_map(Map<str, CheckedType>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    CheckedType ct = m.at(name).unwrap();
+    _free_checked_type_contents(&ct);
+  }
+  for name : names {
+    free(name);
+  }
+  m.free();
+}
+
+// Same deep value-free as `_free_checked_type_map`, but for a map whose
+// keys are borrowed from the AST (a compound's own field names) rather
+// than this call's own fresh-built strings - those must never be freed.
+fun _free_checked_type_map_borrowed_keys(Map<str, CheckedType>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    CheckedType ct = m.at(name).unwrap();
+    _free_checked_type_contents(&ct);
+  }
+  m.free();
+}
+
 fun _free_variant_payloads_map(Map<str, Vec<CheckedType>>* m) {
   Vec<str> names = m.keys();
   defer names.free();
   for name : names {
     Vec<CheckedType> bucket = m.at(name).unwrap();
+    // Each payload type is a fresh `checked_from_dtype` build, the
+    // same as an `FnSig`'s own `.args`/`.rtype` - see
+    // `_free_checked_type_contents`'s own note on why this is never
+    // just the bucket itself to free.
+    num i = 0;
+    for i < bucket.len {
+      CheckedType ct = bucket.get(i);
+      _free_checked_type_contents(&ct);
+      i = i + 1;
+    }
     bucket.free();
   }
   // The keys are the map's own lookup keys, so they stay alive until every
@@ -801,6 +940,26 @@ fun _qualified_variant_names(Node* callee, str* enum_name, str* variant_name) {
   }
 }
 
+// `checker.fns`'s own keys are a function declaration's bare `.name`,
+// borrowed straight from the AST like every other node string - never
+// this call's to free, unlike `MethodTable.methods`'s own keys (see
+// `_free_fn_sig_map` below).
+fun _free_fn_sig_map_borrowed_keys(Map<str, FnSig>* fns) {
+  Vec<str> names = fns.keys();
+  defer names.free();
+  num i = 0;
+  for i < names.len {
+    FnSig sig = fns.at(names.get(i)).unwrap();
+    _free_fn_sig(&sig);
+    i = i + 1;
+  }
+  fns.free();
+}
+
+// Every key this map ever holds is its own fresh copy (see
+// `_method_leaf_name` and the Shape-method registration's own matching
+// clone), never borrowed from the AST - freed here alongside each
+// value's own content, not just the map shell.
 fun _free_fn_sig_map(Map<str, FnSig>* fns) {
   Vec<str> names = fns.keys();
   defer names.free();
@@ -808,6 +967,7 @@ fun _free_fn_sig_map(Map<str, FnSig>* fns) {
   for i < names.len {
     FnSig sig = fns.at(names.get(i)).unwrap();
     _free_fn_sig(&sig);
+    free(names.get(i));
     i = i + 1;
   }
   fns.free();
@@ -845,23 +1005,42 @@ fun _without_self(FnSig sig, FunctionNode f) FnSig {
     ret sig;
   }
   FnSig out = sig;
+  // `out.args`/`.arg_params` below are about to be overwritten with a
+  // fresh Vec, same shape as `TypeEnv.bind`'s own aliasing concern:
+  // `out = sig;` just shallow-copied `sig`'s own backing arrays, not
+  // cloned them, so `.init()` replacing that copy here would abandon
+  // `sig`'s own original ones - still reachable only through `sig`,
+  // which nothing past this function ever reads again once this
+  // returns. `self`'s own slot (element 0, the only one actually
+  // dropped - every other element is transferred below, not copied
+  // again) is the one entry here whose own nested structure needs
+  // freeing explicitly; the rest travel into `out.args` by value and
+  // stay owned exactly once, same as before this change.
+  Vec<CheckedType> old_args = out.args;
+  if old_args.len > 0 {
+    CheckedType self_type = old_args.get(0);
+    _free_checked_type_contents(&self_type);
+  }
   out.args.init(sig.args.len);
   num i = 1;
   for i < sig.args.len {
     out.args.push(sig.args.get(i));
     i = i + 1;
   }
+  old_args.free();
   // What each argument was written as has to lose its first entry too:
   // a call names arguments after `self`, and the two lists are read
   // side by side. Leaving this one long shifted every argument by a
   // place, so a method's own bound was tested against `self` and never
   // against what the call supplied.
+  Vec<str> old_arg_params = out.arg_params;
   out.arg_params.init(sig.arg_params.len);
   num a = 1;
   for a < sig.arg_params.len {
     out.arg_params.push(sig.arg_params.get(a));
     a = a + 1;
   }
+  old_arg_params.free();
   out.min_args = sig.min_args;
   if out.min_args > 0 {
     out.min_args = out.min_args - 1;
@@ -890,7 +1069,13 @@ fun _method_leaf_name(str declared, str type_name) str {
     i = i + 1;
   }
   if cut < 0 || cut >= len(declared) {
-    ret declared;
+    // A fresh copy even here, not `declared` itself: every caller
+    // stores this straight into a `MethodTable.methods` key, which is
+    // always freed as owned (see `_free_fn_sig_map`'s own note) - this
+    // is the fallback path only, but the invariant has to hold
+    // unconditionally, not just for the ordinary mangled-name case
+    // just below.
+    ret substr(declared, 0, len(declared));
   }
   ret substr(declared, cut, len(declared) - cut);
 }
@@ -1076,9 +1261,20 @@ impl Checker {
   // instantiation supplies.
   register_impl(ImplNode block) {
     let existing = self.methods.at(block.type_name);
-    MethodTable table = _method_table_new();
+    MethodTable table;
     if existing.is_some() {
       table = existing.unwrap();
+      // `table` now aliases the same `.methods` backing array
+      // `self.methods` itself still points at. `table.methods.put()`
+      // below can grow and rehash that array - freeing the old one -
+      // leaving `self.methods`'s own stored copy pointing at freed
+      // memory until the write-back at the end of this call. Removing
+      // the stale entry now (shallow - the key/value aren't freed,
+      // `table` already holds the only copy that matters) means
+      // nothing else can read that dangling reference in between.
+      self.methods.remove(block.type_name);
+    } else {
+      table = _method_table_new();
     }
     for m : block.methods {
       fit m.kind {
@@ -1118,6 +1314,11 @@ impl Checker {
     let existing = self.shape_implementors.at(shape_name);
     if existing.is_some() {
       Set<str> bucket = existing.unwrap();
+      // Same hazard as `register_impl`'s own note: `bucket` aliases
+      // the stored Set's backing array, and `add()` below can grow
+      // and rehash it, freeing the old one out from under
+      // `self.shape_implementors`'s own copy until the write-back.
+      self.shape_implementors.remove(shape_name);
       bucket.add(type_name);
       self.shape_implementors.put(shape_name, bucket);
     } else {
@@ -1142,6 +1343,12 @@ impl Checker {
     CheckedType named = t;
     named.name = self.canonical_type_name(t.name);
     str mangled = mangled_name(named);
+    flag mangled_is_fresh = named.generic_args.len > 0;
+    defer {
+      if mangled_is_fresh {
+        free(mangled);
+      }
+    }
     if !equals(mangled, named.name) && implementors.has(mangled) {
       ret true;
     }
@@ -1162,11 +1369,17 @@ impl Checker {
     CheckedType named = t;
     named.name = self.canonical_type_name(t.name);
     str mangled = mangled_name(named);
+    flag mangled_is_fresh = named.generic_args.len > 0;
     StringBuilder mangled_key_sb = string_builder_init(24);
     mangled_key_sb.append(mangled);
     mangled_key_sb.append("::");
     mangled_key_sb.append(shape_name);
-    let by_mangled = self.shape_elem_by_type.at(mangled_key_sb.build());
+    if mangled_is_fresh {
+      free(mangled);
+    }
+    str mangled_key = mangled_key_sb.build();
+    let by_mangled = self.shape_elem_by_type.at(mangled_key);
+    free(mangled_key);
     if by_mangled.is_some() {
       ret by_mangled;
     }
@@ -1174,7 +1387,9 @@ impl Checker {
     bare_key_sb.append(named.name);
     bare_key_sb.append("::");
     bare_key_sb.append(shape_name);
-    let by_bare = self.shape_elem_by_type.at(bare_key_sb.build());
+    str bare_key = bare_key_sb.build();
+    let by_bare = self.shape_elem_by_type.at(bare_key);
+    free(bare_key);
     if by_bare.is_none() {
       ret .None;
     }
@@ -1529,6 +1744,10 @@ fun _is_type_param(FunctionNode f, str name) flag {
 
 fun _erase_type_params(FunctionNode f, CheckedType t) CheckedType {
   if _is_type_param(f, t.name) {
+    // `t` is owned outright by every caller (see each call site's own
+    // note), and is about to be replaced wholesale, not returned - its
+    // own contents, if any, have nowhere else to go but freed here.
+    _free_checked_type_contents(&t);
     ret checked_unknown();
   }
   ret t;
@@ -1543,6 +1762,8 @@ fun _erase_named(CheckedType t, Vec<str>* names) CheckedType {
   num i = 0;
   for i < names.len {
     if equals(names.get(i), t.name) {
+      // Same reasoning as `_erase_type_params`'s own discard above.
+      _free_checked_type_contents(&t);
       ret checked_unknown();
     }
     i = i + 1;
@@ -1558,12 +1779,19 @@ fun _erase_signature(FnSig sig, Vec<str>* names) FnSig {
   }
   FnSig out = sig;
   out.rtype = _erase_named(sig.rtype, names);
+  // Same aliasing shape as `_without_self`'s own `out = sig;`: `out.args`
+  // is about to point at a fresh backing array, abandoning the one it
+  // still shares with `sig.args` here. Each element's own content
+  // already travels through `_erase_named` intact (or gets freed there
+  // when erased) - only this array's own shell is left over.
+  Vec<CheckedType> old_args = out.args;
   out.args.init(sig.args.len);
   num i = 0;
   for i < sig.args.len {
-    out.args.push(_erase_named(sig.args.get(i), names));
+    out.args.push(_erase_named(old_args.get(i), names));
     i = i + 1;
   }
+  old_args.free();
   ret out;
 }
 
@@ -1742,14 +1970,34 @@ fun _fun_format_specs(str fmt) Vec<str> {
     }
     if close > 0 {
       str word = substr(fmt, i + 1, close - i - 1);
-      if equals(word, "str") || equals(word, "num") || equals(word, "dec") ||
-        equals(word, "flag") || equals(word, "chr") || equals(word, "ptr") ||
-        equals(word, "raw") {
-        out.push(word);
+      // Pushes the matched literal, not `word` itself: every entry
+      // `out` ever holds is either this fixed vocabulary or the plain
+      // literal `""` above, never a fresh allocation, so a caller
+      // freeing `out` only needs to free its own backing array - the
+      // same convention `_c_format_specs` already follows.
+      flag matched = true;
+      if equals(word, "str") {
+        out.push("str");
+      } elif equals(word, "num") {
+        out.push("num");
+      } elif equals(word, "dec") {
+        out.push("dec");
+      } elif equals(word, "flag") {
+        out.push("flag");
+      } elif equals(word, "chr") {
+        out.push("chr");
+      } elif equals(word, "ptr") {
+        out.push("ptr");
+      } elif equals(word, "raw") {
+        out.push("raw");
+      } else {
+        matched = false;
+      }
+      free(word);
+      if matched {
         i = close + 1;
         continue;
       }
-      free(word);
     }
     i = i + 1;
   }
@@ -2397,6 +2645,13 @@ impl Checker {
   // name misses; this resolves it back to the bare name once doing so
   // actually helps, and leaves anything else (a generic mangled name, a
   // genuinely unknown type) untouched.
+  // Always borrows `name` - never a fresh allocation, even on the
+  // stripped-suffix path, since every caller throughout this file treats
+  // the result as borrowed and never frees it (this is called from deep
+  // inside hot paths like `receiver_method`/`has_method`, many times per
+  // typecheck pass): offsetting straight into `name`'s own buffer rather
+  // than `substr`-copying it is safe exactly because `name` itself
+  // already outlives every use of the returned pointer.
   canonical_type_name(str name) str {
     if self.compounds.at(name).is_some() || self.methods.at(name).is_some() ||
       self.shapes.has(name) || self.plain_enums.has(name) {
@@ -2406,7 +2661,7 @@ impl Checker {
     if sep < 0 {
       ret name;
     }
-    ret substr(name, sep + 2, len(name) - sep - 2);
+    ret name + sep + 2;
   }
 
   has_method(str type_name, str method) flag {
@@ -2423,6 +2678,12 @@ impl Checker {
   receiver_method(CheckedType receiver, str method) Option<FnSig> {
     receiver.name = self.canonical_type_name(receiver.name);
     str instantiated = mangled_name(receiver);
+    flag instantiated_is_fresh = receiver.generic_args.len > 0;
+    defer {
+      if instantiated_is_fresh {
+        free(instantiated);
+      }
+    }
     if !equals(instantiated, receiver.name) {
       let found = self.method_signature(instantiated, method);
       if found.is_some() {
@@ -2609,6 +2870,9 @@ impl Checker {
     // `sig.type_params` is empty for a non-generic method like this one.
     Vec<str> receiver_type_params;
     receiver_type_params.init(0);
+    // Shallow only: every pushed name below is borrowed straight from
+    // the compound's own declared `type_params`, not a copy of its own.
+    defer receiver_type_params.free();
     let compound_info = self.compounds.at(self.canonical_type_name(found.receiver.name));
     if compound_info.is_some() {
       for p : compound_info.unwrap().type_params {
@@ -3305,15 +3569,11 @@ fun _is_assignment(str op) flag {
     ret false;
   }
   str head = substr(op, 0, len(op) - 1);
-  ret equals(head, "+") || equals(head, "-") || equals(head, "*") || equals(head, "/") ||
-    equals(
-    head,
-    "%"
-  ) || equals(head, "&") || equals(head, "|") || equals(head, "^") || equals(head, "<<") ||
-    equals(
-    head,
-    ">>"
-  );
+  flag matched = equals(head, "+") || equals(head, "-") || equals(head, "*") ||
+    equals(head, "/") || equals(head, "%") || equals(head, "&") || equals(head, "|") ||
+    equals(head, "^") || equals(head, "<<") || equals(head, ">>");
+  free(head);
+  ret matched;
 }
 
 // The value an expression is known to hold when it is written out of
@@ -4207,6 +4467,18 @@ impl Checker {
 
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
+    // Owned outright for as long as `declared` still holds this fresh
+    // value - `env.bind` below stores its own clone regardless (see
+    // its own note on why), so every return path here is this value's
+    // last use. Set false the one place `declared` is reassigned to
+    // `value` (an inferred type that may alias another binding's own
+    // CheckedType), where freeing it would risk a double free instead.
+    flag declared_is_fresh = true;
+    defer {
+      if declared_is_fresh {
+        _free_checked_type_contents(&declared);
+      }
+    }
     if !equals(declared.name, "") {
       str type_name = self.canonical_type_name(declared.name);
       let info = self.compounds.at(type_name);
@@ -4294,6 +4566,7 @@ impl Checker {
           ret;
         }
         declared = value;
+        declared_is_fresh = false;
       } elif !self.assignable(declared, value) {
         self.fail(
           format(
@@ -4691,7 +4964,14 @@ impl Checker {
     for g < nodes.len {
       fit nodes.data[g].kind {
         .Variable(v) -> {
-          env.bind(v.name, checked_from_dtype(v.var_type), v.is_const);
+          // `bind` stores its own clone (see its own note on why), so
+          // this fresh value is redundant - and, unlike every other
+          // caller here, which passes an alias shared with something
+          // that outlives this call, this one owns it outright and
+          // nothing else ever frees it otherwise.
+          CheckedType vt = checked_from_dtype(v.var_type);
+          env.bind(v.name, vt, v.is_const);
+          _free_checked_type_contents(&vt);
         }
         _ -> {}
       }
@@ -4706,7 +4986,13 @@ impl Checker {
     for a : f.args {
       fit a.kind {
         .Variable(v) -> {
-          env.define(v.name, _erase_type_params(f, checked_from_dtype(v.var_type)));
+          // Same reasoning as this function's own `env.bind` call above:
+          // `define` (via `bind`) stores its own clone, so this fresh
+          // value - owned outright, not an alias of anything else - is
+          // redundant once stored and nothing else frees it otherwise.
+          CheckedType at = _erase_type_params(f, checked_from_dtype(v.var_type));
+          env.define(v.name, at);
+          _free_checked_type_contents(&at);
         }
         _ -> {}
       }
@@ -4749,6 +5035,11 @@ impl Checker {
       self.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
     }
     self.check_statement(f.body, &env);
+    // The rtype just built above (owned outright, not an alias of
+    // `previous`) is done being checked against now - freed before
+    // it's overwritten, or every typed function body leaks its own
+    // return type on every check.
+    _free_checked_type_contents(&self.rtype);
     self.rtype = previous;
     self.in_async = previous_async;
     self.active_type_params.free();
@@ -4803,12 +5094,12 @@ fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node)
 // Checks a whole program, reporting the first type error it finds.
 pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   Checker checker = _checker_new();
-  defer _free_fn_sig_map(&checker.fns);
+  defer _free_fn_sig_map_borrowed_keys(&checker.fns);
   defer checker.declared_at.free();
   defer checker.shapes.free();
   defer _free_shape_implementors_map(&checker.shape_implementors);
   defer _free_shape_impl_type_params_map(&checker.shape_impl_type_params);
-  defer checker.shape_elem_by_type.free();
+  defer _free_checked_type_map(&checker.shape_elem_by_type);
   defer checker.plain_enums.free();
   defer checker.globals.free();
   defer checker.enum_names.free();
@@ -4863,7 +5154,13 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
           if q.is_generic {
             sig = _erase_signature(sig, &q.type_params);
           }
-          table.methods.put(m.name, sig);
+          // A fresh copy, not `m.name` itself: every `MethodTable.methods`
+          // key is freed as owned when the table itself is (see
+          // `_free_fn_sig_map`'s own note), matching `register_impl`'s
+          // own always-fresh `_method_leaf_name` result - a table whose
+          // keys were a mix of owned and borrowed would free the wrong
+          // half no matter which way that cleanup picked.
+          table.methods.put(substr(m.name, 0, len(m.name)), sig);
         }
         checker.methods.put(q.name, table);
       }

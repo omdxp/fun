@@ -242,7 +242,7 @@ impl Analysis {
     self.shape_implementors.free();
     self.functions.free();
     self.compound_decls.free();
-    self.local_types.free();
+    _free_local_types(&self.local_types);
     self.channel_element_types.free();
   }
 }
@@ -962,9 +962,11 @@ impl Analysis {
       .Variable(v) -> {
         locals.add(v.name);
         if v.var_type != nil {
-          str vtype = v.var_type.type_str;
+          str vtype = substr(v.var_type.type_str, 0, len(v.var_type.type_str));
           if v.var_type.pointer_depth > 0 || v.var_type.flags.is_pointer {
-            vtype = format("{str}*", vtype);
+            str suffixed = format("{str}*", vtype);
+            free(vtype);
+            vtype = suffixed;
           }
           self.local_types.put(v.name, vtype);
           self._record_channel_element_type(v.name, v.var_type);
@@ -1283,6 +1285,9 @@ impl Analysis {
           stmt
         );
       }
+      if !equals(subj_type, "") {
+        free(subj_type);
+      }
       ret;
     }
     let declared = self.enum_variants.at(over);
@@ -1330,11 +1335,19 @@ impl Analysis {
     // `fit <- ch { ... }` desugars to `ch.recv()` at parse time - what
     // it matches is the channel's own element type, not the call's
     // return value read literally.
+    // `_method_receiver`'s own result is borrowed straight from the
+    // call's receiver identifier when it finds one (never freed, same
+    // as every other AST-identifier alias in this file).
     str channel = _method_receiver(f.exp, "recv");
     if !equals(channel, "") {
       let elem = self.channel_element_types.at(channel);
       if elem.is_some() {
-        ret elem.unwrap();
+        // `channel_element_types`'s own stored value is borrowed too -
+        // cloned here so every caller of `_fit_subject_type` can free
+        // its result uniformly, matching `_resolve_node_type`'s own
+        // convention.
+        str e = elem.unwrap();
+        ret substr(e, 0, len(e));
       }
     }
     ret "";
@@ -1344,6 +1357,10 @@ impl Analysis {
   // sub-expression a field access or a propagation's own operand needs
   // resolved (`b.kind`'s own `b`, `get()?.kind`'s own `get()`), not
   // just the fit's own top-level subject.
+  // Every path returns a string this call owns outright - a fresh
+  // clone even where the underlying value (a `local_types` entry) is
+  // actually borrowed, so every caller can free the result uniformly
+  // without needing to know which case produced it.
   _resolve_node_type(Node* n) str {
     if n == nil {
       ret "";
@@ -1352,7 +1369,8 @@ impl Analysis {
       .Identifier(name) -> {
         let declared = self.local_types.at(name);
         if declared.is_some() {
-          ret declared.unwrap();
+          str d = declared.unwrap();
+          ret substr(d, 0, len(d));
         }
       }
       .Unary(u) -> {
@@ -1362,7 +1380,9 @@ impl Analysis {
             ret "";
           }
           if ends_with(inner, "*") {
-            ret substr(inner, 0, len(inner) - 1);
+            str out = substr(inner, 0, len(inner) - 1);
+            free(inner);
+            ret out;
           }
           ret inner;
         }
@@ -1371,13 +1391,31 @@ impl Analysis {
         }
       }
       .Expression(e) -> {
+        if equals(e.op, "()") && e.has_left {
+          str callee_name = "";
+          fit e.left.kind {
+            .Identifier(name) -> { callee_name = name; }
+            _ -> {}
+          }
+          if !equals(callee_name, "") {
+            let known = self.functions.at(callee_name);
+            if known.is_some() {
+              FunctionNode called = known.unwrap();
+              if called.has_rtype && called.rtype != nil {
+                ret self._dtype_type_name(*called.rtype);
+              }
+            }
+          }
+        }
         if equals(e.op, ".") && e.has_left && e.has_right {
           str recv_type = self._resolve_node_type(e.left);
           if equals(recv_type, "") {
             ret "";
           }
           if ends_with(recv_type, "*") {
-            recv_type = substr(recv_type, 0, len(recv_type) - 1);
+            str stripped = substr(recv_type, 0, len(recv_type) - 1);
+            free(recv_type);
+            recv_type = stripped;
           }
           str field_name = "";
           fit e.right.kind {
@@ -1385,18 +1423,22 @@ impl Analysis {
             _ -> {}
           }
           if equals(field_name, "") {
+            free(recv_type);
             ret "";
           }
           let info = self.compound_decls.at(recv_type);
           if info.is_none() {
+            free(recv_type);
             ret "";
           }
           CompoundNode c = info.unwrap();
           for field : c.fields {
             if equals(field.name, field_name) && field.dtype != nil {
+              free(recv_type);
               ret self._dtype_type_name(*field.dtype);
             }
           }
+          free(recv_type);
         }
       }
       _ -> {}
@@ -1444,12 +1486,15 @@ impl Analysis {
 
   // A `DataType`'s own bare type name, with a trailing `*` appended for
   // a pointer - the same "type_str[+*]" spelling `local_types` already
-  // stores locals under.
+  // stores locals under. Always a fresh copy, even in the non-pointer
+  // case where `dt.type_str` itself would do: every caller in this
+  // resolver chain treats its own result as owned, and a borrowed
+  // return here would be the one exception freed by mistake.
   _dtype_type_name(DataType dt) str {
     if dt.pointer_depth > 0 || dt.flags.is_pointer {
       ret format("{str}*", dt.type_str);
     }
-    ret dt.type_str;
+    ret substr(dt.type_str, 0, len(dt.type_str));
   }
 
   // Records `name`'s own element type when `dtype` declares it as a
@@ -1629,9 +1674,11 @@ impl Analysis {
       .Variable(av) -> {
         locals.add(av.name);
         if av.var_type != nil {
-          str atype = av.var_type.type_str;
+          str atype = substr(av.var_type.type_str, 0, len(av.var_type.type_str));
           if av.var_type.pointer_depth > 0 || av.var_type.flags.is_pointer {
-            atype = format("{str}*", atype);
+            str suffixed = format("{str}*", atype);
+            free(atype);
+            atype = suffixed;
           }
           self.local_types.put(av.name, atype);
           self._record_channel_element_type(av.name, av.var_type);
@@ -1662,7 +1709,7 @@ impl Analysis {
     }
     Set<str> locals = set_init("", 8);
     defer locals.free();
-    self.local_types.clear();
+    _clear_local_types(&self.local_types);
     self.channel_element_types.clear();
     for arg : f.args {
       self._register_param_local(arg, &locals);
@@ -1690,7 +1737,7 @@ impl Analysis {
   walk_test(TestDeclNode t) {
     Set<str> locals = set_init("", 8);
     defer locals.free();
-    self.local_types.clear();
+    _clear_local_types(&self.local_types);
     self.channel_element_types.clear();
     self.walk_declared_body(t.body, &locals);
   }
@@ -1701,7 +1748,7 @@ impl Analysis {
   walk_fuzz(FuzzDeclNode fz) {
     Set<str> locals = set_init("", 8);
     defer locals.free();
-    self.local_types.clear();
+    _clear_local_types(&self.local_types);
     self.channel_element_types.clear();
     self._register_param_local(fz.data_param, &locals);
     self._register_param_local(fz.len_param, &locals);
@@ -2122,8 +2169,11 @@ fun _unmangled_method_name(str mangled, str type_name) str {
   b.append("__");
   str prefix = b.build();
   if starts_with(mangled, prefix) {
-    ret substr(mangled, len(prefix), len(mangled) - len(prefix));
+    str unmangled = substr(mangled, len(prefix), len(mangled) - len(prefix));
+    free(prefix);
+    ret unmangled;
   }
+  free(prefix);
   ret mangled;
 }
 
@@ -2135,7 +2185,16 @@ fun _import_is_read(str path, Set<str>* read) flag {
     ret true;
   }
   Vec<str> parts = split(path, '.');
-  defer parts.free();
+  // `split`'s own pieces are each a fresh substr, not borrowed from
+  // `path` - a shallow free leaked every one of them.
+  defer {
+    num fi = 0;
+    for fi < parts.len {
+      free(parts.get(fi));
+      fi = fi + 1;
+    }
+    parts.free();
+  }
   num i = 0;
   for i < parts.len {
     if read.has(parts.get(i)) {
@@ -2195,10 +2254,17 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
         // ambiguity at all.
         if !i.has_type_params {
           Vec<str> implementors;
-          implementors.init(1);
           let existing = state.shape_implementors.at(i.shape_name);
           if existing.is_some() {
             implementors = existing.unwrap();
+            // `implementors` now aliases the same backing array
+            // `state.shape_implementors` itself still points at -
+            // `push()` below can realloc it, leaving that stored
+            // entry pointing at memory `realloc` already moved or
+            // freed, until the write-back at the end of this arm.
+            state.shape_implementors.remove(i.shape_name);
+          } else {
+            implementors.init(1);
           }
           implementors.push(i.type_name);
           state.shape_implementors.put(i.shape_name, implementors);
@@ -2325,14 +2391,38 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
 
 // Everything `Analysis` owns except `.found`, which each of `analyze`'s
 // own two exit paths above already carries out on its own. Shallow
-// only for `.functions`/`.compound_decls`/`.local_types`/
-// `.channel_element_types`: their values alias the AST `nodes`/
-// `program` (borrowed parameters, not this call's to free) or its own
-// token text, the same convention as everywhere else a Declaration or
-// its own fields get reused rather than copied. `.enum_variants`
-// values are the one exception - each `Vec<str>` is this call's own,
+// only for `.functions`/`.compound_decls`/`.channel_element_types`:
+// their values alias the AST `nodes`/`program` (borrowed parameters,
+// not this call's to free) or its own token text, the same convention
+// as everywhere else a Declaration or its own fields get reused rather
+// than copied. `.enum_variants` and `.local_types` are the exceptions -
+// each value (a `Vec<str>`, or a cloned type name) is this call's own,
 // built fresh in the walk above - so those get freed individually
-// before the map itself.
+// before their own map.
+// `local_types`' own values are always this call's independent copies
+// (see `walk_body`/`_register_param_local`'s own cloning, not an alias
+// of the AST they walked), so they need freeing individually before
+// the map is itself freed or reused for the next declaration.
+fun _free_local_types_values(Map<str, str>* m) {
+  Vec<str> keys = m.keys();
+  defer keys.free();
+  num i = 0;
+  for i < keys.len {
+    free(m.at(keys.get(i)).unwrap());
+    i = i + 1;
+  }
+}
+
+fun _free_local_types(Map<str, str>* m) {
+  _free_local_types_values(m);
+  m.free();
+}
+
+fun _clear_local_types(Map<str, str>* m) {
+  _free_local_types_values(m);
+  m.clear();
+}
+
 fun _free_analysis_scratch(Analysis* state) {
   Vec<str> enum_names = state.enum_variants.keys();
   defer enum_names.free();
@@ -2345,7 +2435,7 @@ fun _free_analysis_scratch(Analysis* state) {
   state.enum_variants.free();
   state.functions.free();
   state.compound_decls.free();
-  state.local_types.free();
+  _free_local_types(&state.local_types);
   state.channel_element_types.free();
   state.allowed.free();
   state.expected.free();

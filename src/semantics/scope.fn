@@ -11,6 +11,26 @@ pub compound ScopeEntity {
   flag on_stack;
   Node* node;
   flag has_node;
+  // True only when `node` is also the exact pointer a `Parser.create_node`
+  // call copied *by value* into `state.nodes` for this same declaration
+  // (currently just a plain `let`/variable declaration, `parse_variable`) -
+  // meaning this struct and that copy share every nested `Node*`/`DataType*`
+  // field value, and only `state.nodes`'s own teardown (`free_node_tree`)
+  // may free what they point to. Freeing this entity's own `node` still
+  // frees `node` itself (the wrapper `malloc(sizeof(Node))` this struct
+  // alone owns), just never recurses into its contents.
+  flag node_is_shared;
+  // True only when `node` is the exact same pointer already owned by
+  // something else entirely - currently just `self`, pushed into a
+  // method's own `args: Vec<Node*>` by that identical pointer, not a
+  // value copy (`parse_impl`). Unlike `node_is_shared`, this struct
+  // does not own even the wrapper: freeing it here at all would free
+  // the one and only copy `f.args` still points to and still needs.
+  // Every other scope entity's own `node` (a destructuring binding, a
+  // synthetic `vargs`, a `fit`-arm binding, ...) is registered in
+  // scope but never copied or shared anywhere else, so it alone owns
+  // what it points to, wrapper and contents both.
+  flag node_is_borrowed;
   str name;
   // For multi-dimensional array elements: the root array name used to
   // compute sizeof chain bounds for nested for-iter loops. Empty for
@@ -27,6 +47,8 @@ pub fun scope_entity_new(str name) ScopeEntity {
   e.on_stack = false;
   e.node = nil;
   e.has_node = false;
+  e.node_is_shared = false;
+  e.node_is_borrowed = false;
   e.name = name;
   e.multidim_root = "";
   e.has_multidim_root = false;
@@ -50,11 +72,27 @@ pub fun scope_new() Scope {
   ret s;
 }
 
-// Frees just the struct itself: `.node`/`.name`/`.multidim_root` are
-// all borrowed from the AST/tokens, owned elsewhere.
+// `.name`/`.multidim_root` are borrowed from the AST/tokens, owned
+// elsewhere - but `.node` is not, except for `node_is_borrowed`:
+// `Parser.new_scope_entity` otherwise always hands this struct a
+// freshly `malloc`'d `Node*` of its own, never a pointer anything
+// else keeps and frees. Left unfreed, every local, parameter,
+// destructuring binding, and synthetic `vargs` in the whole program
+// leaked its own declaration node, for as long as the server (or a
+// single build's own compile) kept running. `node_is_shared`/
+// `node_is_borrowed` (see their own notes on `ScopeEntity`) are the
+// two exceptions, checked in that order since a node already fully
+// owned elsewhere (`node_is_borrowed`) is never also flagged shared.
 fun free_scope_entity(ScopeEntity* e) {
   if e == nil {
     ret;
+  }
+  if e.has_node && e.node != nil && !e.node_is_borrowed {
+    if e.node_is_shared {
+      free(e.node);
+    } else {
+      node_free(e.node);
+    }
   }
   free(e);
 }

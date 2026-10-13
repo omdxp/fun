@@ -149,11 +149,26 @@ impl WorkspaceSymbolTable {
     }
     uri_buckets.free();
 
+    // Deep here, not just the bucket shells: `_replace` clones each
+    // Declaration's own name/detail/container/pos.filename into this
+    // table's own strings (see its own note), and this is the single
+    // point that owns them - `by_uri`'s own buckets just above share
+    // the same `IndexedDeclaration`s and stay shallow, to not free
+    // each string twice.
     Vec<Vec<IndexedDeclaration>> name_buckets = self.by_name.values();
     i = 0;
     for i < name_buckets.len {
       Vec<IndexedDeclaration> b = name_buckets.get(i);
       i = i + 1;
+      num bi = 0;
+      for bi < b.len {
+        IndexedDeclaration e = b.get(bi);
+        bi = bi + 1;
+        free(e.decl.name);
+        free(e.decl.detail);
+        free(e.decl.container);
+        free(e.decl.pos.filename);
+      }
       b.free();
     }
     name_buckets.free();
@@ -185,20 +200,48 @@ impl WorkspaceSymbolTable {
     Vec<IndexedDeclaration> old_bucket = existing.unwrap();
     Vec<IndexedDeclaration> kept;
     kept.init(old_bucket.len);
+    // `name` (this call's own parameter, read by `_replace`'s caller
+    // straight off one of this exact bucket's own entries before
+    // calling here) is the same pointer as exactly one dropped
+    // entry's own `.decl.name` below - tracked here so that one
+    // entry's own name is freed once, after the loop, rather than
+    // inside it (where freeing it immediately would leave `name`
+    // itself dangling for every later use in this same call).
+    flag name_is_dropped = false;
     num i = 0;
     for i < old_bucket.len {
       IndexedDeclaration e = old_bucket.get(i);
       i = i + 1;
       if !equals(e.uri, uri) {
         kept.push(e);
+      } else {
+        if e.decl.name == name {
+          name_is_dropped = true;
+        } else {
+          free(e.decl.name);
+        }
+        free(e.decl.detail);
+        free(e.decl.container);
+        free(e.decl.pos.filename);
       }
     }
     old_bucket.free();
+    // Removed unconditionally, before any write-back: `Map.put()`
+    // only ever replaces the VALUE at an existing key's own slot, so
+    // calling it below with a *different* (but content-equal) key
+    // while the old slot is still live would silently keep the old
+    // slot's own key pointer in the map - exactly the one `name`
+    // itself is about to free, the moment this call returns, leaving
+    // the map's own stored key dangling. Removing first always forces
+    // a fresh slot, with a key this call never frees.
+    self.by_name.remove(name);
     if kept.len == 0 {
       kept.free();
-      self.by_name.remove(name);
     } else {
-      self.by_name.put(name, kept);
+      self.by_name.put(kept.get(0).decl.name, kept);
+    }
+    if name_is_dropped {
+      free(name);
     }
   }
 
@@ -227,6 +270,11 @@ impl WorkspaceSymbolTable {
     let old = self.by_uri.at(uri);
     if old.is_some() {
       Vec<IndexedDeclaration> old_bucket = old.unwrap();
+      // `old_bucket` aliases the same backing array `self.by_uri`
+      // itself still points at - `old_bucket.free()` just below frees
+      // it outright, leaving that stored entry pointing at freed
+      // memory until the write-back at the end of this call.
+      self.by_uri.remove(uri);
       num i = 0;
       for i < old_bucket.len {
         self._scrub_name(old_bucket.get(i).decl.name, uri);
@@ -242,11 +290,31 @@ impl WorkspaceSymbolTable {
       IndexedDeclaration entry;
       entry.uri = uri;
       entry.decl = fresh.get(j);
+      // `_collect_declarations` builds each `Declaration`'s own
+      // name/detail/container/pos.filename borrowed from that
+      // revision's own parsed AST (symbols.fn's own convention, same
+      // as everywhere else a node string is read) - fine for a
+      // one-shot read, but this table keeps every `Declaration` it
+      // wraps indefinitely, across edits, while `AnalysisCache`/
+      // `ImportCache` deep-free exactly that revision's own tokens
+      // the moment the next edit replaces it (see `ParsedFile.tokens`'s
+      // own note in import_resolver.fn) - cloned here so this table's
+      // own copy outlives the revision it was read from, matching
+      // every string `_scrub_name`/`free()` now frees to balance it.
+      entry.decl.name = substr(entry.decl.name, 0, len(entry.decl.name));
+      entry.decl.detail = substr(entry.decl.detail, 0, len(entry.decl.detail));
+      entry.decl.container = substr(entry.decl.container, 0, len(entry.decl.container));
+      entry.decl.pos.filename = substr(entry.decl.pos.filename, 0, len(entry.decl.pos.filename));
       wrapped.push(entry);
 
       let existing = self.by_name.at(entry.decl.name);
       if existing.is_some() {
         Vec<IndexedDeclaration> bucket = existing.unwrap();
+        // `bucket` aliases the same backing array `self.by_name`
+        // itself still points at - `push()` below can realloc it,
+        // leaving that stored entry pointing at memory `realloc`
+        // already moved or freed, until the write-back just after.
+        self.by_name.remove(entry.decl.name);
         bucket.push(entry);
         self.by_name.put(entry.decl.name, bucket);
       } else {

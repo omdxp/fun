@@ -335,7 +335,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     defer dep_names.free();
     num di = 0;
     for di < dep_names.len() {
-      str dname = dep_names.get(di);
+      // A fresh clone, not `dep_names`'s own borrowed entry: this
+      // name is stored into `Dependency.name` below, which outlives
+      // `doc` (freed, keys included, when this function returns).
+      str borrowed_name = dep_names.get(di);
+      str dname = substr(borrowed_name, 0, len(borrowed_name));
       if !is_safe_dep_name(dname) {
         ret .Err(format(
           "[deps] `{str}`: a dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)",

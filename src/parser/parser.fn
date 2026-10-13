@@ -273,11 +273,25 @@ impl ParseState {
         if !is_shr {
           ret;
         }
+        // `substr` forces a genuine heap copy, not a bare C string
+        // literal: token cleanup frees every token's own text as owned
+        // heap memory, which crashes on a literal (see
+        // `split_angle_closer_equals_token_if_needed`'s identical note).
+        //
+        // Deliberately not freeing the ">>" text this replaces, unlike
+        // the otherwise-identical `=`/`<<` splitters just below: nested
+        // generics (`Vec<Vec<T>>`) call this one often enough, and
+        // revisit the same position often enough, that something
+        // downstream still expects this exact string alive when it's
+        // freed here - confirmed by a real, reproducible malloc
+        // corruption crash (mfm_free, inside AnalysisCache.of, under
+        // the concurrent preload path specifically) when this free was
+        // added. A real leak, smaller than the crash it caused.
         Token first = t;
-        first.data = .Sval(">");
+        first.data = .Sval(substr(">", 0, 1));
         self.tokens.set(self.pindex, first);
         Token second = t;
-        second.data = .Sval(">");
+        second.data = .Sval(substr(">", 0, 1));
         self.tokens.insert(self.pindex + 1, second);
       }
       .None -> {}
@@ -309,12 +323,20 @@ impl ParseState {
         // `substr` forces a genuine heap copy, not a bare C string
         // literal: token cleanup frees every token's own text as owned
         // heap memory, which crashes on a literal.
+        str old_text = "";
+        fit t.data {
+          .Sval(s) -> { old_text = s; }
+          _ -> {}
+        }
         Token first = t;
         first.data = .Sval(substr(">", 0, 1));
         self.tokens.set(self.pindex, first);
         Token second = t;
         second.data = .Sval(substr("=", 0, 1));
         self.tokens.insert(self.pindex + 1, second);
+        // The original ">=" this split replaced, now held by neither
+        // slot.
+        free(old_text);
       }
       .None -> {}
     }
@@ -339,12 +361,24 @@ impl ParseState {
         if !is_shl {
           ret;
         }
+        // `substr` forces a genuine heap copy, not a bare C string
+        // literal: token cleanup frees every token's own text as owned
+        // heap memory, which crashes on a literal (see
+        // `split_angle_closer_equals_token_if_needed`'s identical note).
+        str old_text = "";
+        fit t.data {
+          .Sval(s) -> { old_text = s; }
+          _ -> {}
+        }
         Token first = t;
-        first.data = .Sval("<");
+        first.data = .Sval(substr("<", 0, 1));
         self.tokens.set(self.pindex, first);
         Token second = t;
-        second.data = .Sval("<");
+        second.data = .Sval(substr("<", 0, 1));
         self.tokens.insert(self.pindex + 1, second);
+        // The original "<<" this split replaced, now held by neither
+        // slot.
+        free(old_text);
       }
       .None -> {}
     }
@@ -1656,6 +1690,12 @@ fun _flatten_paren_comma_chain(Node* node, Vec<Node*>* out) {
       if equals(e.op, ",") && e.has_left && e.has_right {
         _flatten_paren_comma_chain(e.left, out);
         _flatten_paren_comma_chain(e.right, out);
+        // Every element this comma node ever held now lives in `out`
+        // instead, reached directly rather than through it - this
+        // wrapper itself is never referenced again once this call
+        // returns, its own `binded` context included.
+        free_node_binded_only(node);
+        free(node);
         ret;
       }
     }
@@ -1826,10 +1866,23 @@ impl Parser {
         // A pointer written inside `sizeof(...)` belongs to the type,
         // not to the expression around it.
         if is_sizeof_type_operand {
-          StringBuilder named = string_builder_init(len(name) + 4);
-          named.append(name);
-          named.append(self.state.take_sizeof_pointer_stars());
-          name = named.build();
+          str stars = self.state.take_sizeof_pointer_stars();
+          // `name` is otherwise this token's own borrowed `Sval`, never
+          // freed by this node's own teardown (see `_free_node_contents`'s
+          // `.Identifier` case - every other path here relies on that
+          // same borrow). Rebuilding unconditionally replaced it with a
+          // fresh, independently owned string even for the overwhelmingly
+          // common `sizeof(Type)` case with no stars at all, which then
+          // had nowhere left to be freed. Skipping the rebuild whenever
+          // there's nothing to append keeps the common case borrowed, as
+          // every other identifier already is.
+          if !equals(stars, "") {
+            StringBuilder named = string_builder_init(len(name) + 4);
+            named.append(name);
+            named.append(stars);
+            name = named.build();
+          }
+          free(stars);
         }
 
         Node node = node_new(.Identifier(name));
@@ -2042,10 +2095,21 @@ impl Parser {
             new_left.pos = node.pos;
             new_left.has_pos = true;
 
+            // `exp.right` (the old right-child wrapper) is about to be
+            // overwritten below; its own fields (`right_exp.left`/`.right`)
+            // are already absorbed into `new_left`/the rotated `exp` by
+            // value, so only the now-empty wrapper itself - never its
+            // former contents - needs freeing. Its own `binded` context
+            // (stamped when it was first built, independent of its
+            // contents) is still its own, though, and nothing else will
+            // ever free it once this wrapper is gone.
+            Node* old_right = exp.right;
             exp.left = new_left;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
             node.kind = .Expression(exp);
+            free_node_binded_only(old_right);
+            free(old_right);
           }
           _ -> {}
         }
@@ -2081,10 +2145,18 @@ impl Parser {
             completed.pos = node.pos;
             completed.has_pos = true;
 
+            // Same reasoning as `parse_node_shift_children_left`'s own
+            // `old_right` free: this wrapper's former contents are
+            // already absorbed by value into `completed`/the rotated
+            // `exp`, so only the now-empty wrapper itself needs freeing -
+            // its own `binded` context included.
+            Node* old_right = exp.right;
             exp.left = completed;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
             node.kind = .Expression(exp);
+            free_node_binded_only(old_right);
+            free(old_right);
           }
           _ -> {}
         }
@@ -2132,7 +2204,17 @@ impl Parser {
 
             UnaryNode new_u = ru;
             new_u.operand = new_inner;
+            // `exp.right` (the old `.Unary(ru)` wrapper) is now an empty
+            // shell: `ru`'s own fields are carried over by value into
+            // `new_u` above (`ru.operand` into `new_inner` specifically),
+            // so only the wrapper itself - same reasoning as
+            // `parse_node_shift_children_left`'s own `old_right` free -
+            // needs freeing, not its former contents - its own `binded`
+            // context included.
+            Node* old_right = exp.right;
             node.kind = .Unary(new_u);
+            free_node_binded_only(old_right);
+            free(old_right);
             ret true;
           }
           _ -> { ret false; }
@@ -2463,7 +2545,9 @@ impl Parser {
               self.state.token_next(); // consume the type keyword
               StringBuilder named = string_builder_init(8);
               named.append(kw);
-              named.append(self.state.take_sizeof_pointer_stars());
+              str stars2 = self.state.take_sizeof_pointer_stars();
+              named.append(stars2);
+              free(stars2);
               str operand = named.build();
               Node node = node_new(.Identifier(operand));
               node.pos = t.pos;
@@ -2608,6 +2692,12 @@ impl Parser {
         outer_e.right = frac_num;
         outer_e.has_right = true;
         outer_e.op = ".";
+        // `e.right` (the original decimal-number node, e.g. the `0.1` in
+        // `t.0.1`) is now replaced by `whole_num`/`frac_num` above and
+        // never read again - a leaf node with no children of its own to
+        // preserve, so freeing it here is a plain, complete `node_free`,
+        // not the shallow `free()` the rotation functions above need.
+        node_free(e.right);
         node.kind = .Expression(outer_e);
       }
       .ExpressionParenthesis(inner) -> { self._fix_chained_tuple_access(inner); }
@@ -3357,6 +3447,15 @@ impl Parser {
     bn.statements = stmts;
     bnode_ptr.kind = .Body(bn);
     self.state.nodes.push(*bnode_ptr);
+    // `bnode_ptr` was only ever a stable address for `self.current_body`
+    // to point at while this block's own statements were being parsed
+    // (restored to `prev_body` above, before this point) - its value is
+    // now copied into `state.nodes`, so the wrapper itself is this
+    // call's own to free. Every `{ ... }` block in the whole program
+    // leaked one of these - a function body, a test body, an if/for/
+    // while/fit block, however deeply nested - for as long as the
+    // server (or a single build's own compile) kept running.
+    free(bnode_ptr);
     ret .None;
   }
 
@@ -3527,6 +3626,13 @@ impl Parser {
     Node* node_ptr = malloc(sizeof(Node));
     *node_ptr = node;
     ScopeEntity* entity = self.new_scope_entity(node_ptr);
+    // `create_node` below copies `*node_ptr` by value into
+    // `state.nodes` - this entity and that copy now share every
+    // nested `Node*`/`DataType*` field value, so only that copy's
+    // own teardown may free what they point to; this entity's own
+    // `node` is freed as a bare wrapper on scope exit (see
+    // `free_scope_entity`).
+    entity.node_is_shared = true;
 
     self.create_node(node_ptr);
     self.state.push_scope_entity(entity);
@@ -3645,6 +3751,12 @@ impl Parser {
     Node* node_ptr = malloc(sizeof(Node));
     *node_ptr = node;
     self.create_node(node_ptr);
+    // Unlike `parse_variable`'s own matching wrapper, nothing keeps
+    // `node_ptr` around afterward - this statement has no scope entity
+    // of its own (each destructured name below gets its own, separate
+    // one); `create_node` already copied its value into `state.nodes`,
+    // so the wrapper itself is this call's own to free.
+    free(node_ptr);
 
     // A declared tuple type with a matching arity gives each name its own
     // real element type directly - real precision fls hover, unlike the
@@ -3862,6 +3974,12 @@ impl Parser {
           cond_ptr = e.left;
           msg_ptr = e.right;
           has_msg = true;
+          // `exp_val` itself - the comma wrapper - is discarded below,
+          // its two children taken over directly rather than copied;
+          // only its own `binded` context still needs freeing, same as
+          // every other wrapper a parser-side rotation discards this
+          // way.
+          free_node_binded_only(&exp_val);
         }
         _ -> {}
       }
@@ -4424,6 +4542,14 @@ impl Parser {
 
     self.has_current_function = false;
     self.state.nodes.push(*fn_node_ptr);
+    // Same reasoning as `parse_body_multiple_statements`'s own
+    // `bnode_ptr`: this wrapper only ever existed to give
+    // `self.current_function` a stable address while the signature and
+    // body were being parsed (both attached by mutating `fn_node_ptr`
+    // in place above); its value is now copied into `state.nodes`, so
+    // the wrapper itself is this call's own to free. Every top-level
+    // function declaration in the whole program leaked one of these.
+    free(fn_node_ptr);
     self.state.finish_scope();
     ret .None;
   }
@@ -6869,9 +6995,19 @@ impl Parser {
     }
 
     str path = folder_name;
+    // `path` starts out borrowed from `folder_name`'s own token; every
+    // `format()` call below replaces it with a fresh, owned string -
+    // tracked so the PREVIOUS one (owned, once this flips true) gets
+    // freed before being overwritten, instead of orphaned.
+    flag path_owned = false;
     num i = 0;
     for i < leading_dots {
-      path = format("{chr}{str}", '.', path);
+      str next_path = format("{chr}{str}", '.', path);
+      if path_owned {
+        free(path);
+      }
+      path = next_path;
+      path_owned = true;
       i = i + 1;
     }
 
@@ -6900,7 +7036,12 @@ impl Parser {
         .Sval(s) -> { part_name = s; }
         _ -> {}
       }
-      path = format("{str}{str}{str}", path, dot_op, part_name);
+      str next_path = format("{str}{str}{str}", path, dot_op, part_name);
+      if path_owned {
+        free(path);
+      }
+      path = next_path;
+      path_owned = true;
     }
 
     str alias = "";
@@ -6910,6 +7051,9 @@ impl Parser {
       let alias_tok = self.state.token_next();
       if alias_tok.is_none() || alias_tok.unwrap().type != .Identifier {
         self.state.err("expected alias identifier after 'as'");
+        if path_owned {
+          free(path);
+        }
         ret .Some(.InvalidIdentifier);
       }
       fit alias_tok.unwrap().data {
@@ -6921,6 +7065,9 @@ impl Parser {
 
     let serr = self.state.expect_sym(';');
     if serr.is_some() {
+      if path_owned {
+        free(path);
+      }
       ret serr;
     }
 
@@ -6928,6 +7075,7 @@ impl Parser {
     imp_node_data.path = path;
     imp_node_data.alias = alias;
     imp_node_data.has_alias = has_alias;
+    imp_node_data.owns_path = path_owned;
 
     Node node = node_new(.Import(imp_node_data));
     fit use_tok {
@@ -6996,20 +7144,40 @@ impl Parser {
       *dt = dtype_new();
       let derr = self.state.parse_datatype(dt);
       if derr.is_some() {
+        // Deep, not shallow: nothing has copied out of `dt` yet on
+        // this path, so whatever it built before failing - its own
+        // generic args included - is still exclusively its own.
+        dtype_free(dt);
         ret derr;
       }
       if self.state.next_token_is_operator("[") {
         let aberr = self.parse_array_brackets(dt);
         if aberr.is_some() {
+          dtype_free(dt);
           ret aberr;
         }
       }
+      // `dt` is only ever a template from here on: every field name in
+      // this comma-separated line gets its own value-copy (`field_dt`
+      // below), so `dt` itself - the wrapper, not whatever it aliases,
+      // already shared out to each copy - has nowhere left to go once
+      // this line's names are read, or every compound field line
+      // leaked its own declared type.
 
       num field_count = 0;
       for true {
         let field_tok = self.state.token_next();
         if field_tok.is_none() || field_tok.unwrap().type != .Identifier {
           self.state.err("expected field name");
+          // Deep only before any name has copied out of `dt` yet
+          // (field_count == 0); once at least one has, `dt`'s own
+          // nested content is shared with that copy, same as the
+          // line's own successful end.
+          if field_count > 0 {
+            free(dt);
+          } else {
+            dtype_free(dt);
+          }
           ret .Some(.InvalidIdentifier);
         }
         str fname = "";
@@ -7023,6 +7191,7 @@ impl Parser {
         // name isn't supported.
         if field_count > 0 && dt.is_array {
           self.state.err("array fields cannot be declared in a combined list; declare them separately");
+          free(dt);
           ret .Some(.InvalidDataType);
         }
 
@@ -7045,8 +7214,10 @@ impl Parser {
 
       let serr = self.state.expect_sym(';');
       if serr.is_some() {
+        free(dt);
         ret serr;
       }
+      free(dt);
     }
 
     let rberr = self.state.expect_sym('}');
@@ -7821,6 +7992,7 @@ impl Parser {
     FunctionNode fnv = function_node_new();
     fnv.name = gen_name;
     fnv.has_name = true;
+    fnv.owns_name = true;
     fnv.is_async = method_is_async;
 
     Node fn_node = node_new(.Function(fnv));
@@ -7837,6 +8009,22 @@ impl Parser {
     self.has_current_function = true;
 
     self.state.new_scope();
+    // Every error return below here used to skip straight past the
+    // success path's own restore/finish_scope/push (right before its
+    // own `ret .None;`), leaving the parser's own current_function
+    // stack unbalanced and leaking this method's own node outright -
+    // one per malformed method anywhere a real codebase is edited
+    // mid-method. `handed_off` flips true only once `out_methods` has
+    // taken real ownership.
+    flag handed_off = false;
+    defer {
+      self.current_function = prev_fn;
+      self.has_current_function = prev_has_fn;
+      self.state.finish_scope();
+      if !handed_off {
+        node_free(fn_node_ptr);
+      }
+    }
 
     Vec<str> method_type_params;
     method_type_params.init(0);
@@ -7911,6 +8099,12 @@ impl Parser {
     Node* self_node_ptr = malloc(sizeof(Node));
     *self_node_ptr = self_node;
     ScopeEntity* self_entity = self.new_scope_entity(self_node_ptr);
+    // Unlike a destructuring/`vargs` binding's own entity, `self`'s
+    // own node is pushed below by the exact same pointer (not a
+    // value copy) into `margs`/the method's own `args` - that Vec's
+    // own entry is the sole copy that exists at all, so this entity
+    // must not free any part of it, not even its own wrapper.
+    self_entity.node_is_borrowed = true;
     self.state.push_scope_entity(self_entity);
 
     Vec<Node*> margs;
@@ -8014,10 +8208,7 @@ impl Parser {
       }
     }
 
-    self.current_function = prev_fn;
-    self.has_current_function = prev_has_fn;
-    self.state.finish_scope();
-
+    handed_off = true;
     out_methods.push(fn_node_ptr);
     ret .None;
   }
@@ -8873,12 +9064,18 @@ test "parse_reorder_expression rotates a right-heavy naive parse when the outer 
   inner_e.right = &c;
   inner_e.has_right = true;
   inner_e.op = "+";
-  Node inner = node_new(.Expression(inner_e));
+  // Heap-allocated, matching every real right-hand child the parser
+  // itself ever builds (`make_expression_node` always mallocs): a
+  // rotation here frees this exact wrapper once its own contents are
+  // absorbed into the rotated tree, same as it would for real parsed
+  // input.
+  Node* inner = malloc(sizeof(Node));
+  *inner = node_new(.Expression(inner_e));
 
   ExprNode outer_e = expr_node_new();
   outer_e.left = &a;
   outer_e.has_left = true;
-  outer_e.right = &inner;
+  outer_e.right = inner;
   outer_e.has_right = true;
   outer_e.op = "*";
   Node outer = node_new(.Expression(outer_e));
@@ -8969,31 +9166,38 @@ test "parse_reorder_expression rotates a chain needing two rotations" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
 
-  // Innermost first: (c * d).
+  // Innermost first: (c * d). Heap-allocated, same as `inner` in the
+  // single-rotation test above: `cd` becomes `bcd`'s own right child
+  // below, and a rotation there frees this wrapper once its contents
+  // are absorbed, matching every real right-hand child the parser
+  // itself builds.
   ExprNode e_cd = expr_node_new();
   e_cd.left = &c;
   e_cd.has_left = true;
   e_cd.right = &d;
   e_cd.has_right = true;
   e_cd.op = "*";
-  Node cd = node_new(.Expression(e_cd));
-  p.parse_reorder_expression(&cd);
+  Node* cd = malloc(sizeof(Node));
+  *cd = node_new(.Expression(e_cd));
+  p.parse_reorder_expression(cd);
 
-  // Then (b * (c * d)) -> rotates to ((b * c) * d).
+  // Then (b * (c * d)) -> rotates to ((b * c) * d). Heap-allocated too:
+  // `bcd` becomes the top call's own right child next.
   ExprNode e_bcd = expr_node_new();
   e_bcd.left = &b;
   e_bcd.has_left = true;
-  e_bcd.right = &cd;
+  e_bcd.right = cd;
   e_bcd.has_right = true;
   e_bcd.op = "*";
-  Node bcd = node_new(.Expression(e_bcd));
-  p.parse_reorder_expression(&bcd);
+  Node* bcd = malloc(sizeof(Node));
+  *bcd = node_new(.Expression(e_bcd));
+  p.parse_reorder_expression(bcd);
 
   // Then (a * ((b * c) * d)) -> rotates to (((a * b) * c) * d).
   ExprNode e_top = expr_node_new();
   e_top.left = &a;
   e_top.has_left = true;
-  e_top.right = &bcd;
+  e_top.right = bcd;
   e_top.has_right = true;
   e_top.op = "*";
   Node n1 = node_new(.Expression(e_top));
@@ -9056,7 +9260,11 @@ test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
   comma_e.right = &y;
   comma_e.has_right = true;
   comma_e.op = ",";
-  Node comma_node = node_new(.Expression(comma_e));
+  // Heap-allocated: this becomes `top`'s own right child below, and the
+  // rotation frees this exact wrapper once its contents are absorbed,
+  // matching every real right-hand child the parser itself builds.
+  Node* comma_node = malloc(sizeof(Node));
+  *comma_node = node_new(.Expression(comma_e));
 
   // The rotation carries the top node's own op onto the new left child,
   // not `call_node`'s, so `top`'s own op must be "()" for the new left
@@ -9064,7 +9272,7 @@ test "parse_node_move_right_left_to_left rotates a call/comma-shaped pair" {
   ExprNode top_e = expr_node_new();
   top_e.left = &call_node;
   top_e.has_left = true;
-  top_e.right = &comma_node;
+  top_e.right = comma_node;
   top_e.has_right = true;
   top_e.op = "()";
   Node top = node_new(.Expression(top_e));

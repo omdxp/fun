@@ -129,12 +129,23 @@ const num max_stdlib_search_depth = 32;
 pub fun stdlib_root(str input_file_path) str {
   str configured = env("FUN_STDLIB_DIR");
   if configured != nil && !equals(configured, "") {
-    ret configured;
+    // `env`/`getenv` hands back a pointer into the process's own
+    // environment block, never something `free` can touch - a fresh
+    // copy here is what makes every return path from this function
+    // alike: this caller's own, independent, and safe to free exactly
+    // like the directory-walk's own result below.
+    ret substr(configured, 0, len(configured));
   }
 
+  // `dir` is always this loop's own owned copy from here on, freed
+  // before every reassignment (including the literal "." substitute,
+  // copied rather than aliased so every exit can free it uniformly) -
+  // or every call up a directory tree this deep leaked one path per
+  // level, for every `std.*` import resolved.
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
-    dir = ".";
+    free(dir);
+    dir = substr(".", 0, 1);
   }
   num depth = 0;
   for depth < max_stdlib_search_depth {
@@ -142,17 +153,29 @@ pub fun stdlib_root(str input_file_path) str {
     // A directory named `stdlib` is not enough: the repository keeps
     // one holding examples of using the standard library. What makes a
     // root is the `std` it would be imported from.
-    if is_dir(path_join(candidate, "std")) {
+    str probe = path_join(candidate, "std");
+    flag found = is_dir(probe);
+    free(probe);
+    if found {
+      free(dir);
       ret candidate;
     }
+    free(candidate);
     let parent = dirname(dir);
     if equals(parent, dir) || equals(parent, "") {
+      free(parent);
       break;
     }
+    free(dir);
     dir = parent;
     depth = depth + 1;
   }
-  ret "stdlib";
+  free(dir);
+  // A fresh copy, not the bare literal: every other return from this
+  // function hands the caller something it owns and frees (see each
+  // one's own note above) - this is the one path that didn't, and
+  // freeing a literal crashes outright rather than merely leaking.
+  ret substr("stdlib", 0, 6);
 }
 
 // Where the nearest `[deps]`-declaring project root is, walking upward
@@ -163,23 +186,33 @@ pub fun stdlib_root(str input_file_path) str {
 // project with no `fun.toml` above it at all falls back to `.`, same
 // as `load_manifest`'s own working-directory assumption.
 pub fun deps_project_root(str input_file_path) str {
+  // Same ownership discipline as `stdlib_root`'s own identical walk:
+  // `dir` is always this loop's own copy, freed before every
+  // reassignment.
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
-    dir = ".";
+    free(dir);
+    dir = substr(".", 0, 1);
   }
   num depth = 0;
   for depth < max_stdlib_search_depth {
-    if exists(path_join(dir, "fun.toml")) {
+    str candidate = path_join(dir, "fun.toml");
+    flag found = exists(candidate);
+    free(candidate);
+    if found {
       ret dir;
     }
     let parent = dirname(dir);
     if equals(parent, dir) || equals(parent, "") {
+      free(parent);
       break;
     }
+    free(dir);
     dir = parent;
     depth = depth + 1;
   }
-  ret ".";
+  free(dir);
+  ret substr(".", 0, 1);
 }
 
 // `deps.<name>.<rest>` resolves against dependency `name`'s own
@@ -196,19 +229,40 @@ fun _resolve_deps_path(str input_file_path, str import_path) str {
   num dot_i = index_of_char(rest, '.');
   str name = rest;
   str remaining = "";
+  flag name_is_rest = true;
   if dot_i >= 0 {
     name = substr(rest, 0, dot_i);
     remaining = substr(rest, dot_i + 1, len(rest) - (dot_i + 1));
+    name_is_rest = false;
   }
   str project_root = deps_project_root(input_file_path);
   let root_opt = resolve_deps_import_root(name, project_root);
+  free(project_root);
   if root_opt.is_none() {
-    ret format("<unresolved-dep-{str}>/__missing__.fn", name);
+    str missing = format("<unresolved-dep-{str}>/__missing__.fn", name);
+    if !name_is_rest {
+      free(name);
+      free(remaining);
+    }
+    free(rest);
+    ret missing;
+  }
+  str root = root_opt.unwrap();
+  if !name_is_rest {
+    free(name);
   }
   if equals(remaining, "") {
-    ret root_opt.unwrap();
+    if !name_is_rest {
+      free(remaining);
+    }
+    free(rest);
+    ret root;
   }
-  ret _convert_dotted_path(root_opt.unwrap(), remaining);
+  str resolved = _convert_dotted_path(root, remaining);
+  free(root);
+  free(remaining);
+  free(rest);
+  ret resolved;
 }
 
 // Resolves one `use`-statement's dotted `path` to an actual `.fn` file
@@ -221,16 +275,22 @@ fun _resolve_deps_path(str input_file_path, str import_path) str {
 // share).
 pub fun resolve_import_path(str input_file_path, str import_path) str {
   if starts_with(import_path, "std.") {
-    ret _convert_dotted_path(stdlib_root(input_file_path), import_path);
+    str root = stdlib_root(input_file_path);
+    str resolved = _convert_dotted_path(root, import_path);
+    free(root);
+    ret resolved;
   }
   if starts_with(import_path, "deps.") {
     ret _resolve_deps_path(input_file_path, import_path);
   }
   str dir = dirname(input_file_path);
   if equals(dir, input_file_path) {
-    dir = ".";
+    free(dir);
+    dir = substr(".", 0, 1);
   }
-  ret _convert_dotted_path(dir, import_path);
+  str resolved = _convert_dotted_path(dir, import_path);
+  free(dir);
+  ret resolved;
 }
 
 // Recursively resolves, parses, and merges `entry_path` and every file it
@@ -307,12 +367,45 @@ pub compound ParsedFile {
   str source;
   str symbols_key;
   Vec<Node> nodes;
+  // The tokens `nodes` was parsed from, kept alive rather than freed:
+  // `nodes`'s own string fields (an `Identifier`, an `ExprNode.op`, ...)
+  // point directly into these tokens' `Sval` content rather than owning
+  // copies of their own (the whole-codebase convention - neither
+  // `node_free` nor a clone of `nodes` ever frees a node's own string
+  // content). Freeing only `nodes` and never these would leak every
+  // string this file's text contains, for as long as the server keeps
+  // running; freeing both together, exactly once, on replacement (see
+  // `_parse_and_merge_source`'s own stale-entry handling below) is what
+  // actually releases them.
+  Vec<Token> tokens;
+}
+
+// One file's own preload-scan result: not the real parse, just what
+// `_preload_one_file`'s lightweight pass collects from it (its own
+// `pub compound`/`pub fun` names and its own direct imports). Kept by
+// resolved path across edits, the same way `ParsedFile` already is,
+// so a file nothing has touched is never re-read and re-lexed just
+// because its importer (or a sibling import) was edited again - this
+// pass previously had no caching of its own at all, redone in full,
+// for every file in the whole import graph, on every single edit of
+// any file that (transitively) imports it.
+pub compound PreloadedFileSymbols {
+  str source;
+  // Owns the string content `symbols`' own `symbol_name`/`file_path`
+  // alias into (the lexer's tokens borrow slices of `source`
+  // directly) - kept alive exactly as long as this cache entry is,
+  // freed only on replacement, mirroring `ParsedFile.tokens`'s own
+  // contract.
+  Vec<Token> tokens;
+  Vec<GlobalSymbolInfo> symbols;
+  Vec<str> import_paths;
 }
 
 // What has been parsed, by resolved path. A long-running server keeps
 // one of these; a single compile makes one and drops it.
 pub compound ImportCache {
   Map<str, ParsedFile> files;
+  Map<str, PreloadedFileSymbols> preload_cache;
   flag ready;
   // `true` by default (a real multi-threading environment, the only
   // place `_preload_and_collect_source`'s `fork`-based worker pool
@@ -326,6 +419,7 @@ pub compound ImportCache {
 pub fun import_cache_new() ImportCache {
   ImportCache c;
   c.files.init(16);
+  c.preload_cache.init(16);
   c.ready = true;
   c.parallel_preload = true;
   ret c;
@@ -379,20 +473,63 @@ pub fun parse_program_with_imports(str entry_path, flag parallel_preload = true)
 pub fun parse_program_with_source(str entry_path, str entry_source, flag parallel_preload = true) Result<ProgramMergeResult, str> {
   ImportCache cache = import_cache_new();
   defer cache.files.free();
+  defer cache.preload_cache.free();
   ret parse_program_cached(entry_path, entry_source, &cache, parallel_preload);
+}
+
+// `global_symbols` and the token storage its own `symbol_name`/
+// `file_path` strings alias (see `parse_program_cached`'s own note on
+// why those two are bundled) - handed back by `parse_program_cached`
+// when `out_symbols` is given, for a caller that needs the same
+// known-symbol info a later, isolated parse would otherwise have no
+// way to reconstruct cheaply (fls's own incremental-reparse fast
+// path). Free with `free_global_symbols_snapshot`, never field by
+// field.
+pub compound GlobalSymbolsSnapshot {
+  Map<str, GlobalSymbolInfo> global_symbols;
+  Vec<Vec<Token>> all_tokens;
+}
+
+pub fun free_global_symbols_snapshot(GlobalSymbolsSnapshot* s) {
+  s.global_symbols.free();
+  num i = 0;
+  for i < s.all_tokens.len {
+    Vec<Token> one = s.all_tokens.get(i);
+    free_token_vec(&one);
+    i = i + 1;
+  }
+  s.all_tokens.free();
 }
 
 // The same, reusing what `cache` already holds. A file whose text and
 // surrounding declarations are unchanged is not parsed again, so an edit
 // in one file costs that file rather than the whole import graph.
-pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cache, flag parallel_preload = true) Result<ProgramMergeResult, str> {
+// `out_symbols`, when given, receives this call's own `global_symbols`
+// (every public symbol read while preloading this file's imports) and
+// the token storage it aliases, instead of having both freed at the
+// end as usual - the caller then owns `*out_symbols` and must free it
+// with `free_global_symbols_snapshot` itself.
+pub fun parse_program_cached(
+  str entry_path,
+  str entry_source,
+  ImportCache* cache,
+  flag parallel_preload = true,
+  GlobalSymbolsSnapshot* out_symbols = nil
+) Result<ProgramMergeResult, str> {
+  flag keep_symbols = out_symbols != nil;
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
   // Shallow only: every GlobalSymbolInfo is a value copy, and its own
   // symbol_name/file_path are aliases into `all_tokens` below (from
   // the preload scan) or into the real parse's own AST/token content
   // - global_symbols itself owns none of that, just points at it.
-  defer global_symbols.free();
+  // Skipped when `out_symbols` is handing both off to the caller
+  // instead (see its own note above).
+  defer {
+    if !keep_symbols {
+      global_symbols.free();
+    }
+  }
   Set<str> preload_visited = set_init("", 8);
   // Deep: every key here is this function's own _normalize_path
   // result, added only during the preload pass and never read again
@@ -408,13 +545,15 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
   Vec<Vec<Token>> all_tokens;
   all_tokens.init(8);
   defer {
-    num ati = 0;
-    for ati < all_tokens.len {
-      Vec<Token> one = all_tokens.get(ati);
-      free_token_vec(&one);
-      ati = ati + 1;
+    if !keep_symbols {
+      num ati = 0;
+      for ati < all_tokens.len {
+        Vec<Token> one = all_tokens.get(ati);
+        free_token_vec(&one);
+        ati = ati + 1;
+      }
+      all_tokens.free();
     }
-    all_tokens.free();
   }
   let preload_err = _preload_and_collect_source(
     entry_path,
@@ -422,9 +561,19 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
     &global_symbols,
     &preload_visited,
     &all_tokens,
-    parallel_preload
+    parallel_preload,
+    cache
   );
   if preload_err.is_some() {
+    // Still handed off on this failure path when requested: the
+    // defers above already skipped freeing `global_symbols`/
+    // `all_tokens` on that assumption, so leaving `*out_symbols`
+    // unset here would leak both rather than just return nothing
+    // useful in them.
+    if keep_symbols {
+      out_symbols.global_symbols = global_symbols;
+      out_symbols.all_tokens = all_tokens;
+    }
     ret .Err(preload_err.unwrap());
   }
 
@@ -465,16 +614,43 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
     symbols_key
   );
   if err.is_some() {
+    if keep_symbols {
+      out_symbols.global_symbols = global_symbols;
+      out_symbols.all_tokens = all_tokens;
+    }
     ret .Err(err.unwrap());
   }
-  // The entry file is parsed once more here only to keep its own nodes,
-  // which the merge settles and then drops.
+  // The call above just parsed (or confirmed unchanged and reused) the
+  // entry file under its own path, with `current_alias` the empty
+  // string - exactly `_parse_and_merge_source`'s own `cacheable`
+  // condition - so `cache.files` now holds it. Cloning that straight
+  // out, the same safe, string-sharing way every import's own cached
+  // entry already gets reused across the documents that import it, is
+  // strictly cheaper than this used to be (a second full tokenize and
+  // parse of the same text, every single call) and, just as important,
+  // no longer leaks that second parse's own tokens the way the entry
+  // file's first parse used to before `ParsedFile.tokens` existed - see
+  // its own note just above. Falling back to a fresh, independent parse
+  // covers the one case where this path's own entry isn't cacheable
+  // (practically unreachable here, since `current_alias` is always ""
+  // for a top-level entry) rather than ever returning no entry nodes.
   ProgramMergeResult r;
-  r.entry_nodes = _entry_nodes(entry_path, entry_source);
+  str normalized_entry_path = _normalize_path(entry_path);
+  let cached_entry = cache.files.at(normalized_entry_path);
+  if cached_entry.is_some() {
+    ParsedFile held_entry = cached_entry.unwrap();
+    r.entry_nodes = clone_node_tree(&held_entry.nodes);
+  } else {
+    r.entry_nodes = _entry_nodes(entry_path, entry_source);
+  }
   r.nodes = merged;
   r.aliases = aliases;
   r.alias_rename_keys = rename_keys;
   r.alias_rename_targets = rename_targets;
+  if keep_symbols {
+    out_symbols.global_symbols = global_symbols;
+    out_symbols.all_tokens = all_tokens;
+  }
   ret .Ok(r);
 }
 
@@ -532,7 +708,16 @@ compound PreloadShared {
   // alias these tokens' `Sval` strings directly, and `out` itself
   // stays alive and gets read again during the real parse that
   // follows preloading, so these can't be freed until that's done too.
+  // Only the entry file's own tokens are ever pushed here now (see
+  // `cache.preload_cache` below) - every disk-read import's tokens
+  // outlive this one call instead, owned by the persistent cache.
   Vec<Vec<Token>>* all_tokens;
+  // What each disk file's preload scan already found, guarded by the
+  // same `mu` as every other field here. The one-shot compile path
+  // (`parse_program_with_source`) gets a fresh, empty one of these
+  // per call - no different from before this cache existed, since
+  // nothing is kept past that one call anyway.
+  ImportCache* cache;
   Channel<str> queue;
   num pending;
   flag has_error;
@@ -581,6 +766,11 @@ fun _preload_claim(PreloadShared* shared, str path) {
   if !shared.visited.has(norm) {
     shared.visited.add(norm);
     _preload_enqueue_locked(shared, norm);
+  } else {
+    // Already claimed by an earlier call (common: many files import
+    // the same shared module) - `norm` has nowhere to go but freed
+    // here, or every such call leaks its own normalized copy.
+    free(norm);
   }
   shared.mu.unlock();
 }
@@ -596,13 +786,93 @@ fun _preload_claim(PreloadShared* shared, str path) {
 // `path` is assumed already claimed (added to `shared.visited`) by the
 // caller; `source` is non-nil only for the entry file, read from disk
 // otherwise.
+// `path`'s own cached preload result, when `cache` already holds one
+// whose own retained source text still matches what's on disk right
+// now - checked before any of the real work below runs at all. `nil`
+// for the entry file (`is_entry`): its text changes on every edit by
+// definition, so a cache lookup there would be a guaranteed miss,
+// paid on every single call for no benefit.
+fun _preload_cache_hit(PreloadShared* shared, str norm, str current_src) Option<PreloadedFileSymbols> {
+  shared.mu.lock();
+  let cached = shared.cache.preload_cache.at(norm);
+  shared.mu.unlock();
+  if cached.is_none() {
+    ret .None;
+  }
+  PreloadedFileSymbols hit = cached.unwrap();
+  if !equals(hit.source, current_src) {
+    ret .None;
+  }
+  ret .Some(hit);
+}
+
+// Replays a cache hit's own already-known result: no disk read beyond
+// the one `current_src` this file's caller already did to confirm the
+// hit, no lexing, no scanning - just handing its own findings to
+// `shared.out` and continuing the graph walk through its own already-
+// known imports, exactly as a fresh scan of this same file would.
+fun _preload_replay_cached(PreloadShared* shared, PreloadedFileSymbols hit) {
+  shared.mu.lock();
+  num si = 0;
+  for si < hit.symbols.len {
+    GlobalSymbolInfo info = hit.symbols.get(si);
+    shared.out.put(info.symbol_name, info);
+    si = si + 1;
+  }
+  shared.mu.unlock();
+  num ii = 0;
+  for ii < hit.import_paths.len {
+    _preload_claim(shared, hit.import_paths.get(ii));
+    ii = ii + 1;
+  }
+}
+
+// Frees a stale cache entry's own retained content before it's
+// replaced: the tokens and source text a fresh rescan is about to
+// supersede, and the per-file symbol/import lists scanned from them.
+// None of this touches anything `shared.out` or `visited` still
+// reference from a PRIOR call - those are independent copies (`.at()`
+// on this call's own cache lookup, not the live entries this frees).
+fun _free_stale_preloaded(PreloadedFileSymbols* old) {
+  free_token_vec(&old.tokens);
+  free(old.source);
+  old.symbols.free();
+  num oi = 0;
+  for oi < old.import_paths.len {
+    free(old.import_paths.get(oi));
+    oi = oi + 1;
+  }
+  old.import_paths.free();
+}
+
 fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
+  str norm = _normalize_path(path);
+  // Handed off exactly once, below, to `shared.cache.preload_cache` as
+  // that entry's own key - every other exit from here (the entry file,
+  // which never reaches that line at all, a cache-hit replay, or any
+  // error return) has nowhere else for this copy to go but freed here.
+  flag norm_owned = true;
+  defer {
+    if norm_owned {
+      free(norm);
+    }
+  }
+  flag is_entry = source != nil;
+
   str src = source;
   if src == nil {
     if !exists(path) {
       ret .Some(format("import not found: {str}", path));
     }
     src = read_to_string(path);
+    if !is_entry {
+      let hit = _preload_cache_hit(shared, norm, src);
+      if hit.is_some() {
+        free(src);
+        _preload_replay_cached(shared, hit.unwrap());
+        ret .None;
+      }
+    }
   }
 
   let tok_result = tokenize(src, path);
@@ -612,19 +882,6 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
 
   ParseState state = parse_state_new(path, src);
   state.tokens = tok_result.unwrap();
-  // Handed to `shared.all_tokens` rather than freed here or left
-  // untracked: `_scan_compound_names` below aliases its own Sval
-  // strings directly into `shared.out`'s `GlobalSymbolInfo.symbol_name`
-  // entries, and `out` outlives this whole preload pass (read again
-  // during the real parse that follows it, back in
-  // `parse_program_cached`), so these tokens need to live at least
-  // that long too. `parse_program_cached` frees every entry once it's
-  // truly done with `out`. Registered under the same lock
-  // `_scan_compound_names` itself takes below, since `all_tokens` is
-  // shared the same way `out` is.
-  shared.mu.lock();
-  shared.all_tokens.push(state.tokens);
-  shared.mu.unlock();
   state.emit_stderr = false;
   Parser p = parser_new(&state);
   // `state.nodes` (the handful of Import nodes parsed below) and
@@ -633,34 +890,81 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
   // the same reasoning as diagnose()'s own discarded parse.
   // `free_node_tree` never touches `str` fields either way (see its
   // own file-level note in ast.fn), so freeing `state.nodes` here
-  // can't touch the Sval strings `shared.out` still needs through
-  // `state.tokens`, registered above.
+  // can't touch the Sval strings the symbols collected below alias
+  // from `state.tokens`.
   defer free_node_tree(&state.nodes);
   defer free_parse_state_internal(&state);
-  // Never aliased to anything here (`_scan_compound_names` below
-  // writes straight into `shared.out`, not through this field), so
-  // the default map `parse_state_new` constructs is ours alone.
+  // Never aliased to anything here (symbols are collected into a
+  // local vec below, not written through this field), so the default
+  // map `parse_state_new` constructs is ours alone.
   defer state.global_symbols.free();
 
   for state.next_token_is_keyword("use") {
     let ierr = p.parse_import();
     if ierr.is_some() {
+      // Not cached - a transient parse-error state the entry file's
+      // own next edit might fix. `state.tokens` has nowhere else to
+      // live, so it goes to `shared.all_tokens` exactly as every
+      // file's tokens used to, pre-existing behavior this cache
+      // doesn't change on an error path.
+      shared.mu.lock();
+      shared.all_tokens.push(state.tokens);
+      shared.mu.unlock();
       ret .Some(format("parse error in {str}", path));
     }
   }
 
+  Vec<str> my_imports;
+  my_imports.init(4);
   for n : state.nodes {
     fit n.kind {
       .Import(imp_node) -> {
         str resolved = resolve_import_path(path, imp_node.path);
         _preload_claim(shared, resolved);
+        my_imports.push(resolved);
       }
       _ -> {}
     }
   }
 
+  Vec<GlobalSymbolInfo> my_symbols;
+  my_symbols.init(4);
+  _scan_compound_names(state.tokens, state.pindex, path, &my_symbols);
+
   shared.mu.lock();
-  _scan_compound_names(state.tokens, state.pindex, path, shared.out);
+  num mi = 0;
+  for mi < my_symbols.len {
+    GlobalSymbolInfo info = my_symbols.get(mi);
+    shared.out.put(info.symbol_name, info);
+    mi = mi + 1;
+  }
+  if is_entry {
+    // The entry file is never cached (see `_preload_cache_hit`'s own
+    // note), so its tokens still need `shared.all_tokens`'s own
+    // lifetime, exactly as before this cache existed; `my_symbols`/
+    // `my_imports` were only ever scratch for the merge/claim above.
+    shared.all_tokens.push(state.tokens);
+    my_symbols.free();
+    num fi = 0;
+    for fi < my_imports.len {
+      free(my_imports.get(fi));
+      fi = fi + 1;
+    }
+    my_imports.free();
+  } else {
+    let stale = shared.cache.preload_cache.at(norm);
+    if stale.is_some() {
+      PreloadedFileSymbols old = stale.unwrap();
+      _free_stale_preloaded(&old);
+    }
+    PreloadedFileSymbols fresh;
+    fresh.source = src;
+    fresh.tokens = state.tokens;
+    fresh.symbols = my_symbols;
+    fresh.import_paths = my_imports;
+    norm_owned = false;
+    shared.cache.preload_cache.put(norm, fresh);
+  }
   shared.mu.unlock();
   ret .None;
 }
@@ -676,10 +980,13 @@ async fun _preload_worker(PreloadShared* shared, WaitGroup* wpool) {
       .Ok(path) -> {
         let ferr = _preload_one_file(shared, path, nil);
         if ferr.is_some() {
+          str msg = ferr.unwrap();
           shared.mu.lock();
           if !shared.has_error {
             shared.has_error = true;
-            shared.first_error = ferr.unwrap();
+            shared.first_error = msg;
+          } else {
+            free(msg);
           }
           shared.mu.unlock();
         }
@@ -701,10 +1008,13 @@ fun _preload_drain_sync(PreloadShared* shared) {
       .Ok(path) -> {
         let ferr = _preload_one_file(shared, path, nil);
         if ferr.is_some() {
+          str msg = ferr.unwrap();
           shared.mu.lock();
           if !shared.has_error {
             shared.has_error = true;
-            shared.first_error = ferr.unwrap();
+            shared.first_error = msg;
+          } else {
+            free(msg);
           }
           shared.mu.unlock();
         }
@@ -745,7 +1055,8 @@ fun _preload_and_collect_source(
   Map<str, GlobalSymbolInfo>* out,
   Set<str>* visited,
   Vec<Vec<Token>>* all_tokens,
-  flag parallel_preload
+  flag parallel_preload,
+  ImportCache* cache
 ) Option<str> {
   str norm = _normalize_path(path);
   if visited.has(norm) {
@@ -758,6 +1069,7 @@ fun _preload_and_collect_source(
   shared.out = out;
   shared.visited = visited;
   shared.all_tokens = all_tokens;
+  shared.cache = cache;
   shared.queue = channel_new_cap("", 64);
   shared.pending = 1;
   shared.has_error = false;
@@ -808,7 +1120,7 @@ fun _preload_and_collect_source(
 // `out`. Tracks `{`/`}` depth so only a depth-0 (top-level) sequence ever
 // matches. The function case backs `is_known_function`'s cross-file half,
 // the same way the compound case backs `is_known_compound_symbol`'s.
-fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, GlobalSymbolInfo>* out) {
+fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Vec<GlobalSymbolInfo>* out) {
   num i = start_idx;
   num depth = 0;
   flag prev_was_pub = false;
@@ -845,7 +1157,7 @@ fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, Gl
         }
         let info = global_symbol_info_new(name, path);
         info.is_compound = true;
-        out.put(name, info);
+        out.push(info);
       }
     }
     if depth == 0 && prev_was_pub && token_is_keyword(t, "fun") {
@@ -861,7 +1173,7 @@ fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Map<str, Gl
         }
         let finfo = global_symbol_info_new(fname, path);
         finfo.is_function = true;
-        out.put(fname, finfo);
+        out.push(finfo);
       }
     }
     prev_was_pub = token_is_keyword(t, "pub");
@@ -911,6 +1223,12 @@ fun _parse_and_merge_source(
 ) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
+    // Never reaches `visited.add` below, which is otherwise this
+    // string's own owner (see its own note on why `visited.free()`
+    // stays shallow) - nothing else holds it, so it is freed here
+    // instead, on every file the same import graph reaches more than
+    // once.
+    free(path);
     ret .None;
   }
   visited.add(path);
@@ -921,6 +1239,20 @@ fun _parse_and_merge_source(
       ret .Some(format("import not found: {str}", path));
     }
     src = read_to_string(path);
+  } else {
+    // `source` is the entry file's own live editor text - owned by
+    // the document store, which frees and replaces it on the very
+    // next edit (`Documents.edited`/`.replaced`). `fresh.source`
+    // below is read again on every later call to this same path,
+    // for as long as this process keeps running, so aliasing the
+    // caller's buffer directly here would leave it pointing at freed
+    // memory the moment this document is edited again - silently
+    // "working" only because the allocator so often hands back the
+    // same address for the next similarly-sized text, making a stale
+    // comparison read whatever now occupies that address instead of
+    // reliably failing. An owned copy is this cache entry's own,
+    // independent of the caller's.
+    src = substr(source, 0, len(source));
   }
 
   // A file reached under an alias has its own function names rewritten
@@ -940,7 +1272,16 @@ fun _parse_and_merge_source(
     }
   }
 
-  if !reused {
+  if reused {
+    // `src` was either a fresh disk read (an import) or this call's
+    // own entry-text copy just above - either way, nothing past this
+    // point ever reads it again once a cached parse is being reused
+    // instead, so it has nowhere left to go but freed here. Left
+    // unfreed, every reused import leaked its own full source text on
+    // every single edit of any document that imports it, for as long
+    // as the server kept running.
+    free(src);
+  } else {
     let tok_result = tokenize(src, path);
     if tok_result.is_err() {
       ret .Some(format("lex error in {str}", path));
@@ -951,12 +1292,15 @@ fun _parse_and_merge_source(
     state.global_symbols = *global_symbols;
     Parser p = parser_new(&state);
     let perr = p.parse();
-    // Just the backing array - see the identical note in `_entry_nodes`.
-    state.tokens.free();
     // Not `global_symbols.free()`: it's `*global_symbols` above, the
     // caller's own map, not this call's to free.
     free_parse_state_internal(&state);
     if perr.is_some() {
+      // Not cached either way below, so nothing else will ever reach
+      // `state.nodes` to read its borrowed strings - safe to fully free
+      // here, tokens included, unlike the success path just below.
+      free_node_tree(&state.nodes);
+      free_token_vec(&state.tokens);
       ret .Some(format("parse error in {str}", path));
     }
     parsed_nodes = state.nodes;
@@ -965,17 +1309,40 @@ fun _parse_and_merge_source(
       // freed first: every consumer of a cached entry's own `nodes`
       // clones it rather than borrowing (`_parse_and_merge_source`'s
       // own push loop below), so nothing outside this cache still
-      // points into the entry being replaced.
+      // points into the entry being replaced. Its own `tokens` are
+      // freed deeply here too (see `ParsedFile.tokens`'s own note) -
+      // this is the one point that's safe, since nothing but `old`
+      // itself and clones of its *nodes* (which never touch strings)
+      // ever reached these strings.
       let stale = cache.files.at(path);
       if stale.is_some() {
         ParsedFile old = stale.unwrap();
         free_node_tree(&old.nodes);
+        free_token_vec(&old.tokens);
+        free(old.source);
       }
       ParsedFile fresh;
       fresh.source = src;
       fresh.symbols_key = symbols_key;
+      // `state.tokens` moves in whole: `fresh.tokens` is now its sole
+      // owner, freed only above, the next time this path's entry is
+      // replaced (or, for the process's very last revision of it,
+      // never - no different from any other resource still live when
+      // the server exits).
+      fresh.tokens = state.tokens;
       fresh.nodes = parsed_nodes;
       cache.files.put(path, fresh);
+    } else {
+      // An aliased import, reparsed fresh every time and never cached
+      // (see this function's own note above on why) - its `nodes` is
+      // about to be cloned into `merged` below and then is itself
+      // discarded with nothing left pointing at it, but nothing downstream
+      // of this whole call ever frees its *tokens* either, so this one
+      // path still leaks that text's own strings on every call. Narrower,
+      // pre-existing, and separate from the unbounded cacheable-path leak
+      // this change fixes - left as-is rather than widening this change's
+      // own blast radius.
+      state.tokens.free();
     }
   }
 
@@ -1004,6 +1371,10 @@ fun _parse_and_merge_source(
           cache,
           symbols_key
         );
+        // Passed by value: `_parse_and_merge_source`'s own internal
+        // `path = _normalize_path(path);` only rebinds its own copy,
+        // never this one - nothing else here reads `resolved` again.
+        free(resolved);
         if ierr.is_some() {
           ret ierr;
         }
@@ -1334,6 +1705,30 @@ test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
   }
   assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
   assert saw_helper, "expected the imported file's 'helper_add_one' function in the merged nodes too";
+}
+
+test "parse_program_cached hands back its own global_symbols when asked, instead of freeing them" {
+  // fls's own incremental-reparse fast path needs exactly this: the
+  // known-symbol info a later, isolated parse can't otherwise
+  // reconstruct cheaply. `keep_symbols` skips the function's own
+  // defers in that case, so the two go hand in hand - verified here
+  // by actually reading the snapshot's content, not just that the
+  // call succeeded.
+  ImportCache cache = import_cache_new();
+  defer cache.files.free();
+  defer cache.preload_cache.free();
+  GlobalSymbolsSnapshot snap;
+  let result = parse_program_cached(
+    "src/parser/import_resolver_fixtures/two_file_main.fn",
+    nil,
+    &cache,
+    true,
+    &snap
+  );
+  assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
+  assert snap.global_symbols.has("helper_add_one"),
+  "expected the imported file's own public function in the handed-back snapshot";
+  free_global_symbols_snapshot(&snap);
 }
 
 test "parse_program_with_imports terminates on a diamond import instead of duplicating or looping" {

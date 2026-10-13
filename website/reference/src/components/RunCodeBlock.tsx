@@ -174,33 +174,32 @@ export default function RunCodeBlock({ initialCode, title }: Props) {
           return;
         } catch {
           // No pre-baked module for this example (or it failed to load/
-          // run) - fall through to the backend below.
+          // run) - every example is still expected to run with no
+          // backend at all, so this falls through to the exact same
+          // live in-browser compile edited code always uses, just
+          // below, before ever reaching the backend.
         }
-      } else {
-        try {
-          const outcome = await runEditedCode({ "playground.fn": code }, "playground.fn");
-          setStdout(outcome.stdout);
-          setStderr(outcome.stderr);
+      }
+      try {
+        const outcome = await runEditedCode({ "playground.fn": code }, "playground.fn");
+        setStdout(outcome.stdout);
+        setStderr(outcome.stderr);
+        return;
+      } catch (e) {
+        if (e instanceof FunCompileError) {
+          // The authoritative answer - a live backend would reject
+          // the same program the same way, so there's nothing to
+          // gain by falling through to one.
+          setStderr(e.message);
           return;
-        } catch (e) {
-          if (e instanceof FunCompileError) {
-            // The authoritative answer - a live backend would reject
-            // the same program the same way, so there's nothing to
-            // gain by falling through to one.
-            setStderr(e.message);
-            return;
-          }
-          // An infrastructure failure (a module failed to load, a
-          // timeout, the in-browser C compiler itself choked) - fall
-          // through to the backend below, same as an unedited example
-          // without a pre-baked module does.
         }
+        // An infrastructure failure (a module failed to load, a
+        // timeout, the in-browser C compiler itself choked) - fall
+        // through to the backend below.
       }
       if (backendUnavailable) {
         setStderr(
-          isUnedited
-            ? "This example has no pre-baked offline version and there is no backend API available to run it. Run the site locally, or set up a remote runner API (see project README)."
-            : "Could not run this in your browser and there is no backend API available to fall back to. Run the site locally, or set up a remote runner API (see project README).",
+          "Could not run this in your browser and there is no backend API available to fall back to. Run the site locally, or set up a remote runner API (see project README).",
         );
         return;
       }

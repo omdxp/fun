@@ -14585,7 +14585,25 @@ impl Codegen {
         .Variable(v) -> {
           if v.is_const {
             self.top_level_const_names.push(v.name);
-            self.top_level_const_type_names.push(v.var_type.type_str);
+            // An untyped `const` (`pub const MAX = 100;`) still carries
+            // the `__let_infer__` sentinel here, same as an untyped
+            // `let` - `emit_global_variable`'s own declaration resolves
+            // it (via `infer_let_expr_type`, or `__auto_type` when that
+            // can't) before ever writing C for it, but this registry is
+            // read by every *other* reference to this const, including
+            // from another file, before that declaration is ever
+            // reached. Registering the sentinel itself, unresolved, had
+            // every such reference's own type become literally
+            // `__let_infer__` in the generated C - a guaranteed
+            // compile error, not just an imprecise type.
+            str registered_type = v.var_type.type_str;
+            if equals(registered_type, "__let_infer__") && v.has_val {
+              let inferred = self.infer_let_expr_type(v.val);
+              if inferred.is_some() {
+                registered_type = inferred.unwrap().type_str;
+              }
+            }
+            self.top_level_const_type_names.push(registered_type);
           }
         }
         _ -> {}
