@@ -477,17 +477,59 @@ pub fun parse_program_with_source(str entry_path, str entry_source, flag paralle
   ret parse_program_cached(entry_path, entry_source, &cache, parallel_preload);
 }
 
+// `global_symbols` and the token storage its own `symbol_name`/
+// `file_path` strings alias (see `parse_program_cached`'s own note on
+// why those two are bundled) - handed back by `parse_program_cached`
+// when `out_symbols` is given, for a caller that needs the same
+// known-symbol info a later, isolated parse would otherwise have no
+// way to reconstruct cheaply (fls's own incremental-reparse fast
+// path). Free with `free_global_symbols_snapshot`, never field by
+// field.
+pub compound GlobalSymbolsSnapshot {
+  Map<str, GlobalSymbolInfo> global_symbols;
+  Vec<Vec<Token>> all_tokens;
+}
+
+pub fun free_global_symbols_snapshot(GlobalSymbolsSnapshot* s) {
+  s.global_symbols.free();
+  num i = 0;
+  for i < s.all_tokens.len {
+    Vec<Token> one = s.all_tokens.get(i);
+    free_token_vec(&one);
+    i = i + 1;
+  }
+  s.all_tokens.free();
+}
+
 // The same, reusing what `cache` already holds. A file whose text and
 // surrounding declarations are unchanged is not parsed again, so an edit
 // in one file costs that file rather than the whole import graph.
-pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cache, flag parallel_preload = true) Result<ProgramMergeResult, str> {
+// `out_symbols`, when given, receives this call's own `global_symbols`
+// (every public symbol read while preloading this file's imports) and
+// the token storage it aliases, instead of having both freed at the
+// end as usual - the caller then owns `*out_symbols` and must free it
+// with `free_global_symbols_snapshot` itself.
+pub fun parse_program_cached(
+  str entry_path,
+  str entry_source,
+  ImportCache* cache,
+  flag parallel_preload = true,
+  GlobalSymbolsSnapshot* out_symbols = nil
+) Result<ProgramMergeResult, str> {
+  flag keep_symbols = out_symbols != nil;
   Map<str, GlobalSymbolInfo> global_symbols;
   global_symbols.init(8);
   // Shallow only: every GlobalSymbolInfo is a value copy, and its own
   // symbol_name/file_path are aliases into `all_tokens` below (from
   // the preload scan) or into the real parse's own AST/token content
   // - global_symbols itself owns none of that, just points at it.
-  defer global_symbols.free();
+  // Skipped when `out_symbols` is handing both off to the caller
+  // instead (see its own note above).
+  defer {
+    if !keep_symbols {
+      global_symbols.free();
+    }
+  }
   Set<str> preload_visited = set_init("", 8);
   // Deep: every key here is this function's own _normalize_path
   // result, added only during the preload pass and never read again
@@ -503,13 +545,15 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
   Vec<Vec<Token>> all_tokens;
   all_tokens.init(8);
   defer {
-    num ati = 0;
-    for ati < all_tokens.len {
-      Vec<Token> one = all_tokens.get(ati);
-      free_token_vec(&one);
-      ati = ati + 1;
+    if !keep_symbols {
+      num ati = 0;
+      for ati < all_tokens.len {
+        Vec<Token> one = all_tokens.get(ati);
+        free_token_vec(&one);
+        ati = ati + 1;
+      }
+      all_tokens.free();
     }
-    all_tokens.free();
   }
   let preload_err = _preload_and_collect_source(
     entry_path,
@@ -521,6 +565,15 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
     cache
   );
   if preload_err.is_some() {
+    // Still handed off on this failure path when requested: the
+    // defers above already skipped freeing `global_symbols`/
+    // `all_tokens` on that assumption, so leaving `*out_symbols`
+    // unset here would leak both rather than just return nothing
+    // useful in them.
+    if keep_symbols {
+      out_symbols.global_symbols = global_symbols;
+      out_symbols.all_tokens = all_tokens;
+    }
     ret .Err(preload_err.unwrap());
   }
 
@@ -561,6 +614,10 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
     symbols_key
   );
   if err.is_some() {
+    if keep_symbols {
+      out_symbols.global_symbols = global_symbols;
+      out_symbols.all_tokens = all_tokens;
+    }
     ret .Err(err.unwrap());
   }
   // The call above just parsed (or confirmed unchanged and reused) the
@@ -590,6 +647,10 @@ pub fun parse_program_cached(str entry_path, str entry_source, ImportCache* cach
   r.aliases = aliases;
   r.alias_rename_keys = rename_keys;
   r.alias_rename_targets = rename_targets;
+  if keep_symbols {
+    out_symbols.global_symbols = global_symbols;
+    out_symbols.all_tokens = all_tokens;
+  }
   ret .Ok(r);
 }
 
@@ -1638,6 +1699,30 @@ test "parse_program_with_imports merges a two-file program into one Vec<Node>" {
   }
   assert saw_main, "expected the entry file's own 'main' function in the merged nodes";
   assert saw_helper, "expected the imported file's 'helper_add_one' function in the merged nodes too";
+}
+
+test "parse_program_cached hands back its own global_symbols when asked, instead of freeing them" {
+  // fls's own incremental-reparse fast path needs exactly this: the
+  // known-symbol info a later, isolated parse can't otherwise
+  // reconstruct cheaply. `keep_symbols` skips the function's own
+  // defers in that case, so the two go hand in hand - verified here
+  // by actually reading the snapshot's content, not just that the
+  // call succeeded.
+  ImportCache cache = import_cache_new();
+  defer cache.files.free();
+  defer cache.preload_cache.free();
+  GlobalSymbolsSnapshot snap;
+  let result = parse_program_cached(
+    "src/parser/import_resolver_fixtures/two_file_main.fn",
+    nil,
+    &cache,
+    true,
+    &snap
+  );
+  assert result.is_ok(), "expected the two-file program to resolve and parse cleanly";
+  assert snap.global_symbols.has("helper_add_one"),
+  "expected the imported file's own public function in the handed-back snapshot";
+  free_global_symbols_snapshot(&snap);
 }
 
 test "parse_program_with_imports terminates on a diamond import instead of duplicating or looping" {
