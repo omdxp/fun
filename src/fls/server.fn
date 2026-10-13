@@ -363,7 +363,12 @@ impl Server {
       ret;
     }
     Vec<Diagnostic> found = diagnose(&self.reads, &self.diagnosed, doc.unwrap());
-    defer found.free();
+    // Deep: every Diagnostic.message `diagnose` hands back is its own
+    // fresh, freeable string (see diagnostics.fn's own note on
+    // `free_diagnostics`), not aliased from the version cached
+    // internally - a shallow free here leaked every diagnostic
+    // message, every report, for as long as the server kept running.
+    defer free_diagnostics(&found);
     write_message(publish(document_uri, doc.unwrap().text, &found));
   }
 

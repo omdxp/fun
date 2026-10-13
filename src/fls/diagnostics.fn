@@ -66,7 +66,10 @@ impl DiagnosticsCache {
   pub forget(str document_uri) {
     let found = self.entries.at(document_uri);
     if found.is_some() {
-      found.unwrap().diagnostics.free();
+      // Always a `_clone_diagnostics`-built copy (see `diagnose`'s
+      // own note) - safe to deep-free.
+      DiagnosedEntry entry = found.unwrap();
+      free_diagnostics(&entry.diagnostics);
     }
     self.entries.remove(document_uri);
   }
@@ -76,20 +79,40 @@ impl DiagnosticsCache {
   }
 }
 
-// A shallow copy of `src`'s own elements: cheap next to a full
-// typecheck/analyze pass, and each `Diagnostic`'s own `message` is
-// never freed by `Vec.free()` (which only ever frees the backing
-// array), so sharing that string between the cached copy and what a
-// caller goes on to free carries no double-free risk.
+// A deep copy of `src`'s own elements: each `Diagnostic.message` is
+// its own fresh string this call owns, not an aliased copy of
+// `src`'s own - the cached copy and whatever the caller does with
+// `src` afterward (typically freeing it, see `_free_diagnostics`)
+// each own their own, with no double-free risk between them.
 fun _clone_diagnostics(Vec<Diagnostic>* src) Vec<Diagnostic> {
   Vec<Diagnostic> copy;
   copy.init(src.len);
   num i = 0;
   for i < src.len {
-    copy.push(src.get(i));
+    Diagnostic d = src.get(i);
+    d.message = substr(d.message, 0, len(d.message));
+    copy.push(d);
     i = i + 1;
   }
   ret copy;
+}
+
+// Frees every `Diagnostic.message` before the Vec's own backing
+// array. Safe for any `Vec<Diagnostic>` this module itself hands
+// back (from `diagnose`, or a `_clone_diagnostics`-built cache
+// entry): every `_at_start` call site in this file clones a message
+// that might otherwise be a bare string literal (several of
+// typecheck.fn's/warnings.fn's/alias_expand.fn's own error-message
+// sources are, and freeing one of those crashes) before handing it
+// off, so every `Diagnostic.message` leaving this module is
+// uniformly its own fresh, freeable string.
+pub fun free_diagnostics(Vec<Diagnostic>* d) {
+  num i = 0;
+  for i < d.len {
+    free(d.get(i).message);
+    i = i + 1;
+  }
+  d.free();
 }
 
 // Everything wrong with `doc`, in the order a reader meets it. Cached
@@ -105,8 +128,10 @@ pub fun diagnose(AnalysisCache* cache, DiagnosticsCache* dcache, Document doc) V
     }
     // A stale revision, about to be replaced below - freed first, or
     // every edit leaks the whole previous diagnostics list for as
-    // long as the server keeps running.
-    found.diagnostics.free();
+    // long as the server keeps running. Always a `_clone_diagnostics`
+    // copy (every entry ever stored here went through it), so safe
+    // to deep-free.
+    free_diagnostics(&found.diagnostics);
   }
 
   Vec<Diagnostic> out = _diagnose_uncached(cache, doc);
@@ -132,7 +157,8 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
 
   Analyzed read = cache.of(doc);
   if !read.lexed {
-    out.push(_at_start(DIAG_SEVERITY_ERROR, "could not read this file"));
+    str not_lexed = "could not read this file";
+    out.push(_at_start(DIAG_SEVERITY_ERROR, substr(not_lexed, 0, len(not_lexed))));
     ret out;
   }
 
@@ -160,8 +186,16 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     defer state.global_symbols.free();
     defer free_parse_state_internal(&state);
     if parse_failed.is_some() {
-      str message = "this file could not be read";
+      // Always a fresh clone, whichever branch sets it - `message`
+      // ends up as this `Diagnostic`'s own `.message`, which (unlike
+      // most built in typecheck.fn/warnings.fn, often a bare string
+      // literal) is always safe to free, matching every other
+      // `Diagnostic` this function builds. See `report()`'s own note
+      // on why that uniformity matters.
+      str not_read = "this file could not be read";
+      str message = substr(not_read, 0, len(not_read));
       if state.has_error {
+        free(message);
         message = substr(state.error_message, 0, len(state.error_message));
       }
       Diagnostic d = _at_start(DIAG_SEVERITY_ERROR, message);
@@ -174,7 +208,8 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
       out.push(d);
       ret out;
     }
-    out.push(_at_start(DIAG_SEVERITY_ERROR, "this file's imports could not be resolved"));
+    str imports_msg = "this file's imports could not be resolved";
+    out.push(_at_start(DIAG_SEVERITY_ERROR, substr(imports_msg, 0, len(imports_msg))));
     ret out;
   }
   ProgramMergeResult program = read.program;
@@ -195,7 +230,12 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   let alias_err = expand_type_aliases(&alias_checked_nodes);
   if alias_err.is_some() {
     has_type_error = true;
-    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, alias_err.unwrap());
+    // Cloned: `expand_type_aliases`'s own error is a bare string
+    // literal at at least one of its own return sites, never safe to
+    // free as-is - see this function's own earlier note on why every
+    // `Diagnostic` it builds needs to be uniformly freeable.
+    str alias_msg = alias_err.unwrap();
+    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, substr(alias_msg, 0, len(alias_msg)));
   }
   let checked = typecheck_program(&alias_checked_nodes);
   // The clone above is the only tree expansion ever touched, so it is
@@ -208,7 +248,11 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
   if !has_type_error && checked.is_err() {
     TypeError e = checked.unwrap_err();
     has_type_error = true;
-    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, e.message);
+    // Cloned: `TypeError.message` is a bare string literal at most of
+    // `Checker.fail`'s own call sites in typecheck.fn, never safe to
+    // free as-is - every `Diagnostic` this function builds needs to
+    // be uniformly freeable (see `report()`'s own note).
+    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, substr(e.message, 0, len(e.message)));
     if e.has_pos && equals(e.pos.filename, path) {
       type_error_diag.line = e.pos.line - 1;
       type_error_diag.col = e.pos.col - 1;
