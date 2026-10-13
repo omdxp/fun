@@ -7937,6 +7937,22 @@ impl Parser {
     self.has_current_function = true;
 
     self.state.new_scope();
+    // Every error return below here used to skip straight past the
+    // success path's own restore/finish_scope/push (right before its
+    // own `ret .None;`), leaving the parser's own current_function
+    // stack unbalanced and leaking this method's own node outright -
+    // one per malformed method anywhere a real codebase is edited
+    // mid-method. `handed_off` flips true only once `out_methods` has
+    // taken real ownership.
+    flag handed_off = false;
+    defer {
+      self.current_function = prev_fn;
+      self.has_current_function = prev_has_fn;
+      self.state.finish_scope();
+      if !handed_off {
+        node_free(fn_node_ptr);
+      }
+    }
 
     Vec<str> method_type_params;
     method_type_params.init(0);
@@ -8120,10 +8136,7 @@ impl Parser {
       }
     }
 
-    self.current_function = prev_fn;
-    self.has_current_function = prev_has_fn;
-    self.state.finish_scope();
-
+    handed_off = true;
     out_methods.push(fn_node_ptr);
     ret .None;
   }
