@@ -173,6 +173,33 @@ fun _tv_dup(str s) str {
   ret out;
 }
 
+// Deep-frees a `TomlValue`'s own owned contents: `.Str`'s string, or
+// every entry of a nested `.Table`'s own map (recursively). `.Int`,
+// `.Float`, and `.Bool` own nothing.
+fun _free_toml_value(TomlValue* v) {
+  fit *v {
+    .Str(s) -> { free(s); }
+    .Table(m) -> { _free_toml_value_map(&m); }
+    _ -> {}
+  }
+}
+
+// Every key in a TOML value map is a fresh string this module built
+// itself, never borrowed - both the keys and each value's own owned
+// contents are freed here before the map's own shell.
+fun _free_toml_value_map(Map<str, TomlValue>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    TomlValue v = m.at(name).unwrap();
+    _free_toml_value(&v);
+  }
+  for name : names {
+    free(name);
+  }
+  m.free();
+}
+
 // A parsed TOML document: keys mapped to typed values.
 // A `[name]` section's own `key = value` pairs.
 pub compound TomlTable {
@@ -222,7 +249,8 @@ impl TomlTable {
   }
 
   pub free() {
-    self.values.free();
+    free(self.name);
+    _free_toml_value_map(&self.values);
   }
 }
 
@@ -270,7 +298,7 @@ impl TomlDoc {
 
   // Free internal storage.
   pub free() {
-    self.values.free();
+    _free_toml_value_map(&self.values);
     num i = 0;
     for i < self.tables.len {
       self.tables.data[i].free();
@@ -322,7 +350,9 @@ fun _toml_is_digit(chr c) flag {
 }
 
 // Drops a trailing `# comment`, respecting a quoted value so a `#`
-// inside quotes is kept.
+// inside quotes is kept. Consumes `text`: returns it unchanged when
+// there is no comment, otherwise frees it and returns a fresh,
+// trimmed owned string.
 fun _strip_trailing_comment(str text) str {
   num i = 0;
   flag in_quotes = false;
@@ -331,7 +361,11 @@ fun _strip_trailing_comment(str text) str {
     if text[i] == '"' {
       in_quotes = !in_quotes;
     } elif text[i] == '#' && !in_quotes {
-      ret trim(substr(text, 0, i));
+      str cut = substr(text, 0, i);
+      str trimmed = trim(cut);
+      free(cut);
+      free(text);
+      ret trimmed;
     }
     i = i + 1;
   }
@@ -340,18 +374,28 @@ fun _strip_trailing_comment(str text) str {
 
 // One `key = value` piece inside an inline table's braces, put into
 // `out` (a no-op for an empty or malformed piece, mirroring
-// `_parse_line_into`'s own tolerance for a line with no `=`).
+// `_parse_line_into`'s own tolerance for a line with no `=`). Always
+// consumes `piece`.
 fun _inline_table_put(Map<str, TomlValue>* out, str piece) {
   if len(piece) == 0 {
+    free(piece);
     ret;
   }
   let eq_idx = index_of_char(piece, '=');
   if eq_idx == -1 {
+    free(piece);
     ret;
   }
-  let key = trim(substr(piece, 0, eq_idx));
-  let value_text = trim(substr(piece, eq_idx + 1, len(piece) - (eq_idx + 1)));
+  str key_cut = substr(piece, 0, eq_idx);
+  let key = trim(key_cut);
+  free(key_cut);
+  str val_cut = substr(piece, eq_idx + 1, len(piece) - (eq_idx + 1));
+  let value_text = trim(val_cut);
+  free(val_cut);
+  free(piece);
   if len(key) == 0 {
+    free(key);
+    free(value_text);
     ret;
   }
   out.put(key, _classify(value_text));
@@ -360,13 +404,17 @@ fun _inline_table_put(Map<str, TomlValue>* out, str piece) {
 // `{ key = value, key2 = value2 }`: strips the outer braces, then splits
 // on a top-level comma (one respecting quotes, so a comma inside a
 // quoted value doesn't split it) and classifies each `key = value`
-// piece the same way a top-level line would be.
+// piece the same way a top-level line would be. Consumes `text`.
 fun _classify_inline_table(str text) TomlValue {
   Map<str, TomlValue> out;
   out.init(4);
-  let inner = trim(substr(text, 1, len(text) - 2));
+  str inner_cut = substr(text, 1, len(text) - 2);
+  let inner = trim(inner_cut);
+  free(inner_cut);
+  free(text);
   let n = len(inner);
   if n == 0 {
+    free(inner);
     ret .Table(out);
   }
   num i = 0;
@@ -377,18 +425,26 @@ fun _classify_inline_table(str text) TomlValue {
     if c == '"' {
       in_quotes = !in_quotes;
     } elif c == ',' && !in_quotes {
-      _inline_table_put(&out, trim(substr(inner, start, i - start)));
+      str piece_cut = substr(inner, start, i - start);
+      str piece = trim(piece_cut);
+      free(piece_cut);
+      _inline_table_put(&out, piece);
       start = i + 1;
     }
     i = i + 1;
   }
   if start < n {
-    _inline_table_put(&out, trim(substr(inner, start, n - start)));
+    str last_cut = substr(inner, start, n - start);
+    str last_piece = trim(last_cut);
+    free(last_cut);
+    _inline_table_put(&out, last_piece);
   }
+  free(inner);
   ret .Table(out);
 }
 
 // Classify a raw (trimmed) TOML value string into a typed TomlValue.
+// Consumes `raw_text`.
 fun _classify(str raw_text) TomlValue {
   let text = _strip_trailing_comment(raw_text);
   let n = _tv_strlen(text);
@@ -404,16 +460,20 @@ fun _classify(str raw_text) TomlValue {
   // Quoted string: strip the surrounding quotes.
   if text[0] == '"' {
     if n >= 2 && text[n - 1] == '"' {
-      ret .Str(substr(text, 1, n - 2));
+      str inner = substr(text, 1, n - 2);
+      free(text);
+      ret .Str(inner);
     }
     ret .Str(text);
   }
 
   // Booleans.
   if equals(text, "true") {
+    free(text);
     ret .Bool(true);
   }
   if equals(text, "false") {
+    free(text);
     ret .Bool(false);
   }
 
@@ -429,9 +489,13 @@ fun _classify(str raw_text) TomlValue {
       i = i + 1;
     }
     if has_dot == 1 {
-      ret .Float(parse_dec(text));
+      let f = parse_dec(text);
+      free(text);
+      ret .Float(f);
     }
-    ret .Int(parse_int(text));
+    let v = parse_int(text);
+    free(text);
+    ret .Int(v);
   }
 
   // Anything else is a bare string.
@@ -446,9 +510,15 @@ fun _parse_line_into(TomlDoc* out, str line) {
   if eq_idx == -1 {
     ret;
   }
-  let key = trim(substr(line, 0, eq_idx));
-  let value_text = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+  str key_cut = substr(line, 0, eq_idx);
+  let key = trim(key_cut);
+  free(key_cut);
+  str val_cut = substr(line, eq_idx + 1, len(line) - (eq_idx + 1));
+  let value_text = trim(val_cut);
+  free(val_cut);
   if len(key) <= 0 {
+    free(key);
+    free(value_text);
     ret;
   }
   out.set(key, _classify(value_text));
@@ -470,9 +540,15 @@ fun _route_line(TomlDoc* out, str line, num section, num index) {
   if eq_idx == -1 {
     ret;
   }
-  let key = trim(substr(line, 0, eq_idx));
-  let value_text = trim(substr(line, eq_idx + 1, len(line) - (eq_idx + 1)));
+  str key_cut = substr(line, 0, eq_idx);
+  let key = trim(key_cut);
+  free(key_cut);
+  str val_cut = substr(line, eq_idx + 1, len(line) - (eq_idx + 1));
+  let value_text = trim(val_cut);
+  free(val_cut);
   if len(key) <= 0 {
+    free(key);
+    free(value_text);
     ret;
   }
   if section == 1 {
@@ -514,12 +590,16 @@ pub fun parse_document(str s) TomlDoc {
     }
     if _is_header(line) {
       if starts_with(line, "[[") && ends_with(line, "]]") {
-        let name = trim(substr(line, 2, len(line) - 4));
+        str name_cut = substr(line, 2, len(line) - 4);
+        let name = trim(name_cut);
+        free(name_cut);
         out.array_tables.push(toml_table_init(name));
         section = 2;
         index = out.array_tables.len - 1;
       } else {
-        let name = trim(substr(line, 1, len(line) - 2));
+        str name_cut = substr(line, 1, len(line) - 2);
+        let name = trim(name_cut);
+        free(name_cut);
         out.tables.push(toml_table_init(name));
         section = 1;
         index = out.tables.len - 1;
