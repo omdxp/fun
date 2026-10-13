@@ -1156,6 +1156,12 @@ fun _parse_and_merge_source(
 ) Option<str> {
   path = _normalize_path(path);
   if visited.has(path) {
+    // Never reaches `visited.add` below, which is otherwise this
+    // string's own owner (see its own note on why `visited.free()`
+    // stays shallow) - nothing else holds it, so it is freed here
+    // instead, on every file the same import graph reaches more than
+    // once.
+    free(path);
     ret .None;
   }
   visited.add(path);
@@ -1298,6 +1304,10 @@ fun _parse_and_merge_source(
           cache,
           symbols_key
         );
+        // Passed by value: `_parse_and_merge_source`'s own internal
+        // `path = _normalize_path(path);` only rebinds its own copy,
+        // never this one - nothing else here reads `resolved` again.
+        free(resolved);
         if ierr.is_some() {
           ret ierr;
         }
