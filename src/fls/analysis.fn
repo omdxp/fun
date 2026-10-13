@@ -456,7 +456,7 @@ impl AnalysisCache {
 
     if !ok {
       free_node_tree(&state.nodes);
-      state.tokens.free();
+      free_token_vec(&state.tokens);
       state.global_symbols.free();
       free_parse_state_internal(&state);
       ret false;
@@ -464,7 +464,15 @@ impl AnalysisCache {
 
     Node new_node = state.nodes.get(0);
     state.nodes.free();
-    state.tokens.free();
+    // Not freed: `new_node`'s own strings (its name, every identifier
+    // in its body, ...) are borrowed straight from these tokens, same
+    // convention as everywhere else in this codebase - and `new_node`
+    // is about to be spliced into `found.program`, outliving this
+    // call. Handed to `found.symbols.all_tokens` instead, the exact
+    // same idiom `_parse_and_merge_source` itself uses for a kept
+    // node's own tokens - freed as a batch, together with every other
+    // kept token vec, the next time this file gets a full reparse.
+    found.symbols.all_tokens.push(state.tokens);
     state.global_symbols.free();
     free_parse_state_internal(&state);
 
