@@ -7096,20 +7096,40 @@ impl Parser {
       *dt = dtype_new();
       let derr = self.state.parse_datatype(dt);
       if derr.is_some() {
+        // Deep, not shallow: nothing has copied out of `dt` yet on
+        // this path, so whatever it built before failing - its own
+        // generic args included - is still exclusively its own.
+        dtype_free(dt);
         ret derr;
       }
       if self.state.next_token_is_operator("[") {
         let aberr = self.parse_array_brackets(dt);
         if aberr.is_some() {
+          dtype_free(dt);
           ret aberr;
         }
       }
+      // `dt` is only ever a template from here on: every field name in
+      // this comma-separated line gets its own value-copy (`field_dt`
+      // below), so `dt` itself - the wrapper, not whatever it aliases,
+      // already shared out to each copy - has nowhere left to go once
+      // this line's names are read, or every compound field line
+      // leaked its own declared type.
 
       num field_count = 0;
       for true {
         let field_tok = self.state.token_next();
         if field_tok.is_none() || field_tok.unwrap().type != .Identifier {
           self.state.err("expected field name");
+          // Deep only before any name has copied out of `dt` yet
+          // (field_count == 0); once at least one has, `dt`'s own
+          // nested content is shared with that copy, same as the
+          // line's own successful end.
+          if field_count > 0 {
+            free(dt);
+          } else {
+            dtype_free(dt);
+          }
           ret .Some(.InvalidIdentifier);
         }
         str fname = "";
@@ -7123,6 +7143,7 @@ impl Parser {
         // name isn't supported.
         if field_count > 0 && dt.is_array {
           self.state.err("array fields cannot be declared in a combined list; declare them separately");
+          free(dt);
           ret .Some(.InvalidDataType);
         }
 
@@ -7145,8 +7166,10 @@ impl Parser {
 
       let serr = self.state.expect_sym(';');
       if serr.is_some() {
+        free(dt);
         ret serr;
       }
+      free(dt);
     }
 
     let rberr = self.state.expect_sym('}');
