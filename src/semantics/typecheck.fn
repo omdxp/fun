@@ -978,6 +978,20 @@ fun _free_fn_sig_map(Map<str, FnSig>* fns) {
   for i < names.len {
     FnSig sig = fns.at(names.get(i)).unwrap();
     _free_fn_sig(&sig);
+    i = i + 1;
+  }
+  // A second, separate pass - matching `_free_checked_type_map`'s own
+  // shape just above: freeing a key here is freeing live content
+  // `fns.at()` still probes for every OTHER key in this same table
+  // (open addressing walks past a live-but-unrelated slot to resolve
+  // a hash collision), so a key freed mid-loop leaves any later
+  // lookup that happens to probe through its own now-dangling slot
+  // reading freed memory - confirmed directly as the real cause of an
+  // intermittent `strcmp` crash tearing down a large table (enough
+  // entries for real collisions), Guard Malloc catching every time,
+  // plain malloc only sometimes.
+  i = 0;
+  for i < names.len {
     free(names.get(i));
     i = i + 1;
   }
