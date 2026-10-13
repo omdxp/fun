@@ -2254,10 +2254,17 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
         // ambiguity at all.
         if !i.has_type_params {
           Vec<str> implementors;
-          implementors.init(1);
           let existing = state.shape_implementors.at(i.shape_name);
           if existing.is_some() {
             implementors = existing.unwrap();
+            // `implementors` now aliases the same backing array
+            // `state.shape_implementors` itself still points at -
+            // `push()` below can realloc it, leaving that stored
+            // entry pointing at memory `realloc` already moved or
+            // freed, until the write-back at the end of this arm.
+            state.shape_implementors.remove(i.shape_name);
+          } else {
+            implementors.init(1);
           }
           implementors.push(i.type_name);
           state.shape_implementors.put(i.shape_name, implementors);

@@ -1264,6 +1264,15 @@ impl Checker {
     MethodTable table;
     if existing.is_some() {
       table = existing.unwrap();
+      // `table` now aliases the same `.methods` backing array
+      // `self.methods` itself still points at. `table.methods.put()`
+      // below can grow and rehash that array - freeing the old one -
+      // leaving `self.methods`'s own stored copy pointing at freed
+      // memory until the write-back at the end of this call. Removing
+      // the stale entry now (shallow - the key/value aren't freed,
+      // `table` already holds the only copy that matters) means
+      // nothing else can read that dangling reference in between.
+      self.methods.remove(block.type_name);
     } else {
       table = _method_table_new();
     }
@@ -1305,6 +1314,11 @@ impl Checker {
     let existing = self.shape_implementors.at(shape_name);
     if existing.is_some() {
       Set<str> bucket = existing.unwrap();
+      // Same hazard as `register_impl`'s own note: `bucket` aliases
+      // the stored Set's backing array, and `add()` below can grow
+      // and rehash it, freeing the old one out from under
+      // `self.shape_implementors`'s own copy until the write-back.
+      self.shape_implementors.remove(shape_name);
       bucket.add(type_name);
       self.shape_implementors.put(shape_name, bucket);
     } else {
