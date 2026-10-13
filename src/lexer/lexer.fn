@@ -31,13 +31,18 @@ pub compound Lexer {
 }
 
 // Creates a Lexer positioned at the start of `src` (a whole file's
-// contents, already read into memory).
-pub fun lexer_new(str src, str filename) Lexer {
+// contents, already read into memory). `start_line` defaults to 1 for
+// an ordinary whole-file lex; a caller lexing a substring extracted
+// from a larger file (fls's own isolated-declaration reparse) passes
+// that substring's real starting line instead, so every token it
+// produces carries the same absolute `Pos` a full-file lex would have
+// given it - no post-hoc line-shift over the resulting tree needed.
+pub fun lexer_new(str src, str filename, num start_line = 1) Lexer {
   Lexer l;
   l.src = src;
   l.len = len(src);
   l.pos = 0;
-  l.line = 1;
+  l.line = start_line;
   l.col = 1;
   l.filename = filename;
   l.tokens.init(64);
@@ -1001,8 +1006,8 @@ impl Lexer {
 }
 
 // Tokenizes `src` (a whole file's contents) into a flat Vec<Token>.
-pub fun tokenize(str src, str filename) Result<Vec<Token>, Error> {
-  Lexer lex = lexer_new(src, filename);
+pub fun tokenize(str src, str filename, num start_line = 1) Result<Vec<Token>, Error> {
+  Lexer lex = lexer_new(src, filename, start_line);
 
   for {
     let r = lex.next();
