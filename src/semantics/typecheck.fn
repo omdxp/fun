@@ -500,11 +500,13 @@ compound MethodTable {
   Map<str, FnSig> methods;
 }
 
-// Frees a compound's own scratch: `.fields`'s own CheckedType values
-// alias the declaring CompoundNode's own AST fields, so only the map
-// itself needs freeing, the same shallow convention as `_free_fn_sig`.
+// Frees a compound's own scratch. `.fields`'s own values are each a
+// fresh `checked_from_dtype` build (see its own registration site),
+// not an alias of anything - freed deeply here, keys left untouched
+// since those are the declaring CompoundNode's own borrowed field
+// names.
 fun _free_compound_info(CompoundInfo* info) {
-  info.fields.free();
+  _free_checked_type_map_borrowed_keys(&info.fields);
   info.type_params.free();
   info.bounds.free();
 }
@@ -634,6 +636,19 @@ fun _free_checked_type_map(Map<str, CheckedType>* m) {
   }
   for name : names {
     free(name);
+  }
+  m.free();
+}
+
+// Same deep value-free as `_free_checked_type_map`, but for a map whose
+// keys are borrowed from the AST (a compound's own field names) rather
+// than this call's own fresh-built strings - those must never be freed.
+fun _free_checked_type_map_borrowed_keys(Map<str, CheckedType>* m) {
+  Vec<str> names = m.keys();
+  defer names.free();
+  for name : names {
+    CheckedType ct = m.at(name).unwrap();
+    _free_checked_type_contents(&ct);
   }
   m.free();
 }
