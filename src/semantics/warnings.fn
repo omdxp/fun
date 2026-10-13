@@ -1391,6 +1391,22 @@ impl Analysis {
         }
       }
       .Expression(e) -> {
+        if equals(e.op, "()") && e.has_left {
+          str callee_name = "";
+          fit e.left.kind {
+            .Identifier(name) -> { callee_name = name; }
+            _ -> {}
+          }
+          if !equals(callee_name, "") {
+            let known = self.functions.at(callee_name);
+            if known.is_some() {
+              FunctionNode called = known.unwrap();
+              if called.has_rtype && called.rtype != nil {
+                ret self._dtype_type_name(*called.rtype);
+              }
+            }
+          }
+        }
         if equals(e.op, ".") && e.has_left && e.has_right {
           str recv_type = self._resolve_node_type(e.left);
           if equals(recv_type, "") {

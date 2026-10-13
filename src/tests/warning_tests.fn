@@ -358,6 +358,25 @@ test "a fit over a field access is checked, not just a bare identifier" {
   assert contains(found, "Shape.Square"), "expected the message to name what is missing";
 }
 
+test "a fit over a plain function call is checked too" {
+  // Regression: `_resolve_node_type` had no case for a plain call
+  // expression (`e.op == "()"`), only `.Identifier`/`.Unary`/a `.`
+  // field access, so `fit some_func()` over a function returning an
+  // enum silently skipped exhaustiveness checking no matter how many
+  // variants were left unhandled.
+  str src = `enum Shape { Circle, Square }
+  `fun get() Shape { ret .Circle; }
+  `fun describe() num {
+  `  fit get() {
+  `    .Circle -> { ret 1; }
+  `  }
+  `  ret 0;
+  `}`;
+  str found = notice(src, false);
+  assert contains(found, "fit_non_exhaustive"), "expected the missing variant noticed for a function-call subject";
+  assert contains(found, "Shape.Square"), "expected the message to name what is missing";
+}
+
 test "a fit over a propagated field access is checked too" {
   // Same root cause as the field-access case just above, one layer
   // deeper: `get()?.kind` never reached the field-access resolver at
