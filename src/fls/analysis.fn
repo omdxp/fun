@@ -126,12 +126,16 @@ impl AnalysisCache {
   _inject_workspace_defines(Vec<Node>* nodes, str current_file) {
     str project_root = deps_project_root(current_file);
     str manifest_path = path_join(project_root, "fun.toml");
+    free(project_root);
     if !exists(manifest_path) {
+      free(manifest_path);
       ret;
     }
     str manifest_text = read_to_string(manifest_path);
+    defer free(manifest_text);
     let parsed = parse_manifest(manifest_text);
     if parsed.is_err() {
+      free(manifest_path);
       ret;
     }
     Manifest m = parsed.unwrap();
@@ -139,6 +143,12 @@ impl AnalysisCache {
     Vec<Define> defines = manifest_defines(&m);
     defer defines.free();
 
+    if defines.len == 0 {
+      // Nothing below will alias this into a node's own `Pos.filename`
+      // after all - its only other reader, `manifest_key_line`, is
+      // long done by the time this function returns.
+      free(manifest_path);
+    }
     num i = defines.len;
     for i > 0 {
       i = i - 1;
