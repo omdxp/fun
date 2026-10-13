@@ -82,7 +82,8 @@ impl TomlValue {
   // field is absent, or the field isn't itself a string. A plain scalar
   // return rather than handing back the inner `Map` or a `TomlTable`
   // wrapper, since a bare `{ key = value }` value has no section name of
-  // its own for `TomlTable` to carry.
+  // its own for `TomlTable` to carry. A fresh clone, like `get_str`
+  // (see its own comment) - safe to keep past this value's lifetime.
   pub table_field(str key) str {
     fit *self {
       .Table(m) -> {
@@ -90,7 +91,11 @@ impl TomlValue {
         if v.is_none() {
           ret "";
         }
-        ret v.unwrap().as_str().unwrap_or("");
+        let s = v.unwrap().as_str().unwrap_or("");
+        if equals(s, "") {
+          ret "";
+        }
+        ret substr(s, 0, len(s));
       }
       _ -> { ret ""; }
     }
@@ -239,13 +244,21 @@ impl TomlTable {
     ret self.values.at(key);
   }
 
-  // The string value for `key`, or "" when absent or not a string.
+  // The string value for `key`, or "" when absent or not a string. A
+  // fresh clone, safe to keep (and free) past this table's own
+  // lifetime - `as_str()` itself still hands back the stored value
+  // borrowed, since callers that only read it immediately shouldn't
+  // pay for a clone they never use.
   pub get_str(str key) str {
     let v = self.values.at(key);
     if v.is_none() {
       ret "";
     }
-    ret v.unwrap().as_str().unwrap_or("");
+    let s = v.unwrap().as_str().unwrap_or("");
+    if equals(s, "") {
+      ret "";
+    }
+    ret substr(s, 0, len(s));
   }
 
   pub free() {
