@@ -417,6 +417,209 @@ test "editing a document through the real edit lifecycle never re-serves a stale
   second.free();
 }
 
+test "the fast reparse path keeps an edit inside a function body correct, and still resolves a sibling declaration" {
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  str uri = "file:///fastpath_body_edit.fn";
+  docs.opened(
+    uri,
+    `compound Box {
+    `  num value;
+    `}
+    `fun helper(Box b) num {
+    `  ret b.value;
+    `}
+    `fun main() num {
+    `  Box b;
+    `  b.value = 1;
+    `  ret helper(b);
+    `}`,
+    1
+  );
+  let d1 = docs.at(uri);
+  Vec<Diagnostic> first = diagnose(&reads, &dcache, d1.unwrap());
+  assert first.len == 0, "expected no diagnostics on the original, valid source";
+  first.free();
+
+  // A single ranged edit entirely inside helper's own body ("ret
+  // b.value;" on line 4): what the fast path is for.
+  docs.edited(uri, 4, 13, 4, 13, " + 1", 2);
+  let d2 = docs.at(uri);
+  Document doc2 = d2.unwrap();
+  assert contains(doc2.text, "b.value + 1"), "expected the real edit to have landed";
+  Vec<Diagnostic> second = diagnose(&reads, &dcache, doc2);
+  assert second.len == 0, "expected the edited body to still typecheck cleanly";
+  second.free();
+
+  // Box itself was untouched by the edit - hover on its field still
+  // has to resolve through whatever `helper`'s own splice left
+  // `entry_nodes`/`program.nodes` in.
+  str hovered = hover(&reads, doc2, 4, 9);
+  assert contains(hovered, "num value"), "expected the field hover to still resolve after the fast-path splice";
+}
+
+test "the fast reparse path falls back correctly when an edit renames a declaration" {
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  str uri = "file:///fastpath_rename.fn";
+  docs.opened(
+    uri,
+    `fun helper() num {
+    `  ret 1;
+    `}
+    `fun main() num {
+    `  ret helper();
+    `}`,
+    1
+  );
+  let d1 = docs.at(uri);
+  Vec<Diagnostic> first = diagnose(&reads, &dcache, d1.unwrap());
+  assert first.len == 0, "expected no diagnostics while 'main' still calls 'helper'";
+  first.free();
+
+  // Renaming the declaration itself changes its own identity - the
+  // fast path's own precondition - so this has to fall back to a
+  // full reparse, which correctly sees 'helper()' now calling
+  // nothing declared.
+  docs.edited(uri, 0, 4, 0, 10, "renamed", 2);
+  let d2 = docs.at(uri);
+  Document doc2 = d2.unwrap();
+  assert contains(doc2.text, "fun renamed()"), "expected the rename to have landed";
+  Vec<Diagnostic> second = diagnose(&reads, &dcache, doc2);
+  flag saw_undefined_call = false;
+  num si = 0;
+  for si < second.len {
+    if contains(second.get(si).message, "helper") {
+      saw_undefined_call = true;
+    }
+    si = si + 1;
+  }
+  assert saw_undefined_call,
+  "expected the stale call to the old name to be reported - a corrupted splice would silently drop or misreport it instead";
+  second.free();
+}
+
+test "the fast reparse path falls back when an edit spans more than one declaration" {
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  str uri = "file:///fastpath_multi_decl.fn";
+  docs.opened(
+    uri,
+    `fun first() num {
+    `  ret 1;
+    `}
+    `fun second() num {
+    `  ret 2;
+    `}`,
+    1
+  );
+  let d1 = docs.at(uri);
+  Vec<Diagnostic> first = diagnose(&reads, &dcache, d1.unwrap());
+  first.free();
+
+  // The replaced range starts inside first()'s own body and ends
+  // inside second()'s - crosses a declaration boundary, so this must
+  // never take the fast path no matter how the rest of the edit looks.
+  docs.edited(
+    uri,
+    1,
+    6,
+    4,
+    6,
+    "99;\n}\n\nfun second() num {\n  ret 22",
+    2
+  );
+  let d2 = docs.at(uri);
+  Document doc2 = d2.unwrap();
+  Vec<Diagnostic> second = diagnose(&reads, &dcache, doc2);
+  // Both functions are genuinely unused in this fixture (neither is
+  // ever called) - the real assertion here is that the fallback
+  // reparse produced exactly that, and nothing worse (a parse error,
+  // a corrupted splice silently dropping one of them, ...).
+  assert second.len == 2, "expected exactly the two genuine unused-function warnings through the full-reparse fallback";
+  second.free();
+  str hovered = hover(&reads, doc2, 4, 5);
+  assert contains(hovered, "fun second() num"), "expected second() to still resolve correctly by name after the fallback reparse";
+}
+
+test "the fast reparse path shifts a later declaration's own position so it stays correctly resolvable" {
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+
+  str uri = "file:///fastpath_position_shift.fn";
+  docs.opened(
+    uri,
+    `fun first() num {
+    `  ret 1;
+    `}
+    `
+    `fun second() num {
+    `  ret 2;
+    `}`,
+    1
+  );
+  let d1 = docs.at(uri);
+  Vec<Diagnostic> first = diagnose(&reads, &dcache, d1.unwrap());
+  first.free();
+
+  // Three separate edits, each growing first()'s own body by one
+  // line - second() shifts down by three lines in the real text, but
+  // nothing ever reparses it directly, so only _try_fast_reparse's own
+  // post-splice shift keeps its stored position in step.
+  num v = 2;
+  num i = 0;
+  for i < 3 {
+    docs.edited(uri, 1, 2, 1, 2, format("num extra{num} = {num};\n  ", i, i), v);
+    let dv = docs.at(uri);
+    Vec<Diagnostic> dv_diags = diagnose(&reads, &dcache, dv.unwrap());
+    dv_diags.free();
+    v = v + 1;
+    i = i + 1;
+  }
+
+  let dfinal = docs.at(uri);
+  Document doc_final = dfinal.unwrap();
+  // second() started at line 4 (0-indexed); three added lines move it
+  // to line 7, and its own body to line 8.
+  assert contains(doc_final.text, "fun second() num {"), "expected second() to still be there verbatim";
+  str hovered = hover(&reads, doc_final, 7, 5);
+  assert contains(hovered, "fun second() num"), "expected second() to resolve at its real, shifted line";
+
+  // An edit against second()'s own (shifted) body must still be found
+  // by the fast path's own containment check, which reads exactly the
+  // position this test is verifying got shifted.
+  docs.edited(uri, 8, 6, 8, 7, "3", v);
+  let dlast = docs.at(uri);
+  Vec<Diagnostic> last_diags = diagnose(&reads, &dcache, dlast.unwrap());
+  // Neither function is ever called and all three `extraN` locals are
+  // genuinely unused - exactly 2 unused-function + 3 unused-variable
+  // warnings is what a correct parse of this fixture reports; a
+  // corrupted splice from any of the 4 edits would show up here as a
+  // real parse/type error instead, or a different count.
+  assert last_diags.len == 5,
+  "expected exactly 2 unused-function + 3 unused-variable warnings, with no real type/parse error introduced";
+  last_diags.free();
+}
+
 test "an unmet expect diagnoses as an error, at the expect statement's own position" {
   // `analyze`'s own unmet-expectation case used to surface as
   // DIAG_SEVERITY_WARNING at file start (0,0), always - it's a genuine

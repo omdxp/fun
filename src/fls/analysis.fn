@@ -14,9 +14,12 @@ use ..ast.ast;
 use ..lexer.lexer;
 use ..lexer.token;
 use ..parser.import_resolver;
+use ..parser.parse_state;
+use ..parser.parser;
 use ..cli.manifest;
 use std.map;
 use std.vec;
+use std.string;
 use std.option;
 use std.result;
 use std.fs;
@@ -31,6 +34,176 @@ pub compound Analyzed {
   num version;
   Vec<Token> tokens;
   ProgramMergeResult program;
+  // Every public symbol this revision's own imports carry, handed back
+  // by `parse_program_cached` instead of being freed there - kept here
+  // so the next edit's own fast-reparse attempt (see `_try_fast_reparse`
+  // below) can seed an isolated single-declaration parse with the same
+  // context a full parse would have given it, without re-walking the
+  // whole import graph just to rebuild it.
+  GlobalSymbolsSnapshot symbols;
+  flag has_symbols;
+}
+
+// A top-level declaration's own identity: its kind and the name(s)
+// that make the rest of the file's own parse care about it (whether
+// `Name{...}`/`name<T>(...)` resolve as a compound literal/generic
+// call, whether a forward reference to it parses at all). Two
+// declarations with the same identity cannot have changed in any way
+// that would affect how anything ELSE in the file parses - the
+// fast-reparse path's own central correctness invariant (see
+// `_try_fast_reparse`'s own header comment).
+compound DeclIdentity {
+  flag valid;
+  str kind_tag;
+  str name;
+  // Impl's own shape_name, when it has one; empty otherwise.
+  str extra;
+}
+
+// `Node*` version, for scanning a stored `entry_nodes` in place
+// without copying each candidate first.
+fun _decl_identity_ptr(Node* n) DeclIdentity {
+  DeclIdentity d;
+  d.valid = false;
+  d.kind_tag = "";
+  d.name = "";
+  d.extra = "";
+  fit n.kind {
+    .Function(f) -> {
+      if f.has_name {
+        d.valid = true;
+        d.kind_tag = "fun";
+        d.name = f.name;
+      }
+    }
+    .Compound(c) -> {
+      d.valid = true;
+      d.kind_tag = "compound";
+      d.name = c.name;
+    }
+    .Enum(e) -> {
+      d.valid = true;
+      d.kind_tag = "enum";
+      d.name = e.name;
+    }
+    .Shape(s) -> {
+      d.valid = true;
+      d.kind_tag = "shape";
+      d.name = s.name;
+    }
+    .TypeAlias(a) -> {
+      d.valid = true;
+      d.kind_tag = "alias";
+      d.name = a.name;
+    }
+    .Impl(i) -> {
+      d.valid = true;
+      d.kind_tag = "impl";
+      d.name = i.type_name;
+      if i.has_shape_name {
+        d.extra = i.shape_name;
+      }
+    }
+    _ -> {}
+  }
+  ret d;
+}
+
+fun _decl_identity_eq(DeclIdentity a, DeclIdentity b) flag {
+  ret a.valid && b.valid && equals(a.kind_tag, b.kind_tag) && equals(a.name, b.name) &&
+    equals(a.extra, b.extra);
+  }
+
+// The entry in `entry_nodes` whose own leading line is the latest one
+// at or before `start1` (1-indexed) - i.e. whichever declaration
+// `start1` falls inside or after, without yet knowing where that
+// declaration's own text actually ends (see `_decl_real_end_line`
+// for why that needs the token stream, not another node's own
+// position). -1 when `entry_nodes` has no position-carrying node at
+// or before `start1` at all.
+fun _decl_index_at_line(Vec<Node>* entry_nodes, num start1) num {
+  num best_idx = -1;
+  num best_start = -1;
+  num i = 0;
+  for i < entry_nodes.len {
+    Node* n = &entry_nodes.data[i];
+    if n.has_pos && n.pos.line <= start1 && n.pos.line > best_start {
+      best_start = n.pos.line;
+      best_idx = i;
+    }
+    i = i + 1;
+  }
+  ret best_idx;
+}
+
+// The token index of the first token on line `line1` (1-indexed), or
+// -1 if none - `tokens` is assumed sorted by position (true of any
+// real tokenize() result).
+fun _token_index_at_line(Vec<Token>* tokens, num line1) num {
+  num i = 0;
+  for i < tokens.len {
+    if tokens.get(i).pos.line == line1 {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// A top-level declaration's own real last line, found by scanning
+// `tokens` forward from its own leading token counting brace depth -
+// robust regardless of how stale any OTHER declaration's own stored
+// `Node.pos` is (this never reads one at all), since a `{`/`}` deep
+// inside a string/char literal or a comment never reaches the token
+// stream as a brace symbol in the first place; the lexer already
+// resolved that. A declaration with no body at all (`als X = Y;`)
+// ends at the first top-level `;` instead, reached before any `{`.
+// -1 if `start_tok_idx` is out of range or the declaration's own
+// close is never found (malformed text, or genuinely the last
+// declaration in the file with nothing after it to close against -
+// callers treat -1 as "runs to end of file").
+fun _decl_real_end_line(Vec<Token>* tokens, num start_tok_idx) num {
+  if start_tok_idx < 0 || start_tok_idx >= tokens.len {
+    ret -1;
+  }
+  num depth = 0;
+  flag seen_brace = false;
+  num k = start_tok_idx;
+  for k < tokens.len {
+    let t = tokens.get(k);
+    if token_is_symbol(t, '{') {
+      depth = depth + 1;
+      seen_brace = true;
+    } elif token_is_symbol(t, '}') {
+      depth = depth - 1;
+      if seen_brace && depth == 0 {
+        ret t.pos.line;
+      }
+    } elif token_is_symbol(t, ';') && !seen_brace {
+      ret t.pos.line;
+    }
+    k = k + 1;
+  }
+  ret -1;
+}
+
+// A fresh `Map<str, GlobalSymbolInfo>` holding every entry from `src`
+// - a plain shallow copy of each key/value pair, not a deep clone:
+// every value aliases whatever `src`'s own entries already alias
+// (safe for the caller's own short-lived use building a seeded
+// context, never stored past that one call).
+fun _clone_global_symbols(Map<str, GlobalSymbolInfo>* src) Map<str, GlobalSymbolInfo> {
+  Map<str, GlobalSymbolInfo> out;
+  out.init(src.len() + 8);
+  Vec<str> keys = src.keys();
+  defer keys.free();
+  num i = 0;
+  for i < keys.len {
+    str k = keys.get(i);
+    out.put(k, src.get(k));
+    i = i + 1;
+  }
+  ret out;
 }
 
 // What has been read, by document URI.
@@ -53,41 +226,21 @@ impl AnalysisCache {
   // and by reading it again when it does not.
   pub of(Document doc) Analyzed {
     let kept = self.entries.at(doc.uri);
+    flag have_prev = false;
+    Analyzed found;
     if kept.is_some() {
-      Analyzed found = kept.unwrap();
+      found = kept.unwrap();
       if found.version == doc.version {
         ret found;
       }
-      // A stale revision is about to be replaced below - freed first,
-      // or every edit leaks the whole previous parse for as long as
-      // the server keeps running. `program.nodes` (the transitively
-      // merged cross-file program) is safe to free this deeply too,
-      // not just `entry_nodes`: `_parse_and_merge_source` clones every
-      // node it pulls from `self.imports` rather than sharing it, so
-      // this document's own copy is exclusively its own. Neither this
-      // nor `free_node_tree` below touches a node's own string content
-      // (an `Identifier`, an `ExprNode.op`, ...) - that's `self.imports`'
-      // own `ParsedFile.tokens` to free, on its own schedule (see that
-      // field's note), not tied to this document's revision at all.
-      if found.lexed {
-        // Deep: this is AnalysisCache's own independent tokenize()
-        // call below, not the tokens a parse ran against, so nothing
-        // aliases these strings.
-        free_token_vec(&found.tokens);
-      }
-      if found.parsed {
-        free_node_tree(&found.program.entry_nodes);
-        free_node_tree(&found.program.nodes);
-        found.program.aliases.free();
-        found.program.alias_rename_keys.free();
-        found.program.alias_rename_targets.free();
-      }
+      have_prev = true;
     }
 
     Analyzed fresh;
     fresh.version = doc.version;
     fresh.lexed = false;
     fresh.parsed = false;
+    fresh.has_symbols = false;
     fresh.tokens.init(0);
 
     let lexed = tokenize(doc.text, doc.path);
@@ -96,17 +249,286 @@ impl AnalysisCache {
       fresh.lexed = true;
     }
 
-    // The text a client holds is what to read, not what is on disk;
-    // everything it imports is still read from disk.
-    let merged = parse_program_cached(doc.path, doc.text, &self.imports, self.imports.parallel_preload);
-    if merged.is_ok() {
-      fresh.program = merged.unwrap();
+    // A single clean ranged edit against a document this cache already
+    // held a successful parse for can often be served by reparsing
+    // just the one declaration it fell inside, reusing everything else
+    // from `found` unchanged - see `_try_fast_reparse`'s own header
+    // comment for the exact, conservative conditions this requires.
+    // Anything else (no previous revision, a whole-document replace, a
+    // multi-change batch, an edit crossing a declaration boundary, an
+    // edit changing a declaration's own name/kind, or the isolated
+    // reparse itself disagreeing with a full one) falls through to the
+    // full reparse below, always correct regardless of why.
+    flag fast_done = false;
+    if have_prev && doc.has_edit_range && found.parsed && found.has_symbols {
+      fast_done = self._try_fast_reparse(doc, &found);
+    }
+
+    if fast_done {
+      fresh.program = found.program;
       fresh.parsed = true;
-      self._inject_workspace_defines(&fresh.program.nodes, doc.path);
+      fresh.symbols = found.symbols;
+      fresh.has_symbols = true;
+    } else {
+      // The text a client holds is what to read, not what is on disk;
+      // everything it imports is still read from disk.
+      GlobalSymbolsSnapshot snap;
+      let merged = parse_program_cached(
+        doc.path,
+        doc.text,
+        &self.imports,
+        self.imports.parallel_preload,
+        &snap
+      );
+      if merged.is_ok() {
+        fresh.program = merged.unwrap();
+        fresh.parsed = true;
+        fresh.symbols = snap;
+        fresh.has_symbols = true;
+        self._inject_workspace_defines(&fresh.program.nodes, doc.path);
+      } else {
+        free_global_symbols_snapshot(&snap);
+      }
+    }
+
+    // The stale revision is freed last, once `fresh` no longer needs
+    // anything from it - `fast_done` means `fresh.program`/`.symbols`
+    // ARE `found`'s own (mutated in place, not cloned), so freeing
+    // `found` here would free `fresh` out from under itself; skipped
+    // in exactly that case. `program.nodes` (the transitively merged
+    // cross-file program) is safe to free this deeply too, not just
+    // `entry_nodes`: `_parse_and_merge_source` clones every node it
+    // pulls from `self.imports` rather than sharing it, so this
+    // document's own copy is exclusively its own. Neither this nor
+    // `free_node_tree` touches a node's own string content (an
+    // `Identifier`, an `ExprNode.op`, ...) - that's `self.imports`'
+    // own `ParsedFile.tokens` to free, on its own schedule (see that
+    // field's note), not tied to this document's revision at all.
+    if have_prev {
+      if found.lexed {
+        // Deep: this is AnalysisCache's own independent tokenize()
+        // call below, not the tokens a parse ran against, so nothing
+        // aliases these strings.
+        free_token_vec(&found.tokens);
+      }
+      if found.parsed && !fast_done {
+        free_node_tree(&found.program.entry_nodes);
+        free_node_tree(&found.program.nodes);
+        found.program.aliases.free();
+        found.program.alias_rename_keys.free();
+        found.program.alias_rename_targets.free();
+      }
+      if found.has_symbols && !fast_done {
+        free_global_symbols_snapshot(&found.symbols);
+      }
     }
 
     self.entries.put(doc.uri, fresh);
     ret fresh;
+  }
+
+  // Attempts to serve `doc`'s own edit by reparsing just the one
+  // top-level declaration it fell inside, splicing the result into
+  // `found.program` (both `entry_nodes` and `nodes`) in place instead
+  // of the full `tokenize` + `parse_program_cached` pipeline `of()`
+  // otherwise always runs. Mutates `*found` and returns true only on
+  // success; on any failure `*found` is left completely untouched and
+  // the caller falls back to a full reparse, which is always correct
+  // - so every early return below is a pure optimization decision, not
+  // a correctness one.
+  //
+  // The central invariant: this is safe only when nothing ELSE in the
+  // file could have parsed differently because of this edit. Two
+  // conditions make that provable without re-checking the rest of the
+  // file at all: the edit's own old range falls entirely within one
+  // declaration's own span (so no other declaration's own text
+  // changed), and that declaration's own identity (kind + name, see
+  // `DeclIdentity`) comes out unchanged after reparsing just it (so
+  // the global symbol table and the forward-type-name set - the two
+  // things a declaration's own name/kind can affect in how anything
+  // ELSE in the file parses - are provably unaffected too). Anything
+  // reparsed inside the declaration's own body still needs the same
+  // context a full parse would have given it, which `_decl_identity_ptr`
+  // sweeping every OTHER declaration below, union'd with this
+  // revision's own real imported symbols, provides.
+  _try_fast_reparse(Document doc, Analyzed* found) flag {
+    if !found.lexed {
+      ret false;
+    }
+    num old_idx = _decl_index_at_line(&found.program.entry_nodes, doc.edit_start_line + 1);
+    if old_idx < 0 {
+      ret false;
+    }
+    Node* old_node_ptr = &found.program.entry_nodes.data[old_idx];
+    let old_identity = _decl_identity_ptr(old_node_ptr);
+    if !old_identity.valid {
+      ret false;
+    }
+    num old_start1 = old_node_ptr.pos.line;
+    str old_filename = old_node_ptr.pos.filename;
+
+    num old_start_tok = _token_index_at_line(&found.tokens, old_start1);
+    num old_end1 = _decl_real_end_line(&found.tokens, old_start_tok);
+    // The edit's own old range has to fall entirely within this
+    // declaration's own real span (computed above from the token
+    // stream, not from another declaration's own possibly-stale
+    // position) - otherwise it touched more than one declaration, or
+    // this lookup itself landed on the wrong one.
+    if old_end1 >= 0 && doc.edit_end_line + 1 > old_end1 {
+      ret false;
+    }
+
+    num line_delta = doc.edit_replacement_lines - (doc.edit_end_line - doc.edit_start_line);
+    num new_start_line0 = old_start1 - 1;
+    num new_end_line0 = old_end1 - 1 + line_delta;
+    if old_end1 < 0 {
+      // The last declaration in the file - its own span already ran
+      // to the end before this edit, and still does after.
+      new_end_line0 = count(doc.text, "\n");
+    }
+    if new_end_line0 < new_start_line0 {
+      ret false;
+    }
+
+    num start_offset = line_byte_start(doc.text, new_start_line0);
+    num end_offset = line_byte_start(doc.text, new_end_line0 + 1);
+    if end_offset <= start_offset {
+      ret false;
+    }
+    str decl_text = substr(doc.text, start_offset, end_offset - start_offset);
+
+    Map<str, GlobalSymbolInfo> seeded = _clone_global_symbols(&found.symbols.global_symbols);
+    Map<str, flag> seeded_forward;
+    seeded_forward.init(8);
+    num fi = 0;
+    for fi < found.program.entry_nodes.len {
+      if fi != old_idx {
+        let other = _decl_identity_ptr(&found.program.entry_nodes.data[fi]);
+        if other.valid {
+          if equals(other.kind_tag, "fun") {
+            let info = global_symbol_info_new(other.name, doc.path);
+            info.is_function = true;
+            seeded.put(other.name, info);
+          } elif equals(other.kind_tag, "compound") {
+            let info = global_symbol_info_new(other.name, doc.path);
+            info.is_compound = true;
+            seeded.put(other.name, info);
+            seeded_forward.put(other.name, true);
+          } elif equals(other.kind_tag, "enum") || equals(other.kind_tag, "shape") {
+            seeded_forward.put(other.name, true);
+          }
+        }
+      }
+      fi = fi + 1;
+    }
+
+    let tok_result = tokenize(decl_text, doc.path, new_start_line0 + 1);
+    if tok_result.is_err() {
+      free(decl_text);
+      seeded.free();
+      seeded_forward.free();
+      ret false;
+    }
+
+    ParseState state = parse_state_new(doc.path, decl_text);
+    state.tokens = tok_result.unwrap();
+    state.emit_stderr = false;
+    state.global_symbols.free();
+    state.global_symbols = seeded;
+    state.forward_type_names.free();
+    state.forward_type_names = seeded_forward;
+    state.forward_type_names_scanned = true;
+    state.init_root_scope();
+    Parser p = parser_new(&state);
+    let perr = p.parse_top_level_declaration();
+    free(decl_text);
+
+    flag ok = perr.is_none() && state.nodes.len == 1;
+    DeclIdentity new_identity;
+    new_identity.valid = false;
+    new_identity.kind_tag = "";
+    new_identity.name = "";
+    new_identity.extra = "";
+    if ok {
+      new_identity = _decl_identity_ptr(&state.nodes.data[0]);
+      ok = _decl_identity_eq(old_identity, new_identity);
+    }
+
+    if !ok {
+      free_node_tree(&state.nodes);
+      state.tokens.free();
+      state.global_symbols.free();
+      free_parse_state_internal(&state);
+      ret false;
+    }
+
+    Node new_node = state.nodes.get(0);
+    state.nodes.free();
+    state.tokens.free();
+    state.global_symbols.free();
+    free_parse_state_internal(&state);
+
+    // Every check passed - committing the splice is the only thing
+    // left, so this is the sole place `*found` actually changes.
+    num prog_idx = -1;
+    num pi = 0;
+    for pi < found.program.nodes.len {
+      Node* candidate = &found.program.nodes.data[pi];
+      if candidate.has_pos && equals(candidate.pos.filename, old_filename) &&
+        candidate.pos.line == old_start1 {
+        prog_idx = pi;
+        break;
+      }
+      pi = pi + 1;
+    }
+
+    Vec<Node> old_entry_wrap;
+    old_entry_wrap.init(1);
+    old_entry_wrap.push(found.program.entry_nodes.get(old_idx));
+    free_node_tree(&old_entry_wrap);
+    found.program.entry_nodes.set(old_idx, new_node);
+
+    if prog_idx >= 0 {
+      Vec<Node> old_prog_wrap;
+      old_prog_wrap.init(1);
+      old_prog_wrap.push(found.program.nodes.get(prog_idx));
+      free_node_tree(&old_prog_wrap);
+      found.program.nodes.set(prog_idx, node_clone(new_node));
+    }
+
+    // Every declaration AFTER the edited one just shifted by
+    // `line_delta` lines in the real file, but nothing re-parsed them
+    // - their own stored top-level position needs the same shift, or
+    // the next edit's own `_decl_index_at_line`/`_token_index_at_line`
+    // lookups (both keyed on exactly this field) would be wrong by
+    // however many such edits have accumulated since the last full
+    // reparse. Deliberately shallow: only each remaining top-level
+    // node's own leading position, not every nested statement/
+    // expression inside it - those stay stale until the next full
+    // reparse, which every non-fast-path edit (including, eventually,
+    // one this file's own author makes) still runs.
+    if line_delta != 0 {
+      num shift_i = old_idx + 1;
+      for shift_i < found.program.entry_nodes.len {
+        Node* later = &found.program.entry_nodes.data[shift_i];
+        if later.has_pos && equals(later.pos.filename, old_filename) {
+          later.pos.line = later.pos.line + line_delta;
+          later.pos.end_line = later.pos.end_line + line_delta;
+        }
+        shift_i = shift_i + 1;
+      }
+      num shift_p = 0;
+      for shift_p < found.program.nodes.len {
+        Node* later_p = &found.program.nodes.data[shift_p];
+        if later_p.has_pos && equals(later_p.pos.filename, old_filename) &&
+          later_p.pos.line > old_start1 {
+          later_p.pos.line = later_p.pos.line + line_delta;
+          later_p.pos.end_line = later_p.pos.end_line + line_delta;
+        }
+        shift_p = shift_p + 1;
+      }
+    }
+    ret true;
   }
 
   // Inserts this workspace's own PACKAGE_NAME/PACKAGE_VERSION (if
