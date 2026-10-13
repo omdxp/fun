@@ -210,6 +210,7 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
             }
             let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
             if merged.is_err() {
+              free(merged.unwrap_err());
               continue;
             }
             ProgramMergeResult target = merged.unwrap();
@@ -1036,6 +1037,7 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     }
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
+      free(merged.unwrap_err());
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -1065,6 +1067,7 @@ fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCa
     }
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
+      free(merged.unwrap_err());
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -1596,6 +1599,7 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     }
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
+      free(merged.unwrap_err());
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -2640,6 +2644,7 @@ fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<I
   }
   let merged = parse_program_cached(module_path, text, &cache.imports, cache.imports.parallel_preload);
   if merged.is_err() {
+    free(merged.unwrap_err());
     ret;
   }
   ProgramMergeResult target = merged.unwrap();

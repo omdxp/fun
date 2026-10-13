@@ -287,6 +287,11 @@ impl AnalysisCache {
         fresh.has_symbols = true;
         self._inject_workspace_defines(&fresh.program.nodes, doc.path);
       } else {
+        // `_diagnose_uncached`'s own generic "this file's imports
+        // could not be resolved" is what a client actually sees - the
+        // real message here, built fresh by `_preload_one_file`, has
+        // nowhere else to go but freed right away.
+        free(merged.unwrap_err());
         free_global_symbols_snapshot(&snap);
       }
     }

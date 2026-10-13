@@ -980,10 +980,13 @@ async fun _preload_worker(PreloadShared* shared, WaitGroup* wpool) {
       .Ok(path) -> {
         let ferr = _preload_one_file(shared, path, nil);
         if ferr.is_some() {
+          str msg = ferr.unwrap();
           shared.mu.lock();
           if !shared.has_error {
             shared.has_error = true;
-            shared.first_error = ferr.unwrap();
+            shared.first_error = msg;
+          } else {
+            free(msg);
           }
           shared.mu.unlock();
         }
@@ -1005,10 +1008,13 @@ fun _preload_drain_sync(PreloadShared* shared) {
       .Ok(path) -> {
         let ferr = _preload_one_file(shared, path, nil);
         if ferr.is_some() {
+          str msg = ferr.unwrap();
           shared.mu.lock();
           if !shared.has_error {
             shared.has_error = true;
-            shared.first_error = ferr.unwrap();
+            shared.first_error = msg;
+          } else {
+            free(msg);
           }
           shared.mu.unlock();
         }
