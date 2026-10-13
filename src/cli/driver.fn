@@ -967,15 +967,22 @@ pub fun resolve_c_compiler() str {
 Atomic<flag> _cc_claimed;
 Atomic<flag> _cc_ready;
 
-// `resolve_c_compiler`, memoized for this process's lifetime: the
-// result can't change mid-run (the compiler on PATH and `FUN_CC` are
-// both fixed for the process), so every caller after the first reuses
-// one answer instead of re-spawning the same `--version` probes (or
-// worse, the same real subprocess spawn) for every file a parallel
-// compile touches. `resolve_c_compiler` itself stays uncached and
-// un-touched - its own override test sets `FUN_CC` and calls it
-// directly, which must keep re-checking the env var fresh every time.
+// `resolve_c_compiler`, memoized for this process's lifetime, but only
+// for the expensive PATH search its own fallback runs when `FUN_CC` is
+// unset - the compiler actually on PATH can't change mid-run, so every
+// caller after the first reuses that one answer instead of re-spawning
+// the same `--version` probes for every file a parallel compile
+// touches. `FUN_CC` itself is re-checked fresh on every call, cheaply
+// (one env lookup, no subprocess): a handful of tests in this same
+// file flip it mid-process (wasm's own `set_env("FUN_CC", "emcc")` /
+// `clear_env`), and a cache that ignored that would hand every compile
+// after the first whichever compiler happened to resolve first,
+// regardless of what `FUN_CC` says by the time it runs.
 fun _resolve_c_compiler_cached() str {
+  str override_cc = env_or("FUN_CC", "");
+  if !equals(override_cc, "") {
+    ret override_cc;
+  }
   if _cc_claimed.compare_exchange(false, true) {
     str v = resolve_c_compiler();
     _cc_cached_value = v;
