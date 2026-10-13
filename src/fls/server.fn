@@ -549,7 +549,17 @@ impl Server {
 
   // Says where the name under the cursor was declared.
   answer_definition(str id, JsonValue message) {
-    self._ensure_workspace_symbols_current();
+    // `definition_workspace_wide` itself only reaches for the full
+    // workspace symbol table (`symbols.ensure_all`, re-walking every
+    // open document on every call) once its own cheap same-file-plus-
+    // imports lookup has already come up empty - the common case,
+    // where that cheap lookup is all this needs, pays for the eager
+    // `_ensure_workspace_symbols_current()` this used to run
+    // unconditionally for nothing. `_ensure_workspace_indexed()`
+    // alone (its own one-time-per-server-lifetime disk walk) still
+    // has to run first, so a workspace file nobody's opened yet is
+    // there to search once the slow path really does need it.
+    self._ensure_workspace_indexed();
     let asked = self.document_at(message);
     if asked.is_none() {
       write_message(response(id, "[]"));
