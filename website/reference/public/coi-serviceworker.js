@@ -19,24 +19,64 @@ if (typeof window === "undefined") {
   self.addEventListener("install", () => self.skipWaiting());
   self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
+  // The Playground's own wasm modules (the compiler frontend, fls, and
+  // every pre-baked example) - large, and immutable once fetched: each
+  // one's URL already carries its build's own content hash as a `?v=`
+  // query param (see `compileInBrowser.ts`'s own `manifestHash`), so the
+  // exact same URL can only ever resolve to the exact same bytes. Cached
+  // here, across page loads *and* across deployments (a new deployment
+  // changes the hash, so its own URLs are a natural cache miss - nothing
+  // to invalidate by hand), rather than left to the regular HTTP cache,
+  // which is the first thing evicted under storage pressure for
+  // anything this large. `manifest.json` itself is excluded - it has no
+  // hash of its own (it's what *provides* the hash everything else
+  // uses) and the app already fetches it with `cache: "no-store"` for
+  // exactly that reason.
+  const ASSET_CACHE = "fun-wasm-assets-v1";
+  const isVersionedAsset = (pathname) =>
+    /\/(wasm|wasm-frontend|wasm-fls)\//.test(pathname) &&
+    !pathname.endsWith("manifest.json");
+
+  const withCoiHeaders = (response) => {
+    if (response.status === 0) return response;
+    const headers = new Headers(response.headers);
+    headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+    headers.set("Cross-Origin-Opener-Policy", "same-origin");
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+
+  const fetchWithCoiHeaders = (request) =>
+    fetch(request)
+      .then(withCoiHeaders)
+      .catch((error) => {
+        console.error("coi-serviceworker fetch failed:", error);
+        throw error;
+      });
+
+  const cacheFirst = async (request) => {
+    const cache = await caches.open(ASSET_CACHE);
+    const cached = await cache.match(request);
+    if (cached) return cached;
+    const response = await fetchWithCoiHeaders(request);
+    if (response.ok) {
+      cache.put(request, response.clone());
+    }
+    return response;
+  };
+
   self.addEventListener("fetch", (event) => {
     const request = event.request;
     if (request.cache === "only-if-cached" && request.mode !== "same-origin") return;
 
+    const pathname = new URL(request.url).pathname;
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.status === 0) return response;
-          const headers = new Headers(response.headers);
-          headers.set("Cross-Origin-Embedder-Policy", "require-corp");
-          headers.set("Cross-Origin-Opener-Policy", "same-origin");
-          return new Response(response.body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers,
-          });
-        })
-        .catch((error) => console.error("coi-serviceworker fetch failed:", error)),
+      request.method === "GET" && isVersionedAsset(pathname)
+        ? cacheFirst(request)
+        : fetchWithCoiHeaders(request),
     );
   });
 } else {
