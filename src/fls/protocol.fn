@@ -113,12 +113,15 @@ pub fun response(str id, str result_json) str {
 
 // The reply to a request the server could not carry out.
 pub fun error_response(str id, num code, str message) str {
-  ret format(
+  str quoted = json_quote(message);
+  str out = format(
     `{"jsonrpc":"2.0","id":{str},"error":{"code":{num},"message":{str}}}`,
     id,
     code,
-    json_quote(message)
+    quoted
   );
+  free(quoted);
+  ret out;
 }
 
 // A request the server sends without being asked, expecting a reply -
@@ -129,12 +132,18 @@ pub fun error_response(str id, num code, str message) str {
 // client's own response arrives as an ordinary message with no
 // "method" field, which `handle` already ignores.
 pub fun request_to_client(str id, str method, str params_json) str {
-  ret format(`{"jsonrpc":"2.0","id":{str},"method":{str},"params":{str}}`, id, json_quote(method), params_json);
+  str quoted = json_quote(method);
+  str out = format(`{"jsonrpc":"2.0","id":{str},"method":{str},"params":{str}}`, id, quoted, params_json);
+  free(quoted);
+  ret out;
 }
 
 // A message the server sends without being asked, such as diagnostics.
 pub fun notification(str method, str params_json) str {
-  ret format(`{"jsonrpc":"2.0","method":{str},"params":{str}}`, json_quote(method), params_json);
+  str quoted = json_quote(method);
+  str out = format(`{"jsonrpc":"2.0","method":{str},"params":{str}}`, quoted, params_json);
+  free(quoted);
+  ret out;
 }
 
 // Writes `s` into `out` as a JSON string, with the characters JSON
