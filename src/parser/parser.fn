@@ -277,6 +277,16 @@ impl ParseState {
         // literal: token cleanup frees every token's own text as owned
         // heap memory, which crashes on a literal (see
         // `split_angle_closer_equals_token_if_needed`'s identical note).
+        //
+        // Deliberately not freeing the ">>" text this replaces, unlike
+        // the otherwise-identical `=`/`<<` splitters just below: nested
+        // generics (`Vec<Vec<T>>`) call this one often enough, and
+        // revisit the same position often enough, that something
+        // downstream still expects this exact string alive when it's
+        // freed here - confirmed by a real, reproducible malloc
+        // corruption crash (mfm_free, inside AnalysisCache.of, under
+        // the concurrent preload path specifically) when this free was
+        // added. A real leak, smaller than the crash it caused.
         Token first = t;
         first.data = .Sval(substr(">", 0, 1));
         self.tokens.set(self.pindex, first);
