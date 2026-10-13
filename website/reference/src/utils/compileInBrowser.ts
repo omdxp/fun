@@ -281,14 +281,27 @@ export type PlaygroundReadiness = {
   compileReady: Promise<void>;
 };
 
-// Starts loading every wasm module in the background, well before any
-// click needs them - called once from `App.tsx` shortly after the page
-// itself has settled (not blocking first paint). Every individual
-// fetch failure is swallowed: a warm-up that couldn't reach the
-// network changes nothing about correctness, the same path just tries
-// again, for real, on the next actual use. Returns promises a caller
-// can use to gate a loading indicator on, rather than only firing
-// fetches blind.
+// Starts loading the two SMALL wasm modules (the compiler frontend and
+// fls, each a few MB) in the background, well before any click needs
+// them - called once from `App.tsx` shortly after the page itself has
+// settled (not blocking first paint). Every individual fetch failure is
+// swallowed: a warm-up that couldn't reach the network changes nothing
+// about correctness, the same path just tries again, for real, on the
+// next actual use. Returns promises a caller can use to gate a loading
+// indicator on, rather than only firing fetches blind.
+//
+// `getClang()` - the real C compiler, ~105 MB - is deliberately NOT
+// warmed here. It used to be, unconditionally, the moment the page went
+// idle; confirmed directly as the cause of the page feeling frozen for
+// several seconds after load on a visit that never even opens the
+// Playground, since downloading and instantiating a module that size is
+// genuinely heavy regardless of how early it starts. It still loads
+// lazily (and is still cached as a module-level singleton, see
+// `getClang` itself) the moment a real run actually needs it -
+// `compileAndRun` calls it directly - so a run is never blocked on
+// anything this function doesn't already warm; only the page's own idle
+// moment no longer pays for a download most visits never use.
+//
 // Memoized: `App.tsx` calls this once on page mount to start the warm-up
 // as early as possible, and `Playground.tsx` calls it again on its own
 // mount to get the same readiness promises to gate its loading
@@ -298,7 +311,6 @@ let playgroundReadiness: PlaygroundReadiness | null = null;
 
 export function warmPlaygroundRuntime(): PlaygroundReadiness {
   if (!playgroundReadiness) {
-    getClang().catch(() => {});
     playgroundReadiness = {
       compileReady: warmDir("wasm-frontend", "wasm_frontend_main").catch(() => {}),
       flsReady: warmDir("wasm-fls", "wasm_fls_main").catch(() => {}),
