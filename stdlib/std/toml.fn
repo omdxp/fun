@@ -492,13 +492,24 @@ pub fun parse_document(str s) TomlDoc {
   num index = 0;
 
   let lines = split(s, '\n');
-  defer lines.free();
+  // `split`'s own pieces are each a fresh substr, not borrowed from
+  // `s` - a shallow free leaked every line of the file.
+  defer {
+    num li = 0;
+    for li < lines.len {
+      free(lines.get(li));
+      li = li + 1;
+    }
+    lines.free();
+  }
   for raw_line : lines {
     let line = trim(raw_line);
     if len(line) == 0 {
+      free(line);
       continue;
     }
     if line[0] == '#' {
+      free(line);
       continue;
     }
     if _is_header(line) {
@@ -513,9 +524,11 @@ pub fun parse_document(str s) TomlDoc {
         section = 1;
         index = out.tables.len - 1;
       }
+      free(line);
       continue;
     }
     _route_line(&out, line, section, index);
+    free(line);
   }
   ret out;
 }
