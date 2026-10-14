@@ -5,6 +5,10 @@ on:
   pull_request:
     branches:
       - main
+  # Lets the -memcheck step (see the build job below) run on demand,
+  # from the Actions tab or `gh workflow run`, without adding its own
+  # several-minutes-plus cost to every ordinary push/PR.
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -142,6 +146,30 @@ jobs:
           export FUN_STDLIB_DIR="$PWD/stdlib"
           mkdir -p coverage
           ./fun-out/bin/fun test . -cover -cover-min 80 -cover-exclude examples,scripts,editors,src/cli/main.fn,src/fls/main.fn,src/fls/server.fn,src/cli/coverage_samples,stdlib/std/sync_backend_windows.fn -cover-report lcov=coverage/lcov.info,cobertura=coverage/cobertura.xml,json=coverage/coverage.json,html=coverage/index.html,text=coverage/summary.txt | tee coverage/test-output.txt
+      # Every allocation across the whole suite redirected through the
+      # built-in memory checker (see stdlib/std/memcheck.fn): a
+      # double-free, use-after-free, or buffer overflow anywhere in the
+      # compiler, stdlib, or their own tests fails this step (leak
+      # reporting stays off, see Codegen.memcheck_leaks's own note - a
+      # test's own process is short-lived by design, so "still
+      # allocated when it exits a moment later anyway" isn't a bug).
+      # One platform only, same reasoning as coverage just above: a
+      # double-free/UAF/overflow is a real bug regardless of which
+      # platform's build happens to hit it, so the other two lanes
+      # would only pay the extra time for no extra coverage. Manual-
+      # trigger only (`workflow_dispatch`, the GitHub Actions
+      # equivalent of GitLab's manual job): the guard-page allocator
+      # is markedly slower than a real malloc (every allocation costs
+      # a real mmap/mprotect syscall pair), enough that this step alone
+      # can run well past 30 minutes under load - too costly to add to
+      # every ordinary push/PR, but still there on demand from the
+      # Actions tab or `gh workflow run ci-dev.yml`.
+      - name: Run the test suite on ${{ matrix.lane }} under -memcheck
+        if: matrix.os == 'ubuntu-24.04' && github.event_name == 'workflow_dispatch'
+        timeout-minutes: 60
+        run: |
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          ./fun-out/bin/fun test . -memcheck
       - name: Summarize coverage
         if: always() && matrix.os == 'ubuntu-24.04'
         run: |
