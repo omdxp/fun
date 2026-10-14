@@ -17818,7 +17818,7 @@ impl Codegen {
       `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
       `    const char* a=getenv("FUN_DEADLOCK_ABORT");
       `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
-      `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+      `    if(__fun_g_wd.armed){ __fun_thread_t th; if(__fun_thread_start(&th, __fun_wd_thread, NULL)==0){ pthread_detach(th); } }
       `  }
       `  if(!__fun_g_wd.armed) return;
       `  __fun_g_wd.blocked++;
@@ -17995,8 +17995,8 @@ impl Codegen {
     `      long long mwv = (mw && mw[0]) ? atoll(mw) : 4096;
     `      if(mwv < n) mwv = n;
     `      __fun_g_sched.max_workers = (int)mwv; }
-    `    for(int i=0;i<n;i++){ __fun_thread_t th; __fun_thread_start(&th, __fun_sched_worker, NULL); }
-    `    if(__fun_g_sched.wd_armed){ __fun_thread_t wt; __fun_thread_start(&wt, __fun_sched_watchdog, NULL); }
+    `    for(int i=0;i<n;i++){ __fun_thread_t th; if(__fun_thread_start(&th, __fun_sched_worker, NULL)==0){ pthread_detach(th); } }
+    `    if(__fun_g_sched.wd_armed){ __fun_thread_t wt; if(__fun_thread_start(&wt, __fun_sched_watchdog, NULL)==0){ pthread_detach(wt); } }
     `  }
     `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
     `}
@@ -18023,7 +18023,7 @@ impl Codegen {
     `  if(__need_worker){ __fun_g_sched.nworkers++; }
     `  __fun_sched_cv_signal(&__fun_g_sched.not_empty);
     `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
-    `  if(__need_worker){ __fun_thread_t __th; __fun_thread_start(&__th, __fun_sched_worker, NULL); }
+    `  if(__need_worker){ __fun_thread_t __th; if(__fun_thread_start(&__th, __fun_sched_worker, NULL)==0){ pthread_detach(__th); } }
     `}
     `static void __fun_sched_wait_idle(void){
     `  if(!__fun_g_sched.started) return;
@@ -23292,7 +23292,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `    __fun_g_wd.armed=(wm>0)?1:0; __fun_g_wd.threshold_ms=(wm>0)?wm:0;
     `    const char* a=getenv("FUN_DEADLOCK_ABORT");
     `    __fun_g_wd.abort_on_fire=(a && a[0]=='1')?1:0;
-    `    if(__fun_g_wd.armed){ __fun_thread_t th; __fun_thread_start(&th, __fun_wd_thread, NULL); }
+    `    if(__fun_g_wd.armed){ __fun_thread_t th; if(__fun_thread_start(&th, __fun_wd_thread, NULL)==0){ pthread_detach(th); } }
     `  }
     `  if(!__fun_g_wd.armed) return;
     `  __fun_g_wd.blocked++;
