@@ -23,7 +23,19 @@ use std.string;
 use std.option;
 use std.result;
 use std.fs;
+use std.c.io;
+use std.c.mem;
 use std.path;
+
+// `fun.fls.debugImports` in the VS Code extension's own settings sets
+// this for the server process it spawns; checked fresh every call
+// (not cached) since nothing here runs often enough for a syscall per
+// call to matter, and a cached read would miss someone flipping the
+// setting and reloading mid-session.
+fun _debug_imports() flag {
+  str v = getenv("FLS_DEBUG_IMPORTS");
+  ret v != nil && !equals(v, "");
+}
 
 // One document as it was last read.
 pub compound Analyzed {
@@ -290,8 +302,22 @@ impl AnalysisCache {
         // `_diagnose_uncached`'s own generic "this file's imports
         // could not be resolved" is what a client actually sees - the
         // real message here, built fresh by `_preload_one_file`, has
-        // nowhere else to go but freed right away.
-        free(merged.unwrap_err());
+        // nowhere else to go but freed right away. Printed first under
+        // `FLS_DEBUG_IMPORTS` (see `fun.fls.debugImports`), since this
+        // is the one place that ever sees why a file's own imports
+        // genuinely failed to resolve, not just that they did.
+        str err_msg = merged.unwrap_err();
+        if _debug_imports() {
+          fprintf(
+            stderr_stream(),
+            "[fls debug] import resolution failed for %.*s: %.*s\n",
+            len(doc.path),
+            doc.path,
+            len(err_msg),
+            err_msg
+          );
+        }
+        free(err_msg);
         free_global_symbols_snapshot(&snap);
       }
     }
@@ -358,6 +384,16 @@ impl AnalysisCache {
   // revision's own real imported symbols, provides.
   _try_fast_reparse(Document doc, Analyzed* found) flag {
     if !found.lexed {
+      ret false;
+    }
+    // `has_edit_range` alone can't prove `edit_start_line`/`edit_end_line`
+    // describe the WHOLE diff since `found` was analyzed - it's never
+    // cleared on success, so a second ranged edit landing before the
+    // first was ever analyzed overwrites it with only the latest edit's
+    // own range (see `Document.edit_base_version`'s own comment). Bail
+    // to a full reparse whenever the range on hand was computed from
+    // some other revision than the one actually being diffed against.
+    if doc.edit_base_version != found.version {
       ret false;
     }
     num old_idx = _decl_index_at_line(&found.program.entry_nodes, doc.edit_start_line + 1);
@@ -541,6 +577,28 @@ impl AnalysisCache {
         shift_p = shift_p + 1;
       }
     }
+
+    // The splice just committed above updates `found.program`/
+    // `found.tokens` directly, but never touches `self.imports.files`
+    // (the SEPARATE cache `_parse_and_merge_source` itself reads on
+    // every full reparse, keyed by this path's own text content). Left
+    // alone, that entry still holds whatever this document's text was
+    // the last time a FULL reparse ran, now stale by however many fast
+    // splices have landed since. Ordinarily a stale `source` just
+    // fails the cache's own equality check on the next full reparse,
+    // a harmless miss - but if this document's text ever cycles back
+    // to byte-identical content it held at that last full reparse
+    // (trivially common: type a character, then immediately backspace
+    // it - exactly two fast-path edits that net to zero), the stale
+    // entry's `source` matches again and the next full reparse gets a
+    // FALSE cache hit, handing back nodes/tokens from a revision this
+    // same document has since moved past. Dropping the entry here
+    // removes the map slot only - its own `source`/`tokens`/`nodes`
+    // are deliberately left unfreed, the same leak-not-free reasoning
+    // as `_parse_and_merge_source`'s own stale-entry handling, since
+    // another document's already-merged program could still be
+    // borrowing strings from this entry's tokens.
+    let _invalidated = self.imports.files.remove(doc.path);
     ret true;
   }
 

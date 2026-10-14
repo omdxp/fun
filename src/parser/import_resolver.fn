@@ -1305,22 +1305,30 @@ fun _parse_and_merge_source(
     }
     parsed_nodes = state.nodes;
     if cacheable {
-      // Replaces whatever was cached for `path` before, if anything -
-      // freed first: every consumer of a cached entry's own `nodes`
-      // clones it rather than borrowing (`_parse_and_merge_source`'s
-      // own push loop below), so nothing outside this cache still
-      // points into the entry being replaced. Its own `tokens` are
-      // freed deeply here too (see `ParsedFile.tokens`'s own note) -
-      // this is the one point that's safe, since nothing but `old`
-      // itself and clones of its *nodes* (which never touch strings)
-      // ever reached these strings.
-      let stale = cache.files.at(path);
-      if stale.is_some() {
-        ParsedFile old = stale.unwrap();
-        free_node_tree(&old.nodes);
-        free_token_vec(&old.tokens);
-        free(old.source);
-      }
+      // What was cached for `path` before, if anything, is deliberately
+      // NOT freed here. `symbols_key` is keyed to the whole preload-
+      // discovered symbol set of whichever entry file is being
+      // analyzed right now (`_symbols_key`'s own note), not to this
+      // one file's own content - editing a completely different
+      // document, with a different import graph, routinely changes
+      // it, so this "replace" path runs for files that never actually
+      // changed at all, just because some OTHER document was edited.
+      // Every consumer of a cached entry's own `nodes` clones rather
+      // than borrows it (`_parse_and_merge_source`'s own push loop
+      // below) - but that clone never touches its own node's string
+      // content either (names, positions, ...), so it still borrows
+      // those strings from exactly this entry's own `tokens`. Any
+      // OTHER document already holding such a clone in its own cached
+      // merged program (built from an earlier call, before this one,
+      // for a document that was never itself re-analyzed) would read
+      // freed memory the moment this entry's own tokens were freed
+      // here - confirmed directly: editing one open document corrupted
+      // hover/go-to-definition in a completely different, untouched
+      // one that happened to share this import. Left to leak instead -
+      // bounded by how many distinct revisions of this one path get
+      // parsed over the life of the process, not unbounded, and
+      // nothing else in this cache's own design can yet prove when
+      // the last borrower is gone.
       ParsedFile fresh;
       fresh.source = src;
       fresh.symbols_key = symbols_key;

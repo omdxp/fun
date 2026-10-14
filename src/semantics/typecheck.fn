@@ -525,8 +525,19 @@ fun _free_compound_info_map(Map<str, CompoundInfo>* compounds) {
   compounds.free();
 }
 
-fun _method_table_new() MethodTable {
-  MethodTable t;
+// Heap-allocated, never a bare `MethodTable` value: `Checker.methods`
+// keeps one of these per type, and every reader (`register_impl`
+// re-registering the same type across several impl/shape blocks,
+// `check_shape_conformance`, `method_signature`, `has_method`) reaches
+// the exact same object through this one pointer rather than a struct
+// copy of it. A struct copy would alias `.methods`'s own backing
+// arrays with whichever copy mutates (grows/rehashes) next - the
+// shallow-copy-then-mutate hazard this file's other `Map`/`Set`
+// fields guard against with an explicit remove-before-mutate dance -
+// except here nothing can even depend on get-out-of-sync timing,
+// since there is only ever the one real object.
+fun _method_table_new() MethodTable* {
+  MethodTable* t = malloc(sizeof(MethodTable));
   t.methods.init(8);
   ret t;
 }
@@ -967,21 +978,37 @@ fun _free_fn_sig_map(Map<str, FnSig>* fns) {
   for i < names.len {
     FnSig sig = fns.at(names.get(i)).unwrap();
     _free_fn_sig(&sig);
+    i = i + 1;
+  }
+  // A second, separate pass - matching `_free_checked_type_map`'s own
+  // shape just above: freeing a key here is freeing live content
+  // `fns.at()` still probes for every OTHER key in this same table
+  // (open addressing walks past a live-but-unrelated slot to resolve
+  // a hash collision), so a key freed mid-loop leaves any later
+  // lookup that happens to probe through its own now-dangling slot
+  // reading freed memory - confirmed directly as the real cause of an
+  // intermittent `strcmp` crash tearing down a large table (enough
+  // entries for real collisions), Guard Malloc catching every time,
+  // plain malloc only sometimes.
+  i = 0;
+  for i < names.len {
     free(names.get(i));
     i = i + 1;
   }
   fns.free();
 }
 
-// Frees every method table's own signature map, then the table of
-// tables itself.
-fun _free_method_tables(Map<str, MethodTable>* methods) {
+// Frees every method table's own signature map, then its own heap box
+// (see `_method_table_new`'s own note on why it's always one), then
+// the table of tables itself.
+fun _free_method_tables(Map<str, MethodTable*>* methods) {
   Vec<str> names = methods.keys();
   defer names.free();
   num i = 0;
   for i < names.len {
-    MethodTable t = methods.at(names.get(i)).unwrap();
+    MethodTable* t = methods.at(names.get(i)).unwrap();
     _free_fn_sig_map(&t.methods);
+    free(t);
     i = i + 1;
   }
   methods.free();
@@ -1207,7 +1234,7 @@ compound Checker {
   // What each declared compound holds, and what each type and shape
   // declares as methods.
   Map<str, CompoundInfo> compounds;
-  Map<str, MethodTable> methods;
+  Map<str, MethodTable*> methods;
   // The file whose declarations are being checked, so a name declared
   // elsewhere can be held to what its own file offers.
   str current_file;
@@ -1261,18 +1288,14 @@ impl Checker {
   // instantiation supplies.
   register_impl(ImplNode block) {
     let existing = self.methods.at(block.type_name);
-    MethodTable table;
+    MethodTable* table;
     if existing.is_some() {
+      // The same one heap-allocated table `self.methods` itself still
+      // points at (see `_method_table_new`'s own note) - mutating
+      // `table.methods` below mutates that exact object, not a copy,
+      // so there is nothing to write back or any staleness window to
+      // guard against.
       table = existing.unwrap();
-      // `table` now aliases the same `.methods` backing array
-      // `self.methods` itself still points at. `table.methods.put()`
-      // below can grow and rehash that array - freeing the old one -
-      // leaving `self.methods`'s own stored copy pointing at freed
-      // memory until the write-back at the end of this call. Removing
-      // the stale entry now (shallow - the key/value aren't freed,
-      // `table` already holds the only copy that matters) means
-      // nothing else can read that dangling reference in between.
-      self.methods.remove(block.type_name);
     } else {
       table = _method_table_new();
     }
@@ -1298,8 +1321,20 @@ impl Checker {
             sig.file = m.pos.filename;
           }
           // A method's declared name carries the type it belongs to
-          // (`Counter__add`), while a call names it on its own.
-          table.methods.put(_method_leaf_name(f.name, block.type_name), sig);
+          // (`Counter__add`), while a call names it on its own. A name
+          // shared between two of this type's own impl blocks (a
+          // shape impl re-supplying a method the main block already
+          // has, e.g. `clear`) is a real, legal overlap - `put()`
+          // keeps its own first-seen key on a matching re-insert (the
+          // value still updates to this call's own, kept exactly as
+          // before), so this call's own fresh copy of that same key
+          // would otherwise leak unused.
+          str leaf = _method_leaf_name(f.name, block.type_name);
+          flag leaf_already_present = table.methods.at(leaf).is_some();
+          table.methods.put(leaf, sig);
+          if leaf_already_present {
+            free(leaf);
+          }
         }
         _ -> {}
       }
@@ -2669,7 +2704,7 @@ impl Checker {
     if table.is_none() {
       ret false;
     }
-    MethodTable found = table.unwrap();
+    MethodTable* found = table.unwrap();
     ret found.methods.at(method).is_some();
   }
 
@@ -4893,7 +4928,7 @@ impl Checker {
     if declared.is_none() {
       ret;
     }
-    MethodTable required = declared.unwrap();
+    MethodTable* required = declared.unwrap();
     Vec<str> names = required.methods.keys();
     defer names.free();
     num i = 0;
@@ -5146,7 +5181,7 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
       }
       .Shape(q) -> {
         checker.shapes.add(q.name);
-        MethodTable table = _method_table_new();
+        MethodTable* table = _method_table_new();
         for m : q.methods {
           // A generic shape's methods mention its type parameters, which
           // stand for whatever the implementing type supplies.

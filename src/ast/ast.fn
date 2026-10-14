@@ -1850,6 +1850,13 @@ pub fun node_clone(Node n) Node {
   c.has_binded = false;
   c.binded = nil;
   fit n.kind {
+    .Import(i) -> {
+      ImportNode ci = i;
+      if i.owns_path {
+        ci.path = substr(i.path, 0, len(i.path));
+      }
+      c.kind = .Import(ci);
+    }
     .ExpressionParenthesis(inner) -> {
       c.kind = .ExpressionParenthesis(node_clone_ptr(inner));
     }

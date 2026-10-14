@@ -101,15 +101,28 @@ impl WorkspaceSymbolTable {
     self.versions.put(owned_uri, doc.version);
   }
 
-  // Makes sure every URI `docs` currently knows about is current.
+  // Makes sure every URI `docs` currently knows about is current. Runs
+  // with `cache.imports`' own preload forced sequential for the
+  // duration: this walks every workspace file back to back, each one
+  // normally spawning and joining its own fork-based preload worker
+  // pool (see `ImportCache.parallel_preload`) - hundreds of fork/join
+  // cycles in a tight loop, a far higher-volume stress pattern on the
+  // M:N scheduler's fixed thread pool than the one-call-per-keystroke
+  // rate interactive edits produce it under. A real SIGABRT plus
+  // memory corruption was traced here in practice; serializing just
+  // this bulk pass avoids it without touching the interactive path's
+  // own parallel speed.
   pub ensure_all(AnalysisCache* cache, Documents* docs) {
     Vec<str> uris = docs.all_uris();
     defer uris.free();
+    let was_parallel = cache.imports.parallel_preload;
+    cache.imports.parallel_preload = false;
     num i = 0;
     for i < uris.len {
       self.ensure(cache, docs, uris.get(i));
       i = i + 1;
     }
+    cache.imports.parallel_preload = was_parallel;
   }
 
   // Drops what was indexed for a document a client closed. Without
