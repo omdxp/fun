@@ -3138,6 +3138,54 @@ pub fun infer_let_local_type_with_args(
   ret _infer_type(tokens, val_tok_opt.unwrap(), program, file, line, out_args, 0);
 }
 
+// True when the tokens right after the '?' at `q_idx` contain a
+// genuine ternary ':' before the bounded context around them ends -
+// the same disambiguation the real parser's own
+// `Parser.looks_like_ternary_branch` makes, token-index-based here
+// instead of cursor-based, since this file reasons over a plain token
+// stream rather than driving the parser itself. A '{' at depth 0 always
+// ends the scan (not a ternary): this language has no block-expression
+// or bare dict-literal syntax, so a '{' there can only be a following
+// statement/body starting.
+fun _looks_like_ternary_question(Vec<Token>* tokens, num q_idx) flag {
+  num depth = 0;
+  num i = q_idx + 1;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if depth == 0 && token_is_symbol(t, '{') {
+      ret false;
+    }
+    if token_is_operator(t, "(") || token_is_operator(t, "[") ||
+    token_is_symbol(t, '{') {
+      depth = depth + 1;
+      i = i + 1;
+      continue;
+    }
+    if token_is_symbol(t, ')') || token_is_symbol(t, ']') ||
+    token_is_symbol(t, '}') {
+      if depth == 0 {
+        ret false;
+      }
+      depth = depth - 1;
+      i = i + 1;
+      continue;
+    }
+    if depth == 0 {
+      if token_is_symbol(t, ';') {
+        ret false;
+      }
+      if token_is_operator(t, ",") {
+        ret false;
+      }
+      if token_is_operator(t, ":") {
+        ret true;
+      }
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
 // A best-effort read of `val_tok`'s own type, when it's the first
 // token of a `let`'s initializer (or, recursively, of a sub-expression
 // this function is chasing into): a literal, `await <expr>`, a
@@ -3189,6 +3237,24 @@ fun _infer_type(
     ret base_type;
   }
   Token op_tok = op_tok_opt.unwrap();
+  // `cond ? then : else`: shares '?' with the propagation operator
+  // below, told apart the same way the real parser does - a pure
+  // lookahead for a genuinely matching top-level ':' ahead (see
+  // `_looks_like_ternary_question`'s own doc comment) - checked first,
+  // since an unrelated local's own propagation branch just below would
+  // otherwise misread a ternary's own leading '?' as a propagation
+  // unwrap. The ternary's own type is the 'then' branch's (both
+  // branches are required to share one; see typecheck.fn's own
+  // `infer_ternary`), inferred the same recursive way everything else
+  // in this function is.
+  if token_is_operator(op_tok, "?") &&
+    _looks_like_ternary_question(tokens, index_of_token(tokens, op_tok)) {
+    let then_tok_opt = token_after(tokens, index_of_token(tokens, op_tok) + 1);
+    if then_tok_opt.is_none() {
+      ret base_type;
+    }
+    ret _infer_type(tokens, then_tok_opt.unwrap(), program, file, line, out_args, depth + 1);
+  }
   // `x?`/`x!`: the postfix mirror of the `await` prefix case above -
   // unwraps to the propagated value's own type (Option<T>/Result<T,E>'s
   // own T, already collected into `out_args` by the call/chain

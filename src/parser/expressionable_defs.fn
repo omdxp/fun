@@ -87,19 +87,45 @@ pub fun op_precedence_for(str op) OpPrecedence {
       p.assoc = .LeftToRight;
       ret p;
     }
-    // Range operator.
-    ".." -> {
+    // Ternary conditional (`cond ? then : else`). Binds looser than every
+    // ordinary operator but tighter than assignment: `a = b ? c : d` is
+    // `a = (b ? c : d)`, matching C. '?' and ':' are only ever built as
+    // binary operators here when the parser's own ternary lookahead
+    // (`looks_like_ternary_branch`) has already confirmed a real ternary
+    // is present - '?' alone, without a matching ':', is still the
+    // postfix propagation operator, resolved before either ever reaches
+    // this table. Equal rank with different associativity is deliberate:
+    // `left_has_priority` only consults associativity for two instances
+    // of the *same* operator, so a '?'/':' pair at equal rank always
+    // rotates `(cond ? (then : X))` into `((cond ? then) : X)` regardless
+    // of either's own associativity - that rotated shape is exactly what
+    // `Parser._fix_ternary_shape` looks for to build the real `.Ternary`
+    // node. ':' alone must still be right-associative so a chain of
+    // ternaries (`a?b:c?d:e`) nests as `a?b:(c?d:e)`, not
+    // `(a?b:c)?d:e`.
+    "?" -> {
       p.rank = 11;
       p.assoc = .LeftToRight;
       ret p;
     }
-    "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=" -> {
+    ":" -> {
+      p.rank = 11;
+      p.assoc = .RightToLeft;
+      ret p;
+    }
+    // Range operator.
+    ".." -> {
       p.rank = 12;
+      p.assoc = .LeftToRight;
+      ret p;
+    }
+    "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "^=", "|=" -> {
+      p.rank = 13;
       p.assoc = .RightToLeft;
       ret p;
     }
     "," -> {
-      p.rank = 13;
+      p.rank = 14;
       p.assoc = .LeftToRight;
       ret p;
     }

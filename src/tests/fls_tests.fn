@@ -239,6 +239,24 @@ test "hover and inlay hints show a let-inferred local's own concrete generic typ
   assert contains(hints, `": Option<num>"`), "expected the same concrete generic arg in the inlay hint";
 }
 
+test "hover shows a ternary-bound local's own branch type, not the condition's" {
+  str src = `fun pick(flag cond) num {
+  `  let parsed = cond ? 1 : 2;
+  `  ret parsed;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letternary.fn";
+  doc.path = "letternary.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Hover on 'parsed' at its own binding (line 1, col 6).
+  str hovered = hover(&reads, doc, 1, 6);
+  assert contains(hovered, "num parsed"), "expected the then-branch's own type ('num'), not the condition's ('flag')";
+}
+
 test "definition_workspace_wide respects cross-file pub visibility" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

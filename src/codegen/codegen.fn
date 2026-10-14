@@ -5846,6 +5846,28 @@ impl Codegen {
         self.state.write(")");
         ret .None;
       }
+      .Ternary(t) -> {
+        // `cond ? then : else` has an identical C spelling; each operand
+        // is wrapped in its own parens so the emitted precedence is
+        // always correct regardless of what it is.
+        self.state.write("(");
+        let cerr = self.emit_expr(*t.cond);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(") ? (");
+        let therr = self.emit_expr(*t.then_val);
+        if therr.is_some() {
+          ret therr;
+        }
+        self.state.write(") : (");
+        let eerr = self.emit_expr(*t.else_val);
+        if eerr.is_some() {
+          ret eerr;
+        }
+        self.state.write(")");
+        ret .None;
+      }
       .Unary(u) -> {
         if equals(u.op, "await") {
           ret self.emit_await(u.operand);
@@ -10012,7 +10034,7 @@ impl Codegen {
       }
       .ExpressionParenthesis(inner) -> { self.collect_inline_next_locals(inner, out); }
       .Unary(u) -> { self.collect_inline_next_locals(u.operand, out); }
-      .Tenary(t) -> {
+      .Ternary(t) -> {
         self.collect_inline_next_locals(t.cond, out);
         self.collect_inline_next_locals(t.then_val, out);
         self.collect_inline_next_locals(t.else_val, out);
@@ -10113,7 +10135,7 @@ impl Codegen {
       }
       .ExpressionParenthesis(inner) -> { self.apply_inline_next_renames(inner, orig, fresh); }
       .Unary(u) -> { self.apply_inline_next_renames(u.operand, orig, fresh); }
-      .Tenary(t) -> {
+      .Ternary(t) -> {
         self.apply_inline_next_renames(t.cond, orig, fresh);
         self.apply_inline_next_renames(t.then_val, orig, fresh);
         self.apply_inline_next_renames(t.else_val, orig, fresh);
@@ -10263,7 +10285,7 @@ impl Codegen {
       }
       .ExpressionParenthesis(inner) -> { ret self._contains_nested_dotted_call(inner); }
       .Unary(u) -> { ret self._contains_nested_dotted_call(u.operand); }
-      .Tenary(t) -> {
+      .Ternary(t) -> {
         ret self._contains_nested_dotted_call(t.cond) ||
           self._contains_nested_dotted_call(t.then_val) ||
           self._contains_nested_dotted_call(t.else_val);
@@ -15323,6 +15345,20 @@ impl Codegen {
         dt.type_str = recv_r.type_name;
         ret .Some(dt);
       }
+      // `let v = cond ? a : b;`: both branches are required (by
+      // `infer_ternary` in typecheck.fn) to share a type, so either
+      // one's own resolved type is `v`'s - tried in order, falling back
+      // to the other, rather than failing outright, since one branch
+      // alone (e.g. a bare enum-variant shorthand with no dtype of its
+      // own) can resolve to less than the other even when both are
+      // perfectly valid.
+      .Ternary(t) -> {
+        let then_dt = self.infer_let_expr_type(t.then_val);
+        if then_dt.is_some() {
+          ret then_dt;
+        }
+        ret self.infer_let_expr_type(t.else_val);
+      }
       _ -> { ret .None; }
     }
   }
@@ -19206,6 +19242,24 @@ test "emit_expr emits a boolean literal" {
   Node n = node_new(.Boolean(true));
   assert g.emit_expr(n).is_none(), "expected the boolean to emit";
   assert equals(st.out.build(), "true"), "expected 'true'";
+}
+
+test "emit_expr emits a ternary as a parenthesized C ternary" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(.Boolean(true));
+  Node* then_val = malloc(sizeof(Node));
+  *then_val = node_new(.Number(.Num(1)));
+  Node* else_val = malloc(sizeof(Node));
+  *else_val = node_new(.Number(.Num(2)));
+  TernaryNode tn;
+  tn.cond = cond;
+  tn.then_val = then_val;
+  tn.else_val = else_val;
+  Node n = node_new(.Ternary(tn));
+  assert g.emit_expr(n).is_none(), "expected the ternary to emit";
+  assert equals(st.out.build(), "(true) ? (1) : (2)"), "expected a parenthesized C ternary";
 }
 
 test "emit_expr emits the nil literal as C NULL" {

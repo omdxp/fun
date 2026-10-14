@@ -1403,6 +1403,65 @@ impl ParseState {
     ret token_is_symbol(next_opt.unwrap(), ')');
   }
 
+  // True when the tokens right after a just-consumed '?' contain a
+  // genuine ternary ':' before the bounded context around them ends -
+  // the one lookahead that decides whether '?' starts a ternary
+  // (`cond ? a : b`) or is the postfix propagation operator, since both
+  // are the same token and this parser never backtracks a committed
+  // parse (same reasoning as `skip_generic_args_tokens`, used for the
+  // analogous `a < b > (c)` generic-call-vs-comparison ambiguity). Pure
+  // lookahead from the current cursor, consumes nothing. A '{' at depth
+  // 0 always ends the scan (false): this language has no block-
+  // expression or bare dict-literal syntax, so a top-level '{' here can
+  // only be a following statement/body starting, never part of the
+  // expression. Finding some ':' is enough to commit to the ternary
+  // path; nested ternaries sort out their own correct ':' pairing
+  // through `stop_at_colon`'s own save/restore discipline during the
+  // real parse, not through this scan picking the "right" one.
+  pub looks_like_ternary_branch() flag {
+    num depth = 0;
+    num i = 0;
+    num max_scan = 4096;
+    for i < max_scan {
+      let tok_opt = self.token_peek_n(i);
+      if tok_opt.is_none() {
+        ret false;
+      }
+      let tok = tok_opt.unwrap();
+      if depth == 0 && token_is_symbol(tok, '{') {
+        ret false;
+      }
+      if token_is_operator(tok, "(") || token_is_operator(tok, "[") ||
+      token_is_symbol(tok, '{') {
+        depth = depth + 1;
+        i = i + 1;
+        continue;
+      }
+      if token_is_symbol(tok, ')') || token_is_symbol(tok, ']') ||
+      token_is_symbol(tok, '}') {
+        if depth == 0 {
+          ret false;
+        }
+        depth = depth - 1;
+        i = i + 1;
+        continue;
+      }
+      if depth == 0 {
+        if token_is_symbol(tok, ';') {
+          ret false;
+        }
+        if token_is_operator(tok, ",") {
+          ret false;
+        }
+        if token_is_operator(tok, ":") {
+          ret true;
+        }
+      }
+      i = i + 1;
+    }
+    ret false;
+  }
+
   // Consumes a run of `*` written after a type inside `sizeof(...)`, and
   // reports it as the stars to append to the type's own name. A pointer
   // is a type here rather than a multiplication, which is what the
@@ -2619,6 +2678,7 @@ impl Parser {
     if maybe_top.is_some() {
       Node top = maybe_top.unwrap();
       self._fix_chained_tuple_access(&top);
+      self._fix_ternary_shape(&top);
       self.state.nodes.push(top);
     }
     ret .None;
@@ -2707,6 +2767,66 @@ impl Parser {
         }
       }
       .Bracket(inner2) -> { self._fix_chained_tuple_access(inner2); }
+      _ -> {}
+    }
+  }
+
+  // Walks `node`'s own subtree (post-order, same reasoning as
+  // `_fix_chained_tuple_access`) looking for the shape building a
+  // ternary's '?'/':' as ordinary low-precedence binary operators
+  // leaves behind once `parse_reorder_expression` has rotated it into
+  // place: `((cond ? then) : else)`, i.e. a ':' Expression whose own
+  // left child is a '?' Expression. Rewrites it in place into the real
+  // `.Ternary{cond, then, else}` node `emit_expr`/typecheck/fls all
+  // expect. Children are fixed first, so a chained ternary's own nested
+  // '?'/':' pair (already rotated to the same shape one level down by
+  // the same mechanism) is already a real `.Ternary` by the time the
+  // outer one is built from it.
+  _fix_ternary_shape(Node* node) {
+    if node == nil {
+      ret;
+    }
+    fit node.kind {
+      .Expression(e) -> {
+        if e.has_left {
+          self._fix_ternary_shape(e.left);
+        }
+        if e.has_right {
+          self._fix_ternary_shape(e.right);
+        }
+        if !equals(e.op, ":") || !e.has_left || !e.has_right {
+          ret;
+        }
+        fit e.left.kind {
+          .Expression(inner) -> {
+            if !equals(inner.op, "?") || !inner.has_left || !inner.has_right {
+              ret;
+            }
+            TernaryNode tn;
+            tn.cond = inner.left;
+            tn.then_val = inner.right;
+            tn.else_val = e.right;
+            // `e.left` (the old '?' Expression wrapper) is now an empty
+            // shell: its own fields are absorbed by value into `tn`
+            // above, so only the wrapper itself needs freeing, not its
+            // former contents - same reasoning as the rotation helpers'
+            // own `old_right` free elsewhere in this file.
+            Node* old_left = e.left;
+            node.kind = .Ternary(tn);
+            free_node_binded_only(old_left);
+            free(old_left);
+          }
+          _ -> {}
+        }
+      }
+      .ExpressionParenthesis(inner) -> { self._fix_ternary_shape(inner); }
+      .Unary(u) -> { self._fix_ternary_shape(u.operand); }
+      .TupleLiteral(tl) -> {
+        for el : tl.elements {
+          self._fix_ternary_shape(el);
+        }
+      }
+      .Bracket(inner2) -> { self._fix_ternary_shape(inner2); }
       _ -> {}
     }
   }
@@ -3264,7 +3384,24 @@ impl Parser {
     self.state.token_next();
     self.state.node_pop();
 
-    if is_left_operanded_unary_operator(op) {
+    // `?` is shared between the postfix propagation operator and the
+    // start of a ternary (`cond ? then : else`); the two are
+    // distinguished the only way this never-backtracking parser can,
+    // via a pure lookahead for a genuinely matching ':' ahead (see
+    // `looks_like_ternary_branch`'s own doc comment). When it's a
+    // ternary, '?' falls through to the ordinary binary-operator path
+    // below instead of the postfix-unary one: `op_precedence_for` gives
+    // '?'/':' a low enough rank that the existing precedence-reordering
+    // rotation this path already does for every other operator pair
+    // naturally produces the right grouping (`(a > b) ? c : d`, not
+    // `a > (b ? c : d)`), and `parse_expressionable_root`'s own
+    // `_fix_ternary_shape` pass turns the resulting
+    // `((cond ? then) : else)` shape into a real `.Ternary` node once
+    // the whole expression is done. A '?' without a matching ':' is
+    // never a ternary, so it always reaches the postfix-unary path below
+    // exactly as before.
+    flag question_is_ternary = equals(op, "?") && self.state.looks_like_ternary_branch();
+    if is_left_operanded_unary_operator(op) && !question_is_ternary {
       Node* left_ptr = malloc(sizeof(Node));
       *left_ptr = node_left;
       ret self.parse_for_left_operanded_unary(left_ptr, op, op_pos);
@@ -9441,6 +9578,96 @@ test "parse_expressionable_root respects operator precedence (a + b * c)" {
       }
     }
     _ -> { panic("expected an Expression node"); }
+  }
+}
+
+test "parse_expressionable_root builds a ternary with condition-operator precedence (a > b ? c : d)" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  names.push("c");
+  names.push("d");
+  ParseState st = _state_with_declared("a > b ? c : d", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a > b ? c : d' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  // Expect Ternary{(a > b), c, d}: the condition keeps its own '>',
+  // not just 'b' - the bug this precedence table entry fixes.
+  fit top.kind {
+    .Ternary(t) -> {
+      fit t.cond.kind {
+        .Expression(ce) -> {
+          assert equals(ce.op, ">"), "expected the condition to be the whole 'a > b', not just 'b'";
+        }
+        _ -> { panic("expected the condition to be an Expression"); }
+      }
+      fit t.then_val.kind {
+        .Identifier(s) -> { assert equals(s, "c"), "expected the then-branch to be 'c'"; }
+        _ -> { panic("expected the then-branch to be Identifier 'c'"); }
+      }
+      fit t.else_val.kind {
+        .Identifier(s) -> { assert equals(s, "d"), "expected the else-branch to be 'd'"; }
+        _ -> { panic("expected the else-branch to be Identifier 'd'"); }
+      }
+    }
+    _ -> { panic("expected a Ternary node"); }
+  }
+}
+
+test "parse_expressionable_root chains a ternary right-associatively (a ? b : c ? d : e)" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  names.push("b");
+  names.push("c");
+  names.push("d");
+  names.push("e");
+  ParseState st = _state_with_declared("a ? b : c ? d : e", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a ? b : c ? d : e' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  // Expect Ternary{a, b, Ternary{c, d, e}} - a?b:(c?d:e), not (a?b:c)?d:e.
+  fit top.kind {
+    .Ternary(outer) -> {
+      fit outer.cond.kind {
+        .Identifier(s) -> { assert equals(s, "a"), "expected the outer condition to be 'a'"; }
+        _ -> { panic("expected the outer condition to be Identifier 'a'"); }
+      }
+      fit outer.then_val.kind {
+        .Identifier(s) -> { assert equals(s, "b"), "expected the outer then-branch to be 'b'"; }
+        _ -> { panic("expected the outer then-branch to be Identifier 'b'"); }
+      }
+      fit outer.else_val.kind {
+        .Ternary(inner) -> {
+          fit inner.cond.kind {
+            .Identifier(s) -> {
+              assert equals(s, "c"), "expected the inner condition to be 'c'";
+            }
+            _ -> { panic("expected the inner condition to be Identifier 'c'"); }
+          }
+        }
+        _ -> { panic("expected the outer else-branch to be a nested Ternary"); }
+      }
+    }
+    _ -> { panic("expected a Ternary node"); }
+  }
+}
+
+test "parse_expressionable_root still reads a bare '?' as propagation, not a ternary" {
+  Vec<str> names;
+  names.init(0);
+  names.push("a");
+  ParseState st = _state_with_declared("a?", names);
+  Parser p = parser_new(&st);
+  assert p.parse_expressionable_root().is_none(), "expected 'a?' to parse";
+  let top = st.nodes.get(st.nodes.len - 1);
+  fit top.kind {
+    .Unary(u) -> {
+      assert u.is_left_operanded_unary, "expected a postfix unary";
+      assert equals(u.op, "?"), "expected the postfix op to still be '?'";
+    }
+    _ -> { panic("expected a plain propagation Unary node, not a Ternary"); }
   }
 }
 

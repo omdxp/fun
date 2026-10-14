@@ -382,7 +382,7 @@ pub fun is_propagation_op(str op) flag {
 }
 
 // A ternary conditional expression: `cond ? then_val : else_val`.
-pub compound TenaryNode {
+pub compound TernaryNode {
   Node* cond;
   Node* then_val;
   Node* else_val;
@@ -1016,7 +1016,7 @@ pub enum NodeKind {
   // Inline assembly (`asm volatile arch x86_64 (out y: "=r" = y; ...) { ... };`).
   StatementAsm(AsmStmtNode),
   Unary(UnaryNode),
-  Tenary(TenaryNode),
+  Ternary(TernaryNode),
   Bracket(Node*),
   // `Type{...}` or `.{...}`.
   CompoundInit(CompoundInitNode),
@@ -1106,7 +1106,7 @@ pub fun node_is_value_type(Node n) flag {
     .Identifier(s) -> { ret true; }
     .Number(d) -> { ret true; }
     .Unary(u) -> { ret true; }
-    .Tenary(t) -> { ret true; }
+    .Ternary(t) -> { ret true; }
     .String(s) -> { ret true; }
     .Character(c) -> { ret true; }
     .CompoundInit(ci) -> { ret true; }
@@ -1414,7 +1414,7 @@ fun _free_node_contents(Node* n) {
         node_free(u.error_arg);
       }
     }
-    .Tenary(t) -> {
+    .Ternary(t) -> {
       node_free(t.cond);
       node_free(t.then_val);
       node_free(t.else_val);
@@ -1959,12 +1959,12 @@ pub fun node_clone(Node n) Node {
       }
       c.kind = .Unary(cu);
     }
-    .Tenary(t) -> {
-      TenaryNode ct = t;
+    .Ternary(t) -> {
+      TernaryNode ct = t;
       ct.cond = node_clone_ptr(t.cond);
       ct.then_val = node_clone_ptr(t.then_val);
       ct.else_val = node_clone_ptr(t.else_val);
-      c.kind = .Tenary(ct);
+      c.kind = .Ternary(ct);
     }
     .Bracket(inner) -> { c.kind = .Bracket(node_clone_ptr(inner)); }
     .CompoundInit(ci) -> {

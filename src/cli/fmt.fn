@@ -432,6 +432,100 @@ fun _is_for_colon(Vec<Token>* tokens, num idx) flag {
   ret false;
 }
 
+// True when the '?' at `idx` starts a ternary (`cond ? a : b`) rather
+// than the postfix propagation operator - both are the same token,
+// disambiguated the same way the parser itself does: a forward scan for
+// a genuinely matching top-level ':' before the bounded context around
+// it ends. A '{' at depth 0 always ends the scan (not a ternary): this
+// language has no block-expression or bare dict-literal syntax, so a
+// '{' there can only be a following statement/body starting.
+fun _is_ternary_question(Vec<Token>* tokens, num idx) flag {
+  num depth = 0;
+  num i = idx + 1;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type == .Comment || t.type == .NewLine {
+      i = i + 1;
+      continue;
+    }
+    str text = token_text(t);
+    if depth == 0 && equals(text, "{") {
+      ret false;
+    }
+    if equals(text, "(") || equals(text, "[") || equals(text, "{") {
+      depth = depth + 1;
+      i = i + 1;
+      continue;
+    }
+    if equals(text, ")") || equals(text, "]") || equals(text, "}") {
+      if depth == 0 {
+        ret false;
+      }
+      depth = depth - 1;
+      i = i + 1;
+      continue;
+    }
+    if depth == 0 {
+      if equals(text, ";") {
+        ret false;
+      }
+      if equals(text, ",") {
+        ret false;
+      }
+      if equals(text, ":") {
+        ret true;
+      }
+    }
+    i = i + 1;
+  }
+  ret false;
+}
+
+// True when the ':' at `idx` closes a ternary's own then-branch, the
+// mirror image of `_is_ternary_question`'s own forward scan: a backward
+// scan for a genuinely matching '?' before the bounded context behind
+// it starts, bracket depth tracked in reverse (a closer deepens it, an
+// opener at depth 0 means the scan has backed out of the scope that
+// contains this ':').
+fun _is_ternary_colon(Vec<Token>* tokens, num idx) flag {
+  num depth = 0;
+  num i = idx - 1;
+  for i >= 0 {
+    Token t = tokens.get(i);
+    if t.type == .Comment || t.type == .NewLine {
+      i = i - 1;
+      continue;
+    }
+    str text = token_text(t);
+    if equals(text, ")") || equals(text, "]") || equals(text, "}") {
+      depth = depth + 1;
+      i = i - 1;
+      continue;
+    }
+    if equals(text, "(") || equals(text, "[") || equals(text, "{") {
+      if depth == 0 {
+        ret false;
+      }
+      depth = depth - 1;
+      i = i - 1;
+      continue;
+    }
+    if depth == 0 {
+      if equals(text, ";") {
+        ret false;
+      }
+      if equals(text, ",") {
+        ret false;
+      }
+      if equals(text, "?") {
+        ret true;
+      }
+    }
+    i = i - 1;
+  }
+  ret false;
+}
+
 // True when the `*` at `idx` spells a pointer type rather than a
 // multiplication. A pointer star follows a type and is followed by a
 // name, a closing generic argument, or the end of a declaration.
@@ -743,7 +837,11 @@ fun _needs_space_at(
   // own operand rather than the value that follows it - `!`/`++`/`--`
   // also have a prefix reading (`!x`, `++x`), told apart the same way
   // the parser tells them apart: whether a value already precedes them.
-  if _is_postfix_unary_op(c) && _is_postfix_operand_end(prev) {
+  // '?' is excepted when it starts a ternary: `cond ? a : b` reads with
+  // a space on both sides, like any other binary operator, not pressed
+  // against `cond` the way a real propagation `cond?` is.
+  if _is_postfix_unary_op(c) && _is_postfix_operand_end(prev) &&
+    !(equals(c, "?") && _is_ternary_question(tokens, idx)) {
     ret false;
   }
   if equals(p, "use") {
@@ -766,7 +864,7 @@ fun _needs_space_at(
     ret false;
   }
   if equals(c, ":") {
-    ret _is_for_colon(tokens, idx);
+    ret _is_for_colon(tokens, idx) || _is_ternary_colon(tokens, idx);
   }
   if equals(c, ",") || equals(c, ";") || equals(c, ")") || equals(c, "]") || equals(c, "}") {
     ret false;
@@ -2195,4 +2293,33 @@ test "an if condition ending in a compound literal is not mistaken for the if's 
   `}`;
   let out = format_source(src, "t.fn").unwrap();
   assert contains(out, "if x == Point{x = 1} {"), "expected the literal and the if's own body brace on the same line";
+}
+
+test "a ternary gets a space on both sides of '?' and ':'" {
+  str src = `fun a(flag cond) num {
+  `  let x=cond?1:2;
+  `  ret x;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "cond ? 1 : 2"), "expected spaces around both '?' and ':'";
+}
+
+test "a chained ternary keeps each condition's own operator spacing" {
+  str src = `fun a(num x) str {
+  `  ret x>10?"big":x>0?"small":"non-positive";
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(
+    out,
+    `x > 10 ? "big" : x > 0 ? "small" : "non-positive"`
+  ), "expected every comparison and every '?'/':' pair spaced";
+}
+
+test "a plain propagation '?' still binds tight to its own operand, not spaced like a ternary" {
+  str src = `fun a() num {
+  `  let r=make()?;
+  `  ret r;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "make()?;"), "expected no space before a real propagation '?'";
 }
