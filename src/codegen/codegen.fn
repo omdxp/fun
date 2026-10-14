@@ -16418,6 +16418,12 @@ impl Codegen {
     // preamble - `std.memcheck` itself never branches on platform.
     if self.memcheck {
       self.state.write(`#ifdef _WIN32
+      `#ifndef WIN32_LEAN_AND_MEAN
+      `#define WIN32_LEAN_AND_MEAN
+      `#endif
+      `#ifndef NOGDI
+      `#define NOGDI
+      `#endif
       `#include <windows.h>
       `#else
       `#include <signal.h>
