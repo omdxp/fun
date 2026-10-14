@@ -67,6 +67,11 @@ compound Analysis {
   // The functions a fork can name, and the types whose fields say
   // whether a value guards itself.
   Map<str, FunctionNode> functions;
+  // Every impl method, keyed by its own mangled name (`TypeName__method`,
+  // already what `FunctionNode.name` holds for one) - what
+  // `_resolve_node_type` needs to tell a `fit` over a method call's own
+  // return type, the same way `functions` already does for a plain call.
+  Map<str, FunctionNode> methods;
   Map<str, CompoundNode> compound_decls;
   // What each local in the function being walked is declared as.
   Map<str, str> local_types;
@@ -115,6 +120,7 @@ fun _analysis_new() Analysis {
   a.enum_variants.init(8);
   a.shape_implementors.init(8);
   a.functions.init(16);
+  a.methods.init(16);
   a.compound_decls.init(16);
   a.local_types.init(16);
   a.channel_element_types.init(4);
@@ -241,6 +247,7 @@ impl Analysis {
     self.enum_variants.free();
     self.shape_implementors.free();
     self.functions.free();
+    self.methods.free();
     self.compound_decls.free();
     _free_local_types(&self.local_types);
     self.channel_element_types.free();
@@ -1405,6 +1412,56 @@ impl Analysis {
                 ret self._dtype_type_name(*called.rtype);
               }
             }
+          } else {
+            // Not a plain `name()` call - `name.method()` calls through
+            // an impl block instead, which `functions` never tracked at
+            // all (that map is top-level `fun` declarations only).
+            // `methods` is keyed by each method's own mangled name
+            // (`TypeName__method`, codegen's own scheme - already what
+            // `FunctionNode.name` holds for an impl method, and what
+            // `analyze`'s own `.Impl` walk registers it under directly),
+            // built here from the receiver's own resolved type plus the
+            // call's own method name.
+            flag is_method_call = false;
+            str recv_type2 = "";
+            str method_name = "";
+            fit e.left.kind {
+              .Expression(de) -> {
+                if equals(de.op, ".") && de.has_left && de.has_right {
+                  fit de.right.kind {
+                    .Identifier(mname) -> {
+                      method_name = mname;
+                      is_method_call = true;
+                    }
+                    _ -> {}
+                  }
+                  if is_method_call {
+                    recv_type2 = self._resolve_node_type(de.left);
+                  }
+                }
+              }
+              _ -> {}
+            }
+            if is_method_call && !equals(recv_type2, "") {
+              if ends_with(recv_type2, "*") {
+                str stripped2 = substr(recv_type2, 0, len(recv_type2) - 1);
+                free(recv_type2);
+                recv_type2 = stripped2;
+              }
+              str key = format("{str}__{str}", recv_type2, method_name);
+              free(recv_type2);
+              let known_m = self.methods.at(key);
+              free(key);
+              if known_m.is_some() {
+                FunctionNode called_m = known_m.unwrap();
+                if called_m.has_rtype && called_m.rtype != nil {
+                  ret self._dtype_type_name(*called_m.rtype);
+                }
+              }
+            }
+            if !is_method_call && !equals(recv_type2, "") {
+              free(recv_type2);
+            }
           }
         }
         if equals(e.op, ".") && e.has_left && e.has_right {
@@ -2244,6 +2301,19 @@ pub fun analyze(Vec<Node>* nodes, Vec<Node>* program, flag report_unused, str fi
         state.enum_variants.put(decl.name, names);
       }
       .Impl(i) -> {
+        for m : i.methods {
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(mf) -> {
+              if mf.has_name {
+                state.methods.put(mf.name, mf);
+              }
+            }
+            _ -> {}
+          }
+        }
         if !i.has_shape_name {
           continue;
         }
