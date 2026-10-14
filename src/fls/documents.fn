@@ -33,6 +33,23 @@ pub compound Document {
   // with the two fields above, enough to compute the line delta a
   // fast-path splice shifts the replacement subtree's own Pos by.
   num edit_replacement_lines;
+  // `version` as of just before this edit was applied. `has_edit_range`
+  // alone isn't enough to prove the recorded range describes the WHOLE
+  // diff since the last analysis: it is never cleared on a successful
+  // `AnalysisCache.of()` (that struct only ever sees a copy of
+  // `Document`, with nothing to write back), so a second ranged edit
+  // landing before the first was ever analyzed - completely ordinary
+  // during fast typing, no editor-side batching required - silently
+  // overwrites `edit_start_line`/`edit_end_line` with only the SECOND
+  // edit's own range, discarding all record of the first. The fast
+  // path would then splice against a span that was never the real,
+  // total difference between what it last analyzed and the document's
+  // current text. Comparing this against the analyzed revision's own
+  // `version` is what lets `_try_fast_reparse` tell "exactly one edit
+  // since last analysis" (safe) from "more than one, only the latest
+  // recorded" (unsafe) without `AnalysisCache` needing to reach back
+  // into `Documents` at all.
+  num edit_base_version;
 }
 
 // Every document a client has open, by URI, plus a second store for a
@@ -87,6 +104,7 @@ impl Documents {
     doc.edit_start_line = 0;
     doc.edit_end_line = 0;
     doc.edit_replacement_lines = 0;
+    doc.edit_base_version = 0;
     self.open.put(doc.uri, doc);
   }
 
@@ -141,12 +159,14 @@ impl Documents {
     free(before);
     free(after);
     free(doc.text);
+    num base_version = doc.version;
     doc.text = b.build();
     doc.version = version;
     doc.has_edit_range = true;
     doc.edit_start_line = start_line;
     doc.edit_end_line = end_line;
     doc.edit_replacement_lines = count(replacement, "\n");
+    doc.edit_base_version = base_version;
     self.open.put(document_uri, doc);
   }
 

@@ -386,6 +386,16 @@ impl AnalysisCache {
     if !found.lexed {
       ret false;
     }
+    // `has_edit_range` alone can't prove `edit_start_line`/`edit_end_line`
+    // describe the WHOLE diff since `found` was analyzed - it's never
+    // cleared on success, so a second ranged edit landing before the
+    // first was ever analyzed overwrites it with only the latest edit's
+    // own range (see `Document.edit_base_version`'s own comment). Bail
+    // to a full reparse whenever the range on hand was computed from
+    // some other revision than the one actually being diffed against.
+    if doc.edit_base_version != found.version {
+      ret false;
+    }
     num old_idx = _decl_index_at_line(&found.program.entry_nodes, doc.edit_start_line + 1);
     if old_idx < 0 {
       ret false;
@@ -567,6 +577,28 @@ impl AnalysisCache {
         shift_p = shift_p + 1;
       }
     }
+
+    // The splice just committed above updates `found.program`/
+    // `found.tokens` directly, but never touches `self.imports.files`
+    // (the SEPARATE cache `_parse_and_merge_source` itself reads on
+    // every full reparse, keyed by this path's own text content). Left
+    // alone, that entry still holds whatever this document's text was
+    // the last time a FULL reparse ran, now stale by however many fast
+    // splices have landed since. Ordinarily a stale `source` just
+    // fails the cache's own equality check on the next full reparse,
+    // a harmless miss - but if this document's text ever cycles back
+    // to byte-identical content it held at that last full reparse
+    // (trivially common: type a character, then immediately backspace
+    // it - exactly two fast-path edits that net to zero), the stale
+    // entry's `source` matches again and the next full reparse gets a
+    // FALSE cache hit, handing back nodes/tokens from a revision this
+    // same document has since moved past. Dropping the entry here
+    // removes the map slot only - its own `source`/`tokens`/`nodes`
+    // are deliberately left unfreed, the same leak-not-free reasoning
+    // as `_parse_and_merge_source`'s own stale-entry handling, since
+    // another document's already-merged program could still be
+    // borrowing strings from this entry's tokens.
+    let _invalidated = self.imports.files.remove(doc.path);
     ret true;
   }
 
