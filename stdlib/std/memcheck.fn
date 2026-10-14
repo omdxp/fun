@@ -24,15 +24,44 @@
 // never dereferences a user-facing guarded pointer), so the faulting
 // thread can never already hold the lock it's about to wait on.
 
+// Deliberately nothing from std.io/std.string here, even though a
+// Fun-side format()-based message would read better: compiling one of
+// THIS module's own transitive dependencies directly under -memcheck
+// (every stdlib file does, in this project's own test suite) makes the
+// "use std.memcheck" injected above its text pull this module back in
+// as a dependency of itself, and anything this module then called back
+// into - std.io's own format/writeln_to among them - would be a real
+// forward reference into a declaration the entry file is the one
+// supplying, landing before it in the generated C. Building reports
+// with std.c.io's own snprintf/fprintf instead avoids the whole class
+// of problem outright: everything this module touches is a bodiless
+// C extern with no body of its own to be out of order with.
 use std.c.mem;
 use std.c.string;
-use std.io;
+use std.c.io;
 use std.sync;
 
 num __mc_count = 0;
 num __mc_capacity = 0;
 num __mc_next_seq = 0;
 flag __mc_started = false;
+// Set by codegen's own `emit_main_thread_wrapper`/`emit_test_runner`,
+// as the very first statement of a program's real entry point, unless
+// `-memcheck-leaks` asked to keep leak reporting - see
+// `Codegen.memcheck_leaks`'s own note on why it's off by default.
+flag __mc_suppress_leak_sweep = false;
+
+// How much room a report line gets (plenty for every field this module
+// ever prints, file paths included). Fixed rather than measured, so
+// building one never allocates more than once.
+const num __mc_msg_cap = 4096;
+
+// Opts a running program out of the leak sweep below: real for every
+// `-memcheck` build unless `-memcheck-leaks` turns it back on, never
+// meant to be called directly from `.fn` source.
+pub fun __fun_memcheck_disable_leak_sweep() {
+  __mc_suppress_leak_sweep = true;
+}
 
 // Runtime hooks codegen's own preamble provides when `-memcheck` is on
 // (see `write_prelude`'s own `self.memcheck` block) - real
@@ -134,11 +163,13 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
     info_freed_line = __mc_table[idx].freed_line;
   }
   let _ulk = __mc_mu.unlock();
-  str msg = "";
+  str msg = malloc(__mc_msg_cap);
   if idx >= 0 {
     if is_freed {
-      msg = format(
-        "[memcheck] use-after-free: allocation #{num} ({num} bytes), allocated at {str}:{num}, freed at {str}:{num}",
+      let _n = snprintf(
+        msg,
+        __mc_msg_cap,
+        "[memcheck] use-after-free: allocation #%lld (%lld bytes), allocated at %s:%lld, freed at %s:%lld",
         info_seq,
         info_size,
         info_file,
@@ -147,8 +178,10 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
         info_freed_line
       );
     } else {
-      msg = format(
-        "[memcheck] buffer overflow: past the end of allocation #{num} ({num} bytes), allocated at {str}:{num}",
+      let _n = snprintf(
+        msg,
+        __mc_msg_cap,
+        "[memcheck] buffer overflow: past the end of allocation #%lld (%lld bytes), allocated at %s:%lld",
         info_seq,
         info_size,
         info_file,
@@ -157,11 +190,11 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
     }
   } else {
     str lit = "[memcheck] memory access violation (not within any tracked allocation)";
-    msg = substr(lit, 0, len(lit));
+    let _n = snprintf(msg, __mc_msg_cap, "%s", lit);
   }
-  writeln_to(.Stderr, msg);
+  let _fp = fprintf(stderr_stream(), "%s\n", msg);
   free(msg);
-  let _fl = Sink.Stderr.flush();
+  let _ff = fflush(stderr_stream());
   abort();
 }
 
@@ -170,6 +203,9 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
 // freeing it yet. Forces a nonzero exit on any leak found, even though
 // `main` itself already returned cleanly - what makes this usable in CI.
 fun __mc_leak_sweep() {
+  if __mc_suppress_leak_sweep {
+    ret;
+  }
   num i = 0;
   num leaks = 0;
   for i < __mc_count {
@@ -185,14 +221,23 @@ fun __mc_leak_sweep() {
     num line = __mc_table[i].line;
     let _ulk = __mc_mu.unlock();
     if !is_freed {
-      str msg = format("[memcheck] leak: allocation #{num}, {num} bytes, allocated at {str}:{num}, never freed", seq, size, file, line);
-      writeln_to(.Stderr, msg);
+      str msg = malloc(__mc_msg_cap);
+      let _n = snprintf(
+        msg,
+        __mc_msg_cap,
+        "[memcheck] leak: allocation #%lld, %lld bytes, allocated at %s:%lld, never freed",
+        seq,
+        size,
+        file,
+        line
+      );
+      let _fp = fprintf(stderr_stream(), "%s\n", msg);
       free(msg);
       leaks = leaks + 1;
     }
     i = i + 1;
   }
-  let _fl = Sink.Stderr.flush();
+  let _ff = fflush(stderr_stream());
   if leaks > 0 {
     exit(1);
   }
@@ -299,8 +344,11 @@ pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
     str dbl_freed_file = entry.freed_file;
     num dbl_freed_line = entry.freed_line;
     let _ulk1 = __mc_mu.unlock();
-    str msg = format(
-      "[memcheck] double-free: allocation #{num}, {num} bytes, allocated at {str}:{num}, already freed at {str}:{num}, double-freed at {str}:{num}",
+    str msg = malloc(__mc_msg_cap);
+    let _n = snprintf(
+      msg,
+      __mc_msg_cap,
+      "[memcheck] double-free: allocation #%lld, %lld bytes, allocated at %s:%lld, already freed at %s:%lld, double-freed at %s:%lld",
       dbl_seq,
       dbl_size,
       dbl_alloc_file,
@@ -310,9 +358,9 @@ pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
       file,
       line
     );
-    writeln_to(.Stderr, msg);
+    let _fp = fprintf(stderr_stream(), "%s\n", msg);
     free(msg);
-    let _fl = Sink.Stderr.flush();
+    let _ff = fflush(stderr_stream());
     abort();
   }
   let _rc = __fun_mc_guard_protect_all(entry.base, entry.total_size);
