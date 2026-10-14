@@ -182,6 +182,53 @@ test:
         path: cobertura.xml
 ```
 
+## Memory Checker
+
+`-memcheck` redirects every `malloc`/`calloc`/`realloc`/`free` in the
+compiled program through a built-in, native-Fun checker, catching leaks,
+double-frees, use-after-free, and buffer overflows, with no external
+sanitizer and no change to your own source:
+
+```text
+fun -in file.fn -memcheck
+fun test [<path>] -memcheck
+```
+
+- Each allocation gets its own guarded page(s): freeing one revokes
+  access to the whole span forever rather than returning it to the
+  system, so a later read or write through it faults immediately and
+  deterministically, naming the real `.fn` file and line (both where it
+  was allocated and, for a double-free or use-after-free, where it was
+  first freed):
+
+  ```text
+  [memcheck] use-after-free: allocation #0 (16 bytes), allocated at main.fn:5, freed at main.fn:8
+  [memcheck] double-free: allocation #0, 16 bytes, allocated at main.fn:5, already freed at main.fn:6, double-freed at main.fn:7
+  [memcheck] buffer overflow: past the end of allocation #0 (16 bytes), allocated at main.fn:5
+  ```
+
+  A fault or a double-free aborts the process immediately (a nonzero,
+  CI-visible exit).
+- Leak reporting (every allocation still live when the process exits) is
+  **off by default**, including under `-test`: a short-lived process -
+  every CLI invocation this compiler itself makes, and every `-test`
+  binary - never has to free a transient allocation before it exits a
+  moment later anyway, so treating that as a leak would flag ordinary,
+  harmless code. Pass `-memcheck-leaks` alongside `-memcheck` to turn
+  it back on for a program that's meant to run long enough that "still
+  allocated when it finally exits" is a real bug (a long-running server
+  or daemon):
+
+  ```text
+  fun -in server.fn -memcheck -memcheck-leaks
+  ```
+
+  ```text
+  [memcheck] leak: allocation #0, 16 bytes, allocated at main.fn:5, never freed
+  ```
+- Works with any C compiler this project already supports (`clang`,
+  `gcc`, `cl.exe`), on Windows, macOS and Linux.
+
 ## Fuzzing
 
 ```fun
@@ -393,11 +440,12 @@ plain text in the GitHub UI.
 ## CLI
 
 ```text
-fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-test] [-fuzz] [-fuzz-target <name>] [-help] [-version] [-- <program args>]
+fun -in <input_file> [-out <output_file>] [-no-exec] [-outf] [-ast] [-g] [-warn-unused] [-warn-unused-lenient] [-D name=value] [-test] [-fuzz] [-fuzz-target <name>] [-memcheck] [-memcheck-leaks] [-help] [-version] [-- <program args>]
 fun test <input_file>   (shorthand for `fun -in <input_file> -test`)
 fun test [<dir>]        (runs every `test` block under <dir>, default '.'; aggregate summary)
 fun test [<path>] -cover [-cover-report <format[=path],...>] [-cover-min <pct>] [-cover-exclude <path,...>]
                          (measures code coverage, see Code Coverage)
+fun test [<path>] -memcheck   (runs under the memory checker, see Memory Checker)
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun lint [<path>] [-summary]   (reports every warning under <path>, a file or directory, default '.')
