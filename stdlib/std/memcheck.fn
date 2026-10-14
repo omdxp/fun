@@ -1,0 +1,323 @@
+// Memory checker: catches leaks, double-frees, and use-after-free.
+//
+// `-memcheck` redirects malloc/calloc/realloc/free (see codegen's own
+// `self.memcheck` note in `write_prelude`) to this module's own
+// allocator: every allocation gets its own guarded page(s), so freeing
+// one revokes access to it forever instead of returning it to the
+// system - a later read or write through it faults immediately,
+// instead of silently landing on whatever now occupies that address.
+// The same redirecting macro captures `__FILE__`/`__LINE__` at every
+// call site, which the `#line` directives `-memcheck` also turns on
+// resolve back to the original `.fn` source rather than the generated
+// C - so every report below names a real file and line, not just a
+// sequence number.
+//
+// This module's own bookkeeping bypasses the redirect entirely
+// (through `__fun_real_*`), so it never allocates through the very
+// allocator it is tracking.
+//
+// The tracking table is guarded by one mutex (`__mc_mu`), held around
+// every read and write of it, including from the fault handler - safe
+// specifically because the thread that faults is always executing
+// ordinary user code dereferencing a bad pointer at that moment, never
+// code already holding `__mc_mu` itself (this module's own allocator
+// never dereferences a user-facing guarded pointer), so the faulting
+// thread can never already hold the lock it's about to wait on.
+
+use std.c.mem;
+use std.c.string;
+use std.io;
+use std.sync;
+
+num __mc_count = 0;
+num __mc_capacity = 0;
+num __mc_next_seq = 0;
+flag __mc_started = false;
+
+// Runtime hooks codegen's own preamble provides when `-memcheck` is on
+// (see `write_prelude`'s own `self.memcheck` block) - real
+// implementations live there, not here.
+fun __fun_real_malloc(num size) raw*;
+fun __fun_real_realloc(raw* ptr, num size) raw*;
+fun __fun_mc_guard_alloc(num data_size, num* out_total_size) raw*;
+fun __fun_mc_guard_protect_all(raw* base, num total_size) num;
+fun __fun_mc_register_handler(raw* handler) num;
+fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
+
+// One tracked allocation. `size` is what the caller asked for (what a
+// report shows); `total_size` is the real, page-rounded-plus-guard
+// span `__fun_mc_guard_protect_all` needs to revoke on free. `file`/
+// `line` name where it was allocated; `freed_file`/`freed_line` name
+// where it was first freed, filled in only once `is_freed` is set -
+// what tells a double-free report the earlier, real free apart from
+// the one that just tried it again.
+compound AllocInfo {
+  raw* base;
+  num size;
+  num total_size;
+  flag is_freed;
+  num seq;
+  str file;
+  num line;
+  str freed_file;
+  num freed_line;
+}
+AllocInfo* __mc_table = nil;
+Mutex __mc_mu;
+
+// Doubles the table's own capacity (64 to start) via the real,
+// unredirected allocator - growing this table must never go through
+// `__fun_memcheck_realloc`, which would just track itself. Caller
+// must already hold `__mc_mu` - every helper below assumes the same.
+fun __mc_grow_if_needed() {
+  if __mc_count < __mc_capacity {
+    ret;
+  }
+  num new_cap = __mc_capacity * 2;
+  if new_cap < 64 {
+    new_cap = 64;
+  }
+  raw* grown = __fun_real_realloc(__mc_table, new_cap * sizeof(AllocInfo));
+  __mc_table = grown;
+  __mc_capacity = new_cap;
+}
+
+// The live index of the allocation whose own base is exactly `ptr`, or
+// -1. Linear scan - fine at the allocation counts a debug/CI run sees,
+// not a hot path worth a hash table for.
+fun __mc_find(raw* ptr) num {
+  num i = 0;
+  for i < __mc_count {
+    if __mc_table[i].base == ptr {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// The index of the allocation whose own guarded span contains `addr`,
+// live or freed - what the fault handler needs to tell a use-after-free
+// (inside a freed span) from a buffer overflow (inside a live one's
+// trailing guard page) from a genuinely unrelated fault (inside
+// neither).
+fun __mc_find_by_range(raw* addr) num {
+  num i = 0;
+  for i < __mc_count {
+    if __fun_mc_ptr_in_range(addr, __mc_table[i].base, __mc_table[i].total_size) != 0 {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// Registered with `__fun_mc_register_handler`, called from the
+// SIGSEGV/access-violation trampoline codegen's own preamble installs.
+fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
+  let _lk = __mc_mu.lock();
+  num idx = __mc_find_by_range(fault_addr);
+  flag is_freed = false;
+  num info_seq = 0;
+  num info_size = 0;
+  str info_file = "";
+  num info_line = 0;
+  str info_freed_file = "";
+  num info_freed_line = 0;
+  if idx >= 0 {
+    is_freed = __mc_table[idx].is_freed;
+    info_seq = __mc_table[idx].seq;
+    info_size = __mc_table[idx].size;
+    info_file = __mc_table[idx].file;
+    info_line = __mc_table[idx].line;
+    info_freed_file = __mc_table[idx].freed_file;
+    info_freed_line = __mc_table[idx].freed_line;
+  }
+  let _ulk = __mc_mu.unlock();
+  str msg = "";
+  if idx >= 0 {
+    if is_freed {
+      msg = format(
+        "[memcheck] use-after-free: allocation #{num} ({num} bytes), allocated at {str}:{num}, freed at {str}:{num}",
+        info_seq,
+        info_size,
+        info_file,
+        info_line,
+        info_freed_file,
+        info_freed_line
+      );
+    } else {
+      msg = format(
+        "[memcheck] buffer overflow: past the end of allocation #{num} ({num} bytes), allocated at {str}:{num}",
+        info_seq,
+        info_size,
+        info_file,
+        info_line
+      );
+    }
+  } else {
+    str lit = "[memcheck] memory access violation (not within any tracked allocation)";
+    msg = substr(lit, 0, len(lit));
+  }
+  writeln_to(.Stderr, msg);
+  free(msg);
+  let _fl = Sink.Stderr.flush();
+  abort();
+}
+
+// Registered with `atexit` - the only point a leak can be told apart
+// from an allocation whose own program just hasn't gotten around to
+// freeing it yet. Forces a nonzero exit on any leak found, even though
+// `main` itself already returned cleanly - what makes this usable in CI.
+fun __mc_leak_sweep() {
+  num i = 0;
+  num leaks = 0;
+  for i < __mc_count {
+    // Locked just for this one read, not across the `format`/`free`
+    // below - those are further allocator calls (`free` redirects
+    // back into this same module), which would try to re-lock `__mc_mu`
+    // while this same thread still held it.
+    let _lk = __mc_mu.lock();
+    flag is_freed = __mc_table[i].is_freed;
+    num seq = __mc_table[i].seq;
+    num size = __mc_table[i].size;
+    str file = __mc_table[i].file;
+    num line = __mc_table[i].line;
+    let _ulk = __mc_mu.unlock();
+    if !is_freed {
+      str msg = format("[memcheck] leak: allocation #{num}, {num} bytes, allocated at {str}:{num}, never freed", seq, size, file, line);
+      writeln_to(.Stderr, msg);
+      free(msg);
+      leaks = leaks + 1;
+    }
+    i = i + 1;
+  }
+  let _fl = Sink.Stderr.flush();
+  if leaks > 0 {
+    exit(1);
+  }
+}
+
+// Registers the fault handler and the leak sweep exactly once, on the
+// first allocation or free this process ever makes under `-memcheck`.
+// Not itself lock-protected, the same non-atomic once-check this
+// codebase's own M:N scheduler already accepts for its one-time setup
+// (`__fun_sched_init_once`) - two threads racing their very first
+// allocation at the exact same instant is the one window this leaves
+// open, not the steady-state table access the mutex below covers.
+fun __mc_ensure_started() {
+  if __mc_started {
+    ret;
+  }
+  __mc_started = true;
+  let _mu_rc = __mc_mu.init();
+  let _rc = __fun_mc_register_handler(__mc_fault_handler);
+  let _rc2 = atexit(__mc_leak_sweep);
+}
+
+pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
+  __mc_ensure_started();
+  num real_size = size;
+  if real_size <= 0 {
+    real_size = 1;
+  }
+  num total_size = 0;
+  raw* base = __fun_mc_guard_alloc(real_size, &total_size);
+  if base == nil {
+    ret nil;
+  }
+  let _lk = __mc_mu.lock();
+  __mc_grow_if_needed();
+  AllocInfo info;
+  info.base = base;
+  info.size = size;
+  info.total_size = total_size;
+  info.is_freed = false;
+  info.seq = __mc_next_seq;
+  info.file = file;
+  info.line = line;
+  info.freed_file = "";
+  info.freed_line = 0;
+  __mc_next_seq = __mc_next_seq + 1;
+  __mc_table[__mc_count] = info;
+  __mc_count = __mc_count + 1;
+  let _ulk = __mc_mu.unlock();
+  ret base;
+}
+
+// `mmap(MAP_ANONYMOUS)`/`VirtualAlloc` both hand back zeroed pages, so
+// a fresh guarded region is already what `calloc` promises - no
+// separate zeroing pass needed.
+pub fun __fun_memcheck_calloc(num count, num size, str file, num line) raw* {
+  ret __fun_memcheck_malloc(count * size, file, line);
+}
+
+pub fun __fun_memcheck_realloc(raw* ptr, num size, str file, num line) raw* {
+  if ptr == nil {
+    ret __fun_memcheck_malloc(size, file, line);
+  }
+  __mc_ensure_started();
+  let _lk = __mc_mu.lock();
+  num idx = __mc_find(ptr);
+  flag have_old = idx >= 0;
+  num old_size = 0;
+  if have_old {
+    old_size = __mc_table[idx].size;
+  }
+  let _ulk = __mc_mu.unlock();
+  raw* new_ptr = __fun_memcheck_malloc(size, file, line);
+  if have_old {
+    num copy_size = old_size;
+    if size < copy_size {
+      copy_size = size;
+    }
+    if new_ptr != nil && copy_size > 0 {
+      let _cp = memcpy(new_ptr, ptr, copy_size);
+    }
+    __fun_memcheck_free(ptr, file, line);
+  }
+  ret new_ptr;
+}
+
+pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
+  if ptr == nil {
+    ret;
+  }
+  __mc_ensure_started();
+  let _lk = __mc_mu.lock();
+  num idx = __mc_find(ptr);
+  if idx < 0 {
+    let _ulk0 = __mc_mu.unlock();
+    ret;
+  }
+  AllocInfo* entry = &__mc_table[idx];
+  if entry.is_freed {
+    num dbl_seq = entry.seq;
+    num dbl_size = entry.size;
+    str dbl_alloc_file = entry.file;
+    num dbl_alloc_line = entry.line;
+    str dbl_freed_file = entry.freed_file;
+    num dbl_freed_line = entry.freed_line;
+    let _ulk1 = __mc_mu.unlock();
+    str msg = format(
+      "[memcheck] double-free: allocation #{num}, {num} bytes, allocated at {str}:{num}, already freed at {str}:{num}, double-freed at {str}:{num}",
+      dbl_seq,
+      dbl_size,
+      dbl_alloc_file,
+      dbl_alloc_line,
+      dbl_freed_file,
+      dbl_freed_line,
+      file,
+      line
+    );
+    writeln_to(.Stderr, msg);
+    free(msg);
+    let _fl = Sink.Stderr.flush();
+    abort();
+  }
+  let _rc = __fun_mc_guard_protect_all(entry.base, entry.total_size);
+  entry.is_freed = true;
+  entry.freed_file = file;
+  entry.freed_line = line;
+  let _ulk2 = __mc_mu.unlock();
+}

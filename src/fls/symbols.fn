@@ -2785,6 +2785,27 @@ pub fun chain_receiver(
     current_args = local_generic_args(tokens, program, first.name, file, line);
   }
   num i = 1;
+  // `first` named no local/global/top-level call at all, but might
+  // still be real: a bare `EnumName.Variant` used directly as a
+  // receiver (`Sink.Stderr.flush()`, no intermediate `let`) shares
+  // this chain's own "segment, segment, ..." shape, with the enum's
+  // own name as the base segment and its variant as the very next
+  // one - resolved here, once, rather than inside the loop below
+  // (which treats every other segment as a field/method lookup on an
+  // already-known `current_type`, not a type name in its own right).
+  if equals(current_type, "") && segments.len > 1 {
+    ChainSeg variant_seg = segments.get(1);
+    if !variant_seg.is_call {
+      Vec<str> no_args;
+      no_args.init(0);
+      let variant_decl = enum_variant_declaration(program, first.name, variant_seg.name, no_args);
+      if variant_decl.is_some() {
+        current_type = substr(first.name, 0, len(first.name));
+        current_args.init(0);
+        i = 2;
+      }
+    }
+  }
   for i < segments.len {
     if equals(current_type, "") {
       ret empty;
@@ -4038,6 +4059,59 @@ fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, nu
         let found_binding = _lookup_fit_binding(tokens, fz.body, name, program, file, line);
         if found_binding.is_some() {
           ret found_binding;
+        }
+      }
+      _ -> {}
+    }
+  }
+  // A module-level global (`Mutex __mc_mu;`, sitting directly in
+  // `program` rather than inside any function body) is parsed as the
+  // same `.Variable` node a local `let`/plain declaration is -
+  // resolved the identical way `_lookup_in_body`'s own `.Variable`
+  // case renders one. Checked only as a fallback, after every
+  // enclosing function/impl/test/fuzz body above already had its own
+  // chance to match: a local shadowing a same-named global still
+  // takes precedence, matching ordinary scoping. Restricted to `file`
+  // - `program` is the merged, cross-file program, and a same-named
+  // global declared in a completely different file is not this one,
+  // the same "an import brings in names, not scope" rule `covers_body`
+  // already enforces for every other top-level kind above.
+  num gi = 0;
+  for gi < program.len {
+    Node gn = program.get(gi);
+    gi = gi + 1;
+    if !gn.has_pos || !equals(gn.pos.filename, file) {
+      continue;
+    }
+    fit gn.kind {
+      .Variable(v) -> {
+        // `line == gn.pos.line` means this hover is on the global's
+        // own declaration, not a reference to it from inside a
+        // function - left to whatever already-correct, dedicated path
+        // resolves a top-level declaration's own hover (handles a
+        // `const`'s inferred literal type, among other things this
+        // fallback doesn't attempt), rather than this fallback
+        // pre-empting it with an unresolved `__let_infer__` sentinel
+        // for an inferred-type global with no explicit type written.
+        if equals(v.name, name) && line != gn.pos.line {
+          StringBuilder gb = string_builder_init(32);
+          if v.is_const {
+            gb.append("const ");
+          }
+          str global_type_text = render_type(v.var_type);
+          gb.append(global_type_text);
+          free(global_type_text);
+          gb.append(" ");
+          gb.append(v.name);
+          if v.is_const && v.has_val {
+            str glit = _literal_value_text(v.val);
+            if !equals(glit, "") {
+              gb.append(" = ");
+              gb.append(glit);
+            }
+            free(glit);
+          }
+          ret .Some(_declaration(name, .Local, gb.build(), gn.pos));
         }
       }
       _ -> {}

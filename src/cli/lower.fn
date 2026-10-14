@@ -134,9 +134,26 @@ pub fun lower_to_c(
   flag emscripten_mode,
   str host_arch,
   flag parallel_preload,
-  flag reject_concurrency
+  flag reject_concurrency,
+  flag memcheck = false
 ) Result<flag, str> {
-  let merged = parse_program_with_imports(input, parallel_preload)!;
+  ProgramMergeResult merged;
+  if memcheck {
+    // `-memcheck` redirects every allocation through `std.memcheck`'s
+    // own tracking allocator (see `Codegen.memcheck`'s own note) - the
+    // program needs to `use` that module for its own runtime
+    // registration to run at all, without requiring every `.fn` source
+    // file to add that import itself. Prepending it to the live source
+    // text (rather than splicing a node in after parsing) lets the
+    // normal import-resolution pass pick it up like any other import.
+    str original = read_to_string(input);
+    str prepended = format("use std.memcheck;\n{str}", original);
+    free(original);
+    merged = parse_program_with_source(input, prepended, parallel_preload)!;
+    free(prepended);
+  } else {
+    merged = parse_program_with_imports(input, parallel_preload)!;
+  }
   if test_mode {
     drop_foreign_tests(&merged.nodes, input);
   }
@@ -252,6 +269,7 @@ pub fun lower_to_c(
   cg.host_arch = host_arch;
   cg.prune_unreachable = prune_unreachable;
   cg.debug_info = debug_info;
+  cg.memcheck = memcheck;
   if cover != nil {
     cg.coverage = true;
     cg.cover_out = cover.out_path;

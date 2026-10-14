@@ -72,6 +72,9 @@ pub compound Options {
   // an unrelated type error elsewhere. fls's own diagnose() implements
   // the identical idea separately, for the editor rather than the CLI.
   flag warn_unused_lenient;
+  // Redirect every allocation through `std.memcheck`'s own page-guarded
+  // allocator, catching leaks, double-frees, and use-after-free.
+  flag memcheck;
   // Print the parsed AST before compiling.
   flag show_ast;
   // Rewrite the input in place, and with `fmt_all` its local imports too.
@@ -150,6 +153,7 @@ fun _options_new() Options {
   o.show_version = false;
   o.warn_unused = false;
   o.warn_unused_lenient = false;
+  o.memcheck = false;
   o.show_ast = false;
   o.fmt = false;
   o.fmt_all = false;
@@ -314,6 +318,7 @@ pub fun parse_args(str[] argv) Options {
   if o.warn_unused_lenient {
     o.warn_unused = true;
   }
+  o.memcheck = parsed.has("memcheck");
   o.show_ast = parsed.has("ast");
   o.fmt = parsed.has("fmt");
   o.fmt_all = parsed.has("fmt-all");
@@ -523,9 +528,10 @@ pub fun compile_to_c_mode(
   str fuzz_target,
   flag debug_info,
   flag warn_unused_lenient,
-  flag prune_unreachable = true
+  flag prune_unreachable = true,
+  flag memcheck = false
 ) Result<flag, str> {
-  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil, prune_unreachable);
+  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil, prune_unreachable, memcheck);
 }
 
 // `compile_to_c_mode`, optionally instrumented for coverage
@@ -546,7 +552,8 @@ pub fun compile_to_c_cover(
   flag debug_info,
   flag warn_unused_lenient,
   CoverPlan* cover,
-  flag prune_unreachable = true
+  flag prune_unreachable = true,
+  flag memcheck = false
 ) Result<flag, str> {
   let cc = _resolve_c_compiler_cached();
   ret lower_to_c(
@@ -565,8 +572,17 @@ pub fun compile_to_c_cover(
     compiler_is_emscripten(cc),
     host_arch_name(),
     true,
-    false
+    false,
+    memcheck
   );
+}
+
+// Lowers `input` to C with `-memcheck`: every allocation is redirected
+// through `std.memcheck`'s own page-guarded allocator (see
+// `Codegen.memcheck`'s own note), auto-`use`d into the program so no
+// `.fn` source needs to change.
+pub fun compile_to_c_memcheck(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
+  ret compile_to_c_cover(input, out_path, defines, false, false, false, "", debug_info, false, nil, true, true);
 }
 
 // The first of Homebrew's usual keg-only OpenSSL install prefixes (3.x

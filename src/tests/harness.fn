@@ -171,7 +171,23 @@ pub fun assert_not_emits(str src, str needle, str label) {
 
 // Resolves `path`'s import graph and transpiles the merged program.
 pub fun transpile_file(str path) Result<str, str> {
-  let parsed = parse_program_with_imports(path);
+  ret transpile_file_mode(path, false);
+}
+
+// `-memcheck`'s own fixtures need `std.memcheck` auto-`use`d and dead-code
+// pruning off, the same way `lower_to_c`'s own CLI path handles it (see
+// `Codegen.memcheck`'s own note) - this test-only transpile path builds
+// its own `Codegen` directly rather than going through the CLI driver at
+// all, so it needs that same handling reproduced here instead of just
+// calling in.
+pub fun transpile_file_memcheck(str path) Result<str, str> {
+  ret transpile_file_mode(path, true);
+}
+
+fun transpile_file_mode(str path, flag memcheck) Result<str, str> {
+  let parsed = memcheck
+  ? _parse_program_with_memcheck_prelude(path)
+  : parse_program_with_imports(path);
   if parsed.is_err() {
     ret .Err(parsed.unwrap_err());
   }
@@ -189,10 +205,26 @@ pub fun transpile_file(str path) Result<str, str> {
   cg.import_aliases = merged.aliases;
   cg.alias_rename_keys = merged.alias_rename_keys;
   cg.alias_rename_targets = merged.alias_rename_targets;
+  cg.memcheck = memcheck;
+  if memcheck {
+    // `-memcheck`'s own allocator/handler/leak-sweep functions are only
+    // ever "called" through a C preprocessor macro, invisible to this
+    // pass's own reachability analysis - pruned as dead code otherwise.
+    cg.prune_unreachable = false;
+  }
   if cg.transpile(merged.nodes).is_some() {
     ret .Err("codegen error");
   }
   ret .Ok(st.out.build());
+}
+
+fun _parse_program_with_memcheck_prelude(str path) Result<ProgramMergeResult, str> {
+  str original = read_to_string(path);
+  str prepended = format("use std.memcheck;\n{str}", original);
+  free(original);
+  let result = parse_program_with_source(path, prepended);
+  free(prepended);
+  ret result;
 }
 
 // `transpile_file`, with the MSVC codegen path forced on regardless of
