@@ -23,7 +23,19 @@ use std.string;
 use std.option;
 use std.result;
 use std.fs;
+use std.c.io;
+use std.c.mem;
 use std.path;
+
+// `fun.fls.debugImports` in the VS Code extension's own settings sets
+// this for the server process it spawns; checked fresh every call
+// (not cached) since nothing here runs often enough for a syscall per
+// call to matter, and a cached read would miss someone flipping the
+// setting and reloading mid-session.
+fun _debug_imports() flag {
+  str v = getenv("FLS_DEBUG_IMPORTS");
+  ret v != nil && !equals(v, "");
+}
 
 // One document as it was last read.
 pub compound Analyzed {
@@ -290,8 +302,22 @@ impl AnalysisCache {
         // `_diagnose_uncached`'s own generic "this file's imports
         // could not be resolved" is what a client actually sees - the
         // real message here, built fresh by `_preload_one_file`, has
-        // nowhere else to go but freed right away.
-        free(merged.unwrap_err());
+        // nowhere else to go but freed right away. Printed first under
+        // `FLS_DEBUG_IMPORTS` (see `fun.fls.debugImports`), since this
+        // is the one place that ever sees why a file's own imports
+        // genuinely failed to resolve, not just that they did.
+        str err_msg = merged.unwrap_err();
+        if _debug_imports() {
+          fprintf(
+            stderr_stream(),
+            "[fls debug] import resolution failed for %.*s: %.*s\n",
+            len(doc.path),
+            doc.path,
+            len(err_msg),
+            err_msg
+          );
+        }
+        free(err_msg);
         free_global_symbols_snapshot(&snap);
       }
     }
