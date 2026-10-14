@@ -18,6 +18,20 @@ pub compound CodegenState {
   // directive is valid C - it must start its own line.
   flag debug_info;
   flag has_pending_line_directive;
+  // Unlike `has_pending_line_directive` (cleared the moment
+  // `write_indent` flushes it, so the *next* one knows whether it
+  // still needs writing), this one is never cleared once set: it
+  // tracks whether `pending_line_directive` itself has ever been
+  // assigned a real value at all, for a caller that wants to re-read
+  // it directly (a hoisted temp's own extra `#line`, written mid-
+  // statement, well after the statement's own leading `write_indent`
+  // already flushed it once) rather than go through the normal
+  // flush-once-per-statement path. Without this, such a caller can't
+  // tell "already flushed, but still the correct value" apart from
+  // "never set at all" (left as this struct's own zero-initialized
+  // default, including the empty `Pos.filename` dereferencing that
+  // produces when written as a C string).
+  flag pending_line_directive_is_valid;
   Pos pending_line_directive;
 }
 
@@ -27,6 +41,7 @@ pub fun codegen_state_new() CodegenState {
   st.indent_level = 0;
   st.debug_info = false;
   st.has_pending_line_directive = false;
+  st.pending_line_directive_is_valid = false;
   ret st;
 }
 
@@ -44,6 +59,7 @@ impl CodegenState {
     }
     self.pending_line_directive = pos;
     self.has_pending_line_directive = true;
+    self.pending_line_directive_is_valid = true;
   }
 
   // Like `write_indent`, but re-pins the `#line` directive to `pos`

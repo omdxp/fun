@@ -5511,7 +5511,7 @@ impl Codegen {
     // without this, a debugger stepping into `expr?`/`expr!` under
     // MSVC showed the wrong location for the hoisted temp-and-guard,
     // inheriting whatever directive was last active before it.
-    if self.debug_info {
+    if self.debug_info && self.state.pending_line_directive_is_valid {
       try_decl_sb.append(line_directive_text(self.state.pending_line_directive));
     }
     num try_indent_ii = 0;
@@ -6793,7 +6793,7 @@ impl Codegen {
           // hoisted vararg (MSVC's own dialect, no GNU statement
           // expressions) lands on the right line instead of whatever
           // was last active before it.
-          if self.debug_info {
+          if self.debug_info && self.state.pending_line_directive_is_valid {
             va_decl_sb.append(line_directive_text(self.state.pending_line_directive));
           }
           num va_indent_ii = 0;
@@ -7616,11 +7616,21 @@ impl Codegen {
     // receiver - which can trigger an entirely separate generic
     // instantiation, rendered into its OWN scratch state and restored
     // before control returns here - never contaminates it, unlike a
-    // shared field would. It always holds a real value by this point:
+    // shared field would. Usually already real by this point -
     // `emit_statement` sets it before dispatching into any statement's
-    // own expression emission, and nothing between there and here
-    // calls `set_pending_line_directive` again on `self.state` itself.
-    if self.debug_info {
+    // own expression emission, and nothing between there and here calls
+    // `set_pending_line_directive` again on `self.state` itself - except
+    // when the statement node reaching `emit_statement` has no position
+    // of its own (`node.has_pos` false, left unset entirely rather than
+    // zeroed to a real one), which `emit_statement` already treats as
+    // "nothing to flush" by skipping the call outright.
+    // `pending_line_directive_is_valid` (not `has_pending_line_directive`,
+    // which `write_indent`'s own flush already cleared for this exact
+    // statement by the time a hoisted temp like this one needs to
+    // write a second, mid-statement `#line` of its own) is what tells
+    // "never set at all" apart from "already flushed once, but still
+    // the correct value."
+    if self.debug_info && self.state.pending_line_directive_is_valid {
       recv_tmp_stmt_sb.append(line_directive_text(self.state.pending_line_directive));
     }
     num recv_tmp_ii = 0;
