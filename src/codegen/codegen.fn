@@ -601,6 +601,16 @@ pub compound Codegen {
   // auto-injects `use std.memcheck;` so no user `.fn` source needs to
   // change at all.
   flag memcheck;
+  // `-memcheck-leaks`: lets the leak sweep's own forced-nonzero-exit
+  // stay live for a build under `self.memcheck`. Off by default: a
+  // leak is only real when the process keeps running after it happens
+  // (a long-lived server, a daemon) - for an ordinary short-lived
+  // program (every CLI invocation this compiler itself makes, and
+  // every `-test` binary), "still allocated when it exits a moment
+  // later anyway" describes virtually every transient allocation ever
+  // made, not a bug. See `emit_main_thread_wrapper`'s and
+  // `emit_test_runner`'s own `__fun_memcheck_disable_leak_sweep` calls.
+  flag memcheck_leaks;
   // How many enclosing expressions may run a sub-expression zero times or
   // more than once (the right side of `&&`/`||`, a loop condition, an
   // `elif` condition). A call-result receiver evaluated there cannot be
@@ -715,6 +725,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.cover_id_files.init(64);
   g.cover_id_lines.init(64);
   g.memcheck = false;
+  g.memcheck_leaks = false;
   g.cond_eval_depth = 0;
   g.cover_skip_files.init(8);
   g.cover_skip_from.init(8);
@@ -18873,6 +18884,10 @@ impl Codegen {
   // no header of its own.
   emit_main_thread_wrapper() Option<CodegenErrorKind> {
     str real_name = self.effective_function_name("main");
+    str mc_leak_suppress = "";
+    if self.memcheck && !self.memcheck_leaks {
+      mc_leak_suppress = "  __fun_memcheck_disable_leak_sweep();\n";
+    }
     if self.emscripten_mode {
       // A browser's own main (document) thread must never block
       // synchronously waiting on another thread - `pthread_join` from
@@ -18884,7 +18899,13 @@ impl Codegen {
       // time instead (`-sSTACK_SIZE`, see `_append_compile_args` in
       // driver.fn) - `main` just calls straight through, no worker
       // thread, no wrapper needed at all for this target.
-      self.state.write(format("int main(int argc, char** argv) {\n  return {str}(argc, argv);\n}\n", real_name));
+      self.state.write(
+        format(
+        "int main(int argc, char** argv) {\n{str}  return {str}(argc, argv);\n}\n",
+        mc_leak_suppress,
+        real_name
+        )
+      );
       ret .None;
     }
     self.state.write(format(
@@ -18901,7 +18922,7 @@ impl Codegen {
       `}
       `#endif
       `int main(int argc, char** argv) {
-      `  __fun_main_run_args __fun_main_a;
+      `{str}  __fun_main_run_args __fun_main_a;
       `  __fun_main_a.argc = argc;
       `  __fun_main_a.argv = argv;
       `  __fun_main_a.result = 0;
@@ -18921,7 +18942,8 @@ impl Codegen {
       `  return __fun_main_a.result;
       `}
       ``,
-      real_name
+      real_name,
+      mc_leak_suppress
     ));
     ret .None;
   }
@@ -19241,6 +19263,14 @@ impl Codegen {
     self.state.write("    return 0;\n");
     self.state.write("}\n\n");
     self.state.write("int main(int argc, char** argv) {\n");
+    // Same reasoning as `emit_main_thread_wrapper`'s own
+    // `Codegen.memcheck_leaks`-gated call: a `-test` binary's own
+    // process is short-lived by design (run the tests, report, exit),
+    // so it's "unopted" out of leak reporting the same as every other
+    // build, unless `-memcheck-leaks` asked for it.
+    if self.memcheck && !self.memcheck_leaks {
+      self.state.write("    __fun_memcheck_disable_leak_sweep();\n");
+    }
     self.state.write("    __fun_test_main_args __fun_test_a;\n");
     self.state.write("    __fun_test_a.argc = argc;\n");
     self.state.write("    __fun_test_a.argv = argv;\n");

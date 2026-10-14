@@ -94,9 +94,9 @@ fun main(str[] args) num {
       if equals(root, "") {
         root = ".";
       }
-      ret run_test_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines, &opts.cover);
+      ret run_test_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
     }
-    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover);
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
   }
   if equals(opts.subcommand, "fuzz") {
     // No path, or a path that names a directory rather than a `.fn`
@@ -119,7 +119,7 @@ fun main(str[] args) num {
   // the `test`/`fuzz` subcommand spellings above.
   if opts.test_flag {
     apply_manifest_coverage(&opts.cover);
-    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover);
+    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
   }
   if opts.fuzz_flag {
     ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
@@ -213,7 +213,8 @@ fun main(str[] args) num {
     mc_debug_info,
     opts.warn_unused_lenient,
     !opts.memcheck,
-    opts.memcheck
+    opts.memcheck,
+    opts.memcheck_leaks
   );
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());
