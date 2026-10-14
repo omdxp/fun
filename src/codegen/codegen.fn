@@ -16425,18 +16425,18 @@ impl Codegen {
       `#include <unistd.h>
       `#include <string.h>
       `#endif
-      `static void* __fun_real_malloc(long long size) { return malloc((size_t)size); }
+      `static void* __fun_real_malloc(int64_t size) { return malloc((size_t)size); }
       `static void __fun_real_free(void* p) { free(p); }
-      `static void* __fun_real_realloc(void* p, long long size) { return realloc(p, (size_t)size); }
-      `typedef void (*__fun_mc_handler_t)(long long, void*, void*);
+      `static void* __fun_real_realloc(void* p, int64_t size) { return realloc(p, (size_t)size); }
+      `typedef void (*__fun_mc_handler_t)(int64_t, void*, void*);
       `static __fun_mc_handler_t __fun_mc_user_handler = 0;
       `#ifdef _WIN32
-      `static long long __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (long long)si.dwPageSize; }
-      `static void* __fun_mc_guard_alloc(long long data_size, long long* out_total_size) {
-      `  long long ps = __fun_mc_page_size();
-      `  long long data_pages = (data_size + ps - 1) / ps;
+      `static int64_t __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int64_t)si.dwPageSize; }
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  long long total = (data_pages + 1) * ps;
+      `  int64_t total = (data_pages + 1) * ps;
       `  void* base = VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
       `  if (!base) return 0;
       `  void* guard = (char*)base + data_pages * ps;
@@ -16445,7 +16445,7 @@ impl Codegen {
       `  *out_total_size = total;
       `  return base;
       `}
-      `static long long __fun_mc_guard_protect_all(void* base, long long total_size) {
+      `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  DWORD old;
       `  return VirtualProtect(base, (SIZE_T)total_size, PAGE_NOACCESS, &old) ? 0 : 1;
       `}
@@ -16456,18 +16456,18 @@ impl Codegen {
       `  }
       `  return EXCEPTION_CONTINUE_SEARCH;
       `}
-      `static long long __fun_mc_register_handler(void* handler) {
+      `static int64_t __fun_mc_register_handler(void* handler) {
       `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
       `  AddVectoredExceptionHandler(1, __fun_mc_veh);
       `  return 0;
       `}
       `#else
-      `static long long __fun_mc_page_size(void) { return (long long)sysconf(_SC_PAGESIZE); }
-      `static void* __fun_mc_guard_alloc(long long data_size, long long* out_total_size) {
-      `  long long ps = __fun_mc_page_size();
-      `  long long data_pages = (data_size + ps - 1) / ps;
+      `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  long long total = (data_pages + 1) * ps;
+      `  int64_t total = (data_pages + 1) * ps;
       `  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       `  if (base == MAP_FAILED) return 0;
       `  void* guard = (char*)base + data_pages * ps;
@@ -16475,38 +16475,38 @@ impl Codegen {
       `  *out_total_size = total;
       `  return base;
       `}
-      `static long long __fun_mc_guard_protect_all(void* base, long long total_size) {
+      `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
       `}
       `static void __fun_mc_trampoline(int sig, siginfo_t* info, void* ctx) {
       `  if (__fun_mc_user_handler) {
-      `    __fun_mc_user_handler((long long)sig, info ? info->si_addr : 0, ctx);
+      `    __fun_mc_user_handler((int64_t)sig, info ? info->si_addr : 0, ctx);
       `  }
       `}
-      `static long long __fun_mc_register_handler(void* handler) {
+      `static int64_t __fun_mc_register_handler(void* handler) {
       `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
       `  struct sigaction sa;
       `  memset(&sa, 0, sizeof(sa));
       `  sa.sa_sigaction = __fun_mc_trampoline;
       `  sa.sa_flags = SA_SIGINFO;
       `  sigemptyset(&sa.sa_mask);
-      `  long long rc1 = (long long)sigaction(SIGSEGV, &sa, 0);
+      `  int64_t rc1 = (int64_t)sigaction(SIGSEGV, &sa, 0);
       `  /* Accessing an mprotect'd PROT_NONE page raises SIGBUS rather
       `     than SIGSEGV on Darwin/BSD-derived kernels for some fault
       `     paths (Linux is consistently SIGSEGV) - both are registered
       `     with the same handler so a guarded-page fault is always
       `     caught regardless of which one the kernel actually raises. */
-      `  long long rc2 = (long long)sigaction(SIGBUS, &sa, 0);
+      `  int64_t rc2 = (int64_t)sigaction(SIGBUS, &sa, 0);
       `  return rc1 != 0 ? rc1 : rc2;
       `}
       `#endif
-      `static long long __fun_mc_ptr_in_range(void* addr, void* base, long long size) {
+      `static int64_t __fun_mc_ptr_in_range(void* addr, void* base, int64_t size) {
       `  return ((char*)addr >= (char*)base && (char*)addr < (char*)base + size) ? 1 : 0;
       `}
-      `extern void* __fun_memcheck_malloc(long long size, char* file, long long line);
-      `extern void* __fun_memcheck_calloc(long long count, long long size, char* file, long long line);
-      `extern void* __fun_memcheck_realloc(void* ptr, long long size, char* file, long long line);
-      `extern void __fun_memcheck_free(void* ptr, char* file, long long line);
+      `extern void* __fun_memcheck_malloc(int64_t size, char* file, int64_t line);
+      `extern void* __fun_memcheck_calloc(int64_t count, int64_t size, char* file, int64_t line);
+      `extern void* __fun_memcheck_realloc(void* ptr, int64_t size, char* file, int64_t line);
+      `extern void __fun_memcheck_free(void* ptr, char* file, int64_t line);
       `#define malloc(sz) __fun_memcheck_malloc((sz), __FILE__, __LINE__)
       `#define calloc(n, sz) __fun_memcheck_calloc((n), (sz), __FILE__, __LINE__)
       `#define realloc(p, sz) __fun_memcheck_realloc((p), (sz), __FILE__, __LINE__)
