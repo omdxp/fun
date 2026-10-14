@@ -1076,6 +1076,22 @@ fun main() {
 }
 ```
 
+### Ternary Conditional
+
+`cond ? then : else` is a conditional expression, not a statement - it
+produces a value, for use anywhere an expression can go:
+
+```fun
+fun main() {
+  num x = 5;
+  str size = x > 10 ? "big" : x > 0 ? "small" : "non-positive";
+}
+```
+
+Both branches must share a type (the same rule an array literal's
+elements already follow); the condition must be a `flag`. `?`/`:` chain
+right-associatively, so `a ? b : c ? d : e` reads as `a ? b : (c ? d : e)`.
+
 ### For
 
 - Array: `for item : arr { ... }`

@@ -75,6 +75,11 @@ pub compound Options {
   // Redirect every allocation through `std.memcheck`'s own page-guarded
   // allocator, catching leaks, double-frees, and use-after-free.
   flag memcheck;
+  // Keeps the leak sweep's own forced-nonzero-exit live under
+  // `memcheck`, for a program meant to run long enough that "still
+  // allocated when it exits" is a real bug - see
+  // `Codegen.memcheck_leaks`'s own note on why that's not the default.
+  flag memcheck_leaks;
   // Print the parsed AST before compiling.
   flag show_ast;
   // Rewrite the input in place, and with `fmt_all` its local imports too.
@@ -154,6 +159,7 @@ fun _options_new() Options {
   o.warn_unused = false;
   o.warn_unused_lenient = false;
   o.memcheck = false;
+  o.memcheck_leaks = false;
   o.show_ast = false;
   o.fmt = false;
   o.fmt_all = false;
@@ -319,6 +325,7 @@ pub fun parse_args(str[] argv) Options {
     o.warn_unused = true;
   }
   o.memcheck = parsed.has("memcheck");
+  o.memcheck_leaks = parsed.has("memcheck-leaks");
   o.show_ast = parsed.has("ast");
   o.fmt = parsed.has("fmt");
   o.fmt_all = parsed.has("fmt-all");
@@ -529,9 +536,10 @@ pub fun compile_to_c_mode(
   flag debug_info,
   flag warn_unused_lenient,
   flag prune_unreachable = true,
-  flag memcheck = false
+  flag memcheck = false,
+  flag memcheck_leaks = false
 ) Result<flag, str> {
-  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil, prune_unreachable, memcheck);
+  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil, prune_unreachable, memcheck, memcheck_leaks);
 }
 
 // `compile_to_c_mode`, optionally instrumented for coverage
@@ -553,7 +561,8 @@ pub fun compile_to_c_cover(
   flag warn_unused_lenient,
   CoverPlan* cover,
   flag prune_unreachable = true,
-  flag memcheck = false
+  flag memcheck = false,
+  flag memcheck_leaks = false
 ) Result<flag, str> {
   let cc = _resolve_c_compiler_cached();
   ret lower_to_c(
@@ -573,7 +582,8 @@ pub fun compile_to_c_cover(
     host_arch_name(),
     true,
     false,
-    memcheck
+    memcheck,
+    memcheck_leaks
   );
 }
 
@@ -1327,6 +1337,7 @@ pub fun help_text() str {
   `  fun test [<dir>]         runs every test block found under <dir> (default '.')
   `  fun test [<path>] -cover [-cover-report lcov|cobertura|json|html|text[=file],...] [-cover-min <pct>] [-cover-exclude <path,...>]
   `                           measures code coverage while running the tests
+  `  fun test [<path>] -memcheck   runs the tests under the built-in memory checker (leaks, double-frees, use-after-free)
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
   `  fun lint [<path>] [-summary]  reports every warning under <path> (a file or directory, default '.'), then totals; exits 1 if any
@@ -1350,6 +1361,8 @@ pub fun help_text() str {
   `  -warn-unused-lenient  Like -warn-unused, but keeps reporting them past an unrelated type error.
   `  -D name=value     Inject a constant the program can read.
   `  -test             Run -in's own test blocks, in place of a plain compile.
+  `  -memcheck         Redirect every allocation through the built-in memory checker, catching leaks, double-frees, and use-after-free.
+  `  -memcheck-leaks   With -memcheck, also fail on an allocation still live when the program exits (for a long-running program; off by default since a short-lived one never frees everything before exiting anyway).
   `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
   `  -fuzz-target <name>  Which target, when -in declares more than one.
   `  -fmt              Format the input file in place.
@@ -1790,6 +1803,46 @@ test "a plain run has coverage off, and bad coverage flags are rejected" {
   let bad_min = parse_args(_argv(&c));
   defer bad_min.free();
   assert bad_min.has_error, "expected a minimum over 100 to be rejected";
+}
+
+test "'test -memcheck' is read, off by default" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("test");
+  let plain = parse_args(_argv(&a));
+  defer plain.free();
+  assert !plain.memcheck, "expected memcheck off by default";
+
+  Vec<str> b;
+  b.init(0);
+  defer b.free();
+  b.push("test");
+  b.push("-memcheck");
+  let on = parse_args(_argv(&b));
+  defer on.free();
+  assert on.memcheck, "expected -memcheck to be read on 'test' the same as on a plain compile";
+}
+
+test "'-memcheck-leaks' is read, off by default" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("test");
+  a.push("-memcheck");
+  let plain = parse_args(_argv(&a));
+  defer plain.free();
+  assert !plain.memcheck_leaks, "expected memcheck_leaks off by default";
+
+  Vec<str> b;
+  b.init(0);
+  defer b.free();
+  b.push("test");
+  b.push("-memcheck");
+  b.push("-memcheck-leaks");
+  let on = parse_args(_argv(&b));
+  defer on.free();
+  assert on.memcheck_leaks, "expected -memcheck-leaks to be read";
 }
 
 test "percentages read as tenths of a percent" {
@@ -2484,7 +2537,9 @@ pub fun run_tests(
   flag warn_unused_lenient,
   flag keep_c,
   Vec<Define>* extra_defines,
-  CoverOptions* cover
+  CoverOptions* cover,
+  flag memcheck = false,
+  flag memcheck_leaks = false
 ) num {
   Vec<Define> defines = resolved_defines(extra_defines);
   defer defines.free();
@@ -2506,6 +2561,18 @@ pub fun run_tests(
   if cover.enabled {
     plan_ptr = &plan;
   }
+  // Same reasoning as `-memcheck`'s own single-file dispatch in main.fn:
+  // `-g` for real `#line` directives (meaningful names in a leak/
+  // double-free/use-after-free report), reachability pruning off since
+  // `std.memcheck`'s own allocator/handler/leak-sweep are only ever
+  // "called" through codegen's own macro redirect, invisible to a pass
+  // that runs before that macro exists.
+  flag mc_debug_info = debug_info;
+  flag prune_unreachable = true;
+  if memcheck {
+    mc_debug_info = true;
+    prune_unreachable = false;
+  }
   let lowered = compile_to_c_cover(
     input,
     c_path,
@@ -2514,9 +2581,12 @@ pub fun run_tests(
     warn_unused,
     false,
     "",
-    debug_info,
+    mc_debug_info,
     warn_unused_lenient,
-    plan_ptr
+    plan_ptr,
+    prune_unreachable,
+    memcheck,
+    memcheck_leaks
   );
   if lowered.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
@@ -2528,7 +2598,7 @@ pub fun run_tests(
   }
 
   str exe = default_exe_path(input, ".test");
-  let cc_code = compile_c_to_exe(c_path, exe, debug_info);
+  let cc_code = compile_c_to_exe(c_path, exe, mc_debug_info);
   if !keep_c {
     remove_file(c_path);
   }
@@ -2663,7 +2733,9 @@ fun _run_tests_captured(
   flag warn_unused,
   flag warn_unused_lenient,
   Vec<Define>* extra_defines,
-  CoverOptions* cover
+  CoverOptions* cover,
+  flag memcheck = false,
+  flag memcheck_leaks = false
 ) SuiteTestResult {
   SuiteTestResult bad;
   bad.exit_code = 1;
@@ -2684,6 +2756,13 @@ fun _run_tests_captured(
   if cover.enabled {
     plan_ptr = &plan;
   }
+  // See `run_tests`'s own identical note.
+  flag mc_debug_info = debug_info;
+  flag prune_unreachable = true;
+  if memcheck {
+    mc_debug_info = true;
+    prune_unreachable = false;
+  }
   let t_lower = _wall_ms();
   let lowered = compile_to_c_cover(
     input,
@@ -2693,9 +2772,12 @@ fun _run_tests_captured(
     warn_unused,
     false,
     "",
-    debug_info,
+    mc_debug_info,
     warn_unused_lenient,
-    plan_ptr
+    plan_ptr,
+    prune_unreachable,
+    memcheck,
+    memcheck_leaks
   );
   let lower_ms = _wall_ms() - t_lower;
   bad.lower_ms = lower_ms;
@@ -2706,7 +2788,7 @@ fun _run_tests_captured(
 
   str exe = default_exe_path(input, format(".w{num}.test", compile_tag));
   let t_cc = _wall_ms();
-  let cc_code = compile_c_to_exe(c_path, exe, debug_info);
+  let cc_code = compile_c_to_exe(c_path, exe, mc_debug_info);
   let cc_ms = _wall_ms() - t_cc;
   bad.cc_ms = cc_ms;
   remove_file(c_path);
@@ -2775,6 +2857,8 @@ compound _TestSuiteWorkerCtx {
   num total_lower_ms;
   num total_cc_ms;
   num total_run_ms;
+  flag memcheck;
+  flag memcheck_leaks;
 }
 
 // A run_test_suite worker: claims files one at a time from the shared
@@ -2814,7 +2898,9 @@ fun _test_suite_worker(raw* arg) raw* {
       ctx.warn_unused,
       ctx.warn_unused_lenient,
       ctx.extra_defines,
-      ctx.cover
+      ctx.cover,
+      ctx.memcheck,
+      ctx.memcheck_leaks
     );
 
     ctx.lock.lock();
@@ -2912,7 +2998,9 @@ pub fun run_test_suite(
   flag warn_unused,
   flag warn_unused_lenient,
   Vec<Define>* extra_defines,
-  CoverOptions* cover
+  CoverOptions* cover,
+  flag memcheck = false,
+  flag memcheck_leaks = false
 ) num {
   str dir = root;
   if equals(dir, "") {
@@ -2972,6 +3060,8 @@ pub fun run_test_suite(
   ctx.warn_unused = warn_unused;
   ctx.warn_unused_lenient = warn_unused_lenient;
   ctx.extra_defines = extra_defines;
+  ctx.memcheck = memcheck;
+  ctx.memcheck_leaks = memcheck_leaks;
   ctx.lock = mutex_new();
   ctx.passed = 0;
   ctx.failed = 0;
@@ -4077,6 +4167,97 @@ sequential test "running one file's tests returns their result, and can stop at 
   str dir = _scratch_project("onefile");
   write_string(path_join(dir, "bad.fn"), "fun bad( {\n");
   assert run_tests(path_join(dir, "bad.fn"), &args, false, false, "", false, false, false, &defines, &cover) == 1, "expected a file that does not compile to fail";
+}
+
+test "run_tests under -memcheck ignores an ordinary leak by default, but catches a real double-free" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  Vec<str> args;
+  args.init(0);
+  defer args.free();
+  CoverOptions cover = _cover_options_new();
+  defer cover.formats.free();
+  defer cover.paths.free();
+  defer cover.exclude.free();
+
+  str dir = _scratch_project("memcheck_test");
+  str leaky = path_join(dir, "leaky.fn");
+  write_string(
+    leaky,
+    `use std.c.mem;
+    `test "leaks" {
+    `  raw* p = malloc(16);
+    `}
+);
+  // Off by default: a `-test` binary's own process is short-lived, so
+  // "still allocated when it exits a moment later anyway" isn't a bug
+  // (see `Codegen.memcheck_leaks`'s own note) - this is exactly the
+  // false-positive flood that made the leak sweep unusable across a
+  // real test corpus.
+  assert run_tests(leaky, &args, false, false, "", false, false, false, &defines, &cover, true) == 0, "expected an ordinary leak not to fail the test under plain -memcheck";
+  // Opting into `-memcheck-leaks` turns it back on, for a caller that
+  // genuinely wants it (testing a long-running program's own body).
+  assert run_tests(leaky, &args, false, false, "", false, false, false, &defines, &cover, true, true) != 0, "expected -memcheck-leaks to still catch a real leak";
+
+  str clean = path_join(dir, "clean.fn");
+  write_string(
+    clean,
+    `use std.c.mem;
+    `test "frees what it allocates" {
+    `  raw* p = malloc(16);
+    `  free(p);
+    `}
+);
+  assert run_tests(clean, &args, false, false, "", false, false, false, &defines, &cover, true, true) == 0, "expected a clean allocation/free pair to pass even with -memcheck-leaks on";
+
+  str doubled = path_join(dir, "doubled.fn");
+  write_string(
+    doubled,
+    `use std.c.mem;
+    `test "double-frees" {
+    `  raw* p = malloc(16);
+    `  free(p);
+    `  free(p);
+    `}
+);
+  // A double-free is never a matter of process lifetime, so it's
+  // caught unconditionally, with no opt-in needed.
+  assert run_tests(doubled, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real double-free to fail the test under plain -memcheck";
+}
+
+// `-memcheck` auto-injects `use std.memcheck;` into whatever is being
+// compiled, which depends on std.c.mem/std.c.string/std.sync alone
+// (see memcheck.fn's own note on staying off std.io/std.string on
+// purpose) - but before that dependency was trimmed down, and before
+// `lower_to_c`'s own `_stdlib_canonical_path` routed a stdlib entry
+// file through the identical resolution a real `use std.x` import of
+// it already goes through, compiling one of `std.memcheck`'s own
+// (then-wider) dependencies directly under `-memcheck` reached that
+// exact file a second time, transitively, through the import just
+// injected, and double-merged its declarations.
+test "compiling a std.memcheck dependency directly under -memcheck does not double-merge it" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  str out = default_c_path("stdlib/std/io.fn", ".memcheck_selfimport_test.c");
+  defer remove_file(out);
+  let lowered = compile_to_c_mode(
+    "stdlib/std/io.fn",
+    out,
+    &defines,
+    false,
+    false,
+    false,
+    "",
+    false,
+    false,
+    true,
+    true
+  );
+  if lowered.is_err() {
+    panic(format("expected std.io to compile cleanly under -memcheck, found: {str}", lowered.unwrap_err()));
+  }
 }
 
 test "lint reports findings and gives a nonzero exit for them" {

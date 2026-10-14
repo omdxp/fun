@@ -28,6 +28,7 @@ use std.option;
 use std.result;
 use std.io;
 use std.fs;
+use std.path;
 
 // Where a coverage-instrumented test binary writes its counts. `nil`
 // means no instrumentation.
@@ -118,6 +119,45 @@ pub fun drop_foreign_tests(Vec<Node>* nodes, str entry) {
 // into an immediate, real compile error instead - every other caller
 // (the native/MSVC/emcc CLI paths, which never hit this problem)
 // stays `false`.
+// `path`, rewritten the same way a real `use std.x` import of the
+// identical file would resolve it - `stdlib_root(path)` joined onto
+// whatever comes after its own "std/" segment - or "" when `path`
+// isn't under a "std/" segment at all. See `lower_to_c`'s own
+// `memcheck` branch for why this matters: compiling a standard
+// library file directly under `-memcheck` can reach that exact file a
+// second time, transitively, through the import `-memcheck` itself
+// injects (`use std.memcheck;` pulls in `std.io`, which pulls in
+// `std.string`, and so on) - unless both routes to it resolve to the
+// identical path string, the merge's own dedup (keyed on that string)
+// never recognizes them as one file and double-merges its
+// declarations. Scoped to a whole path segment ("std/" at the very
+// start, or right after a '/'), not just the substring, so a project's
+// own file that merely contains "std" somewhere in its name is left
+// alone.
+fun _stdlib_canonical_path(str path) str {
+  str slashed = replace_char(path, '\\', '/');
+  num seg_start = -1;
+  if starts_with(slashed, "std/") {
+    seg_start = 0;
+  } else {
+    num idx = index_of_str(slashed, "/std/");
+    if idx >= 0 {
+      seg_start = idx + 1;
+    }
+  }
+  if seg_start < 0 {
+    free(slashed);
+    ret "";
+  }
+  str suffix = substr(slashed, seg_start, len(slashed) - seg_start);
+  free(slashed);
+  str root = stdlib_root(path);
+  str canonical = path_join(root, suffix);
+  free(root);
+  free(suffix);
+  ret canonical;
+}
+
 pub fun lower_to_c(
   str input,
   str out_path,
@@ -135,9 +175,12 @@ pub fun lower_to_c(
   str host_arch,
   flag parallel_preload,
   flag reject_concurrency,
-  flag memcheck = false
+  flag memcheck = false,
+  flag memcheck_leaks = false
 ) Result<flag, str> {
   ProgramMergeResult merged;
+  str entry_path = input;
+  flag owns_entry_path = false;
   if memcheck {
     // `-memcheck` redirects every allocation through `std.memcheck`'s
     // own tracking allocator (see `Codegen.memcheck`'s own note) - the
@@ -146,16 +189,42 @@ pub fun lower_to_c(
     // file to add that import itself. Prepending it to the live source
     // text (rather than splicing a node in after parsing) lets the
     // normal import-resolution pass pick it up like any other import.
+    //
+    // `entry_path` below (not the raw `input` the caller spelled) is
+    // what actually goes into `parse_program_with_source`: compiling
+    // one of `std.memcheck`'s own dependencies directly reaches that
+    // exact same file a second time through the import just injected
+    // (`use std.memcheck;` -> `use std.io;`, say), and unless BOTH
+    // routes to it resolve to the identical path string, the merge's
+    // own dedup (keyed on that string) never recognizes them as one
+    // file, double-merging its declarations. See
+    // `_stdlib_canonical_path`'s own doc comment for the resolution
+    // this applies (never a general "make any path absolute"
+    // primitive - the bootstrap compiler used for stage 1 has no way
+    // to emit a brand-new one of those yet).
+    str canonical = _stdlib_canonical_path(input);
+    if !equals(canonical, "") {
+      entry_path = canonical;
+      owns_entry_path = true;
+    }
     str original = read_to_string(input);
     str prepended = format("use std.memcheck;\n{str}", original);
     free(original);
-    merged = parse_program_with_source(input, prepended, parallel_preload)!;
+    merged = parse_program_with_source(entry_path, prepended, parallel_preload)!;
     free(prepended);
   } else {
     merged = parse_program_with_imports(input, parallel_preload)!;
   }
   if test_mode {
-    drop_foreign_tests(&merged.nodes, input);
+    // `entry_path` (whatever the real parse above actually used, not
+    // always the caller's own `input`) - see its own note just above:
+    // every node `drop_foreign_tests` looks at is stamped with that
+    // same path, so comparing against anything else would read every
+    // one of this file's own tests as "foreign" and drop them all.
+    drop_foreign_tests(&merged.nodes, entry_path);
+  }
+  if owns_entry_path {
+    free(entry_path);
   }
   if reject_concurrency && uses_concurrency_in(merged.nodes, test_mode, fuzz_mode) {
     ret .Err(
@@ -270,6 +339,7 @@ pub fun lower_to_c(
   cg.prune_unreachable = prune_unreachable;
   cg.debug_info = debug_info;
   cg.memcheck = memcheck;
+  cg.memcheck_leaks = memcheck_leaks;
   if cover != nil {
     cg.coverage = true;
     cg.cover_out = cover.out_path;

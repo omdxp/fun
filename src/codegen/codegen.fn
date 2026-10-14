@@ -601,6 +601,16 @@ pub compound Codegen {
   // auto-injects `use std.memcheck;` so no user `.fn` source needs to
   // change at all.
   flag memcheck;
+  // `-memcheck-leaks`: lets the leak sweep's own forced-nonzero-exit
+  // stay live for a build under `self.memcheck`. Off by default: a
+  // leak is only real when the process keeps running after it happens
+  // (a long-lived server, a daemon) - for an ordinary short-lived
+  // program (every CLI invocation this compiler itself makes, and
+  // every `-test` binary), "still allocated when it exits a moment
+  // later anyway" describes virtually every transient allocation ever
+  // made, not a bug. See `emit_main_thread_wrapper`'s and
+  // `emit_test_runner`'s own `__fun_memcheck_disable_leak_sweep` calls.
+  flag memcheck_leaks;
   // How many enclosing expressions may run a sub-expression zero times or
   // more than once (the right side of `&&`/`||`, a loop condition, an
   // `elif` condition). A call-result receiver evaluated there cannot be
@@ -715,6 +725,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.cover_id_files.init(64);
   g.cover_id_lines.init(64);
   g.memcheck = false;
+  g.memcheck_leaks = false;
   g.cond_eval_depth = 0;
   g.cover_skip_files.init(8);
   g.cover_skip_from.init(8);
@@ -5511,7 +5522,7 @@ impl Codegen {
     // without this, a debugger stepping into `expr?`/`expr!` under
     // MSVC showed the wrong location for the hoisted temp-and-guard,
     // inheriting whatever directive was last active before it.
-    if self.debug_info {
+    if self.debug_info && self.state.pending_line_directive_is_valid {
       try_decl_sb.append(line_directive_text(self.state.pending_line_directive));
     }
     num try_indent_ii = 0;
@@ -6793,7 +6804,7 @@ impl Codegen {
           // hoisted vararg (MSVC's own dialect, no GNU statement
           // expressions) lands on the right line instead of whatever
           // was last active before it.
-          if self.debug_info {
+          if self.debug_info && self.state.pending_line_directive_is_valid {
             va_decl_sb.append(line_directive_text(self.state.pending_line_directive));
           }
           num va_indent_ii = 0;
@@ -7616,11 +7627,21 @@ impl Codegen {
     // receiver - which can trigger an entirely separate generic
     // instantiation, rendered into its OWN scratch state and restored
     // before control returns here - never contaminates it, unlike a
-    // shared field would. It always holds a real value by this point:
+    // shared field would. Usually already real by this point -
     // `emit_statement` sets it before dispatching into any statement's
-    // own expression emission, and nothing between there and here
-    // calls `set_pending_line_directive` again on `self.state` itself.
-    if self.debug_info {
+    // own expression emission, and nothing between there and here calls
+    // `set_pending_line_directive` again on `self.state` itself - except
+    // when the statement node reaching `emit_statement` has no position
+    // of its own (`node.has_pos` false, left unset entirely rather than
+    // zeroed to a real one), which `emit_statement` already treats as
+    // "nothing to flush" by skipping the call outright.
+    // `pending_line_directive_is_valid` (not `has_pending_line_directive`,
+    // which `write_indent`'s own flush already cleared for this exact
+    // statement by the time a hoisted temp like this one needs to
+    // write a second, mid-statement `#line` of its own) is what tells
+    // "never set at all" apart from "already flushed once, but still
+    // the correct value."
+    if self.debug_info && self.state.pending_line_directive_is_valid {
       recv_tmp_stmt_sb.append(line_directive_text(self.state.pending_line_directive));
     }
     num recv_tmp_ii = 0;
@@ -16397,6 +16418,12 @@ impl Codegen {
     // preamble - `std.memcheck` itself never branches on platform.
     if self.memcheck {
       self.state.write(`#ifdef _WIN32
+      `#ifndef WIN32_LEAN_AND_MEAN
+      `#define WIN32_LEAN_AND_MEAN
+      `#endif
+      `#ifndef NOGDI
+      `#define NOGDI
+      `#endif
       `#include <windows.h>
       `#else
       `#include <signal.h>
@@ -16404,18 +16431,18 @@ impl Codegen {
       `#include <unistd.h>
       `#include <string.h>
       `#endif
-      `static void* __fun_real_malloc(long long size) { return malloc((size_t)size); }
+      `static void* __fun_real_malloc(int64_t size) { return malloc((size_t)size); }
       `static void __fun_real_free(void* p) { free(p); }
-      `static void* __fun_real_realloc(void* p, long long size) { return realloc(p, (size_t)size); }
-      `typedef void (*__fun_mc_handler_t)(long long, void*, void*);
+      `static void* __fun_real_realloc(void* p, int64_t size) { return realloc(p, (size_t)size); }
+      `typedef void (*__fun_mc_handler_t)(int64_t, void*, void*);
       `static __fun_mc_handler_t __fun_mc_user_handler = 0;
       `#ifdef _WIN32
-      `static long long __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (long long)si.dwPageSize; }
-      `static void* __fun_mc_guard_alloc(long long data_size, long long* out_total_size) {
-      `  long long ps = __fun_mc_page_size();
-      `  long long data_pages = (data_size + ps - 1) / ps;
+      `static int64_t __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int64_t)si.dwPageSize; }
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  long long total = (data_pages + 1) * ps;
+      `  int64_t total = (data_pages + 1) * ps;
       `  void* base = VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
       `  if (!base) return 0;
       `  void* guard = (char*)base + data_pages * ps;
@@ -16424,7 +16451,7 @@ impl Codegen {
       `  *out_total_size = total;
       `  return base;
       `}
-      `static long long __fun_mc_guard_protect_all(void* base, long long total_size) {
+      `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  DWORD old;
       `  return VirtualProtect(base, (SIZE_T)total_size, PAGE_NOACCESS, &old) ? 0 : 1;
       `}
@@ -16435,18 +16462,18 @@ impl Codegen {
       `  }
       `  return EXCEPTION_CONTINUE_SEARCH;
       `}
-      `static long long __fun_mc_register_handler(void* handler) {
+      `static int64_t __fun_mc_register_handler(void* handler) {
       `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
       `  AddVectoredExceptionHandler(1, __fun_mc_veh);
       `  return 0;
       `}
       `#else
-      `static long long __fun_mc_page_size(void) { return (long long)sysconf(_SC_PAGESIZE); }
-      `static void* __fun_mc_guard_alloc(long long data_size, long long* out_total_size) {
-      `  long long ps = __fun_mc_page_size();
-      `  long long data_pages = (data_size + ps - 1) / ps;
+      `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  long long total = (data_pages + 1) * ps;
+      `  int64_t total = (data_pages + 1) * ps;
       `  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       `  if (base == MAP_FAILED) return 0;
       `  void* guard = (char*)base + data_pages * ps;
@@ -16454,38 +16481,38 @@ impl Codegen {
       `  *out_total_size = total;
       `  return base;
       `}
-      `static long long __fun_mc_guard_protect_all(void* base, long long total_size) {
+      `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
       `}
       `static void __fun_mc_trampoline(int sig, siginfo_t* info, void* ctx) {
       `  if (__fun_mc_user_handler) {
-      `    __fun_mc_user_handler((long long)sig, info ? info->si_addr : 0, ctx);
+      `    __fun_mc_user_handler((int64_t)sig, info ? info->si_addr : 0, ctx);
       `  }
       `}
-      `static long long __fun_mc_register_handler(void* handler) {
+      `static int64_t __fun_mc_register_handler(void* handler) {
       `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
       `  struct sigaction sa;
       `  memset(&sa, 0, sizeof(sa));
       `  sa.sa_sigaction = __fun_mc_trampoline;
       `  sa.sa_flags = SA_SIGINFO;
       `  sigemptyset(&sa.sa_mask);
-      `  long long rc1 = (long long)sigaction(SIGSEGV, &sa, 0);
+      `  int64_t rc1 = (int64_t)sigaction(SIGSEGV, &sa, 0);
       `  /* Accessing an mprotect'd PROT_NONE page raises SIGBUS rather
       `     than SIGSEGV on Darwin/BSD-derived kernels for some fault
       `     paths (Linux is consistently SIGSEGV) - both are registered
       `     with the same handler so a guarded-page fault is always
       `     caught regardless of which one the kernel actually raises. */
-      `  long long rc2 = (long long)sigaction(SIGBUS, &sa, 0);
+      `  int64_t rc2 = (int64_t)sigaction(SIGBUS, &sa, 0);
       `  return rc1 != 0 ? rc1 : rc2;
       `}
       `#endif
-      `static long long __fun_mc_ptr_in_range(void* addr, void* base, long long size) {
+      `static int64_t __fun_mc_ptr_in_range(void* addr, void* base, int64_t size) {
       `  return ((char*)addr >= (char*)base && (char*)addr < (char*)base + size) ? 1 : 0;
       `}
-      `extern void* __fun_memcheck_malloc(long long size, char* file, long long line);
-      `extern void* __fun_memcheck_calloc(long long count, long long size, char* file, long long line);
-      `extern void* __fun_memcheck_realloc(void* ptr, long long size, char* file, long long line);
-      `extern void __fun_memcheck_free(void* ptr, char* file, long long line);
+      `extern void* __fun_memcheck_malloc(int64_t size, char* file, int64_t line);
+      `extern void* __fun_memcheck_calloc(int64_t count, int64_t size, char* file, int64_t line);
+      `extern void* __fun_memcheck_realloc(void* ptr, int64_t size, char* file, int64_t line);
+      `extern void __fun_memcheck_free(void* ptr, char* file, int64_t line);
       `#define malloc(sz) __fun_memcheck_malloc((sz), __FILE__, __LINE__)
       `#define calloc(n, sz) __fun_memcheck_calloc((n), (sz), __FILE__, __LINE__)
       `#define realloc(p, sz) __fun_memcheck_realloc((p), (sz), __FILE__, __LINE__)
@@ -18863,6 +18890,10 @@ impl Codegen {
   // no header of its own.
   emit_main_thread_wrapper() Option<CodegenErrorKind> {
     str real_name = self.effective_function_name("main");
+    str mc_leak_suppress = "";
+    if self.memcheck && !self.memcheck_leaks {
+      mc_leak_suppress = "  __fun_memcheck_disable_leak_sweep();\n";
+    }
     if self.emscripten_mode {
       // A browser's own main (document) thread must never block
       // synchronously waiting on another thread - `pthread_join` from
@@ -18874,7 +18905,13 @@ impl Codegen {
       // time instead (`-sSTACK_SIZE`, see `_append_compile_args` in
       // driver.fn) - `main` just calls straight through, no worker
       // thread, no wrapper needed at all for this target.
-      self.state.write(format("int main(int argc, char** argv) {\n  return {str}(argc, argv);\n}\n", real_name));
+      self.state.write(
+        format(
+        "int main(int argc, char** argv) {\n{str}  return {str}(argc, argv);\n}\n",
+        mc_leak_suppress,
+        real_name
+        )
+      );
       ret .None;
     }
     self.state.write(format(
@@ -18891,7 +18928,7 @@ impl Codegen {
       `}
       `#endif
       `int main(int argc, char** argv) {
-      `  __fun_main_run_args __fun_main_a;
+      `{str}  __fun_main_run_args __fun_main_a;
       `  __fun_main_a.argc = argc;
       `  __fun_main_a.argv = argv;
       `  __fun_main_a.result = 0;
@@ -18911,7 +18948,8 @@ impl Codegen {
       `  return __fun_main_a.result;
       `}
       ``,
-      real_name
+      real_name,
+      mc_leak_suppress
     ));
     ret .None;
   }
@@ -19231,6 +19269,14 @@ impl Codegen {
     self.state.write("    return 0;\n");
     self.state.write("}\n\n");
     self.state.write("int main(int argc, char** argv) {\n");
+    // Same reasoning as `emit_main_thread_wrapper`'s own
+    // `Codegen.memcheck_leaks`-gated call: a `-test` binary's own
+    // process is short-lived by design (run the tests, report, exit),
+    // so it's "unopted" out of leak reporting the same as every other
+    // build, unless `-memcheck-leaks` asked for it.
+    if self.memcheck && !self.memcheck_leaks {
+      self.state.write("    __fun_memcheck_disable_leak_sweep();\n");
+    }
     self.state.write("    __fun_test_main_args __fun_test_a;\n");
     self.state.write("    __fun_test_a.argc = argc;\n");
     self.state.write("    __fun_test_a.argv = argv;\n");

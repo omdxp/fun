@@ -308,12 +308,17 @@ impl AnalysisCache {
         // genuinely failed to resolve, not just that they did.
         str err_msg = merged.unwrap_err();
         if _debug_imports() {
+          // Both strings are already NUL-terminated, so a plain `%s`
+          // prints all of either exactly like a `%.*s` precision of
+          // its own `len()` would - without that precision argument's
+          // own real hazard: C's varargs promote based on the actual
+          // type passed, not the format string, so `len()`'s `int64_t`
+          // read back as the `int` width `%.*s` expects is genuinely
+          // undefined on a platform where the two differ in size.
           fprintf(
             stderr_stream(),
-            "[fls debug] import resolution failed for %.*s: %.*s\n",
-            len(doc.path),
+            "[fls debug] import resolution failed for %s: %s\n",
             doc.path,
-            len(err_msg),
             err_msg
           );
         }
