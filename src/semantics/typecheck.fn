@@ -2204,6 +2204,7 @@ impl Checker {
         ret out;
       }
       .Unary(u) -> { ret self.infer_unary(node, u, env); }
+      .Ternary(t) -> { ret self.infer_ternary(node, t, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
       _ -> { ret checked_unknown(); }
     }
@@ -2299,6 +2300,41 @@ impl Checker {
     t.is_array = true;
     t.array_depth = held.array_depth + 1;
     ret t;
+  }
+
+  // A ternary's own type is whichever of its two branches is the more
+  // specific, the same rule `infer_bracket` already uses across an
+  // array literal's elements: either side assignable to the other
+  // passes, an unknown side defers entirely to the other, and two
+  // genuinely incompatible sides fail loudly instead of guessing.
+  infer_ternary(Node* node, TernaryNode t, TypeEnv* env) CheckedType {
+    self.check_condition(t.cond, env);
+    if self.failed {
+      ret checked_unknown();
+    }
+    CheckedType then_type = self.infer(t.then_val, env);
+    CheckedType else_type = self.infer(t.else_val, env);
+    if is_unknown(then_type) {
+      ret else_type;
+    }
+    if is_unknown(else_type) {
+      ret then_type;
+    }
+    if can_assign(then_type, else_type) {
+      ret then_type;
+    }
+    if can_assign(else_type, then_type) {
+      ret else_type;
+    }
+    self.fail(
+      format(
+      "a ternary's two branches must share a type, found {str} and {str}",
+      type_name(then_type),
+      type_name(else_type)
+      ),
+      node
+    );
+    ret checked_unknown();
   }
 
   infer_unary(Node* node, UnaryNode u, TypeEnv* env) CheckedType {
@@ -3839,6 +3875,7 @@ impl Checker {
       .Expression(_) -> { self.walk_expr(stmt, env); }
       .ExpressionParenthesis(_) -> { self.walk_expr(stmt, env); }
       .Unary(_) -> { self.walk_expr(stmt, env); }
+      .Ternary(_) -> { self.walk_expr(stmt, env); }
       _ -> {}
     }
   }

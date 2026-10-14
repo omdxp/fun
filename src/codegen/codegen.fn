@@ -595,6 +595,12 @@ pub compound Codegen {
   Map<str, num> cover_ids;
   Vec<str> cover_id_files;
   Vec<num> cover_id_lines;
+  // `-memcheck`: redirects every malloc/calloc/realloc/free in the
+  // compiled program through `std.memcheck`'s own page-guarded
+  // allocator (see `write_prelude`'s own `self.memcheck` block) and
+  // auto-injects `use std.memcheck;` so no user `.fn` source needs to
+  // change at all.
+  flag memcheck;
   // How many enclosing expressions may run a sub-expression zero times or
   // more than once (the right side of `&&`/`||`, a loop condition, an
   // `elif` condition). A call-result receiver evaluated there cannot be
@@ -708,6 +714,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.cover_ids.init(64);
   g.cover_id_files.init(64);
   g.cover_id_lines.init(64);
+  g.memcheck = false;
   g.cond_eval_depth = 0;
   g.cover_skip_files.init(8);
   g.cover_skip_from.init(8);
@@ -5846,6 +5853,28 @@ impl Codegen {
         self.state.write(")");
         ret .None;
       }
+      .Ternary(t) -> {
+        // `cond ? then : else` has an identical C spelling; each operand
+        // is wrapped in its own parens so the emitted precedence is
+        // always correct regardless of what it is.
+        self.state.write("(");
+        let cerr = self.emit_expr(*t.cond);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(") ? (");
+        let therr = self.emit_expr(*t.then_val);
+        if therr.is_some() {
+          ret therr;
+        }
+        self.state.write(") : (");
+        let eerr = self.emit_expr(*t.else_val);
+        if eerr.is_some() {
+          ret eerr;
+        }
+        self.state.write(")");
+        ret .None;
+      }
       .Unary(u) -> {
         if equals(u.op, "await") {
           ret self.emit_await(u.operand);
@@ -8973,6 +9002,79 @@ impl Codegen {
           tr.is_call_result = recv_rt.is_call_result;
           ret .Some(tr);
         }
+        // `EnumName.Variant` used bare, as a method call's own receiver
+        // (`Sink.Stderr.flush()`), with no construction args at all -
+        // shares this chain's own "a.b" shape, but names no field: `a`
+        // is a type, not a value. `emit_call`'s own disambiguation
+        // (`EnumName.Variant(args)`, called) only fires when the
+        // variant construction is itself what's being called; this is
+        // the same pairing one level up, a variant used as a value in
+        // its own right. A local of the same spelling as the enum
+        // still shadows it, the same precedence every other
+        // alias/type-name check in this file already gives a local.
+        flag resolved_as_bare_variant = false;
+        fit inner_e.left.kind {
+          .Identifier(enum_name) -> {
+            fit inner_e.right.kind {
+              .Identifier(variant_name) -> {
+                if self.lookup_local_type_name(enum_name).is_none() &&
+                  self.enum_has_variant(enum_name, variant_name) {
+                  resolved_as_bare_variant = true;
+                }
+              }
+              _ -> {}
+            }
+          }
+          _ -> {}
+        }
+        if resolved_as_bare_variant {
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          CodegenState variant_scratch = self.new_scratch_state();
+          CodegenState* saved_variant_state = self.state;
+          let saved_variant_hoist_pos = self.hoist_insert_pos;
+          let saved_variant_stmt_start_pos = self.current_stmt_start_pos;
+          let prev_variant_suppress = self.suppress_generic_impl_method_draining;
+          self.state = &variant_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          self.suppress_generic_impl_method_draining = true;
+          let verr = self.emit_expr(*recv);
+          self.state = saved_variant_state;
+          self.hoist_insert_pos = saved_variant_hoist_pos;
+          self.current_stmt_start_pos = saved_variant_stmt_start_pos;
+          self.suppress_generic_impl_method_draining = prev_variant_suppress;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+            self.hoist_insert_pos = self.root_hoist_pos;
+          }
+          if !prev_variant_suppress && !self.draining_generic_impl_methods {
+            self.drain_pending_generic_impl_methods();
+          }
+          if verr.is_some() {
+            ret .None;
+          }
+          str variant_enum_name = "";
+          fit inner_e.left.kind {
+            .Identifier(n) -> { variant_enum_name = n; }
+            _ -> {}
+          }
+          ChainResolution vr;
+          vr.text = variant_scratch.out.build();
+          vr.type_name = variant_enum_name;
+          vr.is_pointer = false;
+          vr.dtype = .None;
+          // An enum literal, like a call's result, is an rvalue in C -
+          // not addressable, so a caller needing `&<receiver>` hoists
+          // its own temp instead, the same as a call-result receiver.
+          vr.is_call_result = true;
+          ret .Some(vr);
+        }
         str field_name = "";
         fit inner_e.right.kind {
           .Identifier(name) -> { field_name = name; }
@@ -10012,7 +10114,7 @@ impl Codegen {
       }
       .ExpressionParenthesis(inner) -> { self.collect_inline_next_locals(inner, out); }
       .Unary(u) -> { self.collect_inline_next_locals(u.operand, out); }
-      .Tenary(t) -> {
+      .Ternary(t) -> {
         self.collect_inline_next_locals(t.cond, out);
         self.collect_inline_next_locals(t.then_val, out);
         self.collect_inline_next_locals(t.else_val, out);
@@ -10113,7 +10215,7 @@ impl Codegen {
       }
       .ExpressionParenthesis(inner) -> { self.apply_inline_next_renames(inner, orig, fresh); }
       .Unary(u) -> { self.apply_inline_next_renames(u.operand, orig, fresh); }
-      .Tenary(t) -> {
+      .Ternary(t) -> {
         self.apply_inline_next_renames(t.cond, orig, fresh);
         self.apply_inline_next_renames(t.then_val, orig, fresh);
         self.apply_inline_next_renames(t.else_val, orig, fresh);
@@ -10263,7 +10365,7 @@ impl Codegen {
       }
       .ExpressionParenthesis(inner) -> { ret self._contains_nested_dotted_call(inner); }
       .Unary(u) -> { ret self._contains_nested_dotted_call(u.operand); }
-      .Tenary(t) -> {
+      .Ternary(t) -> {
         ret self._contains_nested_dotted_call(t.cond) ||
           self._contains_nested_dotted_call(t.then_val) ||
           self._contains_nested_dotted_call(t.else_val);
@@ -15323,6 +15425,20 @@ impl Codegen {
         dt.type_str = recv_r.type_name;
         ret .Some(dt);
       }
+      // `let v = cond ? a : b;`: both branches are required (by
+      // `infer_ternary` in typecheck.fn) to share a type, so either
+      // one's own resolved type is `v`'s - tried in order, falling back
+      // to the other, rather than failing outright, since one branch
+      // alone (e.g. a bare enum-variant shorthand with no dtype of its
+      // own) can resolve to less than the other even when both are
+      // perfectly valid.
+      .Ternary(t) -> {
+        let then_dt = self.infer_let_expr_type(t.then_val);
+        if then_dt.is_some() {
+          ret then_dt;
+        }
+        ret self.infer_let_expr_type(t.else_val);
+      }
       _ -> { ret .None; }
     }
   }
@@ -16269,6 +16385,113 @@ impl Codegen {
       `#endif
       ``);
     }
+    // `-memcheck`'s own runtime hooks: `std.memcheck`'s Fun-level logic
+    // tracks every live allocation and page-guards it, but needs a
+    // handful of things only C can give it - the true, unredirected
+    // allocator (so its own bookkeeping table doesn't recurse through
+    // the very `malloc`/`free` it's about to take over), the OS's real
+    // page-guard primitives, and a SIGSEGV/access-violation handler.
+    // Each is a single, identically-named, identically-signatured
+    // function on both platforms (only the body differs), the same
+    // shape as `__fun_cpu_count`/`__fun_thread_start` elsewhere in this
+    // preamble - `std.memcheck` itself never branches on platform.
+    if self.memcheck {
+      self.state.write(`#ifdef _WIN32
+      `#include <windows.h>
+      `#else
+      `#include <signal.h>
+      `#include <sys/mman.h>
+      `#include <unistd.h>
+      `#include <string.h>
+      `#endif
+      `static void* __fun_real_malloc(long long size) { return malloc((size_t)size); }
+      `static void __fun_real_free(void* p) { free(p); }
+      `static void* __fun_real_realloc(void* p, long long size) { return realloc(p, (size_t)size); }
+      `typedef void (*__fun_mc_handler_t)(long long, void*, void*);
+      `static __fun_mc_handler_t __fun_mc_user_handler = 0;
+      `#ifdef _WIN32
+      `static long long __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (long long)si.dwPageSize; }
+      `static void* __fun_mc_guard_alloc(long long data_size, long long* out_total_size) {
+      `  long long ps = __fun_mc_page_size();
+      `  long long data_pages = (data_size + ps - 1) / ps;
+      `  if (data_pages < 1) data_pages = 1;
+      `  long long total = (data_pages + 1) * ps;
+      `  void* base = VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+      `  if (!base) return 0;
+      `  void* guard = (char*)base + data_pages * ps;
+      `  DWORD old;
+      `  VirtualProtect(guard, (SIZE_T)ps, PAGE_NOACCESS, &old);
+      `  *out_total_size = total;
+      `  return base;
+      `}
+      `static long long __fun_mc_guard_protect_all(void* base, long long total_size) {
+      `  DWORD old;
+      `  return VirtualProtect(base, (SIZE_T)total_size, PAGE_NOACCESS, &old) ? 0 : 1;
+      `}
+      `static LONG WINAPI __fun_mc_veh(PEXCEPTION_POINTERS ep) {
+      `  if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && __fun_mc_user_handler) {
+      `    void* fault_addr = (void*)ep->ExceptionRecord->ExceptionInformation[1];
+      `    __fun_mc_user_handler(11, fault_addr, 0);
+      `  }
+      `  return EXCEPTION_CONTINUE_SEARCH;
+      `}
+      `static long long __fun_mc_register_handler(void* handler) {
+      `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
+      `  AddVectoredExceptionHandler(1, __fun_mc_veh);
+      `  return 0;
+      `}
+      `#else
+      `static long long __fun_mc_page_size(void) { return (long long)sysconf(_SC_PAGESIZE); }
+      `static void* __fun_mc_guard_alloc(long long data_size, long long* out_total_size) {
+      `  long long ps = __fun_mc_page_size();
+      `  long long data_pages = (data_size + ps - 1) / ps;
+      `  if (data_pages < 1) data_pages = 1;
+      `  long long total = (data_pages + 1) * ps;
+      `  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      `  if (base == MAP_FAILED) return 0;
+      `  void* guard = (char*)base + data_pages * ps;
+      `  mprotect(guard, (size_t)ps, PROT_NONE);
+      `  *out_total_size = total;
+      `  return base;
+      `}
+      `static long long __fun_mc_guard_protect_all(void* base, long long total_size) {
+      `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
+      `}
+      `static void __fun_mc_trampoline(int sig, siginfo_t* info, void* ctx) {
+      `  if (__fun_mc_user_handler) {
+      `    __fun_mc_user_handler((long long)sig, info ? info->si_addr : 0, ctx);
+      `  }
+      `}
+      `static long long __fun_mc_register_handler(void* handler) {
+      `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
+      `  struct sigaction sa;
+      `  memset(&sa, 0, sizeof(sa));
+      `  sa.sa_sigaction = __fun_mc_trampoline;
+      `  sa.sa_flags = SA_SIGINFO;
+      `  sigemptyset(&sa.sa_mask);
+      `  long long rc1 = (long long)sigaction(SIGSEGV, &sa, 0);
+      `  /* Accessing an mprotect'd PROT_NONE page raises SIGBUS rather
+      `     than SIGSEGV on Darwin/BSD-derived kernels for some fault
+      `     paths (Linux is consistently SIGSEGV) - both are registered
+      `     with the same handler so a guarded-page fault is always
+      `     caught regardless of which one the kernel actually raises. */
+      `  long long rc2 = (long long)sigaction(SIGBUS, &sa, 0);
+      `  return rc1 != 0 ? rc1 : rc2;
+      `}
+      `#endif
+      `static long long __fun_mc_ptr_in_range(void* addr, void* base, long long size) {
+      `  return ((char*)addr >= (char*)base && (char*)addr < (char*)base + size) ? 1 : 0;
+      `}
+      `extern void* __fun_memcheck_malloc(long long size, char* file, long long line);
+      `extern void* __fun_memcheck_calloc(long long count, long long size, char* file, long long line);
+      `extern void* __fun_memcheck_realloc(void* ptr, long long size, char* file, long long line);
+      `extern void __fun_memcheck_free(void* ptr, char* file, long long line);
+      `#define malloc(sz) __fun_memcheck_malloc((sz), __FILE__, __LINE__)
+      `#define calloc(n, sz) __fun_memcheck_calloc((n), (sz), __FILE__, __LINE__)
+      `#define realloc(p, sz) __fun_memcheck_realloc((p), (sz), __FILE__, __LINE__)
+      `#define free(p) __fun_memcheck_free((p), __FILE__, __LINE__)
+      ``);
+    }
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
@@ -16390,7 +16613,7 @@ impl Codegen {
       `static size_t __fun_win_children_cap = 0;
       `static SRWLOCK __fun_win_spawn_lock = SRWLOCK_INIT;
       `
-      `long long posix_spawnp(pid_t* pid, const char* file, posix_spawn_file_actions_t* file_actions, posix_spawnattr_t* attrp, char** argv, char** envp) {
+      `long long posix_spawnp(pid_t* pid, char* file, posix_spawn_file_actions_t* file_actions, posix_spawnattr_t* attrp, char** argv, char** envp) {
       `    (void)file; (void)attrp; (void)envp;
       `    if (pid == NULL || argv == NULL) return -1;
       `
@@ -19206,6 +19429,24 @@ test "emit_expr emits a boolean literal" {
   Node n = node_new(.Boolean(true));
   assert g.emit_expr(n).is_none(), "expected the boolean to emit";
   assert equals(st.out.build(), "true"), "expected 'true'";
+}
+
+test "emit_expr emits a ternary as a parenthesized C ternary" {
+  CodegenState st = codegen_state_new();
+  Codegen g = codegen_new(&st);
+  Node* cond = malloc(sizeof(Node));
+  *cond = node_new(.Boolean(true));
+  Node* then_val = malloc(sizeof(Node));
+  *then_val = node_new(.Number(.Num(1)));
+  Node* else_val = malloc(sizeof(Node));
+  *else_val = node_new(.Number(.Num(2)));
+  TernaryNode tn;
+  tn.cond = cond;
+  tn.then_val = then_val;
+  tn.else_val = else_val;
+  Node n = node_new(.Ternary(tn));
+  assert g.emit_expr(n).is_none(), "expected the ternary to emit";
+  assert equals(st.out.build(), "(true) ? (1) : (2)"), "expected a parenthesized C ternary";
 }
 
 test "emit_expr emits the nil literal as C NULL" {

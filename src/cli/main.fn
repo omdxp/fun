@@ -188,6 +188,20 @@ fun main(str[] args) num {
   }
   Vec<Define> all_defines = resolved_defines(&opts.defines);
   defer all_defines.free();
+  // `-memcheck`'s own allocator/handler/leak-sweep functions are only
+  // ever "called" through a C preprocessor macro (see codegen's own
+  // `self.memcheck` note) - invisible to this pass's own reachability
+  // analysis, which runs on the Fun AST before that macro exists, so
+  // pruning stays off for a memcheck build rather than stripping them
+  // as dead code. The same macro also captures `__FILE__`/`__LINE__`
+  // at every allocation site for a leak/double-free/use-after-free
+  // report to name - meaningful only with `#line` directives mapping
+  // the generated C back to this program's own `.fn` source, which is
+  // what `debug_info` turns on, so `-memcheck` implies it.
+  flag mc_debug_info = opts.debug_info;
+  if opts.memcheck {
+    mc_debug_info = true;
+  }
   let lowered = compile_to_c_mode(
     opts.input,
     c_path,
@@ -196,8 +210,10 @@ fun main(str[] args) num {
     opts.warn_unused,
     false,
     "",
-    opts.debug_info,
-    opts.warn_unused_lenient
+    mc_debug_info,
+    opts.warn_unused_lenient,
+    !opts.memcheck,
+    opts.memcheck
   );
   if lowered.is_err() {
     ret _fail(lowered.unwrap_err());

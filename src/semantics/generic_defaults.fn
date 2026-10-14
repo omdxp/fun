@@ -295,7 +295,7 @@ fun _fill_node(Node* node, Map<str, _DefaultsEntry>* table, str* err) {
         _fill_node(u.error_arg, table, err);
       }
     }
-    .Tenary(t) -> {
+    .Ternary(t) -> {
       _fill_node(t.cond, table, err);
       _fill_node(t.then_val, table, err);
       _fill_node(t.else_val, table, err);

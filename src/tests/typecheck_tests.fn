@@ -188,6 +188,33 @@ test "an array literal holds one type" {
   );
 }
 
+test "a ternary's two branches must share a type" {
+  rejects(
+    `fun main() {
+    `  flag cond = true;
+    `  let x = cond ? 1 : "two";
+    `}`,
+    "expected mismatched ternary branches to be rejected"
+  );
+  accepts(
+    `fun main() {
+    `  flag cond = true;
+    `  num x = cond ? 1 : 2;
+    `}`,
+    "expected matching ternary branches to check out"
+  );
+}
+
+test "a ternary's condition must be a flag" {
+  rejects(
+    `fun main() {
+    `  num n = 5;
+    `  num x = n ? 1 : 2;
+    `}`,
+    "expected a non-flag ternary condition to be rejected"
+  );
+}
+
 test "a decimal has no remainder" {
   rejects(
     `fun main() {

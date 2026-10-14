@@ -2535,7 +2535,7 @@ pub fun collect_reads(Node* node, Set<str>* out) {
         collect_reads(u.error_arg, out);
       }
     }
-    .Tenary(t) -> {
+    .Ternary(t) -> {
       collect_reads(t.cond, out);
       collect_reads(t.then_val, out);
       collect_reads(t.else_val, out);
