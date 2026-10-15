@@ -1,102 +1,880 @@
+## [0.68.0] - 2026-10-15
+
+### 🚀 Features
+
+- Wire fls inlay hints into the playground editor
+- Track a document's last ranged edit, for incremental fls reparse
+- Parse_program_cached can hand back its own global_symbols
+- Incremental single-declaration reparse for fls, on by default
+- Cache the playground's wasm modules in the browser across deployments
+- Wire up fun.fls.debugImports, which the extension already sent
+- Add ternary conditional expressions (cond ? a : b)
+- Add a built-in memory checker (-memcheck)
+- Wire -memcheck into fun test, leak reporting off by default
+
+### 🐛 Bug Fixes
+
+- >>/<< split tokens got a bare string literal, crashing when freed
+- Expression-rotation and tuple-access rewrites orphan their old node
+- Canonical_type_name always allocated, though every caller borrows it
+- Entry file's own re-parse leaked its token strings every edit
+- Number and boolean literals leaked their intermediate text
+- Mangled_name allocated on generics, though every caller borrows it
+- Take_sizeof_pointer_stars leaked at both its call sites
+- Completion offered private names from other files
+- Entry file's cached parse aliased the live editor buffer
+- Every scope entity's own declaration node leaked
+- Cross-file reference to an untyped const emitted invalid C
+- A let local's hover leaked a referenced const's own type text
+- Inlay hint background used a fixed color, not a themed one
+- Destructuring let leaked its own whole-statement node
+- A CheckedType's own generic/tuple args were never freed
+- Every function body and top-level function leaked its own node
+- A TypeEnv binding could leak or double-free another's type
+- _unmangled_method_name leaked its own prefix on every call
+- Expression rotation discarded a wrapper's own binding
+- Preload claim leaked the normalized path on every re-visit
+- Register_impl's own fresh method table leaked when reused
+- _erase_type_params leaked the type it discarded
+- _erase_named leaked the type it discarded
+- _fun_format_specs leaked every parsed placeholder word
+- Three more CheckedType ownership leaks in Checker
+- Local_types' own pointer-suffixed entries leaked on every clear
+- A method table's own leaf-name keys leaked every typecheck pass
+- A comma-expression assert leaked its own comma wrapper's binding
+- Check_variable's own declared type leaked on every path
+- Stdlib/deps path helpers crashed or leaked on every return path
+- Two deps_project_root callers never freed its now-owned result
+- Two more normalized-path leaks in the import merge walk
+- A malformed impl method leaked its own node and parser state
+- A compound field line leaked its own shared declared type
+- _erase_signature leaked a generic method's own original args
+- A compound's own field types leaked on every typecheck pass
+- An impl method's own generated name leaked on every teardown
+- Operator-token backoff and two angle-split leaks
+- _import_is_read leaked every dotted-path segment it split
+- Parse_document leaked every line of the TOML text it read
+- Fit-subject type resolution leaked its own borrowed/owned strings
+- TomlDoc/TomlTable never freed their own keys or values
+- Get_str/table_field handed back a pointer the caller's own doc.free() just freed
+- Fit over a plain function call skipped exhaustiveness checking
+- A stored MethodTable/Set/Vec could be freed out from under its own map entry
+- The workspace symbol table held borrowed strings across edits
+- A fast-reparsed declaration's own strings were freed while still borrowed
+- Every reported Diagnostic.message leaked, every edit
+- A dotted or '..' import path leaked its own built string
+- Every outgoing LSP message leaked its own quoted method name
+- A preload error's own message leaked at every discard site
+- Cached C-compiler resolution ignored a later FUN_CC change
+- The playground's idle warm-up eagerly loaded the ~105MB clang package
+- An example with no pre-baked wasm module dead-ended with no backend
+- Checker.methods copied a growing inner map on every re-registration
+- Freeing a method table's own key mid-teardown crashed a later lookup
+- Editing one open document corrupted hover/goto-def in another
+- Serialize preload during the bulk workspace scan
+- Detach fire-and-forget scheduler/watchdog threads
+- Track the version a ranged edit's own range came from
+- Node_clone shared an owned import path with its original
+- Fit over a method call never checked exhaustiveness
+- A hoisted temp's own #line directive could read uninitialized data under -g
+- Std.memcheck depending on std.io created a circular forward reference
+- Fls debug-import logging passed a 64-bit length where printf expects int
+- Memcheck's own hand-written C used long long where num maps to int64_t
+- Memcheck's own Windows block included windows.h without the lean guard
+
+### 📚 Documentation
+
+- Note why >> splitting can't free its own replaced token
+- Document the memory checker and ternary conditional expressions
+
+### ⚡ Performance
+
+- Cache resolve_c_compiler() across one process's compiles
+- Diagnose() reparsed the whole file a second time on every edit
+- Goto-definition always paid for a full workspace symbol rebuild
+
+### ⚙️ Miscellaneous Tasks
+
+- Check for memory issues under -memcheck, manual trigger only
+- Bump version to 0.68.0
+
+### 💼 Other
+
+- Incremental reparse, hardening, and a zero-leak pass (#203)
+- Fix a real crash and a goto-definition correctness/perf bug (#204)
+## [0.67.0] - 2026-10-07
+
+### 🚀 Features
+
+- Render fls hover/completion docs as real markdown, not raw text
+- Full screen toggle, named file creation, and a discoverability hint
+- Operator overloading via impl methods (op_add, op_eq, ...)
+
+### 🐛 Bug Fixes
+
+- Switching Playground files silently discarded unsaved edits
+- Safari clipped the hover tooltip; light-theme tree-button colors
+- Op_index's own return type, not its receiver's, under MSVC codegen
+
+### 📚 Documentation
+
+- Fix dead Wasmer JS SDK docs link
+- Document fixed-size stack-allocated arrays (num[N])
+- Document operator overloading
+
+### 🧪 Testing
+
+- Operator overloading
+- Print actual output on the MSVC-strict operator-overload mismatch
+- Match this file's own contains() convention for the MSVC-strict check
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.67.0
+
+### 💼 Other
+
+- Real markdown rendering, Safari tooltip fix, full screen, named files (#200)
+## [0.66.2] - 2026-10-06
+
+### 🐛 Bug Fixes
+
+- Wasm playground hangs on any blocking wait, not just pthread_join
+- Detect await-only concurrency, not just explicit fork
+- Prebake-wasm.mjs missed fenced examples indented inside list items
+- Doc examples that could never actually run once prebake actually tried
+- Wasm Playground hangs on any blocking concurrency (#199)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.66.2
+## [0.66.1] - 2026-10-06
+
+### 🐛 Bug Fixes
+
+- A repeated -D flag silently dropped every value but the last
+- Reject fork in the Playground's run path instead of hanging the tab
+- Doc examples that could never actually run in the Playground
+- Playground editor not respecting the site's theme
+
+### ⚡ Performance
+
+- Serialize fls sessions, gate live features until warm
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.66.1
+## [0.66.0] - 2026-10-06
+
+### 🚀 Features
+
+- *(website)* Consolidate the Playground into one multi-file CodeMirror block
+- *(fls)* A reload-per-call wasm entry point for in-browser diagnostics
+- *(website)* Wire real fls diagnostics into the Playground editor
+- *(fls)* Generalize the wasm entry point to replay any LSP messages
+- *(website)* Color the Playground editor with the real Fun Web theme
+- *(website)* Wire hover, completion, goto-definition, and signature help
+
+### 🐛 Bug Fixes
+
+- Async main's shadow-renamed entry point got a conflicting prototype
+- Runnable code block cursor desync and ugly title bars
+- Surface the real C compiler error instead of a generic message
+
+### ⚡ Performance
+
+- Load the Playground's wasm modules eagerly, cache-busted per build
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.66.0
+## [0.65.1] - 2026-10-01
+
+### 🐛 Bug Fixes
+
+- Make the deployed Playground actually work
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.65.1
+## [0.65.0] - 2026-10-01
+
+### 🚀 Features
+
+- *(codegen)* Reachability-based dead code elimination
+- *(driver)* Wire prune_unreachable, off for library builds
+- *(codegen)* Reachability-based dead code elimination (Tier 2 PR 1) (#192)
+- *(driver)* Extract the lowering pipeline into lower.fn
+- A minimal wasm-buildable compile-Fun-to-C entry point
+- Minimal wasm-buildable compile-Fun-to-C entry point (Tier 2 PR 2) (#193)
+- *(website)* A client-side Fun-to-wasm compile pipeline
+- *(website)* Wire client-side compile into the Run button
+- Wire a real client-side C-to-wasm compiler into the Playground (Tier 2 PR 3) (#194)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Gate the website build on release assets being uploaded
+- *(ci)* Gate the website build on release assets being uploaded (#191)
+- *(codegen)* Never prune under coverage, it needs every body present
+- *(codegen)* Mark an import-alias collision's renamed target too
+- *(driver)* Drop two now-unused codegen imports
+- *(import_resolver)* Sequential fallback for parallel preload
+
+### 📚 Documentation
+
+- Document the in-browser Playground's two-stage pipeline
+
+### 🚜 Refactor
+
+- *(warnings)* Make the read-collection helpers reusable
+- *(codegen)* Inject host_arch instead of resolving it internally
+- *(driver)* Compile_to_c_cover delegates to lower_to_c
+
+### 🧪 Testing
+
+- *(codegen)* Cover reachability pruning
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.65.0
+
+### 💼 Other
+
+- *(website)* Compile the compiler frontend to wasm at build time
+## [0.64.0] - 2026-09-30
+
+### 🚀 Features
+
+- *(driver)* Emscripten as a new C-compiler backend, real wasm target
+- Emscripten as a new C-compiler backend (wasm target, Tier 1 PR 1) (#184)
+- *(codegen)* Reject std.net/std.process for the wasm target
+- *(driver)* Wire emscripten_mode; test the wasm rejection messages
+- Reject std.net/std.process for the wasm target (Tier 1 PR 2) (#185)
+- *(website)* Pre-bake docs examples to wasm at build time
+- Pre-bake docs examples to wasm at build time (Tier 1 PR 4) (#189)
+- *(website)* Prebake playground samples too, normalize hash input
+- *(website)* Run pre-baked wasm examples client-side, no backend
+- Run pre-baked wasm examples client-side, no backend (Tier 1 PR 5) (#190)
+
+### 🐛 Bug Fixes
+
+- *(website)* Stop hiding the Playground tab on GitHub Pages
+- *(wasm)* Skip main()'s pthread wrapper on the emscripten target
+- *(website)* Name the prebaked entry file by hash before compiling
+- *(website)* Run each prebaked wasm module in its own iframe
+
+### 🚜 Refactor
+
+- *(website)* Extract playground samples into a shared module
+
+### ⚙️ Miscellaneous Tasks
+
+- Real emscripten toolchain on the Linux lane, smoke-tested
+- Real emscripten toolchain on the Linux lane (Tier 1 PR 3) (#186)
+- Build fun + emscripten in the website release job for prebaking
+- Bump version to 0.64.0
+## [0.63.0] - 2026-09-30
+
+### 🚀 Features
+
+- *(time)* Use reentrant gmtime/localtime/ctime
+- *(typecheck)* Recognize shape-downcast fit arms
+- *(codegen)* Dispatch shape-downcast fit arms via vtable identity
+- *(parser)* Parse bare Type(binding) as a shape-downcast fit pattern
+- *(warnings)* Exhaustiveness for shape-downcast fit blocks
+- *(fls)* Hover on a shape-downcast fit arm's binding
+- *(fls)* Fill-in-missing-arms code action for shape-downcast fit
+- *(parser)* Parse Type<Args>(binding) for a concrete generic instantiation
+- *(typecheck)* Accept a concrete generic shape-downcast implementor
+- *(warnings)* Exhaustiveness covers a concrete generic implementor too
+
+### 🐛 Bug Fixes
+
+- *(typecheck)* Match shape-downcast arms to the real parsed AST shape
+- *(codegen)* Match shape-downcast emission to the real parsed AST shape
+- *(typecheck)* Clear error for a wrong-arity shape-downcast arm
+- *(typecheck)* Reject a generic implementor in shape-downcast fit
+- *(warnings)* Exclude generic implementors from fit exhaustiveness
+- *(codegen)* Trigger early instantiation for a generic downcast target
+- Support multiple concrete instantiations of the same generic shape
+- *(codegen)* Fix fit's shape gate and two more ambiguous template matches
+- *(typecheck)* Auto-resolve bare generic shape-fit target when unambiguous
+- *(codegen)* Mirror the bare generic shape-fit auto-resolve
+- *(warnings)* Credit auto-resolved bare shape-fit arms as covered
+- *(codegen)* Pin shape-fit binding's own #line, don't inherit
+- *(fls)* Mirror bare generic shape-fit auto-resolve for hover
+- *(fls)* Mirror bare generic shape-fit auto-resolve for completion
+- *(fls)* Nest shape/enum distinction, don't widen the elif chain
+- *(codegen)* Use strcmp for str ==/!= comparisons; split MSVC string literals
+- *(codegen)* Use null-safe __fun_str_eq for str literal comparisons
+- *(codegen)* Use strcmp for str ==/!= on MSVC; split long string literals (#182)
+- *(website)* Recognize shape declarations in the std explorer
+- *(website)* Express 5 rejects a bare wildcard route, crashed prod server
+- *(website)* Type heading renderer children as ReactNode, not unknown
+- *(installer)* Don't overwrite a running binary in place; drop hardcoded FUN_CC=gcc
+- Shapes missing from std explorer, Express 5 crash, installer overwrite/FUN_CC gaps (#183)
+
+### 📚 Documentation
+
+- *(examples)* Add shape-downcast fit example
+- Document fit over a shape (structural downcasting)
+- Note the generic-implementor limitation for shape-downcast fit
+- Update the generic-implementor note for shape-downcast fit
+- Bare generic auto-resolve for shape-fit downcast
+
+### 🎨 Styling
+
+- Fix indentation in use_str_eq condition after fmt
+
+### 🧪 Testing
+
+- Shape-downcast fit dispatch and ordinary-fit regression coverage
+- Shape-downcast fit typecheck errors, exhaustiveness, and hover
+- Shape-downcast fit code action coverage
+- Shape-downcast fit rejects generic implementors
+- Concrete generic shape-downcast dispatch, exhaustiveness, field access
+- Two instantiations of the same generic implementing one shape
+- Bare generic shape-fit auto-resolve, unambiguous and ambiguous
+- Fls hover/completion on auto-resolved shape-fit binding
+
+### ⚙️ Miscellaneous Tasks
+
+- *(examples)* Rename quirks.fn to shapes.fn
+- Bump version to 0.63.0
+
+### 💼 Other
+
+- Use reentrant gmtime/localtime/ctime (#180)
+## [0.62.1] - 2026-09-29
+
+### 🚀 Features
+
+- *(editors)* Update grammars for the shape rename (#177)
+- *(codegen)* Emit reentrant gmtime/localtime/ctime prelude helpers
+
+### ⚙️ Miscellaneous Tasks
+
+- *(zed)* Bump the extension version to 0.1.1 (#178)
+- Bump version to 0.62.1
+## [0.62.0] - 2026-09-29
+
+### 🚀 Features
+
+- Remove the 'quirk' keyword, 'shape' is the only spelling now (#176)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.62.0
+## [0.61.1] - 2026-09-29
+
+### 🚀 Features
+
+- *(stdlib)* Rename std.quirks to std.shapes, migrate declarations and prose to shape
+- Migrate the compiler's own source, docs, and internals from quirk to shape (Phase B) (#175)
+
+### 📚 Documentation
+
+- *(examples)* Migrate quirk declarations and prose to shape
+- Teach shape as the primary keyword, note quirk still works
+
+### 🚜 Refactor
+
+- Rename the Quirk AST node kind and parser internals to Shape
+- *(codegen)* Rename quirk-dispatch internals to shape
+- *(semantics)* Rename quirk-tracking internals to shape
+- *(fls)* Rename quirk-related internals and labels to shape
+
+### 🧪 Testing
+
+- Follow the internal quirk->shape identifier rename
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.61.1
+## [0.61.0] - 2026-09-29
+
+### 🚀 Features
+
+- *(lexer)* Add 'shape' as a lexer keyword, and its own AST spelling flag
+- *(parser)* Accept 'shape' as a full synonym for 'quirk'
+- *(fmt)* Recognize 'shape' as a block keyword
+- *(fls)* Complete, hover, and render 'shape' the same as 'quirk'
+
+### 🐛 Bug Fixes
+
+- *(examples)* Rename a parameter that now collides with the 'shape' keyword
+
+### 🧪 Testing
+
+- Cover 'shape' as a synonym for 'quirk' across parser, fmt, and fls
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.61.0
+## [0.60.2] - 2026-09-29
+
+### 🚀 Features
+
+- *(zed)* Add extension manifest and language config
+- *(zed)* Add language queries
+- *(zed)* Add fls language server integration
+- *(zed)* Add Fun Web theme extension manifest
+- *(zed)* Add Fun Web dark and light themes
+- *(zed)* Ship run tasks and fuzz runnables
+- *(zed)* Add a debug build task and document debugging
+- Add Zed extension and Fun Web themes (#170)
+
+### 🐛 Bug Fixes
+
+- *(zed)* Quote task arguments so test names with spaces work
+- *(zed)* Align highlights with the VS Code grammar
+- *(zed)* Let specific highlight captures override the identifier fallback
+- *(zed)* Color method calls above the field fallback
+- *(zed)* Set diagnostic, git-status and scrollbar colors for the Fun Web theme
+- *(zed)* Set diagnostic, git-status and scrollbar colors for the Fun Web theme (#172)
+- *(warnings)* Walk test and fuzz block bodies for warning checks
+- *(warnings)* Keep walk_function's own doc comment attached to it
+- *(fls)* Show const and its literal value when hovering a local const
+- Silence assert_constant on deliberately-constant asserts inside test blocks
+- *(warnings)* Walk test and fuzz block bodies for warning checks (#173)
+
+### 📚 Documentation
+
+- *(zed)* Add extension readme
+- Mention the Zed extension
+- *(zed)* Describe the bundled tasks
+- *(zed)* Note that the downloaded release is not added to PATH
+- *(zed)* Note which theme colors are Zed-specific
+
+### 🧪 Testing
+
+- *(warnings)* Torture every warning category inside test and fuzz blocks
+
+### ⚙️ Miscellaneous Tasks
+
+- *(zed)* Use the omdxp handle as author
+- *(zed)* Rename the extension id to fun-lang
+- *(zed)* Rename the extension id to fun-lang (#171)
+- Bump version to 0.60.2
+## [0.60.1] - 2026-09-25
+
+### 🐛 Bug Fixes
+
+- *(fls)* Resolve a fit subject's method call through a field receiver
+- *(fls)* Resolve fit subjects that call a method through a field (#169)
+
+### 🧪 Testing
+
+- *(fls)* Cover hover in a fit over a method call on a field
+- *(fls)* Match the stdlib link target in any install layout
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.60.1
+## [0.60.0] - 2026-09-24
+
+### 🚀 Features
+
+- Sequential keyword hover, editor support, and isolated env-var tests
+- Sequential keyword hover, editor support, and isolated env-var tests (#165)
+- Coverage report model with lcov, Cobertura, JSON, HTML and text output
+- Instrument statements for code coverage
+- Fun test -cover, with report formats, a minimum and exclusions
+- Read the coverage minimum and exclusions from fun.toml
+- Test Explorer and coverage in the VS Code extension
+- Code coverage for fun test, reports, an 80% CI gate, and VS Code test explorer (#168)
+
+### 🐛 Bug Fixes
+
+- Give Windows children only their stdio handles, not every inheritable handle
+- Infer a generic type parameter from a negated argument
+- Keep the full precision of decimal literals
+- Keep a call-result receiver's temp inside a generic method's own body
+- Evaluate a call-result receiver where its expression runs, not before it
+- Print `true` and `false` for a {flag} placeholder given a literal or comparison
+- Reject == and != on an enum whose variants carry data
+- Give a fork inside a test the fork runtime when tests are compiled
+- Keep the generated C free of two avoidable compiler warnings
+- Include <intrin.h> for the coverage counter under MSVC
+- List the extension test files explicitly
+- Treat a negative start or length in substr as zero
+
+### 📚 Documentation
+
+- State exactly whose tests run and which files coverage measures
+- Describe the [coverage] manifest table, enum equality, and decimal literal precision
+
+### ⚡ Performance
+
+- Build with the C optimizer in `fun build`, add per-phase test timing
+- Build with the C optimizer in fun build, add per-phase test timing (#166)
+- Splice the codegen output buffer in place instead of rebuilding it
+- Run only a file's own tests, search the output in place, cache typedef lookups
+- Splice the codegen output buffer in place instead of rebuilding it (#167)
+
+### 🧪 Testing
+
+- Report the C compiler's stdout and exit code when a test program is rejected
+- Cover std.json, and fix three parser gaps it exposed
+- Cover std.log (text and JSON output, levels, fields, sinks)
+- Cover std.time (UTC and local formatting, arithmetic, try_ forms, sleeping, human strings)
+- Cover std.math and std.array
+- Cover std.set and std.thread_pool
+- Cover std.vec (growth, checked reads, insert/remove, resize, slicing, sorting, searching, join, display)
+- Cover std.map (lookup, replace, removal, growth, iteration, clone, display)
+- Cover std.io (format, fmt_ helpers, files, sinks, rotating sink)
+- Cover std.fs (files, the Fs value, failures, lines, directories)
+- Make the std.fs directory test repeatable by cleaning up what it creates
+- Cover ast_print, and import the warnings module it already used
+- Cover std.channel (buffering, codes, timeouts, cancellation, results, growth, select, and producer/consumer tasks over the async wrappers)
+- Run the suite, single-file and lint machinery against small projects, and cover the fuzz and compiler-selection helpers
+- Cover dependency resolution against local git repositories (tag, branch, revision, default, transitive, lock reuse, conflicts)
+- Pin which paths coverage treats as project code (not stdlib, dependencies, fixtures or build output)
+- Run the nested-suite driver tests one at a time
+
+### ⚙️ Miscellaneous Tasks
+
+- Run the Linux suite with coverage, enforce 80%, and publish the reports
+- Pin the Linux runners to ubuntu-24.04
+- Bump version to 0.60.0
+## [0.59.0] - 2026-09-24
+
+### 🚀 Features
+
+- *(stdlib)* Add Atomic<T>, a lock-free atomic primitive
+- *(stdlib)* Add Atomic<T>, a lock-free atomic primitive (#153)
+- *(stdlib)* Add Guarded<T>, a Mutex-backed value for arbitrary T
+- *(stdlib)* Add Guarded<T>, a Mutex-backed value for arbitrary T (#154)
+- *(fls)* Go to definition on a bare generic type-parameter name
+- *(fls)* Go to definition on a bare generic type-parameter name (#158)
+- *(codegen)* Platform-specific SO_RCVTIMEO/SO_SNDTIMEO prelude shim
+- Comma-separated OR patterns in a fit arm (.A, .B -> { ... })
+- .tag_value() builtin enum method, real language support
+- Std.http, a full HTTP client and server-side router
+- Std.http (client + server router) plus the compiler fixes it needed (#159)
+- Real client TLS (OpenSSL on POSIX, SChannel on Windows)
+- Std.crypto - hashing, HMAC, AEAD, Ed25519, ports and adapters
+- *(http)* Async/Channel-driven client and server variants
+- Real TLS (OpenSSL POSIX + SChannel Windows), then crypto + async http (#160)
+- Parallel test runner, both across files and within one file
+- Sequential test keyword + slow-test reporting (bootstrap-safe) (#163)
+
+### 🐛 Bug Fixes
+
+- *(net)* Make std.net actually work on Windows, add connect/tcp_connect
+- *(fmt,cli)* Stop baking trailing whitespace into blank comment lines; reject multi-file input where only one is checked
+- *(net)* Move round-trip test breadcrumbs to unbuffered stderr
+- *(codegen)* Try closesocket before _close in the Windows close() patch
+- *(net)* Make std.net actually work on Windows, add connect/tcp_connect (#152)
+- *(codegen)* Use int64_t, not long long, in the atomic prelude shims
+- *(codegen)* Use int64_t, not long long, in the atomic prelude shims (#155)
+- *(codegen,driver)* Suppress cl.exe filename echo and fix C4047 on str[] defer return
+- *(codegen,driver)* Suppress cl.exe filename echo and fix C4047 on str[] defer return (#156)
+- *(fls)* Hover on a bare generic type-parameter name
+- Run the formatter, and fix a wrong test column
+- *(fls)* Hover on a bare generic type-parameter name (#157)
+- *(codegen)* Tagged-union enum honors an explicit variant discriminant
+- *(codegen)* A bare function type used as a generic argument mangles
+- *(net)* Tcp_listen sets SO_REUSEADDR, fixing a real CI flake
+- *(net)* Tcp_connect resolves real hostnames, not just numeric IPs
+- Keep 'sequential test' out of the compiler's own bootstrap graph
+- MSVC environment probe races under the new parallel test runner
+- Never reuse a worker's own compile-path tag across files
+- Revert too-broad prototype fix, relocate process_id, fix two tests
+- Retry the C compile step on transient empty-output failures
+- Lower default test parallelism on Windows
+- Retry the outer per-file compile step too, not just the inner one
+- *(ci)* Set up the MSVC arm64 environment for the aarch64-windows-gnu release build
+- Close Windows process spawn/wait races behind flaky test exit codes
+- Stop freeing map keys before the map has finished looking them up
+- Close Windows process spawn/wait races behind flaky test exit codes (#164)
+
+### 📚 Documentation
+
+- Remove stray other-language mentions from comments and docs
+- Remove stray other-language mentions (#161)
+
+### 🧪 Testing
+
+- *(net)* Remove the round-trip test's diagnostic breadcrumbs
+
+### ⚙️ Miscellaneous Tasks
+
+- *(vscode)* Bundle the extension with esbuild
+- *(vscode)* Bundle the extension with esbuild (#151)
+- Bump version to 0.59.0
+## [0.58.2] - 2026-09-22
+
+### 🐛 Bug Fixes
+
+- *(typecheck)* Check enum variant constructor arguments against their payload
+- *(typecheck)* Check enum variant constructor arguments against their payload (#148)
+- Report every name the generated C cannot accept (#149)
+- *(codegen)* Run every compiled program's main() on a worker thread with a large stack
+- *(codegen)* Run every compiled program's main() on a worker thread with a large stack (#150)
+
+### 📚 Documentation
+
+- Explain the 128 MB main() stack and how it differs from fork/await's 8 MB
+- Fix two broken internal links in language.md
+
+### ⚙️ Miscellaneous Tasks
+
+- Move release.yml's actions to Node 24 releases
+- Move release.yml's actions to Node 24 releases (#147)
+- Bump version to 0.58.2
+## [0.58.1] - 2026-09-19
+
+### 🚀 Features
+
+- *(stdlib)* Default Result's error type to Error
+- *(stdlib)* Default Result's error type to Error (#144)
+
+### 🐛 Bug Fixes
+
+- *(codegen)* A for loop over a plain iterator type iterates a copy
+- *(codegen)* A for loop over a plain iterator type iterates a copy (#145)
+
+### ⚙️ Miscellaneous Tasks
+
+- Use the maintained msvc-dev-cmd fork
+- Use the maintained msvc-dev-cmd fork (#146)
+- Bump version to 0.58.1
+## [0.58.0] - 2026-09-19
+
+### 🚀 Features
+
+- *(stdlib)* Name sort_by's comparison function type Comparator<T>
+- *(stdlib)* Name sort_by's comparison function type Comparator<T>; ci: checkout v7 (#142)
+- *(lang)* Add default generic type parameters
+- *(lang)* Add default generic type parameters (#143)
+
+### 🐛 Bug Fixes
+
+- For over a pointer to a collection, fls default handling, impl default error
+
+### ⚙️ Miscellaneous Tasks
+
+- Move actions/checkout to v7 in ci-dev
+- Bump version to 0.58.0
+## [0.57.3] - 2026-09-19
+
+### 🚀 Features
+
+- *(cli)* Add fun lint, a tree-wide warning report
+- *(cli)* Add fun lint, a tree-wide warning report (#140)
+
+### ⚙️ Miscellaneous Tasks
+
+- Lint the compiler and stdlib with fun lint
+- Lint the compiler and stdlib with fun lint (#141)
+- Bump version to 0.57.3
+## [0.57.2] - 2026-09-19
+
+### 🐛 Bug Fixes
+
+- *(typecheck)* Reject a bare .Variant that its expected enum does not declare
+- *(typecheck)* Also reject an unknown .Variant nested in another variant's payload
+- *(typecheck)* Reject a bare .Variant that its expected enum does not declare (#138)
+- *(parser)* Bind a postfix propagation inside a prefix operator's operand
+- *(parser)* Bind a postfix propagation inside a prefix operator's operand (#139)
+
+### 🚜 Refactor
+
+- *(codegen)* Use the bare .UnsupportedNode shorthand in ?! calls
+- *(codegen)* Use the bare .UnsupportedNode shorthand in ?! calls (#137)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.57.2
+## [0.57.1] - 2026-09-19
+
+### 🚀 Features
+
+- *(fls)* Complete fls coverage for ?!(.Variant), document the syntax
+
+### 🐛 Bug Fixes
+
+- *(lang)* Accept a bare .Variant shorthand as ?!'s error argument
+- *(lang)* Accept a bare .Variant shorthand as ?!'s error argument (#136)
+
+### 🚜 Refactor
+
+- *(codegen)* Use ?! for guard-then-unwrap sites in codegen.fn
+- *(codegen)* Use ?! for guard-then-unwrap sites in codegen.fn (#135)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.57.1
+## [0.57.0] - 2026-09-18
+
+### 🚀 Features
+
+- *(codegen)* Inline a user Iterator's own next() body into for loops
+- *(lang)* [**breaking**] Fold range-for into the general Iterator<T> mechanism
+- *(lang)* Typecheck resolves a for loop's real element type generally
+- *(lang)* [**breaking**] Vec<T> implements Iterator<T> directly (step 4/7)
+- *(lang)* [**breaking**] Map<T> and Set<T> implement Iterator<T> directly (step 5/7)
+- *(alias)* Rebuild variadic generic alias params on real tuple types
+- *(alias)* Rebuild variadic generic alias params on real tuple types (#131)
+- *(stdlib)* Add std.prelude; fix(warnings): allow/expect singular vs plural scope
+- *(stdlib)* Add std.prelude; fix(warnings): allow/expect singular vs plural scope (#132)
+- *(stdlib)* Add Steppable<T>/StepRange<T> for range iteration over any ordered type
+- *(stdlib)* Add Steppable<T>/StepRange<T> for range iteration over any ordered type (#133)
+- *(lang)* Add ?!(err)/!? cross-type propagation sugar
+- *(lang)* Add ?!(err)/!? cross-type propagation sugar (#134)
+
+### 🐛 Bug Fixes
+
+- *(cli)* Reserve a larger MSVC stack for every compiled program, not just tests
+- *(ci)* Patch each Windows bootstrap stage's PE stack reserve directly
+- *(codegen)* Build the base-name prefix via StringBuilder, not inline format()
+- *(codegen)* Fix and unify the plain-type Iterator call-based fallback
+- *(codegen)* Substitute tuple-typed generic arguments in resolve_type_subst
+- *(codegen)* Substitute tuple-typed generic arguments in resolve_type_subst (#129)
+- *(codegen)* Carry a tuple-typed enum payload's real DataType through instantiation
+- *(codegen)* Carry a tuple-typed enum payload's real DataType through instantiation (#130)
+- *(fls)* Recognize ?!(err)/!? wherever ?/! already had dedicated support
+
+### 📚 Documentation
+
+- Document the completed Iterator<T> for-loop dispatch mechanism
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.57.0
+## [0.56.0] - 2026-09-17
+
+### 🚀 Features
+
+- *(lang)* Reject a pointer-typed type-alias body
+- *(lang)* Add unused_type_alias warning, document quirk-bodied aliases
+
+### 🐛 Bug Fixes
+
+- *(lang)* Real memory-corruption bug in bound-list type-alias constraints
+- *(fls)* Hover on a bare enum-variant shorthand nested inside another shorthand's call
+
+### 🧪 Testing
+
+- *(fls)* Lock in a type alias's own workspace/document symbol coverage
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.56.0
+## [0.55.0] - 2026-09-16
+
+### 🚀 Features
+
+- *(lang)* Make 'use'/'flag' the canonical spelling of 'imp'/'bin'
+- *(lang)* Let a generic bound name a quirk or a full type expression
+- *(lang)* Add type aliases (als Name<T> = <type>;)
+
+### 🐛 Bug Fixes
+
+- Leak fixes in alias expansion, bump Windows test stack to 128MB
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.55.0
+## [0.54.0] - 2026-09-15
+
+### 🚀 Features
+
+- *(lang)* Accept 'use'/'flag' as alternate spellings of 'imp'/'bin'
+
+### 🐛 Bug Fixes
+
+- *(deps)* Reject a dependency name that collides with a keyword
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Update CHANGELOG.md
+- Bump version to 0.54.0
 ## [0.53.6] - 2026-09-12
 
-### Chore
-
-- Bump version to 0.53.6
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* PACKAGE_NAME/PACKAGE_VERSION reflect live fun.toml, real goto
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.53.6
 ## [0.53.5] - 2026-09-12
 
-### Chore
-
-- Bump version to 0.53.5
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(driver)* Add bat-wrapper fallback for cl.exe when INCLUDE not set
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.53.5
 ## [0.53.4] - 2026-09-12
 
-### Chore
-
-- Bump version to 0.53.4
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(driver)* Source MSVC env automatically on Windows for plain terminals
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.53.4
 ## [0.53.3] - 2026-09-12
 
-### Chore
-
-- Remove zig cc references from comments in driver and harness
-- Bump version to 0.53.3
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Pin #line directives in variadic function preamble
 - *(vscode)* Pass MSVC env to fun.exe so it emits MSVC-compatible C
 
+### ⚙️ Miscellaneous Tasks
+
+- Remove zig cc references from comments in driver and harness
+- Bump version to 0.53.3
 ## [0.53.2] - 2026-09-12
 
-### Chore
-
-- Bump version to 0.53.2
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(vscode)* Auto-source MSVC env for debug button on Windows
 
-### ﻿fix
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.53.2
+
+### 💼 Other
 
 - *(fls,path,deps)* Windows compat for deps hover, completions, run, cache
-
 ## [0.53.1] - 2026-09-11
 
-### Chore
-
-- Bump version to 0.53.1
-
-### Docs
-
-- *(deps)* Use single-dash flags for fun add, matching every other CLI flag
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(cli)* Add fun add / fun deps update to -help output
 - *(deps)* Fls completion for imp deps., validate fun add upfront
 - *(cli)* _run_tests_captured now includes a failed test's stderr
 
-### Test
+### 📚 Documentation
+
+- *(deps)* Use single-dash flags for fun add, matching every other CLI flag
+
+### 🧪 Testing
 
 - *(deps)* Split fls deps-hover test into 3, add failure diagnostics
 - *(deps)* Add direct import_target/is_dir diagnostics for the Windows failure
 - *(deps)* Isolate tokenizer path from resolve_import_path directly
 
-### ﻿fix
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.53.1
+
+### 💼 Other
 
 - *(fls)* Is_dir() fallback in _resolve_specifier fixes deps hover on Windows
-
 ## [0.53.0] - 2026-09-11
 
-### Chore
-
-- Bump version to 0.53.0
-
-### Docs
-
-- *(deps)* Clarify [lib] has nothing to do with [deps] sharing
-- *(deps)* Note that fetching never verifies the repo is a Fun project
-
-### Feat
+### 🚀 Features
 
 - *(deps)* Git-based dependency management via [deps] in fun.toml
 - *(deps)* Resolve transitive [deps], real fetch bugs found along the way
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(deps)* Correct the earlier WIP commit's diagnosis, no compiler bug
 - *(deps)* Format the import_resolver test fixture, add env vars docs
@@ -105,40 +883,41 @@
 - *(cli)* Executable_path qualifies bare names on Windows too, use backslash
 - *(vscode)* Use `& ` invoker and PowerShell-safe escaping in terminal commands
 
-### Wip
+### 📚 Documentation
+
+- *(deps)* Clarify [lib] has nothing to do with [deps] sharing
+- *(deps)* Note that fetching never verifies the repo is a Fun project
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.53.0
+
+### 💼 Other
 
 - *(deps)* [deps] manifest table with inline-table dependency entries
-
 ## [0.52.5] - 2026-09-10
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Root-cause every remaining -g debug-info gap
-
 ## [0.52.4] - 2026-09-10
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Root-cause the stacked-propagation double-evaluation bug
 
-### Refactor
+### 🚜 Refactor
 
 - Re-tighten lookup_fit_variant's ?-chain now that the hoist bug is fixed
 - Re-tighten the remaining safe ?-chain sites from the reverted batch
-
 ## [0.52.3] - 2026-09-10
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Root-cause the receiver-chain generic-instantiation hoist leak
-
 ## [0.52.2] - 2026-09-10
 
-### Chore
-
-- *(release)* Bump to 0.52.2
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(docs)* Remove a stale workaround note, verify and test the real fix
 - *(fmt)* Keep a postfix ?/! glued to a chained field access
@@ -147,48 +926,42 @@
 - Teach two more fit-subject resolvers about propagation and field access
 - *(codegen)* Root-cause a nested-propagation double-eval and MSVC hoist leak
 
-### Refactor
+### 🚜 Refactor
 
 - Inline the 5 originally-reverted ?-chain tightenings
 - Inline further single-use ?-chain sites found surveying src/+fls/
 - Dispatch directly on indexed elements, no bound pointer first
 - Use the bare enum-variant shorthand for fls's own stdin sink
 
-### Revert
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Bump to 0.52.2
+
+### ◀️ Revert
 
 - Undo every ?-chain tightening still unsafe under MSVC
-
 ## [0.52.1] - 2026-09-09
 
-### Chore
-
-- *(release)* Bump to 0.52.1
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* Resolve hover and dot-completion through an inline propagation receiver
 - *(codegen)* Stop a stale hoist position from leaking across functions
 
-### Fmt
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Bump to 0.52.1
+
+### 💼 Other
 
 - Fix an unformatted continuation line in navigation.fn
-
 ## [0.52.0] - 2026-09-09
 
-### Chore
-
-- *(release)* Bump to 0.52.0
-
-### Docs
-
-- Document transitive imports and global private-name uniqueness as intended
-
-### Feat
+### 🚀 Features
 
 - *(codegen)* Support a propagation as a bare fit subject
 - *(fls)* Resolve a propagation used as a fit subject in hover/completion
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Dispatch a method on an indexed element reached through a chain
 - *(parser)* Name the reserved word when it collides with a binding
@@ -196,18 +969,21 @@
 - *(codegen)* Let a method call resolve a global variable as its receiver
 - *(parser)* Reject two adjacent expressions with no operator between them
 
-### Test
+### 📚 Documentation
+
+- Document transitive imports and global private-name uniqueness as intended
+
+### 🧪 Testing
 
 - *(lexer)* Add regression coverage for the doubled-backtick escape
 - *(typecheck)* Add regression coverage for the duplicate-symbol diagnostic
 
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Bump to 0.52.0
 ## [0.51.1] - 2026-09-09
 
-### Chore
-
-- *(release)* Bump to v0.51.1
-
-### Fix
+### 🐛 Bug Fixes
 
 - Postfix ?/! failed to hoist under MSVC when used inline as a receiver
 - *(codegen)* '{ptr}'/'{raw}' skip Display dispatch, showing the raw pointer
@@ -216,30 +992,25 @@
 - Restore expr?.field inline-receiver and fix {ptr} MSVC dispatch (#112)
 - *(editors)* Highlight postfix '?' as an operator, matching '!'
 
-### Refactor
+### 🚜 Refactor
 
 - Adopt postfix ?/! propagation across src/, where the shape matches exactly
 
-### Revert
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Bump to v0.51.1
+
+### ◀️ Revert
 
 - Drop expr?.field inline-receiver support, real MSVC crash on Windows CI
-
 ## [0.51.0] - 2026-09-08
 
-### Chore
-
-- *(release)* Bump to v0.51.0
-
-### Docs
-
-- *(examples)* Add postfix ?/! propagation examples
-
-### Feat
+### 🚀 Features
 
 - *(lang)* Function values as first-class - checked at every call site, valid everywhere a type is
 - *(lang)* Postfix ? and ! operators for Option/Result propagation
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* Switch stdio to binary mode on Windows to fix LSP framing
 - *(fls)* Fix LSP header framing on Windows via runtime backend check
@@ -250,17 +1021,20 @@
 - Postfix operator precedence after a method chain, private-method resolution, and formatter spacing
 - Generic function call chaining, and postfix operators before another unary op
 
-### Refactor
+### 📚 Documentation
+
+- *(examples)* Add postfix ?/! propagation examples
+
+### 🚜 Refactor
 
 - *(lang)* Convert two real call sites to postfix ! propagation
 
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Bump to v0.51.0
 ## [0.50.4] - 2026-09-06
 
-### Chore
-
-- *(ci)* Drop the Windows -lm bootstrap bridge, no longer needed
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(installer)* Drop stale zig default from the Windows MSI and portable package
 - *(fls)* Resolve a bare '.{...}' compound-literal shorthand field's own hover
@@ -268,13 +1042,12 @@
 - *(fls)* Render a generic type param's own declared constraint in hover
 - *(codegen)* Increase MSVC test-binary stack from 8 MB to 64 MB
 
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* Drop the Windows -lm bootstrap bridge, no longer needed
 ## [0.50.3] - 2026-09-05
 
-### Chore
-
-- *(release)* Bump to v0.50.3
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Resolve generic field types, FFI-narrowed let inference, and fls for-loop item hover
 - *(cli)* Drop -lm on Windows, clang there links via lld-link, not a POSIX linker
@@ -288,169 +1061,73 @@
 - *(ci)* Make it a real 3-stage bootstrap, 2 stages didn't fully converge
 - *(codegen)* Resolve the actual compiler for msvc-mode, and top-level consts in varargs
 
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* Bump to v0.50.3
 ## [0.50.2] - 2026-09-04
 
-### Build
+### 🚀 Features
 
-- *(deps-dev)* Bump fast-uri
-- *(deps-dev)* Bump fast-uri from 3.1.5 to 3.1.7 in /editors/vscode in the npm_and_yarn group across 1 directory (#103)
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update (#104)
-
-### Chore
-
-- Drop leftover zig-out/zig-cache gitignore entries
-- *(release)* Bump to v0.50.1
-
-### Docs
-
-- Document the per-test/per-fuzz-target commands, and fork in the async debugging notes
-- Sweep stale Zig references and dead cross-links, link sections
-
-### Feat
-
-- *(codegen)* Emit #line directives for -g, restoring native debugging
-- *(website)* Tabbed stdlib module view, syntax highlighting sourced from the editor themes
-- *(website)* Split the docs into topic-based tabs, not two giant pages
-- *(website)* Redesign the sidebar nav, drop the redundant right-side TOC
-
-### Fix
-
-- *(fls)* Infer more let shapes, generic literals/multi-param returns, and declaration type params
-- *(fls)* Show a sized array's own size and fence a char literal's own hover breakdown
-- *(fls)* A two-variable for loop over a Map binds key/value, not index/item
-- *(fls)* Substitute a fit arm's own payload binding type, and resolve a call-shaped fit subject
-- *(fls)* Escape a control-character literal's own hover, drop an unused import
-- *(warnings)* Flag a fit's catch-all when both bin values are already covered
-- *(fls)* Substitute a generic return through a compound-shaped parameter
-- *(fls)* Give each outline field, variant, and quirk method its own position
-- *(fls)* Prefer a method over a same-named field when the reference is a call
-- *(typecheck)* Reject ambiguous enum shorthand and duplicate top-level names
-- *(fls)* Resolve a fit arm's own payload binding through a let-inferred subject
-- *(fls)* Return document symbols as a real nested tree, not a flat guess
-- *(fls)* Nest a concrete-instantiation impl's own methods under its base compound too
-- *(cli)* -test/-fuzz respect -no-exec, and -warn-unused-lenient actually works
-- *(codegen)* Pin every line of an async/fork trampoline's own debug info
-- *(cli)* -test/-fuzz also respect -outf/keep_c, update docs to match
-- *(cli)* Merge manifest and -D defines everywhere, not just one or the other
-- *(cli)* -ast prints under -test/-fuzz too, not just a plain compile
-- *(cli)* Fun build respects -D too, not just fun.toml's own defines
-- *(fls)* Resolve a quirk-typed receiver's method, a parenthesized chain, and a compound-literal field name
-- *(fls)* Resolve a chain method whose own paren group ends in a dereferenced call
-- *(fls)* Go-to-definition on a quirk-typed receiver's method lands on the method, not the quirk
-- *(ci)* Make WiX Toolset available on PATH after choco install for aarch64 Windows
-- *(website)* Fall back to fun.toml for the repo version, not just build.zig.zon
-- *(website)* Stop double-boxing code blocks, add copy buttons, fix editor caret drift
-- *(website)* Stabilize the doc-tab TOC across nav clicks, deep links, and scroll-spy
-- *(website)* Mobile-native stdlib modal, fix duplicate doc titles
-- *(ci)* Bootstrap release builds from the newest other release, not "latest"
-- *(ci)* Fix PowerShell quote mangling, gate extension publish on release success
-- *(ci)* Replace the retired macos-13 runner with macos-15-intel
-
-### Inception
-
-- Self-hosted Fun toolchain (#102)
-
-### Test
-
-- *(fls)* Lock in the fuzz block data/len hover behavior on inception
-
-## [0.46.16] - 2026-09-03
-
-### Docs
-
-- Fix the C compiler selection docs, stale since self-hosting
-
-### Feat
-
-- *(fls)* Hover a number literal to see it in decimal, hex, binary, and octal
-
-### Fix
-
-- *(fls)* Resolve generic calls, arithmetic, await, and chains through parens in let-inference
-- *(fls)* Give fun.toml's own PACKAGE_NAME/PACKAGE_VERSION hover and completion support
-- *(cli)* Rename manifest's [[bin]] target to [[exe]]
-
-### Refactor
-
-- *(cli)* Rename the manifest's [[bin]] target to [[exe]]
-
-### Test
-
-- *(warnings)* Cover blocking_fork_deadlock, the one warning id with no test at all
-
-## [0.46.15] - 2026-09-02
-
-### Ci
-
-- Bump test timeout-minutes 20 -> 35 for macOS
-
-### Fix
-
-- *(codegen)* Fix print() routing and qrecv/frame scoping bugs
-- *(cli,codegen,tests)* Full MSVC support for FUN_CC=cl fun build
-
-## [0.46.14] - 2026-09-01
-
-### Chore
-
-- *(ci)* Revert forced FUN_CC=cl on Windows build step
-
-### Ci
-
-- Drop the Force clang on Linux workaround
-- Two-stage Windows build — bootstrap with clang then recompile with cl
-- Load MSVC env before fun build on Windows
-
-### Fix
-
-- *(fls)* Rename SEVERITY_ERROR, it collides with a Windows SDK macro
-- *(fls)* Remove a closed document from its map before freeing its uri
-- *(codegen)* Stop relying on _BitInt for sized ints up to 128 bits
-- *(codegen)* Dispatch Windows close() through _close before closesocket; the bare alias silently fails on pipe fds
-- *(codegen,windows)* Comprehensive MSVC compatibility fixes for examples
-- *(codegen,windows)* MSVC type-inference and multi-dim array iteration
-- *(tests,windows)* Use cmd /c echo on Windows in the observe_probe test
-- *(tests,windows)* Fix MSVC defaults in harness and add flicker reporter
-- *(ci)* Avoid overriding FUN_STDLIB_DIR with POSIX $PWD on Windows runners
-- *(ci)* Pin FUN_STDLIB_DIR to GITHUB_WORKSPACE stdlib on Windows test steps
-- *(ci,codegen)* Use github.workspace template for Windows stdlib path and suppress void-wrapper C4098
-- *(codegen)* Restore codegen.fn formatting via self-hosted formatter
-- *(ci)* Set up MSVC before build step on Windows so fun.exe is MSVC-native
-- *(lexer)* Strip \r from raw strings; add .gitattributes for LF checkout
-- *(codegen)* Eliminate __auto_type and GNU statement expressions from generated C
-
-### Fmt
-
-- Run the formatter over files the lint step flagged
-
-## [0.46.13] - 2026-08-25
-
-### Feat
-
-- *(fmt)* Wrap an over-long ||/&& chain, filling each line like fit arms
-- *(cli)* Shorten fun init's project kinds to lib/exe/mix, and write a .gitignore
-
-### Fix
-
-- *(fls)* Stop the workspace symbol table from outliving a closed document's own strings
-- *(codegen)* Rename TokenType, add a Windows clock_gettime, use dot-shorthand throughout
-- *(stdlib)* Stop formatting a num with %lld, portable only by accident
-- *(codegen)* Give the fork-scheduler's own prelude the clock_gettime shim too
-- *(codegen)* Give Windows a real clock_gettime for std.channel's own deadline math
-- *(codegen)* Guard the Windows clock_gettime shim from MinGW's own real one
-
-## [0.46.12] - 2026-08-25
-
-### Docs
-
-- *(fls)* Document and test the deliberate refusal of a ranged edit with no baseline
-- *(examples)* Exercise implicit-typed const bindings, not just explicit
-- *(ci)* Update every remaining compiler/ reference to src/
-- *(cli)* Document -test/-fuzz/-fuzz-target in help text
-
-### Feat
-
+- *(cli)* Read fun.toml with library, binary, and mixed packages
+- *(stdlib)* Parse TOML sections and arrays of tables
+- *(cli)* Compile and run programs, with build-time constants from the manifest
+- *(cli)* Build a package from its manifest
+- *(cli)* Run a file's test blocks with fun test
+- *(codegen)* Back the process bindings on Windows
+- *(cli)* Start the formatter, emitting from the token stream
+- *(cli)* Teach the formatter literals, prefix operators, and brackets
+- *(cli)* Keep literals, fenced comments, and multi-statement blocks intact
+- *(cli)* Keep compound literals inline and indent continuation lines
+- *(cli)* Match the reference formatter's line and comment layout
+- *(cli)* Reproduce asm statements and align trailing comments
+- *(cli)* Normalize block braces instead of copying their spacing
+- *(cli)* Lay out unformatted source instead of reproducing it
+- *(cli)* Format from the command line
+- *(semantics)* Check types before generating code
+- *(semantics)* Check calls made through a receiver
+- *(semantics)* Check impl bodies, quirk conformance, and enum values
+- *(semantics)* Reject unknown callees, value sizeof, and non-bin conditions
+- *(semantics)* Hold generic calls and quirk impls to what they declare
+- *(semantics)* Follow the arguments an instantiation supplies
+- *(semantics)* Check instantiations, inferred ones included
+- *(semantics)* Report what a program probably did not mean
+- *(semantics)* Notice races, deadlocks, overflows, and out-of-range literals
+- *(semantics)* Hold a name to what the file declaring it offers
+- *(fls)* Speak the language server protocol
+- *(fls)* Report diagnostics, hover, and go to definition
+- *(fls)* List what a document declares
+- *(fls)* Find references, rename, and complete
+- *(fls)* Format a document, and complete with snippets
+- *(codegen)* Carry a function-typed argument through an async call
+- *(typecheck)* Reject a written zero divisor and a mismatched fit branch
+- *(parser)* Measure a pointer type with sizeof
+- *(typecheck)* Hold a global and a field to what their file offers
+- *(parser)* Forward-reference a type in a compound initializer
+- *(codegen)* Drive 'for x : c' via a user Iterator quirk impl
+- *(codegen)* Check format()'s argument count against its placeholders
+- *(parser,codegen)* Parse and emit inline assembly (asm statement)
+- *(selfhost)* Run every test block under a directory, not just one file
+- *(selfhost)* Port fuzz-mode codegen and the fun fuzz subcommand
+- *(selfhost)* Finish self-hosting, retire the Zig toolchain
+- *(fls)* Hover and go-to-definition for enum variants and fit payload bindings
+- *(fls)* Add textDocument/signatureHelp
+- *(fls)* Add workspace/symbol
+- *(fls)* Hover and go-to-definition on an import path segment
+- *(fls)* Add textDocument/inlayHint
+- *(fls)* Add textDocument/codeAction
+- *(fls)* Specialize a generic method's signature against its receiver
+- *(fls)* Fill in a fit's missing arm, and read doc comments from imported files
+- *(fls)* Implement the quirk-method-stub code action
+- *(fls)* Add insert-await and mark-async code actions
+- *(fls)* Add import-path completion, fix method hover/as-doc bugs
+- *(fls)* Add hover's 'See also' related-types footer
+- *(fls)* Add allow/expect warning-id completion
+- *(fls)* Hover documents sized integer types (i7, u23, ...)
+- *(fls)* Parameter-name inlay hints at call sites
+- *(fls)* Hovering a constant shows its own literal value
+- *(fls)* Add semanticTokens/full, fix a real lexer end-column bug
+- *(fls)* Workspace-wide indexing for references and workspace/symbol
+- *(fls)* Definition falls back to a workspace-wide type search
 - *(fls)* Completion offers a compound-init literal's own field names
 - *(fls)* Completion offers a call snippet with a tab stop per parameter
 - *(fls)* Sizeof shows a canned hover, matching fork's own treatment
@@ -476,10 +1153,83 @@
 - *(cli)* Add fun init to scaffold a new package
 - *(cli)* Report the compiler's own version, not a cwd manifest's
 - *(cli)* Fall back across C compilers, and support FUN_CC_ARGS
-- *(cli)* Inject PACKAGE_NAME/PACKAGE_VERSION into fun build targets
+- *(fmt)* Wrap an over-long ||/&& chain, filling each line like fit arms
+- *(cli)* Shorten fun init's project kinds to lib/exe/mix, and write a .gitignore
+- *(fls)* Hover a number literal to see it in decimal, hex, binary, and octal
+- *(codegen)* Emit #line directives for -g, restoring native debugging
+- *(website)* Tabbed stdlib module view, syntax highlighting sourced from the editor themes
+- *(website)* Split the docs into topic-based tabs, not two giant pages
+- *(website)* Redesign the sidebar nav, drop the redundant right-side TOC
 
-### Fix
+### 🐛 Bug Fixes
 
+- *(cli)* Build and run the same way on all three platforms
+- *(cli)* Drop an unused import
+- *(codegen)* Name the node a failed compile choked on, and accept warning control
+- *(codegen)* Give a test body its own function state, and report where a failure came from
+- *(cli)* Keep build output under fun-out, and stop tracking generated C
+- *(lexer)* Record whether whitespace follows a token
+- *(lexer)* Keep whitespace that a lookahead consumed
+- *(cli)* Write character literals as they were written
+- *(imports)* Keep an absolute path absolute
+- *(parser)* Leave no value pointer unset on a declaration that has none
+- *(lexer)* Let a raw string hold a backtick
+- *(imports)* Ask where the standard library is rather than assume
+- *(selfhost)* Drop imports nothing uses
+- *(warnings)* Judge a real file the way the reference does
+- *(typecheck)* Say when a call names a method a type does not have
+- *(warnings)* Check a fit written in shorthand
+- *(typecheck)* Enforce a method's own generic bound
+- *(typecheck)* Judge visibility on an alias-qualified call
+- *(typecheck)* Tell two instantiations of a generic apart
+- *(typecheck)* Refuse to compare two different enums
+- *(typecheck)* Reject sizeof of a name nothing declares
+- *(codegen)* Fill a defaulted argument correctly at every call
+- *(codegen)* Substitute a generic enum's self-referential payload
+- *(codegen)* Coerce a value reached through an index or a field
+- *(codegen)* Let a method chain onto a quirk-typed call result
+- *(codegen)* Dispatch through a quirk-typed array element, and coerce a plain assignment
+- *(codegen)* Give a plain compound's fixed-size array field its brackets
+- *(codegen)* Bound a hex string escape to two digits
+- *(typecheck)* Reject an empty enum and let-from-void
+- *(codegen)* Dispatch a generic compound's quirk impl dynamically
+- *(codegen)* Inline a fixed-size array field on a generic compound
+- *(warnings)* Warn on a non-exhaustive num/pointer fit with no catch-all
+- *(codegen)* Replay a loop-body defer before continue and break
+- *(codegen)* Resolve a fit's generic-call subject return type
+- *(typecheck)* Reject a required parameter after a defaulted one
+- *(codegen)* Agree on the extra star an array return type needs
+- *(codegen)* Materialize a quirk dispatch's call-result receiver once
+- *(codegen)* Dot-vs-arrow after indexing a raw pointer, array-literal call args
+- *(codegen)* Reject a genuine by-value compound cycle
+- *(codegen)* Substitute a method's own type param, not the impl's
+- *(codegen)* Monomorphize a generic async/fork call target
+- *(codegen)* Include time.h explicitly, close std.c.* header gap
+- *(selfhost)* Elastic scheduler pool, bounded concurrent import preload
+- *(selfhost)* Give kill() a real Windows implementation
+- *(ci)* Make the asm-arch check bootstrap-safe, lint with the built binary
+- *(codegen)* Splice a nested generic method's own prototype at file scope
+- *(codegen)* Drop redundant parens on if/while conditions, define Windows pid_t
+- *(codegen)* Splice lazy prototypes at function scope, not block scope
+- *(ci)* Pass a token to setup-fun so it doesn't hit the anonymous API limit
+- *(codegen)* Give a plain method and a same-named quirk method separate identities
+- *(codegen)* Ensure a by-value generic-field substitution's plain type is emitted first
+- *(fls)* Stop mangling non-ASCII bytes into invalid JSON escapes
+- *(fls)* Hover/definition for methods, qualified variants, doc comments, missing keyword docs
+- *(fls)* Method hover was still returning null, and resolve generic variant payloads to concrete types
+- *(fmt)* Free the pre-grouped token vector after grouping
+- *(fls)* Resolve a dotted chain through its own receiver's type
+- *(warnings)* Register a function's own parameters as fit subjects
+- *(editors)* Stop generic-type highlighting from matching comparisons
+- *(fls)* Field/variant go-to-def, See also on containers, '..' import hover
+- *(fls)* Resolve locals/params inside impl methods, add typeDefinition
+- *(fls)* Let-hint gaps for char literals, field reads, bare copies
+- *(fls)* Method-at-declaration hover, doc-comment prose left-trim
+- *(fls)* Fit-arm locals, See-also container on bare variants, scope completion
+- *(fls)* Resolve locals and params inside test and fuzz blocks
+- *(fls)* Call-ending chains resolve everywhere, fix an .Impl regression
+- *(fls)* De-mangle a quirk-conforming impl's own method name correctly
+- *(fls)* TypeDefinition resolves a method call's own return type
 - *(codegen)* A plain function/method prototype splices safely while nested
 - *(fls)* Positions convert between LSP's UTF-16 columns and byte columns
 - *(fls)* A let-inferred receiver resolves its own methods, diagnose caches per revision
@@ -555,438 +1305,262 @@
 - *(fls)* Resolve name[i]'s own indexed type in let-inference, not the base's
 - *(fls)* Stop a compound-init literal's own type name mis-rendering as "compound"
 - *(cli)* Close CLI parity gaps against the Zig main compiler
-- *(codegen)* Resolve a call embedded mid-chain when lowering method calls
+- *(fls)* Stop the workspace symbol table from outliving a closed document's own strings
+- *(codegen)* Rename TokenType, add a Windows clock_gettime, use dot-shorthand throughout
+- *(stdlib)* Stop formatting a num with %lld, portable only by accident
+- *(codegen)* Give the fork-scheduler's own prelude the clock_gettime shim too
+- *(fls)* Rename SEVERITY_ERROR, it collides with a Windows SDK macro
+- *(fls)* Remove a closed document from its map before freeing its uri
+- *(codegen)* Stop relying on _BitInt for sized ints up to 128 bits
+- *(codegen)* Dispatch Windows close() through _close before closesocket; the bare alias silently fails on pipe fds
+- *(codegen,windows)* Comprehensive MSVC compatibility fixes for examples
+- *(codegen,windows)* MSVC type-inference and multi-dim array iteration
+- *(tests,windows)* Use cmd /c echo on Windows in the observe_probe test
+- *(tests,windows)* Fix MSVC defaults in harness and add flicker reporter
+- *(ci)* Avoid overriding FUN_STDLIB_DIR with POSIX $PWD on Windows runners
+- *(ci)* Pin FUN_STDLIB_DIR to GITHUB_WORKSPACE stdlib on Windows test steps
+- *(ci,codegen)* Use github.workspace template for Windows stdlib path and suppress void-wrapper C4098
+- *(codegen)* Restore codegen.fn formatting via self-hosted formatter
+- *(ci)* Set up MSVC before build step on Windows so fun.exe is MSVC-native
+- *(lexer)* Strip \r from raw strings; add .gitattributes for LF checkout
+- *(fls)* Resolve generic calls, arithmetic, await, and chains through parens in let-inference
+- *(fls)* Give fun.toml's own PACKAGE_NAME/PACKAGE_VERSION hover and completion support
+- *(fls)* Infer more let shapes, generic literals/multi-param returns, and declaration type params
+- *(fls)* Show a sized array's own size and fence a char literal's own hover breakdown
+- *(fls)* A two-variable for loop over a Map binds key/value, not index/item
+- *(fls)* Substitute a fit arm's own payload binding type, and resolve a call-shaped fit subject
+- *(fls)* Escape a control-character literal's own hover, drop an unused import
+- *(warnings)* Flag a fit's catch-all when both bin values are already covered
+- *(fls)* Substitute a generic return through a compound-shaped parameter
+- *(fls)* Give each outline field, variant, and quirk method its own position
+- *(fls)* Prefer a method over a same-named field when the reference is a call
+- *(typecheck)* Reject ambiguous enum shorthand and duplicate top-level names
+- *(fls)* Resolve a fit arm's own payload binding through a let-inferred subject
+- *(fls)* Return document symbols as a real nested tree, not a flat guess
+- *(fls)* Nest a concrete-instantiation impl's own methods under its base compound too
+- *(cli)* -test/-fuzz respect -no-exec, and -warn-unused-lenient actually works
+- *(codegen)* Pin every line of an async/fork trampoline's own debug info
+- *(cli)* -test/-fuzz also respect -outf/keep_c, update docs to match
+- *(cli)* Merge manifest and -D defines everywhere, not just one or the other
+- *(cli)* -ast prints under -test/-fuzz too, not just a plain compile
+- *(cli)* Fun build respects -D too, not just fun.toml's own defines
+- *(fls)* Resolve a quirk-typed receiver's method, a parenthesized chain, and a compound-literal field name
+- *(fls)* Resolve a chain method whose own paren group ends in a dereferenced call
+- *(fls)* Go-to-definition on a quirk-typed receiver's method lands on the method, not the quirk
+- *(ci)* Make WiX Toolset available on PATH after choco install for aarch64 Windows
+- *(website)* Fall back to fun.toml for the repo version, not just build.zig.zon
+- *(website)* Stop double-boxing code blocks, add copy buttons, fix editor caret drift
+- *(website)* Stabilize the doc-tab TOC across nav clicks, deep links, and scroll-spy
+- *(website)* Mobile-native stdlib modal, fix duplicate doc titles
+- *(ci)* Bootstrap release builds from the newest other release, not "latest"
+- *(ci)* Fix PowerShell quote mangling, gate extension publish on release success
+- *(ci)* Replace the retired macos-13 runner with macos-15-intel
 
-### Refactor
+### 📚 Documentation
 
-- Rename compiler/ to src/
-
-### Test
-
-- *(fls)* Verify dot-completion merges a method from a different file
-
-## [0.46.11] - 2026-08-19
-
-### Feat
-
-- *(fls)* Add workspace/symbol
-- *(fls)* Hover and go-to-definition on an import path segment
-- *(fls)* Add textDocument/inlayHint
-- *(fls)* Add textDocument/codeAction
-- *(fls)* Specialize a generic method's signature against its receiver
-- *(fls)* Fill in a fit's missing arm, and read doc comments from imported files
-- *(fls)* Implement the quirk-method-stub code action
-- *(fls)* Add insert-await and mark-async code actions
-- *(fls)* Add import-path completion, fix method hover/as-doc bugs
-- *(fls)* Add hover's 'See also' related-types footer
-- *(fls)* Add allow/expect warning-id completion
-- *(fls)* Hover documents sized integer types (i7, u23, ...)
-- *(fls)* Parameter-name inlay hints at call sites
-- *(fls)* Hovering a constant shows its own literal value
-- *(fls)* Add semanticTokens/full, fix a real lexer end-column bug
-- *(fls)* Workspace-wide indexing for references and workspace/symbol
-- *(fls)* Definition falls back to a workspace-wide type search
-
-### Fix
-
-- *(fmt)* Free the pre-grouped token vector after grouping
-- *(fls)* Resolve a dotted chain through its own receiver's type
-- *(warnings)* Register a function's own parameters as fit subjects
-- *(editors)* Stop generic-type highlighting from matching comparisons
-- *(fls)* Field/variant go-to-def, See also on containers, '..' import hover
-- *(fls)* Resolve locals/params inside impl methods, add typeDefinition
-- *(fls)* Let-hint gaps for char literals, field reads, bare copies
-- *(fls)* Method-at-declaration hover, doc-comment prose left-trim
-- *(fls)* Fit-arm locals, See-also container on bare variants, scope completion
-- *(fls)* Resolve locals and params inside test and fuzz blocks
-- *(fls)* Call-ending chains resolve everywhere, fix an .Impl regression
-- *(fls)* De-mangle a quirk-conforming impl's own method name correctly
-- *(fls)* TypeDefinition resolves a method call's own return type
-- *(stdlib)* StringBuilder leaks a fragment on every append
-
-### Test
-
-- *(fls)* Cover a multi-dot ('....') parent-traversal import
-- *(fls)* Use the raw-string doubled-backtick escape, not string concat
-
-## [0.46.10] - 2026-08-16
-
-### Feat
-
-- *(fls)* Hover and go-to-definition for enum variants and fit payload bindings
-- *(fls)* Add textDocument/signatureHelp
-
-### Fix
-
-- *(codegen)* Splice lazy prototypes at function scope, not block scope
-- *(ci)* Pass a token to setup-fun so it doesn't hit the anonymous API limit
-- *(codegen)* Give a plain method and a same-named quirk method separate identities
-- *(codegen)* Ensure a by-value generic-field substitution's plain type is emitted first
-- *(fls)* Stop mangling non-ASCII bytes into invalid JSON escapes
-- *(fls)* Hover/definition for methods, qualified variants, doc comments, missing keyword docs
-- *(fls)* Method hover was still returning null, and resolve generic variant payloads to concrete types
-- *(codegen)* Give Windows thread/process compat a real pid_t and clock
-
-### Merge
-
-- Bring in the cli.fn -- pointer-comparison fix from main (v0.46.9)
-
-## [0.46.9] - 2026-08-16
-
-### Ci,docs
-
-- Add self-hosted CI validation, describe Fun as self-hosted
-
-### Docs
-
-- Describe the directory-wide fun test/fuzz forms and env_or
-
-### Feat
-
-- *(selfhost)* Finish self-hosting, retire the Zig toolchain
-
-### Fix
-
-- *(ci)* Make the asm-arch check bootstrap-safe, lint with the built binary
-- *(codegen)* Splice a nested generic method's own prototype at file scope
-- *(codegen)* Drop redundant parens on if/while conditions, define Windows pid_t
-- *(stdlib)* Compare -- by content, not pointer, in cli_parse_ext
-
-## [0.46.8] - 2026-08-15
-
-### Feat
-
-- *(selfhost)* Run every test block under a directory, not just one file
-- *(selfhost)* Port fuzz-mode codegen and the fun fuzz subcommand
-- *(stdlib)* Process spawn/kill/sleep primitives, fix a real env() crash
-
-### Fix
-
-- *(selfhost)* Give kill() a real Windows implementation
-- *(codegen)* Include windows.h before the new sleep helper uses Sleep
-- *(codegen)* Give kill() a real Windows implementation
-
-## [0.46.7] - 2026-08-15
-
-### Docs
-
-- Describe the elastic scheduler pool and Mutex/WaitGroup safety
-
-### Feat
-
-- *(cli)* Run every test/fuzz block under a directory, not just one file
-
-### Fix
-
-- *(selfhost)* Elastic scheduler pool, bounded concurrent import preload
-
-## [0.46.6] - 2026-08-15
-
-### Feat
-
-- *(codegen)* Check format()'s argument count against its placeholders
-- *(parser,codegen)* Parse and emit inline assembly (asm statement)
-
-### Fix
-
-- *(codegen)* Include time.h explicitly, close std.c.* header gap
-- *(concurrency)* Elastic scheduler pool, eager Mutex/CondVar init, guarded WaitGroup count
-
-### Merge
-
-- Bring in the top-level statement-termination fix from main
-
-### Test
-
-- *(selfhost)* Close statement-termination gap note
-- *(selfhost)* Close the last gap marker
-
-## [0.46.5] - 2026-08-15
-
-### Fix
-
-- *(parser)* Require a trailing ';' on a bare top-level expression
-
-### Merge
-
-- Bring in the worker-thread stack-size fix from main (v0.46.4)
-
-## [0.46.4] - 2026-08-15
-
-### Docs
-
+- *(tests)* Say why the watchdog test is still waiting
 - *(tests)* Correct what the generic-compound-quirk gap actually is
 - Drop -- asides from this session's own comments
 - *(selfhost)* Close deep-expression stack-guard gap note
+- Describe the elastic scheduler pool and Mutex/WaitGroup safety
+- Describe the directory-wide fun test/fuzz forms and env_or
+- *(fls)* Document and test the deliberate refusal of a ranged edit with no baseline
+- *(examples)* Exercise implicit-typed const bindings, not just explicit
+- *(ci)* Update every remaining compiler/ reference to src/
+- *(cli)* Document -test/-fuzz/-fuzz-target in help text
+- Fix the C compiler selection docs, stale since self-hosting
+- Document the per-test/per-fuzz-target commands, and fork in the async debugging notes
+- Sweep stale Zig references and dead cross-links, link sections
 
-### Feat
-
-- *(parser)* Measure a pointer type with sizeof
-- *(typecheck)* Hold a global and a field to what their file offers
-- *(parser)* Forward-reference a type in a compound initializer
-- *(codegen)* Drive 'for x : c' via a user Iterator quirk impl
-
-### Fix
-
-- *(typecheck)* Tell two instantiations of a generic apart
-- *(typecheck)* Refuse to compare two different enums
-- *(typecheck)* Reject sizeof of a name nothing declares
-- *(codegen)* Fill a defaulted argument correctly at every call
-- *(codegen)* Substitute a generic enum's self-referential payload
-- *(codegen)* Coerce a value reached through an index or a field
-- *(codegen)* Let a method chain onto a quirk-typed call result
-- *(codegen)* Dispatch through a quirk-typed array element, and coerce a plain assignment
-- *(codegen)* Give a plain compound's fixed-size array field its brackets
-- *(codegen)* Bound a hex string escape to two digits
-- *(typecheck)* Reject an empty enum and let-from-void
-- *(codegen)* Dispatch a generic compound's quirk impl dynamically
-- *(codegen)* Inline a fixed-size array field on a generic compound
-- *(warnings)* Warn on a non-exhaustive num/pointer fit with no catch-all
-- *(codegen)* Replay a loop-body defer before continue and break
-- *(codegen)* Resolve a fit's generic-call subject return type
-- *(typecheck)* Reject a required parameter after a defaulted one
-- *(codegen)* Agree on the extra star an array return type needs
-- *(codegen)* Materialize a quirk dispatch's call-result receiver once
-- *(codegen)* Dot-vs-arrow after indexing a raw pointer, array-literal call args
-- *(codegen)* Reject a genuine by-value compound cycle
-- *(codegen)* Substitute a method's own type param, not the impl's
-- *(codegen)* Monomorphize a generic async/fork call target
-- *(codegen)* Size every worker thread's stack explicitly
-
-### Test
-
-- *(selfhost)* Read a float literal written with an exponent
-- *(selfhost)* Run the quirk coercion shapes as real tests
-- *(fit)* Close all remaining fit_tests.fn gap markers
-
-## [0.46.3] - 2026-08-14
-
-### Feat
-
-- *(typecheck)* Reject a written zero divisor and a mismatched fit branch
-
-### Fix
-
-- *(typecheck)* Enforce a method's own generic bound
-- *(typecheck)* Judge visibility on an alias-qualified call
-- *(stdlib)* Read the exponent in a decimal
-
-### Test
-
-- *(selfhost)* Run the last test that was only described
-
-## [0.46.2] - 2026-08-14
-
-### Build
-
-- Declare fls as a binary the manifest builds
-
-### Docs
-
-- *(tests)* Say why the watchdog test is still waiting
-
-### Feat
-
-- *(fls)* Report diagnostics, hover, and go to definition
-- *(fls)* List what a document declares
-- *(fls)* Find references, rename, and complete
-- *(fls)* Format a document, and complete with snippets
-- *(codegen)* Carry a function-typed argument through an async call
-
-### Fix
-
-- *(lexer)* Let a raw string hold a backtick
-- *(imports)* Ask where the standard library is rather than assume
-- *(selfhost)* Drop imports nothing uses
-- *(warnings)* Judge a real file the way the reference does
-- *(typecheck)* Say when a call names a method a type does not have
-- *(warnings)* Check a fit written in shorthand
-- *(codegen)* Let a program name a variable argv
-- *(codegen)* Give Windows a setenv of its own
-
-### Perf
+### ⚡ Performance
 
 - *(fls)* Read a document once per revision
 - *(fls)* Parse an unchanged import once, not once per keystroke
 
-### Test
-
-- *(selfhost)* Write the tests that were left unwritten
-- *(selfhost)* Run the programs whose behavior was only asserted about
-- *(selfhost)* Hand back what a run produced, not only its output
-
-## [0.46.1] - 2026-08-13
-
-### Fix
-
-- *(lexer)* Let a raw string hold a backtick
-
-## [0.46.0] - 2026-08-13
-
-### Feat
-
-- *(stdlib)* Sections, flags, directories, sink reads, and hexadecimal
-
-## [0.45.5] - 2026-08-13
-
-### Feat
-
-- *(semantics)* Follow the arguments an instantiation supplies
-- *(semantics)* Check instantiations, inferred ones included
-- *(semantics)* Report what a program probably did not mean
-- *(semantics)* Notice races, deadlocks, overflows, and out-of-range literals
-- *(semantics)* Hold a name to what the file declaring it offers
-- *(fls)* Speak the language server protocol
-
-### Fix
-
-- *(parser)* Leave no value pointer unset on a declaration that has none
-- *(warnings)* Count a variant constant as using the enum's import
-
-### Refactor
+### 🚜 Refactor
 
 - *(io)* Let a sink read as well as write
 - *(fls)* Name the stream at the call rather than binding it first
+- Rename compiler/ to src/
+- *(cli)* Rename the manifest's [[bin]] target to [[exe]]
 
+### 🧪 Testing
+
+- *(fmt)* Cover the formatter with its own cases
+- *(selfhost)* Write the tests that were left unwritten
+- *(selfhost)* Run the programs whose behavior was only asserted about
+- *(selfhost)* Hand back what a run produced, not only its output
+- *(selfhost)* Run the last test that was only described
+- *(selfhost)* Read a float literal written with an exponent
+- *(selfhost)* Run the quirk coercion shapes as real tests
+- *(fit)* Close all remaining fit_tests.fn gap markers
+- *(selfhost)* Close statement-termination gap note
+- *(selfhost)* Close the last gap marker
+- *(fls)* Cover a multi-dot ('....') parent-traversal import
+- *(fls)* Use the raw-string doubled-backtick escape, not string concat
+- *(fls)* Verify dot-completion merges a method from a different file
+- *(warnings)* Cover blocking_fork_deadlock, the one warning id with no test at all
+- *(fls)* Lock in the fuzz block data/len hover behavior on inception
+
+### ⚙️ Miscellaneous Tasks
+
+- Add self-hosted CI validation, describe Fun as self-hosted
+- Drop the Force clang on Linux workaround
+- Two-stage Windows build — bootstrap with clang then recompile with cl
+- Load MSVC env before fun build on Windows
+- *(ci)* Revert forced FUN_CC=cl on Windows build step
+- Drop leftover zig-out/zig-cache gitignore entries
+- *(release)* Bump to v0.50.1
+
+### 🛡️ Security
+
+- *(deps-dev)* Bump fast-uri from 3.1.5 to 3.1.7 in /editors/vscode in the npm_and_yarn group across 1 directory (#103)
+
+### 💼 Other
+
+- Declare fls as a binary the manifest builds
+- Bring in the worker-thread stack-size fix from main (v0.46.4)
+- Bring in the top-level statement-termination fix from main
+- Bring in the cli.fn -- pointer-comparison fix from main (v0.46.9)
+- Run the formatter over files the lint step flagged
+- *(deps-dev)* Bump fast-uri
+- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update
+- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update (#104)
+- Self-hosted Fun toolchain (#102)
+## [0.46.16] - 2026-09-03
+
+### 🐛 Bug Fixes
+
+- *(cli)* Rename manifest's [[bin]] target to [[exe]]
+## [0.46.15] - 2026-09-02
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Fix print() routing and qrecv/frame scoping bugs
+- *(cli,codegen,tests)* Full MSVC support for FUN_CC=cl fun build
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump test timeout-minutes 20 -> 35 for macOS
+## [0.46.14] - 2026-09-01
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Eliminate __auto_type and GNU statement expressions from generated C
+## [0.46.13] - 2026-08-25
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Give Windows a real clock_gettime for std.channel's own deadline math
+- *(codegen)* Guard the Windows clock_gettime shim from MinGW's own real one
+## [0.46.12] - 2026-08-25
+
+### 🚀 Features
+
+- *(cli)* Inject PACKAGE_NAME/PACKAGE_VERSION into fun build targets
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Resolve a call embedded mid-chain when lowering method calls
+## [0.46.11] - 2026-08-19
+
+### 🐛 Bug Fixes
+
+- *(stdlib)* StringBuilder leaks a fragment on every append
+## [0.46.10] - 2026-08-16
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Give Windows thread/process compat a real pid_t and clock
+## [0.46.9] - 2026-08-16
+
+### 🐛 Bug Fixes
+
+- *(stdlib)* Compare -- by content, not pointer, in cli_parse_ext
+## [0.46.8] - 2026-08-15
+
+### 🚀 Features
+
+- *(stdlib)* Process spawn/kill/sleep primitives, fix a real env() crash
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Include windows.h before the new sleep helper uses Sleep
+- *(codegen)* Give kill() a real Windows implementation
+## [0.46.7] - 2026-08-15
+
+### 🚀 Features
+
+- *(cli)* Run every test/fuzz block under a directory, not just one file
+## [0.46.6] - 2026-08-15
+
+### 🐛 Bug Fixes
+
+- *(concurrency)* Elastic scheduler pool, eager Mutex/CondVar init, guarded WaitGroup count
+## [0.46.5] - 2026-08-15
+
+### 🐛 Bug Fixes
+
+- *(parser)* Require a trailing ';' on a bare top-level expression
+## [0.46.4] - 2026-08-15
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Size every worker thread's stack explicitly
+## [0.46.3] - 2026-08-14
+
+### 🐛 Bug Fixes
+
+- *(stdlib)* Read the exponent in a decimal
+## [0.46.2] - 2026-08-14
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Let a program name a variable argv
+- *(codegen)* Give Windows a setenv of its own
+## [0.46.1] - 2026-08-13
+
+### 🐛 Bug Fixes
+
+- *(lexer)* Let a raw string hold a backtick
+## [0.46.0] - 2026-08-13
+
+### 🚀 Features
+
+- *(stdlib)* Sections, flags, directories, sink reads, and hexadecimal
+## [0.45.5] - 2026-08-13
+
+### 🐛 Bug Fixes
+
+- *(warnings)* Count a variant constant as using the enum's import
 ## [0.45.4] - 2026-08-12
 
-### Feat
-
-- *(semantics)* Check calls made through a receiver
-- *(semantics)* Check impl bodies, quirk conformance, and enum values
-- *(semantics)* Reject unknown callees, value sizeof, and non-bin conditions
-- *(semantics)* Hold generic calls and quirk impls to what they declare
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Stop reading past the end of a mangled name
-
 ## [0.45.3] - 2026-08-12
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Keep an element's pointer depth in the iterator's option type
 - *(cli)* Build a manifest from a given directory
 
-### Style
+### 🎨 Styling
 
 - Run zig fmt over the cli tests
-
 ## [0.45.2] - 2026-08-12
 
-### Feat
+### 🐛 Bug Fixes
 
-- *(cli)* Start the formatter, emitting from the token stream
-- *(cli)* Teach the formatter literals, prefix operators, and brackets
-- *(cli)* Keep literals, fenced comments, and multi-statement blocks intact
-- *(cli)* Keep compound literals inline and indent continuation lines
-- *(cli)* Match the reference formatter's line and comment layout
-- *(cli)* Reproduce asm statements and align trailing comments
-- *(cli)* Normalize block braces instead of copying their spacing
-- *(cli)* Lay out unformatted source instead of reproducing it
-- *(cli)* Format from the command line
-- *(semantics)* Check types before generating code
-
-### Fix
-
-- *(lexer)* Record whether whitespace follows a token
-- *(lexer)* Keep whitespace that a lookahead consumed
-- *(cli)* Write character literals as they were written
-- *(imports)* Keep an absolute path absolute
 - *(codegen)* Keep a field receiver's type arguments when chaining
-
-### Test
-
-- *(fmt)* Cover the formatter with its own cases
-
 ## [0.45.1] - 2026-08-12
 
-### Feat
+### 🐛 Bug Fixes
 
-- *(cli)* Read fun.toml with library, binary, and mixed packages
-- *(stdlib)* Parse TOML sections and arrays of tables
-- *(cli)* Compile and run programs, with build-time constants from the manifest
-- *(cli)* Build a package from its manifest
-- *(cli)* Run a file's test blocks with fun test
-- *(codegen)* Back the process bindings on Windows
-
-### Fix
-
-- *(cli)* Build and run the same way on all three platforms
-- *(cli)* Drop an unused import
-- *(codegen)* Name the node a failed compile choked on, and accept warning control
-- *(codegen)* Give a test body its own function state, and report where a failure came from
-- *(cli)* Keep build output under fun-out, and stop tracking generated C
 - *(fmt)* Keep a raw string's contents out of comment alignment
-
 ## [0.45.0] - 2026-08-12
 
-### Build
-
-- *(deps-dev)* Bump js-yaml
-- *(deps-dev)* Bump js-yaml from 4.2.0 to 4.3.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#101)
-
-### Chore
-
-- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates
-- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates (#96)
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 2 updates
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 2 updates (#97)
-- *(deps)* Bump brace-expansion
-- *(deps)* Bump brace-expansion from 5.0.8 to 5.0.9 in /editors/vscode in the npm_and_yarn group across 1 directory (#99)
-- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates
-- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates (#100)
-
-### Ci
-
-- Bump test step timeout to 20 minutes
-
-### Docs
-
-- *(self-hosting)* Clarify why array-typed generic args stay deferred
-- *(self-hosting)* Refresh stale doc comments across parser.fn
-- Document testing/fuzzing, fix stale Result<T,E> references
-- *(fuzz)* Document the compiler fallback list and FUN_FUZZ_NO_ASAN
-- *(fuzz)* Document engine-flag passthrough via --
-- *(fuzz)* Document FUN_FUZZ_CC and the Windows caveat
-- Document const bindings, update editor grammars and examples
-- *(examples)* Add examples for language features added during self-hosting
-- *(selfhost)* Trim codegen.fn comments to short, current-state, plain-case style (partial)
-- *(selfhost)* Trim more codegen.fn comments to short, current-state, plain-case style (partial)
-- *(stdlib)* Trim math/sync/path/set/time/toml/array comments to short, current-state, plain-case style
-- *(stdlib)* Trim channel/string/vec/map comments to short, current-state, plain-case style
-- *(stdlib)* Trim io/log/fs/json/net comments to short, current-state, plain-case style
-- *(stdlib)* Trim remaining stdlib file comments to short, current-state, plain-case style
-- *(selfhost,stdlib)* Trim remaining comments to short, current-state, plain-case style; strip Usage-block headers from stdlib
-- *(selfhost)* Trim typedefs/expressionable_defs/parse_state/datatype_defs comments to short, current-state, plain-case style
-- *(selfhost)* Trim parser.fn comments to short, current-state, plain-case style
-- *(selfhost)* Finish trimming codegen.fn comments to short, current-state, plain-case style
-- *(selfhost)* Strip remaining regression-test/fix-narration framing from codegen.fn test comments
-- *(selfhost)* Tighten overlength ast.fn/import_resolver.fn comments to short Rust-style prose
-- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in io/log/fs/json/net
-- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in math/sync/path/set/time/toml/array/c-math/c-io/runtime_backend
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in remaining stdlib files
-- *(selfhost,stdlib)* Drop double-dash asides, self-referential headers, and redundant language-name mentions from comments
-- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
-- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in vec/map
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose
-- *(selfhost)* Replace remaining double-dash asides in codegen.fn comments
-- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
-- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose
-
-### Feat
+### 🚀 Features
 
 - *(self-hosting)* Process spawning stdlib, contextual fork, T[] return types
 - *(self-hosting)* Add directory operations to std.fs
@@ -1095,7 +1669,7 @@
 - *(selfhost)* Derive a generic quirk's vtable from its own declaration, not just a concrete impl
 - *(selfhost)* The compiler now compiles itself (#98)
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* Index locals inside test { } blocks
 - *(fls)* Unused-function false positive for test-only helpers, formatter unary-! after assert
@@ -1183,16 +1757,61 @@
 - *(selfhost)* Monomorphize a method's own type param on a plain impl
 - *(selfhost)* Emit <math.h> only when the math bindings are used
 
-### Perf
+### 📚 Documentation
+
+- *(self-hosting)* Clarify why array-typed generic args stay deferred
+- *(self-hosting)* Refresh stale doc comments across parser.fn
+- Document testing/fuzzing, fix stale Result<T,E> references
+- *(fuzz)* Document the compiler fallback list and FUN_FUZZ_NO_ASAN
+- *(fuzz)* Document engine-flag passthrough via --
+- *(fuzz)* Document FUN_FUZZ_CC and the Windows caveat
+- Document const bindings, update editor grammars and examples
+- *(examples)* Add examples for language features added during self-hosting
+- *(selfhost)* Trim codegen.fn comments to short, current-state, plain-case style (partial)
+- *(selfhost)* Trim more codegen.fn comments to short, current-state, plain-case style (partial)
+- *(stdlib)* Trim math/sync/path/set/time/toml/array comments to short, current-state, plain-case style
+- *(stdlib)* Trim channel/string/vec/map comments to short, current-state, plain-case style
+- *(stdlib)* Trim io/log/fs/json/net comments to short, current-state, plain-case style
+- *(stdlib)* Trim remaining stdlib file comments to short, current-state, plain-case style
+- *(selfhost,stdlib)* Trim remaining comments to short, current-state, plain-case style; strip Usage-block headers from stdlib
+- *(selfhost)* Trim typedefs/expressionable_defs/parse_state/datatype_defs comments to short, current-state, plain-case style
+- *(selfhost)* Trim parser.fn comments to short, current-state, plain-case style
+- *(selfhost)* Finish trimming codegen.fn comments to short, current-state, plain-case style
+- *(selfhost)* Strip remaining regression-test/fix-narration framing from codegen.fn test comments
+- *(selfhost)* Tighten overlength ast.fn/import_resolver.fn comments to short Rust-style prose
+- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in io/log/fs/json/net
+- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in math/sync/path/set/time/toml/array/c-math/c-io/runtime_backend
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in remaining stdlib files
+- *(selfhost,stdlib)* Drop double-dash asides, self-referential headers, and redundant language-name mentions from comments
+- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
+- *(stdlib)* Collapse Params/Returns/Notes doc-comment boilerplate to short prose in vec/map
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength codegen.fn comments to short Rust-style prose
+- *(selfhost)* Replace remaining double-dash asides in codegen.fn comments
+- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose (partial)
+- *(selfhost)* Tighten overlength parser.fn comments to short Rust-style prose
+
+### ⚡ Performance
 
 - *(fls)* Fix runaway CPU and cascading test timeouts
 
-### Refactor
+### 🚜 Refactor
 
 - *(stdlib)* Adopt const bindings, genericize ok() to Result<T, E>
 - *(selfhost)* Use multiline raw strings for write_prelude's static C text
 
-### Test
+### 🧪 Testing
 
 - Add run_examples_selfhost.sh to validate examples/ against selfhost
 - *(selfhost)* Add a source-to-C test harness and first ported codegen cases
@@ -1210,13 +1829,24 @@
 - *(selfhost)* Resolve imports in the test harness and port the stdlib-dependent corpus
 - Point the definition expectation at len's current line in string.fn
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump test step timeout to 20 minutes
+
+### 🛡️ Security
+
+- *(deps-dev)* Bump js-yaml from 4.2.0 to 4.3.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#101)
+
+### 💼 Other
+
+- *(deps-dev)* Bump js-yaml
 ## [0.44.0] - 2026-07-24
 
-### Feat
+### 🚀 Features
 
 - *(generics)* Impl methods can declare their own type parameter
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Silent fit-on-chr miscompile, enum-payload generic-compound type mismatch
 - *(codegen)* Generic containers instantiated with a pointer type argument mangled identically to the non-pointer instantiation
@@ -1233,118 +1863,83 @@
 - *(generics)* Method chaining resolves a generic method's own-type-param return correctly
 - *(generics)* Constructing a generic enum from a method's own type param no longer cross-substitutes via name collision
 
-### Test
+### 🧪 Testing
 
 - *(codegen)* Confirm self-recursive constrained generic function already works
-
 ## [0.43.0] - 2026-07-22
 
-### Chore
-
-- *(changelog)* Update CHANGELOG for version 0.42.4 with recent fixes and dependency bumps
-- Remove unused serde import from std.json and std.toml
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Torture-test fallout — Display-via-deref dispatch, exhaustive-fit false positive, enum/workspace-scan collision
 - *(parser,codegen)* Uninitialized fit has_default_branch (real UB); cross-file private-function collisions
 
-### Test
+### 🧪 Testing
 
 - *(fls)* Cover chained unwrap_or() on a function-parameter receiver + after incremental edits
 
+### ⚙️ Miscellaneous Tasks
+
+- *(changelog)* Update CHANGELOG for version 0.42.4 with recent fixes and dependency bumps
+- Remove unused serde import from std.json and std.toml
 ## [0.42.4] - 2026-07-21
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Mangle generic compound type before Display auto-dispatch resolution
-
 ## [0.42.3] - 2026-07-21
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* Substitute concrete generic args in quirk missing-method diagnostics; fix UTF-16/byte position desync
-
 ## [0.42.2] - 2026-07-21
 
-### Chore
-
-- *(deps)* Bump body-parser
-- *(deps)* Bump body-parser from 1.20.5 to 1.20.6 in /website/reference in the npm_and_yarn group across 1 directory (#95)
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* Correct completion misfires and codegen edge cases; add underscore numeric literals
-
 ## [0.42.1] - 2026-07-21
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(vscode)* Restore compile after vscode-languageclient v10 bump
 - *(fls)* Substitute concrete generic args in fit-branch variant hover
-
 ## [0.42.0] - 2026-07-20
 
-### Chore
-
-- Refactor serialization quirks to use generic To<T> and From<T> mechanisms
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 2 updates
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 2 updates (#94)
-
-### Feat
+### 🚀 Features
 
 - Wire ErrorKind through stdlib errors and merge constrained-generic duplicates
 
+### ⚙️ Miscellaneous Tasks
+
+- Refactor serialization quirks to use generic To<T> and From<T> mechanisms
 ## [0.41.1] - 2026-07-17
 
-### Feat
+### 🚀 Features
 
 - Implement global search modal and enhance search functionality
 
-### Fix
+### 🐛 Bug Fixes
 
 - Improve handling of module and version readiness in App component
 
-### Refactor
+### 🚜 Refactor
 
 - Simplify result handling in channel and json implementations
 
-### Test
+### 🧪 Testing
 
 - Refine expectations in std.log aliased import tests
-
 ## [0.41.0] - 2026-07-16
 
-### Chore
-
-- Update CHANGELOG with new features and improvements for version 0.40.0
-- *(deps-dev)* Bump markdown-it
-- *(deps-dev)* Bump markdown-it from 14.1.1 to 14.2.0 in /editors/vscode in the npm_and_yarn group across 1 directory (#90)
-- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates
-- *(deps-dev)* Bump the npm_and_yarn group across 1 directory with 2 updates (#91)
-- *(deps)* Bump shell-quote
-- *(deps)* Bump shell-quote from 1.8.3 to 1.8.4 in /website/reference in the npm_and_yarn group across 1 directory (#92)
-- *(deps-dev)* Bump undici
-- *(deps-dev)* Bump undici from 6.24.1 to 6.27.0 in /editors/vscode in the npm_and_yarn group across 1 directory (#93)
-
-### Feat
+### 🚀 Features
 
 - Add concurrency lints and align Fun Web light themes
 
+### ⚙️ Miscellaneous Tasks
+
+- Update CHANGELOG with new features and improvements for version 0.40.0
 ## [0.40.0] - 2026-06-14
 
-### Chore
-
-- Refactor Result and Option handling in stdlib
-- Refactor stdlib synchronization and threading code to use 'nil' instead of 'NULL'
-- Refactor std library for improved error handling and functionality
-- Refactor variable declarations to use 'let' instead of type declarations in stdlib
-- Refactor channel and file handling APIs for improved error handling and consistency
-- *(docs)* Enhance documentation across standard library modules
-- *(deps)* Bump esbuild
-- *(deps)* Bump esbuild from 0.25.12 to 0.28.1 in /website/reference in the npm_and_yarn group across 1 directory (#89)
-
-### Feat
+### 🚀 Features
 
 - Enhance documentation handling and type definitions in FLS
 - Add tests for AST flushing, generic method specialization, and import aliasing
@@ -1358,60 +1953,47 @@
 - Enhance error handling and ergonomics for channel operations
 - Add method to dynamically adjust expected task count in WaitGroup
 
+### ⚙️ Miscellaneous Tasks
+
+- Refactor Result and Option handling in stdlib
+- Refactor stdlib synchronization and threading code to use 'nil' instead of 'NULL'
+- Refactor std library for improved error handling and functionality
+- Refactor variable declarations to use 'let' instead of type declarations in stdlib
+- Refactor channel and file handling APIs for improved error handling and consistency
+- *(docs)* Enhance documentation across standard library modules
 ## [0.30.2] - 2026-06-03
 
-### Feat
+### 🚀 Features
 
 - *(parser)* Implement O(1) significant-token lookahead for improved performance
-
 ## [0.30.1] - 2026-06-02
 
-### Fix
+### 🐛 Bug Fixes
 
 - Unused_import on non-aliased imported function calls
 
-### Test
+### 🧪 Testing
 
 - Increase warm save threshold from 150ms to 200ms
-
 ## [0.30.0] - 2026-05-28
 
-### Chore
-
-- *(deps-dev)* Bump fast-uri
-- *(deps-dev)* Bump fast-uri from 3.1.0 to 3.1.2 in /editors/vscode in the npm_and_yarn group across 1 directory (#86)
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update
-- *(deps)* Bump the npm_and_yarn group across 2 directories with 1 update (#87)
-- *(deps-dev)* Bump tmp
-- *(deps-dev)* Bump tmp from 0.2.5 to 0.2.7 in /editors/vscode in the npm_and_yarn group across 1 directory (#88)
-
-### Feat
+### 🚀 Features
 
 - Add zig.testArgs configuration to settings
 - Add new warning controls and refactor existing tests
 - Add unused variable expect example to expected fail cases
-
 ## [0.29.1] - 2026-05-05
 
-### Feat
+### 🚀 Features
 
 - *(formatting)* Implement format-on-save cache hit for improved performance
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(tests)* Update format-on-save cache hit threshold to 200 ms
-
 ## [0.29.0] - 2026-05-05
 
-### Chore
-
-- *(deps)* Bump uuid
-- *(deps)* Bump uuid from 8.3.2 to removed in /editors/vscode in the npm_and_yarn group across 1 directory (#84)
-- *(deps)* Bump postcss
-- *(deps)* Bump postcss from 8.5.6 to 8.5.13 in /website/reference in the npm_and_yarn group across 1 directory (#85)
-- Bump Zig version to 0.16.0 in CI/release workflows
-
-### Feat
+### 🚀 Features
 
 - *(array)* Add support for multi-dimensional arrays and enhance transpilation for array types
 - *(fls)* Implement diagnostic caching to improve performance and reduce compile time
@@ -1419,7 +2001,7 @@
 - Add run and debug commands for Fun language in VSCode extension
 - *(generics)* Add constrained impl params (T: num | dec) and update vec/string stdlib
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(fls)* Use `fun` language id in hover code fences and improve semantic token classification
 - *(editors)* Fix vim E867 syntax error, set 2-space indent across editors, update neovim docs to 0.11+ LSP API
@@ -1431,102 +2013,79 @@
 - *(codegen)* Correct defer #line mapping for function-scope defers
 - *(codegen)* Emit semicolon for declaration-only function prototypes
 
-### Perf
+### ⚡ Performance
 
 - *(fls)* Combine format+diagnostics into single subprocess on save
 
-### Refactor
+### 🚜 Refactor
 
 - *(fls)* Split monolithic main.zig into modular structure
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump Zig version to 0.16.0 in CI/release workflows
 ## [0.28.8] - 2026-04-13
 
-### Feat
+### 🚀 Features
 
 - Add withBasePath function to handle base URL and improve version content fetching
 - Enhance Fun Web color theme with additional syntax highlighting for regex, keywords, and various types
 - Add operator and punctuation highlighting across various editors and themes
-
 ## [0.28.7] - 2026-04-13
 
-### Chore
-
-- *(deps-dev)* Bump vite
-- *(deps-dev)* Bump vite from 6.4.1 to 6.4.2 in /website/reference in the npm_and_yarn group across 1 directory (#83)
-
-### Feat
+### 🚀 Features
 
 - Add Fun Web color scheme and enhance syntax highlighting
-
 ## [0.28.6] - 2026-04-06
 
-### Feat
+### 🚀 Features
 
 - Enhance defer semantics and add comprehensive tests for defer behavior in various contexts
-
 ## [0.28.5] - 2026-04-06
 
-### Feat
+### 🚀 Features
 
 - *(tests)* Enhance e2e tests for async function completion and definition resolution
-
 ## [0.28.4] - 2026-04-06
 
-### Chore
-
-- Update CHANGELOG for version 0.28.3 with new features and improvements
-
-### Feat
+### 🚀 Features
 
 - Add support for variadic function signatures and corresponding tests
 - Enhance documentation and return codes across synchronization and threading modules
 
+### ⚙️ Miscellaneous Tasks
+
+- Update CHANGELOG for version 0.28.3 with new features and improvements
 ## [0.28.3] - 2026-04-06
 
-### Feat
+### 🚀 Features
 
 - *(tests)* Add end-to-end test for let inference with async call and address argument
-
 ## [0.28.2] - 2026-04-06
 
-### Chore
-
-- Update CHANGELOG for version 0.28.1 and improve formatting
-
-### Feat
+### 🚀 Features
 
 - Add async thread clock ticks example and update README
 
+### ⚙️ Miscellaneous Tasks
+
+- Update CHANGELOG for version 0.28.1 and improve formatting
 ## [0.28.1] - 2026-04-05
 
-### Chore
-
-- Update CHANGELOG for version 0.28.0 and improve formatting
-- Add tests for async quirks, generic inference, and typechecking
-
-### Feat
+### 🚀 Features
 
 - *(tests)* Add end-to-end tests for let await pointer chain inference
 - *(tests)* Add test for async await statement transpilation and execution
 - Enhance module summary normalization and improve mobile drawer functionality
 - Implement CRLF normalization in output for consistency
 
+### ⚙️ Miscellaneous Tasks
+
+- Update CHANGELOG for version 0.28.0 and improve formatting
+- Add tests for async quirks, generic inference, and typechecking
 ## [0.28.0] - 2026-04-05
 
-### Chore
-
-- Enhance channel functionality and testing
-- Update CHANGELOG with recent enhancements, fixes, and documentation updates
-- *(deps-dev)* Bump lodash
-- *(deps-dev)* Bump lodash from 4.17.23 to 4.18.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#82)
-- Update CHANGELOG with recent enhancements, fixes, and documentation updates
-- Improve code formatting and spacing across multiple files
-
-### Docs
-
-- Update FAQ to clarify default indexing behavior and parser settings
-
-### Feat
+### 🚀 Features
 
 - Add POSIX thread and synchronization support with pthread bindings
 - Add std.channel module with single-slot blocking channels and related tests
@@ -1582,65 +2141,60 @@
 - Add tests for async task handle behavior and net offload edge return codes across backend selectors
 - Enhance network compatibility for Windows in transpiler and add timeout handling in tests
 
-### Fix
+### 🐛 Bug Fixes
 
 - Update clock_gettime calls to use raw pointers for ChannelAbsTime handling
 - Update printf format specifiers to use %lld for long long integers
 
-### Fls
+### 📚 Documentation
+
+- Update FAQ to clarify default indexing behavior and parser settings
+
+### ⚙️ Miscellaneous Tasks
+
+- Enhance channel functionality and testing
+- Update CHANGELOG with recent enhancements, fixes, and documentation updates
+- Update CHANGELOG with recent enhancements, fixes, and documentation updates
+- Improve code formatting and spacing across multiple files
+
+### 💼 Other
 
 - Harden indexing crash path and document parse mode
-
 ## [0.27.1] - 2026-04-01
 
-### Feat
+### 🚀 Features
 
 - *(docs)* Update language reference with `allow` and `expect` keywords
-
 ## [0.27.0] - 2026-04-01
 
-### Feat
+### 🚀 Features
 
 - Implement warning control mechanisms with `allow` and `expect` statements
 - *(tests)* Add end-to-end tests for warning IDs completion with allow and expect keywords
-
 ## [0.26.2] - 2026-04-01
 
-### Feat
+### 🚀 Features
 
 - *(docs)* Enhance documentation comments across various modules for clarity and consistency
-
 ## [0.26.1] - 2026-04-01
 
-### Chore
-
-- Update CHANGELOG for upcoming release with new fixes and enhancements
-
-### Fix
+### 🐛 Bug Fixes
 
 - *(release)* Ensure artifacts directory is created before building portable zip
 
+### ⚙️ Miscellaneous Tasks
+
+- Update CHANGELOG for upcoming release with new fixes and enhancements
 ## [0.26.0] - 2026-04-01
 
-### Chore
-
-- *(deps)* Bump picomatch
-- *(deps)* Bump picomatch from 4.0.3 to 4.0.4 in /website/reference in the npm_and_yarn group across 1 directory (#78)
-- *(deps-dev)* Bump picomatch
-- *(deps-dev)* Bump picomatch from 2.3.1 to 2.3.2 in /editors/vscode in the npm_and_yarn group across 1 directory (#79)
-- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update
-- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update (#80)
-- *(deps)* Bump path-to-regexp
-- *(deps)* Bump path-to-regexp from 0.1.12 to 0.1.13 in /website/reference in the npm_and_yarn group across 1 directory (#81)
-
-### Feat
+### 🚀 Features
 
 - *(examples)* Add examples for private quirk method access and visibility rules
 - *(codegen)* Enhance transpiler to support aliased imports and function resolution
 - *(release)* Add portable zip support for Windows and update README
 - Enhance Markdown rendering with heading permalinks and copy functionality
 
-### Fix
+### 🐛 Bug Fixes
 
 - *(codegen)* Scope import alias resolution to the owning module
 - *(fls)* Infer let array literal hover types in LSP
@@ -1649,33 +2203,24 @@
 - *(formatting)* Adjust spacing around operators and ensure consistent formatting in examples
 - *(impl)* Update implementation syntax to use 'as' for quirks
 - *(cli,codegen,stdlib)* Improve Linux C build compatibility and reduce gcc warnings
-
 ## [0.25.3] - 2026-03-23
 
-### Feat
+### 🚀 Features
 
 - Enhance GitHub Pages experience by disabling runtime execution and updating related messages
-
 ## [0.25.2] - 2026-03-22
 
-### Feat
+### 🚀 Features
 
 - Add syntax highlighting for Fun language reference and integrate favicon
-
 ## [0.25.1] - 2026-03-22
 
-### Feat
+### 🚀 Features
 
 - Update CHANGELOG for version 0.25.0 with new features and dependency bumps
-
 ## [0.25.0] - 2026-03-22
 
-### Chore
-
-- *(deps-dev)* Bump undici
-- *(deps-dev)* Bump undici from 7.16.0 to 7.24.1 in /editors/vscode in the npm_and_yarn group across 1 directory (#76)
-
-### Feat
+### 🚀 Features
 
 - Implement alias handling for compound types and enhance transpiler with canonical name resolution
 - Introduce Result type and enhance error handling across stdlib
@@ -1683,70 +2228,54 @@
 - Add cleanup functionality to example scripts and enhance cache management
 - Enhance multi-file snippet support and improve markdown rendering
 - Enhance stdlib module exploration with modal support and improved styling
-
 ## [0.24.1] - 2026-03-02
 
-### Feat
+### 🚀 Features
 
 - Enhance Windows compiler configuration and cleanup in uninstall script
 - Enhance symbol grouping in documentation with collapsible sections and styling
-
 ## [0.24.0] - 2026-03-02
 
-### Feat
+### 🚀 Features
 
 - Enhance asm block handling to support computed operands and preserve formatting
-
 ## [0.23.1] - 2026-03-01
 
-### Feat
+### 🚀 Features
 
 - Update asm block handling to preserve newlines and add corresponding test case
 
-### Fix
+### 🐛 Bug Fixes
 
 - Update asm block in test to remove architecture specification
-
 ## [0.23.0] - 2026-03-01
 
-### Fix
+### 🐛 Bug Fixes
 
 - Update import alias in e2e test and adjust expected completion label
-
 ## [0.22.5] - 2026-03-01
 
-### Feat
+### 🚀 Features
 
 - Enhance parser to support qualified user-defined types and improve type segment parsing
-
 ## [0.22.3] - 2026-03-01
 
-### Feat
+### 🚀 Features
 
 - Update search input to be sticky and remove sticky styling from detail card for improved layout
-
 ## [0.22.2] - 2026-03-01
 
-### Feat
+### 🚀 Features
 
 - Enhance MarkdownWithPlayground component with sourcePath prop and improve link handling; update styles for better accessibility and responsiveness
-
 ## [0.22.1] - 2026-03-01
 
-### Feat
+### 🚀 Features
 
 - Remove environment configuration from GitHub Pages deployment step
-
 ## [0.22.0] - 2026-03-01
 
-### Chore
-
-- *(deps-dev)* Bump qs
-- *(deps-dev)* Bump qs from 6.14.1 to 6.14.2 in /editors/vscode in the npm_and_yarn group across 1 directory (#74)
-- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update
-- *(deps)* Bump the npm_and_yarn group across 1 directory with 1 update (#75)
-
-### Feat
+### 🚀 Features
 
 - Enhance Fun language with new features and type inference
 - Enhance type checking for enums as numeric values and improve transpiler logic
@@ -1758,355 +2287,293 @@
 - Update run_examples.sh to use FUN_STDLIB_DIR environment variable and capture failure details
 - Improve hash function in Map implementation with modular arithmetic
 
-### Fix
+### 🐛 Bug Fixes
 
 - Correct command for running examples in README
-
 ## [0.21.2] - 2026-02-05
 
-### Chore
-
-- Enable conventional commits in cliff.toml
-
-### Feat
+### 🚀 Features
 
 - Enhance enum exhaustiveness checking in transpile process
 
+### ⚙️ Miscellaneous Tasks
+
+- Enable conventional commits in cliff.toml
 ## [0.20.3] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Add GitHub Actions section to README for CI installation instructions
 - Update C compiler selection details in README for macOS/Linux and Windows
 - Update cache directory structure to use .fun-cache for CLI operations
-
 ## [0.20.2] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Update compiler settings to use gcc for linux and macos and MSVC for windows instead of zig in installation scripts
-
 ## [0.20.1] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Enhance transpilation process with generic compound specialization support
-
 ## [0.20.0] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Add editor support documentation and syntax highlighting for Fun language
 - Update .gitattributes for Zig syntax highlighting and enhance README with compiler selection and editor support sections
-
 ## [0.19.1] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Add .gitattributes to specify linguist language for .fn files
-
 ## [0.19.0] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Enhance stdlib with new functionalities and improvements
 - Add support for generic types in syntax highlighting
 - Add assert statement with optional message and update related examples
-
 ## [0.18.2] - 2026-02-04
 
-### Test
+### 🧪 Testing
 
 - Add end-to-end test for generic type member completion (Vec<T>)
-
 ## [0.18.1] - 2026-02-04
 
-### Feat
+### 🚀 Features
 
 - Enhance install script to support fallback for POSIX shells and add compiler environment variables
-
 ## [0.18.0] - 2026-02-04
 
-### Docs
+### 📚 Documentation
 
 - Update README and documentation for 64-bit numeric types and add reference.md
 - Enhance documentation for standard library and add POSIX socket support
-
 ## [0.17.1] - 2026-02-03
 
-### Fix
+### 🐛 Bug Fixes
 
 - Update return values in IO and Result functions to use boolean types
-
 ## [0.17.0] - 2026-02-03
 
-### Feat
+### 🚀 Features
 
 - Enhance keyword and datatype handling, improve visibility and access control
 - Update C stdlib imports to use 'std.c.def' for compatibility
 - Enhance keyword and datatype handling, improve visibility and access control (#69)
 - Add inline assembly support with volatile options and architecture guards
 - Add inline assembly support with volatile options and architecture guards (#71)
-
 ## [0.16.1] - 2026-02-02
 
-### Feat
+### 🚀 Features
 
 - Refactor defer block handling in parser and enhance demo functions
-
 ## [0.16.0] - 2026-02-02
 
-### Feat
+### 🚀 Features
 
 - Add defer keyword support with LIFO execution and update documentation
 - Add defer keyword support with LIFO execution and update documentation (#68)
-
 ## [0.15.5] - 2026-02-02
 
-### Feat
+### 🚀 Features
 
 - Implement inferDeclTypeBeforeName function and enhance exe path resolution in tests
-
 ## [0.15.4] - 2026-02-02
 
-### Feat
+### 🚀 Features
 
 - Add insertText and filterText fields to CompletionItem in LspServer
-
 ## [0.15.3] - 2026-02-02
 
-### Feat
+### 🚀 Features
 
 - Enhance enum support with shorthand access and update documentation
-
 ## [0.15.2] - 2026-02-01
 
-### Feat
+### 🚀 Features
 
 - Add support for referencing enum types before declaration in codegen
 
-### Fix
+### 🐛 Bug Fixes
 
 - Correct indentation in LspServer struct for improved readability
-
 ## [0.15.1] - 2026-02-01
 
-### Chore
-
-- *(deps-dev)* Bump lodash
-- *(deps-dev)* Bump lodash from 4.17.21 to 4.17.23 in /editors/vscode in the npm_and_yarn group across 1 directory (#66)
-
-### Feat
+### 🚀 Features
 
 - Add LSP support for enum dot shorthand completion, hover, and definition
 - Add LSP support for enum dot shorthand completion, hover, and definition (#67)
-
 ## [0.15.0] - 2026-01-05
 
-### Feat
+### 🚀 Features
 
 - Implement `sizeof` operator support with hover, completion, and signature help
 - Add enum support with shorthand syntax and enhance parsing
 - Improve token emission formatting and ensure spacing for operators before dot shorthand
 - Update CHANGELOG.md to reflect recent changes and enhancements
-
 ## [0.14.3] - 2026-01-05
 
-### Feat
+### 🚀 Features
 
 - Add support for `sizeof` operator and related error handling in transpilation
-
 ## [0.14.2] - 2026-01-05
 
-### Feat
+### 🚀 Features
 
 - Add custom import namespace hover functionality to display README content
 - Add new transpilation error types and enhance type checking tests for variadic arguments
-
 ## [0.14.1] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance fit statement exhaustiveness checks and add related tests
 - Add parameter handling to signature help and enhance related tests
-
 ## [0.14.0] - 2026-01-04
 
-### Docs
-
-- Update Zig version recommendation in README to reference build.zig.zon
-
-### Feat
+### 🚀 Features
 
 - Enhance environment variable handling in installer scripts for better path resolution
 - Add diagnostics for returning address of local variables and implement related tests
 - Improve module and directory handling in LSP server for better file resolution
 
+### 📚 Documentation
+
+- Update Zig version recommendation in README to reference build.zig.zon
 ## [0.13.3] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Update .gitignore and add initial implementation of Fun Language Server
-
 ## [0.13.2] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Update README to clarify prerequisites and enhance getting started instructions
 - Enhance debugging options and logging for the Fun language server
-
 ## [0.13.1] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance symbol collection to support pointer and reference types in function parameters
 - Enhance build process to stage test binaries and improve error handling in imports
 - Enhance function and variable type handling in LSP server responses
-
 ## [0.13.0] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance formatting for pointer types in function signatures
-
 ## [0.12.12] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance formatting for pointer and address-of spacing in CLI
-
 ## [0.12.11] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Improve version extraction and validation in release workflows
-
 ## [0.12.10] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance release workflow with version verification and tag resolution
-
 ## [0.12.9] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance release workflow to correctly handle release tags
-
 ## [0.12.8] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Improve version handling in CLI and update usage instructions
-
 ## [0.12.7] - 2026-01-04
 
-### Feat
+### 🚀 Features
 
 - Enhance LspServer to support stdlib namespace completions and hover information
 - Add version option to CLI and update usage instructions
 - Add version tagging to build process in release workflow
-
 ## [0.12.6] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Enhance LspServer and TranspileProcess to improve file handling and error reporting on Windows
-
 ## [0.12.5] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Enhance LspServer to support multiple executable directory layouts for stdlib root detection
-
 ## [0.12.4] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Enhance LSP server to support directory walking for stdlib root detection; improve error handling for unknown function calls
-
 ## [0.12.3] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Enhance LSP server to resolve stdlib paths and improve import handling; add operator syntax highlighting
-
 ## [0.12.2] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Enhance installation and uninstallation scripts to manage FUN_STDLIB_DIR environment variable
 - Add guards and separate functions for emitting impl bodies and vtables in TranspileProcess
 - Enhance symbol indexing to include locals and parameters in impl methods
 - Update isStdlibRoot function to handle absolute paths and improve directory validation
-
 ## [0.12.1] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Update install and uninstall scripts to handle 'fls' binary
-
 ## [0.12.0] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Add debug logging and error handling for argument and body parsing in ParseProcess
 - Add stdlib root path handling and cleanup in LspServer
-
 ## [0.11.7] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Enhance error handling for temporary directory and lexer/parser processes
-
 ## [0.11.6] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Improve temporary file handling in buildIndexFromText function
 - Implement temporary directory cleanup for fls
-
 ## [0.11.5] - 2026-01-03
 
-### Fix
+### 🐛 Bug Fixes
 
 - Update publisher field in package.json to "omdxp"
-
 ## [0.11.4] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Update display name to "Fun (FLS) for VS Code" for clarity
-
 ## [0.11.3] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Update display name to "Fun Language Support" for clarity
-
 ## [0.11.2] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Add package path and base URLs for VSCE publish command in workflow
-
 ## [0.11.1] - 2026-01-03
 
-### Feat
+### 🚀 Features
 
 - Add base URL handling for README links in VS Code extension packaging
-
 ## [0.11.0] - 2026-01-03
 
-### Ci
-
-- Skip unstable LSP tests in CI workflow and update main_test.zig
-
-### Docs
-
-- Update README files for consistency and clarity; enhance module descriptions
-
-### Feat
+### 🚀 Features
 
 - Update VS Code extension prerequisites and version
 - Implement CI skip logic for fls_e2e_test.zig
@@ -2119,164 +2586,126 @@
 - Enhance error handling for format strings in transpiler and improve boolean value printing in utils
 - Enhance cross-platform file URI handling in pathToUri and uriToPath functions
 
+### 📚 Documentation
+
+- Update README files for consistency and clarity; enhance module descriptions
+
+### ⚙️ Miscellaneous Tasks
+
+- Skip unstable LSP tests in CI workflow and update main_test.zig
 ## [0.10.0] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Enhance C standard library compatibility with new examples and typedef support
 - Update time_format_now example to use time_t for epoch seconds and human-readable format
 - Add support for out-of-order function definitions by emitting prototypes
-
 ## [0.7.0] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Add read-write initialization for TranspileProcess to support in-place file modifications
-
 ## [0.6.3] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Ensure INSTALLFOLDER is created before adding to PATH
-
 ## [0.6.2] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Enhance WiX build process with improved logging and argument handling
-
 ## [0.6.1] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Normalize version tags for WiX Product/@Version in release workflow
-
 ## [0.6.0] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Enhance parser and semantics for variadic functions and raw types
 - Add new for loop syntax support and corresponding tests
 - Add support for passing program arguments to compiled executables
-
 ## [0.3.1] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Enhance transpiler and parser error handling with improved position tracking
-
 ## [0.3.0] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Enhance run_examples.ps1 to dynamically resolve RepoRoot if not provided
 - Add identifier sanitization for transpilation process
 - Add caching for quirk signature hashes in TypeRegistry
-
 ## [0.2.0] - 2026-01-01
 
-### Feat
+### 🚀 Features
 
 - Add tests for function calls with varying argument counts and types
 - Enhance language support with decimal type and character literals, update lexer and parser for new number handling
 - Add support for compounds, quirks, and implementations
 - Add support for compounds, quirks, and implementations (#62)
-
 ## [0.1.15] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Rename built binaries to include target in release workflow
-
 ## [0.1.14] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Update release workflow to include both 'fun' and 'fun.exe' artifacts
-
 ## [0.1.13] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Remove update-changelog job from release workflow
 - Update CHANGELOG.md to reflect recent changes and enhancements
-
 ## [0.1.11] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Remove debug step for GH_PAT in release workflow
-
 ## [0.1.10] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Add debug step to check GH_PAT environment variable in release workflow
-
 ## [0.1.9] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Update git remote URL to use personal access token for pushing changes
-
 ## [0.1.7] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Update release workflow to use personal access token and add cliff configuration
-
 ## [0.1.5] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Simplify git-cliff installation method in release workflow
-
 ## [0.1.3] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Fix git-cliff installation path in release workflow
-
 ## [0.1.2] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Fix git-cliff installation path in release workflow
-
 ## [0.1.1] - 2025-12-31
 
-### Feat
+### 🚀 Features
 
 - Update git-cliff installation method and build configuration
-
 ## [0.1.0] - 2025-12-31
 
-### Chore
-
-- Move print_node function to misc
-- Update Zig version to 0.14.0 and adjust build configurations
-- Format parser
-- Create a single consolidated test module to cover all modules
-- Add comprehensive changelog documenting features, bug fixes, refactors, and enhancements
-- *(docs)* Update changelog
-
-### Ci
-
-- Enable incremental builds in CI workflow and update build configuration
-
-### Doc
-
-- Add docs for `LexProcess` structure
-- Lexer strings functions
-- Add token_make_character documentation
-- Add start_expression documentation
-- Add detailed documentation for parser and transpiler scope functions
-
-### Docs
-
-- Add documentation for the used functions
-
-### Feat
+### 🚀 Features
 
 - Add ci action
 - Add README.md and LICENSE files
@@ -2389,7 +2818,7 @@
 - Add job to update and commit CHANGELOG.md on release
 - Update git-cliff installation to version 2.11.0
 
-### Fix
+### 🐛 Bug Fixes
 
 - Correct loop condition in read_op_flush_back_keep_first function to prevent pushing the first character
 - Improve memory management in lexer and parser
@@ -2404,7 +2833,16 @@
 - Correct path to test file in CI workflow
 - Update file paths in launch configuration and build settings
 
-### Refactor
+### 📚 Documentation
+
+- Add docs for `LexProcess` structure
+- Lexer strings functions
+- Add token_make_character documentation
+- Add start_expression documentation
+- Add documentation for the used functions
+- Add detailed documentation for parser and transpiler scope functions
+
+### 🚜 Refactor
 
 - Improve deinit function and simplify main loop printing
 - Remove unused test for parsing if statements
@@ -2414,7 +2852,16 @@
 - Clean up whitespace in compile_and_run function
 - Update documentation for scope entity return types
 
-### Style
+### 🎨 Styling
 
 - Format code for consistency and readability
 
+### ⚙️ Miscellaneous Tasks
+
+- Move print_node function to misc
+- Update Zig version to 0.14.0 and adjust build configurations
+- Format parser
+- Enable incremental builds in CI workflow and update build configuration
+- Create a single consolidated test module to cover all modules
+- Add comprehensive changelog documenting features, bug fixes, refactors, and enhancements
+- *(docs)* Update changelog
