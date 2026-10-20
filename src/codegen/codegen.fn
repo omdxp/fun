@@ -16525,12 +16525,40 @@ impl Codegen {
       `    __fun_mc_user_handler((int64_t)sig, info ? info->si_addr : 0, ctx);
       `  }
       `}
+      `#define __FUN_MC_ALTSTACK_SIZE 65536
+      `static _Thread_local char __fun_mc_altstack[__FUN_MC_ALTSTACK_SIZE];
+      `static _Thread_local int64_t __fun_mc_altstack_done = 0;
+      `/* A real SIGSEGV the fault handler needs to actually run for is a
+      `   stack overflow just as often as a guarded-page violation (this
+      `   project's own parser recursion has hit that before - see
+      `   emit_test_runner's own worker-thread stack size note) - and a
+      `   signal handler with no alternate stack of its own cannot run at
+      `   all once the faulting thread's stack is exhausted, the same way
+      `   the fault that's supposed to be caught can't be. Without this,
+      `   such a crash either re-faults inside the handler itself (an
+      `   unhandled SIGSEGV, exit 139, no report at all) or runs on
+      `   whatever sliver of stack remains and aborts partway through
+      `   (exit 134, a correct-looking report for the wrong reason) -
+      `   both nondeterministic, and both seen in CI before this fix.
+      `   sigaltstack itself is per-thread, not process-wide like
+      `   sigaction, so this runs once per thread (the cheap flag check
+      `   above costs nothing on every later allocation on the same
+      `   thread) rather than once per process. */
+      `static void __fun_mc_ensure_altstack(void) {
+      `  if (__fun_mc_altstack_done) return;
+      `  __fun_mc_altstack_done = 1;
+      `  stack_t ss;
+      `  ss.ss_sp = __fun_mc_altstack;
+      `  ss.ss_size = __FUN_MC_ALTSTACK_SIZE;
+      `  ss.ss_flags = 0;
+      `  sigaltstack(&ss, 0);
+      `}
       `static int64_t __fun_mc_register_handler(void* handler) {
       `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
       `  struct sigaction sa;
       `  memset(&sa, 0, sizeof(sa));
       `  sa.sa_sigaction = __fun_mc_trampoline;
-      `  sa.sa_flags = SA_SIGINFO;
+      `  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
       `  sigemptyset(&sa.sa_mask);
       `  int64_t rc1 = (int64_t)sigaction(SIGSEGV, &sa, 0);
       `  /* Accessing an mprotect'd PROT_NONE page raises SIGBUS rather
