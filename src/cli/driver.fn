@@ -4224,6 +4224,55 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
   // A double-free is never a matter of process lifetime, so it's
   // caught unconditionally, with no opt-in needed.
   assert run_tests(doubled, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real double-free to fail the test under plain -memcheck";
+
+  // A real off-by-one, not a gross overread: `__fun_mc_guard_alloc`
+  // used to round the allocation's own size up to a whole page and put
+  // the guard page after THAT padding, so only an overflow bigger than
+  // the leftover slack (up to a whole page) ever touched the guard page
+  // at all. The allocation's own end is now aligned to the guard page
+  // directly, so even one element past it faults immediately.
+  str overflow = path_join(dir, "overflow.fn");
+  write_string(
+    overflow,
+    `use std.c.mem;
+    `test "writes one element past the end" {
+    `  num* arr = malloc(8 * 4);
+    `  arr[4] = 1;
+    `}
+);
+  assert run_tests(overflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a one-element overflow to fail the test under plain -memcheck";
+
+  // User-reported question: `free(ptr); ptr += 1;` with no dereference
+  // afterward is NOT a use-after-free this (or any guard-page/ASan-style)
+  // checker can catch - no memory access ever happens, so no page fault
+  // ever fires. It is still undefined behaviour by the C standard's own
+  // pointer-provenance rules, just not a class of bug any runtime
+  // access-based tool observes; a real dereference afterward is.
+  str arith_only = path_join(dir, "arith_only.fn");
+  write_string(
+    arith_only,
+    `use std.c.mem;
+    `test "pointer arithmetic on a freed pointer, never dereferenced" {
+    `  num* p = malloc(8);
+    `  free(p);
+    `  p = p + 1;
+    `}
+);
+  assert run_tests(arith_only, &args, false, false, "", false, false, false, &defines, &cover, true) == 0, "expected pointer arithmetic alone, with no dereference, not to be flagged";
+
+  str arith_then_deref = path_join(dir, "arith_then_deref.fn");
+  write_string(
+    arith_then_deref,
+    `use std.c.mem;
+    `test "pointer arithmetic on a freed pointer, then dereferenced" {
+    `  num* p = malloc(8);
+    `  free(p);
+    `  p = p + 1;
+    `  num x = *p;
+    `  _ = x;
+    `}
+);
+  assert run_tests(arith_then_deref, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected the actual dereference after the arithmetic to be caught as a use-after-free";
 }
 
 // `-memcheck` auto-injects `use std.memcheck;` into whatever is being
