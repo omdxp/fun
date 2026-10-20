@@ -460,16 +460,46 @@ fun _quote_escaped(str s) str {
 // `num times = 2`), spelled back the way a reader would read it (a
 // re-rendered numeric form rather than the exact source text, so
 // `0xFF` shows as `255`): "" for an initializer that isn't a plain
-// literal, a bare name, or a unary minus over one of those - covers
-// every shape a default parameter value is allowed to take (a
-// constant, a global, `nil`, or an enum variant's own bare name;
-// arbitrary expressions aren't legal there to begin with), but not
-// a qualified or dot-shorthand variant construction.
+// literal, a bare name, a payload-less dot-shorthand variant, or a
+// unary minus over one of those - covers every shape a default
+// parameter value is allowed to take (a constant, a global, `nil`, a
+// qualified or bare enum variant name, or its dot-shorthand spelling;
+// arbitrary expressions aren't legal there to begin with). User-
+// reported: `LogFormat format = .Text` rendered with no default at
+// all in hover/signature-help - every builtin-typed default (a
+// number, string, bool) showed fine, but this, the idiomatic way to
+// default an enum-typed parameter, silently vanished because this
+// function had no case for it at all, not because enum/compound/shape
+// defaults are unsupported in general (`nil` and a bare constant name
+// already worked).
 fun _literal_value_text(Node* val) str {
   if val == nil {
     ret substr("", 0, 0);
   }
   fit val.kind {
+    .Expression(e) -> {
+      // A payload-less dot-shorthand variant (`.Text`): parsed as a
+      // `.` binary expression whose own left side is a placeholder
+      // `.Blank` node (there's no real receiver to its left) and
+      // whose right side is the variant's own bare name - the same
+      // shape `_bare_enum_shorthand_variant` recognizes in
+      // typecheck.fn, duplicated here rather than imported since fls
+      // deliberately doesn't depend on the full typechecker.
+      if equals(e.op, ".") && e.has_left && e.has_right {
+        flag left_is_blank = false;
+        fit e.left.kind {
+          .Blank -> { left_is_blank = true; }
+          _ -> {}
+        }
+        if left_is_blank {
+          fit e.right.kind {
+            .Identifier(name) -> { ret format(".{str}", name); }
+            _ -> {}
+          }
+        }
+      }
+      ret substr("", 0, 0);
+    }
     // Copied, not returned directly: every other arm here returns an
     // owned string, so a caller can free this function's result
     // uniformly regardless of which arm produced it.
