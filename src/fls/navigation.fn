@@ -588,6 +588,23 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
       ret _hover_result(detail, span_of(t, doc.text));
     }
+    // A call-inferred local (`let l = logger_init(...)`, no type
+    // annotation for `resolve_at`'s own parsed-tree lookup to use, and
+    // the document doesn't parse at all right now - most commonly a
+    // DIFFERENT import this local's own type doesn't even depend on)
+    // still has a resolvable type, the same gap and the same recovery
+    // completion.fn's own dot-completion fallback already relies on,
+    // shared here via `let_call_return_type_from_tokens`.
+    if !read.parsed {
+      str inferred_type = let_call_return_type_from_tokens(&tokens, doc.path, cache, token_word(t));
+      if !equals(inferred_type, "") {
+        str detail = format("{str} {str}", inferred_type, token_word(t));
+        str result = _hover_result(detail, span_of(t, doc.text));
+        free(detail);
+        free(inferred_type);
+        ret result;
+      }
+    }
     ret NO_HOVER;
   }
   Declaration d = declared.unwrap();
