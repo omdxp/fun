@@ -2969,12 +2969,13 @@ const num default_test_suite_workers_windows = 4;
 // at once, each spawning its own full-CPU-count worker pool internally
 // (guard-page mmap/mprotect per allocation makes every one of those
 // threads expensive), pegging every core at once for the whole run. 2
-// here, paired with the inner default also dropping to 2 under
-// memcheck, bounds that to 4 concurrent heavy threads regardless of
-// core count. Neither default changes anything for CI's own memcheck
-// step, which sets both env vars explicitly to restore the original
-// behavior - this only changes what a local run gets with no override
-// of its own.
+// here, paired with the inner default dropping to half the real CPU
+// count under memcheck, lands close to the real core count rather
+// than well past it, regardless of how many cores the machine
+// actually has. Neither default changes anything for CI's own
+// memcheck step, which sets both env vars explicitly to restore the
+// original behavior - this only changes what a local run gets with no
+// override of its own.
 const num default_test_suite_workers_memcheck = 2;
 
 fun _test_suite_worker_count(flag memcheck) num {
