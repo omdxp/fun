@@ -19271,9 +19271,24 @@ impl Codegen {
     // every concurrently-running file sizing its own pool to the full CPU
     // count independently. Unset by default - a directly-invoked `fun
     // test file.fn` gets the full pool.
+    //
+    // Under `-memcheck`, the unset fallback itself drops to a small
+    // fixed number instead of the real CPU count: guard-page mmap/
+    // mprotect makes every one of these threads expensive, and the
+    // outer per-file pool (`_test_suite_worker_count` in driver.fn)
+    // already multiplies whatever this picks by up to 8 files running
+    // at once - full-CPU-count times 8 concurrent files pegs every
+    // core for the whole run. An explicit `FUN_TEST_INTRA_JOBS` still
+    // overrides this the same as always, which is what CI's own
+    // memcheck step sets to keep its own timing exactly as it was
+    // before this default changed.
     self.state.write("        int nworkers;\n");
     self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
-    self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+    if self.memcheck {
+      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = 2; }\n");
+    } else {
+      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+    }
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
     self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
