@@ -158,6 +158,7 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
   num info_line = 0;
   str info_freed_file = "";
   num info_freed_line = 0;
+  raw* info_base = nil;
   if idx >= 0 {
     is_freed = __mc_table[idx].is_freed;
     info_seq = __mc_table[idx].seq;
@@ -166,6 +167,7 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
     info_line = __mc_table[idx].line;
     info_freed_file = __mc_table[idx].freed_file;
     info_freed_line = __mc_table[idx].freed_line;
+    info_base = __mc_table[idx].base;
   }
   let _ulk = __mc_mu.unlock();
   str msg = malloc(__mc_msg_cap);
@@ -183,15 +185,34 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
         info_freed_line
       );
     } else {
-      let _n = snprintf(
-        msg,
-        __mc_msg_cap,
-        "[memcheck] buffer overflow: past the end of allocation #%lld (%lld bytes), allocated at %s:%lld",
-        info_seq,
-        info_size,
-        info_file,
-        info_line
-      );
+      // Live, so the fault is a genuine out-of-bounds access against one
+      // of the two guard pages - which one tells an overrun from an
+      // underrun apart. The two aren't symmetric in precision (see
+      // `__fun_mc_guard_alloc`'s own note): a write even one byte past
+      // the end always faults, but an underflow only faults once it
+      // crosses the page-rounding slack before the start.
+      flag before_start = fault_addr < info_base;
+      if before_start {
+        let _n = snprintf(
+          msg,
+          __mc_msg_cap,
+          "[memcheck] buffer underflow: before the start of allocation #%lld (%lld bytes), allocated at %s:%lld",
+          info_seq,
+          info_size,
+          info_file,
+          info_line
+        );
+      } else {
+        let _n = snprintf(
+          msg,
+          __mc_msg_cap,
+          "[memcheck] buffer overflow: past the end of allocation #%lld (%lld bytes), allocated at %s:%lld",
+          info_seq,
+          info_size,
+          info_file,
+          info_line
+        );
+      }
     }
   } else {
     str lit = "[memcheck] memory access violation (not within any tracked allocation)";

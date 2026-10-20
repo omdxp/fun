@@ -205,10 +205,15 @@ fun test [<path>] -memcheck
   [memcheck] use-after-free: allocation #0 (16 bytes), allocated at main.fn:5, freed at main.fn:8
   [memcheck] double-free: allocation #0, 16 bytes, allocated at main.fn:5, already freed at main.fn:6, double-freed at main.fn:7
   [memcheck] buffer overflow: past the end of allocation #0 (16 bytes), allocated at main.fn:5
+  [memcheck] buffer underflow: before the start of allocation #0 (16 bytes), allocated at main.fn:5
   ```
 
   A fault or a double-free aborts the process immediately (a nonzero,
-  CI-visible exit).
+  CI-visible exit). An overflow (writing past the end) is always caught,
+  even by a single byte. An underflow (writing before the start) is
+  caught too, but only past a page-rounding gap before the guard page -
+  `mprotect` only works at whole-page granularity, so a non-page-sized
+  allocation can be byte-precise against at most one of its two ends.
 - Leak reporting (every allocation still live when the process exits) is
   **off by default**, including under `-test`: a short-lived process -
   every CLI invocation this compiler itself makes, and every `-test`
