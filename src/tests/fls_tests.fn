@@ -4456,6 +4456,40 @@ test "hover on a function or method shows a defaulted parameter's own default va
   assert contains(method_hover, "num x = 10"), "expected the method's own defaulted param";
 }
 
+test "hover and signature help show a dot-shorthand enum variant as a parameter's own default value" {
+  // User-reported: a builtin-typed default (`num`/`str`/`flag`) always
+  // showed, but an enum-typed one defaulted the idiomatic way (a bare
+  // `.Variant`, the same shorthand `std.log`'s own `logger_init` uses
+  // for `LogFormat format = .Text`) rendered with no default at all,
+  // as though the parameter were required - `_literal_value_text` had
+  // no case for a dot-shorthand expression, only plain literals, a
+  // bare name, `nil`, and a unary minus over one of those.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///defparam_enum.fn";
+  doc.path = "defparam_enum.fn";
+  doc.text = `enum Format {
+  `  Text,
+  `  Json,
+  `}
+  `fun render(str body, Format f = .Text) str {
+  `  ret body;
+  `}
+  `fun main() {
+  `  let r = render("hi");
+  `  _ = r;
+  `}`;
+  doc.version = 1;
+
+  str fn_hover = hover(&reads, doc, 4, 4);
+  assert contains(fn_hover, "Format f = .Text"), "expected the dot-shorthand default to show, not a required-looking param";
+
+  // Right after `render(` on the call line.
+  str sig = signature_help(&reads, doc, 8, 17);
+  assert contains(sig, `"label":"Format f = .Text"`), "expected signature help's own parameter list to show it too";
+}
+
 test "hovering a parameter shows only its own type and name, not the enclosing function's own doc comment leaked onto it" {
   // A parameter's own line is always its enclosing function's own
   // declaration line, never a separate one of its own - the ordinary
