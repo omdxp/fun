@@ -1180,6 +1180,81 @@ test "dot-completion merges a method declared in a different file than the type"
   assert contains(out, `"label":"value"`), "expected a method declared in a different file (via use) to be offered";
 }
 
+test "dot-completion on a std.log Logger resolves across a real incremental edit, not just a fresh parse" {
+  // User-reported: completion on `l.debug(...)` etc. looked broken after
+  // `let l = logger_init(...)` was typed - this drives the exact fast
+  // single-declaration-reparse path (`_try_fast_reparse`) a real editor
+  // session takes, which a one-shot `completion()` call never exercises.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///logrepro.fn";
+  // Opened as it looks right after typing the `use` line and an empty
+  // `main`, and analyzed once (same as the server does for diagnostics
+  // on open) so the next edit has a previous revision to fast-reparse
+  // against.
+  docs.opened(uri, "use std.log;\n\nfun main() {\n}\n", 1);
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_logrepro_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // A single ranged edit inserting the body, exactly like a real
+  // editor's `didChange` replacing the blank line inside `main`'s braces.
+  str body = "  let l = logger_init(.Warn, .Json);\n  l.debug(\"this is debug\");\n  l.info(\"this is info\");\n";
+  docs.edited(uri, 3, 0, 3, 0, body, 2);
+  Document d2 = docs.at(uri).unwrap();
+  d2.path = "src/tests/fixtures/_logrepro_probe.fn";
+  assert d2.has_edit_range, "expected a single ranged edit to qualify for the fast-reparse path";
+
+  // Right after `l.` on the debug-call line (0-based line 4, col 4).
+  str out = completion(&reads, d2, 4, 4, false);
+  assert contains(out, `"label":"debug"`), "expected debug among Logger's own methods";
+  assert contains(out, `"label":"info"`), "expected info among Logger's own methods";
+  assert contains(out, `"label":"warn"`), "expected warn among Logger's own methods";
+  assert contains(out, `"label":"error"`), "expected error among Logger's own methods";
+  assert contains(out, `"label":"level","kind":5`), "expected Logger's own fields too";
+}
+
+test "dot-completion gives an honest empty reply, not every other name in the file, when the receiver's own import failed to resolve" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///unresolved_import_probe.fn";
+  doc.path = "src/tests/fixtures/_unresolved_import_probe.fn";
+  doc.text = `use this_module_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = make_thing();
+  `  l.whatever("x");
+  `}`;
+  doc.version = 1;
+
+  // Right after `l.` on the whatever-call line.
+  str out = completion(&reads, doc, 4, 4, false);
+  assert equals(out, "[]"), "expected an honest empty reply, not unrelated top-level names (`use`, `main`, `make_thing`, ...) standing in as fake members of an unresolvable receiver";
+}
+
+test "a document whose own imports failed to resolve shows the real reason, not a generic placeholder" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+  Document doc;
+  doc.uri = "file:///unresolved_import_diag.fn";
+  doc.path = "src/tests/fixtures/_unresolved_import_diag_probe.fn";
+  doc.text = `use this_module_does_not_exist_anywhere;
+  `fun main() {}`;
+  doc.version = 1;
+
+  let diags = diagnose(&reads, &dcache, doc);
+  assert diags.len == 1, "expected exactly one diagnostic for the unresolved import";
+  str msg = diags.get(0).message;
+  assert !equals(msg, "this file's imports could not be resolved"), "expected the real reason, not the old generic placeholder";
+  assert contains(msg, "this_module_does_not_exist_anywhere"), "expected the real import error naming what failed to resolve";
+}
+
 test "a bare capitalized condition isn't mistaken for a compound-init literal" {
   str src = `const flag Ready = true;
   `fun check() num {
@@ -7136,6 +7211,37 @@ test "completion never triggers on a '.' typed inside a comment" {
 
   str out = completion(&reads, doc, 1, 10, false);
   assert equals(out, "[]"), "expected no completion at all for a '.' inside a comment";
+}
+
+test "completion never triggers on a '.' or ',' typed inside a string literal's own content" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///dotstring.fn";
+  doc.path = "dotstring.fn";
+  doc.text = `fun main() {
+  `  str s = "x, y.z";
+  `}`;
+  doc.version = 1;
+
+  // Right after the '.' inside "x, y.z".
+  str after_dot = completion(&reads, doc, 1, 16, false);
+  assert equals(after_dot, "[]"), "expected no completion for a '.' typed as part of a string's own content";
+
+  // Right after the ',' inside "x, y.z".
+  str after_comma = completion(&reads, doc, 1, 13, false);
+  assert equals(after_comma, "[]"), "expected no completion for a ',' typed as part of a string's own content either";
+
+  // A raw (backtick) string that spans multiple lines suppresses the
+  // same way on every line it covers, not just its first.
+  Document raw_doc;
+  raw_doc.uri = "file:///dotrawstring.fn";
+  raw_doc.path = "dotrawstring.fn";
+  raw_doc.text = "fun main() {\n  str s = `line one.\n  `line two, more.\n  `;\n}";
+  raw_doc.version = 1;
+  // Right after the ',' on the raw string's own second line.
+  str raw_out = completion(&reads, raw_doc, 2, 12, false);
+  assert equals(raw_out, "[]"), "expected no completion inside a multi-line raw string's own later line either";
 }
 
 test "hover on a 'let'-inferred function value shows the value's own type, not the referenced function's declaration" {
