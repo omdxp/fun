@@ -111,6 +111,17 @@ test "diamond import: the shared module is emitted exactly once" {
   assert contains(out, "shared_value"), "expected the shared function to be referenced";
 }
 
+test "a genuine import cycle (a imports b, b imports a) resolves both files' declarations, not an infinite loop" {
+  let out = emit_file(
+    "examples/imports/circular/main.fn",
+    "a genuine import cycle (a imports b, b imports a) resolves both files' declarations, not an infinite loop"
+  );
+  assert contains(out, "make_a("), "expected a's own declarations to be emitted";
+  assert contains(out, "make_b("), "expected b's own declarations to be emitted";
+  assert contains(out, "use_a("), "expected a's own function that takes b's own type to be emitted";
+  assert contains(out, "use_b("), "expected b's own function that takes a's own type to be emitted";
+}
+
 test "an aliased generic function call is monomorphized" {
   let out = emit_file(
     "src/tests/fixtures/agc_main.fn",
