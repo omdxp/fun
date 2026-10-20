@@ -1217,6 +1217,118 @@ test "dot-completion on a std.log Logger resolves across a real incremental edit
   assert contains(out, `"label":"level","kind":5`), "expected Logger's own fields too";
 }
 
+test "a fast-reparse edit that renames a top-level declaration falls back to a full reparse, not stale symbols" {
+  // `_try_fast_reparse`'s own central invariant: a declaration whose
+  // identity (kind + name) changed must never take the fast splice -
+  // every OTHER declaration's own seeded symbol table still has the OLD
+  // name, which a caller 3 edits later would otherwise see as still
+  // valid. Proven by actually renaming one, then calling the new name
+  // from elsewhere and confirming it resolves (only possible if the
+  // rename forced a real full reparse that rebuilt the symbol table).
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///identity_change.fn";
+  docs.opened(uri, "fun helper() num {\n  ret 1;\n}\n\nfun main() {\n}\n", 1);
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_identity_change_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // Rename `helper` to `helper2` - a single ranged edit entirely inside
+  // that one declaration's own signature line.
+  docs.edited(uri, 0, 0, 0, 19, "fun helper2() num {", 2);
+  Document d2 = docs.at(uri).unwrap();
+  d2.path = "src/tests/fixtures/_identity_change_probe.fn";
+  let _a2 = reads.of(d2);
+
+  // Now call the renamed function from inside `main`'s own body - a
+  // second, separate ranged edit, entirely inside `main` this time.
+  docs.edited(uri, 5, 0, 5, 0, "  let x = helper2();\n  _ = x;\n", 3);
+  Document d3 = docs.at(uri).unwrap();
+  d3.path = "src/tests/fixtures/_identity_change_probe.fn";
+
+  // Right after `helper2(` on the new call line.
+  str hovered = hover(&reads, d3, 5, 13);
+  assert contains(hovered, "helper2"), "expected the renamed function's own new name to resolve, not a stale 'helper'";
+  assert contains(hovered, "num"), "expected its own real return type too";
+}
+
+test "a fast-reparse edit spanning two declarations falls back to a full reparse" {
+  // The edit's own old range (end of `a`'s body through the start of
+  // `b`'s) touches more than one declaration - `_try_fast_reparse` must
+  // refuse rather than splice against whichever one `_decl_index_at_line`
+  // happens to land on.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///cross_decl_edit.fn";
+  docs.opened(uri, "fun a() num {\n  ret 1;\n}\n\nfun b() num {\n  ret 2;\n}\n", 1);
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_cross_decl_edit_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // Replace from the start of `a`'s own body line through the end of
+  // `b`'s own signature line, crossing straight over the boundary
+  // between the two declarations.
+  docs.edited(uri, 1, 0, 4, 13, "  ret 1;\n}\n\nfun c() num {", 2);
+  Document d2 = docs.at(uri).unwrap();
+  d2.path = "src/tests/fixtures/_cross_decl_edit_probe.fn";
+  let a2 = reads.of(d2);
+  assert a2.parsed, "expected the merged document to still parse after a correct full reparse";
+
+  // `c` only exists after this edit, so it resolving at all (rather than
+  // completion still offering the no-longer-real `b`) proves the symbol
+  // table was genuinely rebuilt, not spliced against a stale boundary.
+  str out = completion(&reads, d2, 0, 0, false);
+  assert contains(out, `"label":"c"`), "expected the real post-edit function 'c' to resolve";
+}
+
+test "a fast-reparse edit that changes the file's own line count never leaves a later declaration's nested positions stale" {
+  // Real bug, caught by this test: `_try_fast_reparse`'s own line-delta
+  // shift (see its header comment) only corrects each remaining
+  // top-level declaration's own LEADING position, deliberately not
+  // every nested statement/expression inside it. Before this test's own
+  // fix, an edit that added or removed a line left every nested
+  // position in every LATER declaration stale - hover on code the edit
+  // never touched (here, `main`'s own `b.data`, a different declaration
+  // entirely) silently went from a real answer to `null`. Now such an
+  // edit falls back to a full reparse instead, which is always correct.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///impl_fast_reparse.fn";
+  docs.opened(
+    uri,
+    "compound Box<T> {\n  T data;\n}\n\nimpl Box<T> {\n  pub get() T {\n    ret self.data;\n  }\n}\n\nfun main() {\n  Box<num> b;\n  b.data = 1;\n}\n",
+    1
+  );
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_impl_fast_reparse_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // Two sequential edits inside the impl's own `get` method body - the
+  // second one inserts a whole new line, shifting `main` (and every
+  // nested position inside it) down by one from where it started.
+  docs.edited(uri, 6, 0, 6, 18, "    num x = 1;", 2);
+  let _a2 = reads.of(docs.at(uri).unwrap());
+  docs.edited(uri, 6, 15, 6, 15, "\n    ret self.data + x;", 3);
+  Document d3 = docs.at(uri).unwrap();
+  d3.path = "src/tests/fixtures/_impl_fast_reparse_probe.fn";
+  let a3 = reads.of(d3);
+  assert a3.parsed, "expected the method to still parse after two sequential edits, one of them line-count-changing";
+
+  // Hover on `b.data` in `main`, a separate declaration never touched by
+  // either edit, now sitting one line further down than it started.
+  str hovered = hover(&reads, d3, 13, 4);
+  assert contains(hovered, "num data"), "expected Box<num>'s own specialized field type, not a stale-position null";
+}
+
 test "dot-completion gives an honest empty reply, not every other name in the file, when the receiver's own import failed to resolve" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
