@@ -16583,6 +16583,9 @@ impl Codegen {
       `static int64_t __fun_mc_ptr_in_range(void* addr, void* base, int64_t size) {
       `  return ((char*)addr >= (char*)base && (char*)addr < (char*)base + size) ? 1 : 0;
       `}
+      `static int64_t __fun_mc_ptr_to_num(void* ptr) {
+      `  return (int64_t)(size_t)ptr;
+      `}
       `extern void* __fun_memcheck_malloc(int64_t size, char* file, int64_t line);
       `extern void* __fun_memcheck_calloc(int64_t count, int64_t size, char* file, int64_t line);
       `extern void* __fun_memcheck_realloc(void* ptr, int64_t size, char* file, int64_t line);

@@ -51,6 +51,25 @@ flag __mc_started = false;
 // `Codegen.memcheck_leaks`'s own note on why it's off by default.
 flag __mc_suppress_leak_sweep = false;
 
+// Open-addressing hash set mapping a tracked allocation's own pointer
+// (as a number) to its index into `__mc_table`, so `__mc_find` is O(1)
+// average instead of an O(n) scan - a file that makes a large number of
+// allocations (an AST-heavy codegen test, say) was paying O(n^2) total
+// under the scan, dominating every other cost `-memcheck` adds. Insert-
+// only, like `__mc_table` itself: a freed allocation's pointer stays
+// mapped to its index forever (this module never reuses or removes a
+// tracked allocation, see `__fun_memcheck_free`'s own note), so a lookup
+// probe can stop at the first empty slot with no tombstones needed -
+// nothing was ever deleted that could leave a gap behind a later key.
+// Allocated through the real, unredirected allocator, same as
+// `__mc_table`. Caller must already hold `__mc_mu`, same as every helper
+// touching `__mc_table` itself.
+num __mc_hash_capacity = 0;
+num __mc_hash_used_count = 0;
+num* __mc_hash_keys = nil;
+flag* __mc_hash_used = nil;
+num* __mc_hash_vals = nil;
+
 // How much room a report line gets (plenty for every field this module
 // ever prints, file paths included). Fixed rather than measured, so
 // building one never allocates more than once.
@@ -72,6 +91,11 @@ fun __fun_mc_guard_alloc(num data_size, num* out_total_size, raw** out_mmap_base
 fun __fun_mc_guard_protect_all(raw* base, num total_size) num;
 fun __fun_mc_register_handler(raw* handler) num;
 fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
+// A pointer's own bit pattern as a number - the one piece of raw-C glue
+// `__mc_hash_insert`/`__mc_hash_lookup` below need to turn a `raw*` into
+// something `%` can hash on.
+fun __fun_mc_ptr_to_num(raw* ptr) num;
+fun __fun_real_free(raw* ptr);
 // Per-thread, unlike `__mc_ensure_started` below: `sigaction`'s own
 // handler registration is process-wide, but the alternate stack a
 // signal handler needs in order to still run once a thread's own
@@ -107,6 +131,89 @@ compound AllocInfo {
 AllocInfo* __mc_table = nil;
 Mutex __mc_mu;
 
+fun __mc_hash_alloc(num capacity) {
+  __mc_hash_keys = __fun_real_malloc(capacity * sizeof(num));
+  __mc_hash_used = __fun_real_malloc(capacity * sizeof(flag));
+  __mc_hash_vals = __fun_real_malloc(capacity * sizeof(num));
+  memset(__mc_hash_used, 0, capacity * sizeof(flag));
+  __mc_hash_capacity = capacity;
+  __mc_hash_used_count = 0;
+}
+
+// Rehashes every live entry into a freshly doubled table - the only time
+// the old one's slot positions (each a function of its own key modulo
+// the *old* capacity) are recomputed.
+fun __mc_hash_grow() {
+  num old_capacity = __mc_hash_capacity;
+  num* old_keys = __mc_hash_keys;
+  flag* old_used = __mc_hash_used;
+  num* old_vals = __mc_hash_vals;
+  num new_capacity = old_capacity * 2;
+  if new_capacity < 128 {
+    new_capacity = 128;
+  }
+  __mc_hash_alloc(new_capacity);
+  num i = 0;
+  for i < old_capacity {
+    if old_used[i] {
+      num slot = old_keys[i] % __mc_hash_capacity;
+      for __mc_hash_used[slot] {
+        slot = (slot + 1) % __mc_hash_capacity;
+      }
+      __mc_hash_keys[slot] = old_keys[i];
+      __mc_hash_used[slot] = true;
+      __mc_hash_vals[slot] = old_vals[i];
+      __mc_hash_used_count = __mc_hash_used_count + 1;
+    }
+    i = i + 1;
+  }
+  if old_capacity > 0 {
+    __fun_real_free(old_keys);
+    __fun_real_free(old_used);
+    __fun_real_free(old_vals);
+  }
+}
+
+// Inserts `ptr -> idx`, assuming `ptr` isn't already present - true at
+// the only call site, right after a fresh allocation appends a brand-new
+// entry to `__mc_table`.
+fun __mc_hash_insert(raw* ptr, num idx) {
+  if __mc_hash_capacity == 0 || (__mc_hash_used_count + 1) * 2 > __mc_hash_capacity {
+    __mc_hash_grow();
+  }
+  num key = __fun_mc_ptr_to_num(ptr);
+  num slot = key % __mc_hash_capacity;
+  for __mc_hash_used[slot] {
+    slot = (slot + 1) % __mc_hash_capacity;
+  }
+  __mc_hash_keys[slot] = key;
+  __mc_hash_used[slot] = true;
+  __mc_hash_vals[slot] = idx;
+  __mc_hash_used_count = __mc_hash_used_count + 1;
+}
+
+// The live index of the allocation whose own base is exactly `ptr`, or
+// -1 - same contract `__mc_find` exposes below, just O(1) average.
+fun __mc_hash_lookup(raw* ptr) num {
+  if __mc_hash_capacity == 0 {
+    ret -1;
+  }
+  num key = __fun_mc_ptr_to_num(ptr);
+  num slot = key % __mc_hash_capacity;
+  num steps = 0;
+  for steps < __mc_hash_capacity {
+    if !__mc_hash_used[slot] {
+      ret -1;
+    }
+    if __mc_hash_keys[slot] == key {
+      ret __mc_hash_vals[slot];
+    }
+    slot = (slot + 1) % __mc_hash_capacity;
+    steps = steps + 1;
+  }
+  ret -1;
+}
+
 // Doubles the table's own capacity (64 to start) via the real,
 // unredirected allocator - growing this table must never go through
 // `__fun_memcheck_realloc`, which would just track itself. Caller
@@ -125,24 +232,18 @@ fun __mc_grow_if_needed() {
 }
 
 // The live index of the allocation whose own base is exactly `ptr`, or
-// -1. Linear scan - fine at the allocation counts a debug/CI run sees,
-// not a hot path worth a hash table for.
+// -1 - the hot path on every `free`/`realloc`, so it goes through the
+// hash table above rather than scanning `__mc_table` directly.
 fun __mc_find(raw* ptr) num {
-  num i = 0;
-  for i < __mc_count {
-    if __mc_table[i].base == ptr {
-      ret i;
-    }
-    i = i + 1;
-  }
-  ret -1;
+  ret __mc_hash_lookup(ptr);
 }
 
 // The index of the allocation whose own guarded span contains `addr`,
 // live or freed - what the fault handler needs to tell a use-after-free
 // (inside a freed span) from a buffer overflow (inside a live one's
 // trailing guard page) from a genuinely unrelated fault (inside
-// neither).
+// neither). Still a linear scan: only the fault handler calls this, on
+// the crash path, not the hot path `__mc_find` above needed fixing.
 fun __mc_find_by_range(raw* addr) num {
   num i = 0;
   for i < __mc_count {
@@ -322,6 +423,7 @@ pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
   info.freed_line = 0;
   __mc_next_seq = __mc_next_seq + 1;
   __mc_table[__mc_count] = info;
+  __mc_hash_insert(base, __mc_count);
   __mc_count = __mc_count + 1;
   let _ulk = __mc_mu.unlock();
   ret base;
