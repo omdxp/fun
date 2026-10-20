@@ -3806,6 +3806,13 @@ pub fun operator_method_name(str op) str {
   if equals(op, "[]") {
     ret "op_index";
   }
+  // Not a real token the parser ever produces - `check_assignment`'s own
+  // `[]` target branch passes this literally, reusing `receiver_method`
+  // the same way every other operator already does rather than
+  // duplicating its instantiation/method-table lookup for one more case.
+  if equals(op, "[]=") {
+    ret "op_index_set";
+  }
   ret "";
 }
 
@@ -4480,6 +4487,10 @@ impl Checker {
     }
     fit e.left.kind {
       .Expression(target) -> {
+        if equals(target.op, "[]") {
+          self.check_index_assignment(node, e, target, env);
+          ret;
+        }
         if !equals(target.op, ".") || !equals(e.op, "=") || !e.has_right {
           ret;
         }
@@ -4534,6 +4545,76 @@ impl Checker {
         }
       }
       _ -> {}
+    }
+  }
+
+  // `a[i] = v` on a real array/`Vec<T>`/`str` keeps its own builtin
+  // meaning, unchecked here exactly as it was before this method
+  // existed - only a type with no array of its own gets validated,
+  // against `op_index_set(index, value)`, the write-side counterpart
+  // `try_operator_dispatch`'s own read-side `"[]"` case already
+  // resolves against `op_index`. Not folded into `try_operator_dispatch`
+  // itself: that helper's own single optional `right` only ever checks
+  // one argument (a binary operator's one operand, or none for unary),
+  // and a setter always takes two (the index, then the value).
+  check_index_assignment(Node* node, ExprNode e, ExprNode target, TypeEnv* env) {
+    if !equals(e.op, "=") || !e.has_right || !target.has_left {
+      ret;
+    }
+    CheckedType base = self.infer(target.left, env);
+    if base.pointer_depth > 0 || base.is_array || equals(base.name, "") ||
+      (base.base == .Str && !base.is_array) {
+      ret;
+    }
+    if !target.has_right {
+      ret;
+    }
+    Node* index_node = target.right;
+    fit target.right.kind {
+      .Bracket(inner) -> { index_node = inner; }
+      _ -> {}
+    }
+    CheckedType index = self.infer(index_node, env);
+    CheckedType value = self.infer(e.right, env);
+    let sig = self.receiver_method(base, "op_index_set");
+    if sig.is_none() {
+      if self.receiver_method(base, "op_index").is_some() {
+        self.fail(
+          format(
+          "{str} has 'op_index' for reading but no 'op_index_set' for assignment through an index",
+          type_name(base)
+          ),
+          node
+        );
+      }
+      ret;
+    }
+    let s = sig.unwrap();
+    if s.args.len != 2 {
+      ret;
+    }
+    if !self.assignable(s.args.get(0), index) {
+      self.fail(
+        format(
+        "'[]=' on {str} (op_index_set) expects index {str}, found {str}",
+        type_name(base),
+        type_name(s.args.get(0)),
+        type_name(index)
+        ),
+        node
+      );
+      ret;
+    }
+    if !self.assignable(s.args.get(1), value) {
+      self.fail(
+        format(
+        "'[]=' on {str} (op_index_set) expects value {str}, found {str}",
+        type_name(base),
+        type_name(s.args.get(1)),
+        type_name(value)
+        ),
+        node
+      );
     }
   }
 
