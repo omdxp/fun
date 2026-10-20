@@ -717,6 +717,13 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     // else (globals, heap) before growth ever needs to kick in.
     argv_args.push("-sINITIAL_MEMORY=167772160");
     argv_args.push("-sALLOW_MEMORY_GROWTH=1");
+    // emcc's own recommendation for this exact `-pthread` +
+    // `-sALLOW_MEMORY_GROWTH` combination (a real build-time warning
+    // otherwise, `-Wpthreads-mem-growth`): without it, every growth
+    // recreates the JS-side typed-array views over the wasm heap,
+    // which also runs non-wasm (JS-side) code slower than it needs to
+    // whenever growth actually happens.
+    argv_args.push("-sGROWABLE_ARRAYBUFFERS=2");
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
     }

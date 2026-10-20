@@ -49,7 +49,7 @@ jobs:
       # for the other two lanes to verify that this one doesn't already.
       - name: Set up emscripten
         if: matrix.os == 'ubuntu-24.04'
-        uses: mymindstorm/setup-emsdk@v14
+        uses: emscripten-core/setup-emsdk@v16
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: omdxp/msvc-dev-cmd@v1
@@ -107,9 +107,9 @@ jobs:
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
           cat > /tmp/wasm_ci_smoke.fn << 'FNEOF'
-          use std.c.io;
+          use std.io;
           fun main() num {
-            printf("wasm ci smoke: %lld\n", 6 * 7);
+            println_fmt("wasm ci smoke: {num}", 6 * 7);
             ret 0;
           }
           FNEOF
