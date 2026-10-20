@@ -233,6 +233,20 @@ fun test [<path>] -memcheck
   ```
 - Works with any C compiler this project already supports (`clang`,
   `gcc`, `cl.exe`), on Windows, macOS and Linux.
+- `fun test <path> -memcheck` runs the whole suite under this: every
+  test file still compiles and runs in parallel with the others
+  (`FUN_TEST_JOBS`), and each one's own test blocks run in parallel
+  with each other too (`FUN_TEST_INTRA_JOBS`) - two independent layers
+  of parallelism, both defaulting lower under `-memcheck` than they do
+  otherwise, since guard-page `mmap`/`mprotect` makes every allocation
+  markedly more expensive than a plain `malloc`, and both layers
+  multiplying at full strength means a lot of concurrently expensive
+  work at once. Override either explicitly to trade that back for
+  speed on a machine that can take it:
+
+  ```text
+  FUN_TEST_JOBS=8 FUN_TEST_INTRA_JOBS=8 fun test . -memcheck
+  ```
 
 ## Fuzzing
 
@@ -486,8 +500,8 @@ fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun
 | `FUN_DEADLOCK_WATCHDOG_MS` | unarmed | Milliseconds a virtual thread may block before the concurrency runtime's watchdog warns about a likely deadlock. |
 | `FUN_DEADLOCK_ABORT` | warn only | When set to `1`, the deadlock watchdog aborts the process instead of just warning. |
 | `FUN_SCHED_MAX_WORKERS` | `4096` | Caps how many OS worker threads the virtual-thread scheduler may grow to under load. |
-| `FUN_TEST_JOBS` | `8` (`4` on Windows) | How many test files `fun test [dir]` compiles and runs at once. `1` runs them strictly one at a time. Lower by default on Windows, where `cl.exe`'s heavier spawn cost makes both layers of parallelism running at once more likely to exhaust a resource-limited machine. |
-| `FUN_TEST_INTRA_JOBS` | CPU count (`2` on Windows, under `fun test [dir]`) | Caps how many worker threads a single compiled test binary's own pool uses. Unset by default (full CPU count) for a directly-invoked `fun test file.fn`; `fun test [dir]` itself sets it to `2` on Windows for the same reason `FUN_TEST_JOBS` is lower there, unless already set. |
+| `FUN_TEST_JOBS` | `8` (`4` on Windows, `2` under `-memcheck`) | How many test files `fun test [dir]` compiles and runs at once. `1` runs them strictly one at a time. Lower by default on Windows, where `cl.exe`'s heavier spawn cost makes both layers of parallelism running at once more likely to exhaust a resource-limited machine, and under `-memcheck`, where guard-page `mmap`/`mprotect` makes every allocation markedly more expensive. |
+| `FUN_TEST_INTRA_JOBS` | CPU count (`2` on Windows, under `fun test [dir]`; `2` under `-memcheck`) | Caps how many worker threads a single compiled test binary's own pool uses. Unset by default (full CPU count) for a directly-invoked `fun test file.fn`; `fun test [dir]` itself sets it to `2` on Windows for the same reason `FUN_TEST_JOBS` is lower there, unless already set. Under `-memcheck`, the compiled-in fallback itself is `2` instead of the CPU count, for the same reason `FUN_TEST_JOBS` is lower there. |
 | `FUN_TEST_TIMING` | off | When set, `fun test [dir]` also prints, per file, how long lowering to C, the C compiler and the test run each took, and a per-phase total at the end. |
 | `FUN_RUNTIME_BACKEND` | auto-detected | Forces the concurrency runtime backend (`posix`/`windows`, or `1`/`2`), mainly for cross-backend testing. |
 | `FUN_RUNTIME_OS` | auto-detected | Forces the OS family (`posix`/`unix`/`windows`) the runtime backend detection resolves to. |
