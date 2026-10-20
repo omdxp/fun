@@ -434,7 +434,7 @@ impl AnalysisCache {
     }
 
     num line_delta = doc.edit_replacement_lines - (doc.edit_end_line - doc.edit_start_line);
-    // A line-count change shifts where every LATER declaration's own
+    // A line-count change shifts where every later declaration's own
     // statements/expressions really sit - but only their own top-level
     // leading position gets corrected below (see the shift loop's own
     // note on why that's deliberately shallow), never anything nested

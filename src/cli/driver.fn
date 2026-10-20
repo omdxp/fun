@@ -4227,7 +4227,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
 
   // A real off-by-one, not a gross overread: `__fun_mc_guard_alloc`
   // used to round the allocation's own size up to a whole page and put
-  // the guard page after THAT padding, so only an overflow bigger than
+  // the guard page after that padding, so only an overflow bigger than
   // the leftover slack (up to a whole page) ever touched the guard page
   // at all. The allocation's own end is now aligned to the guard page
   // directly, so even one element past it faults immediately.
@@ -4244,13 +4244,13 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
 
   // The other direction: a leading guard page too, added alongside the
   // trailing one. mprotect only works at whole-page granularity, so (see
-  // `__fun_mc_guard_alloc`'s own note) only ONE end of a non-page-sized
+  // `__fun_mc_guard_alloc`'s own note) only one end of a non-page-sized
   // allocation can be byte-precise - the end is exact, the start only
   // faults once an underflow crosses the same page-rounding slack the
   // overflow fix above aligned away, which is up to a whole real page
   // (4 KiB on most platforms, 16 KiB on Apple Silicon) - and a single
   // jump far enough back to clear that on every platform overshoots
-  // PAST the guard page entirely on the smaller ones, landing in
+  // past the guard page entirely on the smaller ones, landing in
   // unrelated memory with no fault at all. Walking back one byte at a
   // time instead is what actually crosses the guard on any platform,
   // since it can never skip over it.
@@ -4270,7 +4270,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
   assert run_tests(underflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real underflow to fail the test under plain -memcheck";
 
   // User-reported question: `free(ptr); ptr += 1;` with no dereference
-  // afterward is NOT a use-after-free this (or any guard-page/ASan-style)
+  // afterward is not a use-after-free this (or any guard-page/ASan-style)
   // checker can catch - no memory access ever happens, so no page fault
   // ever fires. It is still undefined behaviour by the C standard's own
   // pointer-provenance rules, just not a class of bug any runtime

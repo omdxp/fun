@@ -16442,9 +16442,9 @@ impl Codegen {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  /* A leading AND a trailing guard page: mprotect only works at
+      `  /* A leading and trailing guard page: mprotect only works at
       `     whole-page granularity, so a non-page-sized allocation can be
-      `     BYTE-PRECISE against at most one of its two ends (the data's
+      `     byte-precise against at most one of its two ends (the data's
       `     own page-rounding slack has to sit somewhere, and whichever
       `     side it sits on is the side that stays imprecise) - this is a
       `     hard constraint of the technique itself, the same reason a
@@ -16491,9 +16491,9 @@ impl Codegen {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  /* A leading AND a trailing guard page: mprotect only works at
+      `  /* A leading and trailing guard page: mprotect only works at
       `     whole-page granularity, so a non-page-sized allocation can be
-      `     BYTE-PRECISE against at most one of its two ends (the data's
+      `     byte-precise against at most one of its two ends (the data's
       `     own page-rounding slack has to sit somewhere, and whichever
       `     side it sits on is the side that stays imprecise) - this is a
       `     hard constraint of the technique itself, the same reason a

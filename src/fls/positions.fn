@@ -205,7 +205,7 @@ pub fun position_in_comment(Vec<Token>* tokens, num line, num character) flag {
 }
 
 // Whether `line`/`character` falls inside a string literal's own span,
-// quotes included - a `.`/`,` typed as part of the string's own CONTENT
+// quotes included - a `.`/`,` typed as part of the string's own content
 // (still being written) carries no meaning as a completion trigger, the
 // same reasoning as `position_in_comment` above. Handles both an ordinary
 // `"..."` (always one line) and a backtick raw string, which can span

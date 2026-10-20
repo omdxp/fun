@@ -1220,7 +1220,7 @@ test "dot-completion on a std.log Logger resolves across a real incremental edit
 test "a fast-reparse edit that renames a top-level declaration falls back to a full reparse, not stale symbols" {
   // `_try_fast_reparse`'s own central invariant: a declaration whose
   // identity (kind + name) changed must never take the fast splice -
-  // every OTHER declaration's own seeded symbol table still has the OLD
+  // every other declaration's own seeded symbol table still has the old
   // name, which a caller 3 edits later would otherwise see as still
   // valid. Proven by actually renaming one, then calling the new name
   // from elsewhere and confirming it resolves (only possible if the
@@ -1290,10 +1290,10 @@ test "a fast-reparse edit spanning two declarations falls back to a full reparse
 test "a fast-reparse edit that changes the file's own line count never leaves a later declaration's nested positions stale" {
   // Real bug, caught by this test: `_try_fast_reparse`'s own line-delta
   // shift (see its header comment) only corrects each remaining
-  // top-level declaration's own LEADING position, deliberately not
+  // top-level declaration's own leading position, deliberately not
   // every nested statement/expression inside it. Before this test's own
   // fix, an edit that added or removed a line left every nested
-  // position in every LATER declaration stale - hover on code the edit
+  // position in every later declaration stale - hover on code the edit
   // never touched (here, `main`'s own `b.data`, a different declaration
   // entirely) silently went from a real answer to `null`. Now such an
   // edit falls back to a full reparse instead, which is always correct.
@@ -1350,7 +1350,7 @@ test "dot-completion gives an honest empty reply, not every other name in the fi
 
 test "dot-completion on a call-inferred local still resolves through a working import, when a different, unrelated import is broken" {
   // User-reported, generalized from the original std.log report: the
-  // whole document's own merged parse fails the instant ANY import
+  // whole document's own merged parse fails the instant any import
   // fails to resolve, even one the receiver's own type has nothing to
   // do with - which previously meant a `let`-inferred local (no type
   // annotation of its own for the token-only fallback to read, unlike
@@ -1400,6 +1400,64 @@ test "hover on a call-inferred local still resolves when a different, unrelated 
   // Right on `l` itself, line 4 "  let l = ...".
   str hovered = hover(&reads, doc, 4, 6);
   assert contains(hovered, "Logger l"), "expected the call-inferred local's own real type, not null";
+}
+
+test "go-to-definition on a member of a call-inferred local resolves through a working import, when a different import is broken" {
+  // navigation.fn's own version of the same gap: `l.debug` jumping
+  // nowhere once the document stopped parsing, even when `debug`'s own
+  // real declaration was perfectly reachable through std.log's own
+  // working import.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///def_partial_fail_import.fn";
+  doc.path = "src/tests/fixtures/_def_partial_fail_import_probe.fn";
+  doc.text = `use std.log;
+  `use this_totally_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = logger_init(.Warn, .Json);
+  `  l.debug("x");
+  `}`;
+  doc.version = 1;
+
+  // Right on `debug` in `l.debug("x")`, line 5.
+  str out = definition(&reads, doc, 5, 4);
+  assert contains(out, "log.fn"), "expected the jump to land in std.log's own file";
+  assert contains(out, `"character":6`), "expected the jump to land right on debug's own name";
+}
+
+test "go-to-definition on a member of a call-inferred local resolves through a function and impl declared in the same file, when an import is broken" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///def_partial_fail_local.fn";
+  doc.path = "src/tests/fixtures/_def_partial_fail_local_probe.fn";
+  doc.text = `use this_totally_does_not_exist_anywhere;
+  `
+  `compound Box {
+  `  num n;
+  `}
+  `impl Box {
+  `  pub doubled() num {
+  `    ret self.n * 2;
+  `  }
+  `}
+  `fun make_box() Box {
+  `  Box created;
+  `  created.n = 1;
+  `  ret created;
+  `}
+  `fun main() {
+  `  let b = make_box();
+  `  b.doubled();
+  `}`;
+  doc.version = 1;
+
+  // Right on `doubled` in `b.doubled();`, line 17.
+  str out = definition(&reads, doc, 17, 6);
+  assert contains(out, `"line":6`), "expected the jump to land on doubled's own declaration line";
+  assert contains(out, `"character":6`), "expected the jump to land right on doubled's own name";
 }
 
 test "dot-completion on a call-inferred local still resolves through a function declared in the same file, when an import is broken" {
