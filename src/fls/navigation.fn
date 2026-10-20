@@ -591,7 +591,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // A call-inferred local (`let l = logger_init(...)`, no type
     // annotation for `resolve_at`'s own parsed-tree lookup to use, and
     // the document doesn't parse at all right now - most commonly a
-    // DIFFERENT import this local's own type doesn't even depend on)
+    // a different import this local's own type doesn't even depend on)
     // still has a resolvable type, the same gap and the same recovery
     // completion.fn's own dot-completion fallback already relies on,
     // shared here via `let_call_return_type_from_tokens`.
@@ -761,6 +761,28 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
       d.container = "";
       d.is_public = true;
       ret _location_result(doc, d);
+    }
+    // A member reached through a call-inferred receiver (`l.debug`,
+    // `l` bound by `let l = logger_init(...)` with no type annotation
+    // of its own), while the document doesn't parse at all right now -
+    // most commonly a different import this receiver's own type
+    // doesn't even depend on. The same gap, and the same recovery,
+    // hover and completion already rely on: resolve the receiver's
+    // own type from tokens, then the member's own real declaration
+    // from the same fallback tier `let_call_return_type_from_tokens`
+    // already draws on.
+    if !read.parsed {
+      str receiver = _receiver_of(&tokens, t);
+      if !equals(receiver, "") {
+        str receiver_type = let_call_return_type_from_tokens(&tokens, doc.path, cache, receiver);
+        if !equals(receiver_type, "") {
+          let member = member_declaration_from_tokens(&tokens, doc.path, cache, receiver_type, token_word(t));
+          free(receiver_type);
+          if member.is_some() {
+            ret _location_result(doc, member.unwrap());
+          }
+        }
+      }
     }
     ret NO_LOCATION;
   }
