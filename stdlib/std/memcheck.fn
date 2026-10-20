@@ -68,7 +68,7 @@ pub fun __fun_memcheck_disable_leak_sweep() {
 // implementations live there, not here.
 fun __fun_real_malloc(num size) raw*;
 fun __fun_real_realloc(raw* ptr, num size) raw*;
-fun __fun_mc_guard_alloc(num data_size, num* out_total_size) raw*;
+fun __fun_mc_guard_alloc(num data_size, num* out_total_size, raw** out_mmap_base) raw*;
 fun __fun_mc_guard_protect_all(raw* base, num total_size) num;
 fun __fun_mc_register_handler(raw* handler) num;
 fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
@@ -82,6 +82,11 @@ fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
 // the one that just tried it again.
 compound AllocInfo {
   raw* base;
+  // The real mmap/VirtualAlloc base `__fun_mc_guard_protect_all` revokes
+  // on free - `base` above is the user-facing pointer, offset forward so
+  // the user's own data ends exactly at the guard page (see
+  // `__fun_mc_guard_alloc`'s own note), no longer the same address.
+  raw* mmap_base;
   num size;
   num total_size;
   flag is_freed;
@@ -133,7 +138,7 @@ fun __mc_find(raw* ptr) num {
 fun __mc_find_by_range(raw* addr) num {
   num i = 0;
   for i < __mc_count {
-    if __fun_mc_ptr_in_range(addr, __mc_table[i].base, __mc_table[i].total_size) != 0 {
+    if __fun_mc_ptr_in_range(addr, __mc_table[i].mmap_base, __mc_table[i].total_size) != 0 {
       ret i;
     }
     i = i + 1;
@@ -267,7 +272,8 @@ pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
     real_size = 1;
   }
   num total_size = 0;
-  raw* base = __fun_mc_guard_alloc(real_size, &total_size);
+  raw* mmap_base = nil;
+  raw* base = __fun_mc_guard_alloc(real_size, &total_size, &mmap_base);
   if base == nil {
     ret nil;
   }
@@ -275,6 +281,7 @@ pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
   __mc_grow_if_needed();
   AllocInfo info;
   info.base = base;
+  info.mmap_base = mmap_base;
   info.size = size;
   info.total_size = total_size;
   info.is_freed = false;
@@ -363,7 +370,7 @@ pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
     let _ff = fflush(stderr_stream());
     abort();
   }
-  let _rc = __fun_mc_guard_protect_all(entry.base, entry.total_size);
+  let _rc = __fun_mc_guard_protect_all(entry.mmap_base, entry.total_size);
   entry.is_freed = true;
   entry.freed_file = file;
   entry.freed_line = line;

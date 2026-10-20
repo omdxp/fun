@@ -16438,7 +16438,7 @@ impl Codegen {
       `static __fun_mc_handler_t __fun_mc_user_handler = 0;
       `#ifdef _WIN32
       `static int64_t __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int64_t)si.dwPageSize; }
-      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
@@ -16449,7 +16449,12 @@ impl Codegen {
       `  DWORD old;
       `  VirtualProtect(guard, (SIZE_T)ps, PAGE_NOACCESS, &old);
       `  *out_total_size = total;
-      `  return base;
+      `  *out_mmap_base = base;
+      `  /* The user's own data ends exactly where the guard page starts,
+      `     not somewhere in the padding before it - an overflow of even
+      `     one byte lands on the guard page immediately, rather than
+      `     needing to cross the whole page-rounding slack first. */
+      `  return (char*)guard - data_size;
       `}
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  DWORD old;
@@ -16469,7 +16474,7 @@ impl Codegen {
       `}
       `#else
       `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
-      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
@@ -16479,7 +16484,12 @@ impl Codegen {
       `  void* guard = (char*)base + data_pages * ps;
       `  mprotect(guard, (size_t)ps, PROT_NONE);
       `  *out_total_size = total;
-      `  return base;
+      `  *out_mmap_base = base;
+      `  /* The user's own data ends exactly where the guard page starts,
+      `     not somewhere in the padding before it - an overflow of even
+      `     one byte lands on the guard page immediately, rather than
+      `     needing to cross the whole page-rounding slack first. */
+      `  return (char*)guard - data_size;
       `}
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
