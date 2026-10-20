@@ -4242,6 +4242,33 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
 );
   assert run_tests(overflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a one-element overflow to fail the test under plain -memcheck";
 
+  // The other direction: a leading guard page too, added alongside the
+  // trailing one. mprotect only works at whole-page granularity, so (see
+  // `__fun_mc_guard_alloc`'s own note) only ONE end of a non-page-sized
+  // allocation can be byte-precise - the end is exact, the start only
+  // faults once an underflow crosses the same page-rounding slack the
+  // overflow fix above aligned away, which is up to a whole real page
+  // (4 KiB on most platforms, 16 KiB on Apple Silicon) - and a single
+  // jump far enough back to clear that on every platform overshoots
+  // PAST the guard page entirely on the smaller ones, landing in
+  // unrelated memory with no fault at all. Walking back one byte at a
+  // time instead is what actually crosses the guard on any platform,
+  // since it can never skip over it.
+  str underflow = path_join(dir, "underflow.fn");
+  write_string(
+    underflow,
+    `use std.c.mem;
+    `test "writes far enough before the start to cross the leading guard page" {
+    `  chr* p = malloc(16);
+    `  num i = 1;
+    `  for i < 40000 {
+    `    p[0 - i] = 'x';
+    `    i = i + 1;
+    `  }
+    `}
+);
+  assert run_tests(underflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real underflow to fail the test under plain -memcheck";
+
   // User-reported question: `free(ptr); ptr += 1;` with no dereference
   // afterward is NOT a use-after-free this (or any guard-page/ASan-style)
   // checker can catch - no memory access ever happens, so no page fault
