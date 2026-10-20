@@ -19282,20 +19282,24 @@ impl Codegen {
     // count independently. Unset by default - a directly-invoked `fun
     // test file.fn` gets the full pool.
     //
-    // Under `-memcheck`, the unset fallback itself drops to a small
-    // fixed number instead of the real CPU count: guard-page mmap/
+    // Under `-memcheck`, the unset fallback itself drops to half the
+    // real CPU count instead of the whole thing: guard-page mmap/
     // mprotect makes every one of these threads expensive, and the
     // outer per-file pool (`_test_suite_worker_count` in driver.fn)
-    // already multiplies whatever this picks by up to 8 files running
-    // at once - full-CPU-count times 8 concurrent files pegs every
-    // core for the whole run. An explicit `FUN_TEST_INTRA_JOBS` still
-    // overrides this the same as always, which is what CI's own
-    // memcheck step sets to keep its own timing exactly as it was
-    // before this default changed.
+    // already multiplies whatever this picks by up to 2 files running
+    // at once - half the CPU count times 2 concurrent files lands
+    // close to the real core count rather than well past it. A flat
+    // small constant here instead (tried first) serializes a file
+    // with many test blocks far more than the thermal problem this is
+    // actually solving requires - a file with hundreds of tests and
+    // only 2 workers took most of an hour on its own. An explicit
+    // `FUN_TEST_INTRA_JOBS` still overrides this the same as always,
+    // which is what CI's own memcheck step sets to keep its own
+    // timing exactly as it was before this default changed.
     self.state.write("        int nworkers;\n");
     self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
     if self.memcheck {
-      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = 2; }\n");
+      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count() / 2; }\n");
     } else {
       self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
     }
