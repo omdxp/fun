@@ -689,6 +689,7 @@ matching operator instead of being written as a `.method()` call:
 | `%` | `op_mod` | `>` | `op_gt` |
 | `-` (unary) | `op_neg` | `>=` | `op_ge` |
 | `!` (unary) | `op_not` | `[]` | `op_index` |
+| | | `[]` (assign) | `op_index_set` |
 
 ```fun
 use std.io;
@@ -716,12 +717,30 @@ impl Vec3 {
   }
 }
 
+compound Body {
+  Vec3 pos;
+  Vec3 vel;
+}
+
+impl Body {
+  step() Vec3 {
+    ret self.pos + self.vel;
+  }
+}
+
 fun main() {
   Vec3 a; a.x = 1; a.y = 2; a.z = 3;
   Vec3 b; b.x = 10; b.y = 20; b.z = 30;
-  Vec3 scaled = a * 2;
-  Vec3 sum = scaled + b;
+  // A chained expression and a field access used directly as an
+  // operand both dispatch, not just a bare local.
+  Vec3 sum = a * 2 + b;
   println_fmt("{num} {num} {num}", sum.x, sum.y, sum.z);
+
+  Body body;
+  body.pos.x = 1; body.pos.y = 1; body.pos.z = 1;
+  body.vel.x = 5; body.vel.y = 5; body.vel.z = 5;
+  Vec3 next = body.step();
+  println_fmt("{num} {num} {num}", next.x, next.y, next.z);
 }
 ```
 
@@ -740,14 +759,54 @@ fun main() {
   builtin meaning completely unchanged - this only ever adds a new
   capability, never changes what `+`/`==`/etc. already do on `num`,
   `str`, and every other type that doesn't define one.
-- **Only a bare local variable is dispatched** - `a + b` and `-a`
-  work, but a chained `a * 2 + b` or a field access used directly as
-  an operand (`self.pos + other.pos`) does not yet resolve; bind the
-  intermediate value to its own `let` first (`let scaled = a * 2; let
-  sum = scaled + b;`).
-- `op_index` only covers reading (`a[i]`); assigning through an index
-  (`a[i] = v`) on a type with no real array/`Vec<T>` field is not yet
-  supported.
+- An operand can be a bare local, a chained operator expression
+  (`a * 2 + b`), a field access (`self.pos + other.pos`, reaching
+  across any number of `.`s), or an index/unary expression that
+  itself dispatches (`p[0] + c`, `-a + b`) - these were all resolved
+  through a bare local only before, but a chained/field/index/unary
+  expression's own type is just as knowable without evaluating
+  anything, so it dispatches too now. **A plain function/method call's
+  own result used directly still doesn't** (`get_vec3() + b`; bind it
+  to its own `let` first) - determining a generic call's return type
+  can trigger instantiating it, a real side effect this speculative
+  check (tried on every operator in the codebase, including deep
+  inside stdlib generics that have nothing to do with operator
+  overloading) can't risk.
+- `[]` assignment (`a[i] = v`) dispatches to `op_index_set(index,
+  value)` on a type with no real array/`Vec<T>` field, the write-side
+  counterpart to `op_index`. A type with `op_index` but no
+  `op_index_set` is a compile error naming the gap, rather than
+  silently falling through to invalid C; a plain array/`Vec<T>` keeps
+  its own builtin `[]=` meaning unchanged either way.
+
+```fun
+use std.io;
+
+compound Grid {
+  num a;
+  num b;
+  num c;
+}
+
+impl Grid {
+  op_index(num i) num {
+    if i == 0 { ret self.a; }
+    if i == 1 { ret self.b; }
+    ret self.c;
+  }
+  op_index_set(num i, num v) {
+    if i == 0 { self.a = v; }
+    elif i == 1 { self.b = v; }
+    else { self.c = v; }
+  }
+}
+
+fun main() {
+  Grid g; g.a = 0; g.b = 0; g.c = 0;
+  g[0] = 10; g[1] = 20; g[2] = 30;
+  println_fmt("{num} {num} {num}", g[0], g[1], g[2]);
+}
+```
 
 ### Generics
 
