@@ -49,7 +49,17 @@ jobs:
       # for the other two lanes to verify that this one doesn't already.
       - name: Set up emscripten
         if: matrix.os == 'ubuntu-24.04'
+        # Pinned, not "latest": emscripten-core/setup-emsdk@v16 defaults to
+        # whatever emsdk version is newest at the time, and that recently
+        # started bundling a Node build its own generated code requires
+        # (26.x) that this runner's own Node (22.23.3) can't run -
+        # confirmed directly as a real CI failure, not just the harmless
+        # Node-20-deprecation notice the older action tag printed. 6.0.13
+        # is the exact version a real, successful run on this same
+        # workflow resolved "latest" to not long ago.
         uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 6.0.13
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: omdxp/msvc-dev-cmd@v1
