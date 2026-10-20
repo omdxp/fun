@@ -16438,6 +16438,7 @@ impl Codegen {
       `static __fun_mc_handler_t __fun_mc_user_handler = 0;
       `#ifdef _WIN32
       `static int64_t __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int64_t)si.dwPageSize; }
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size);
       `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
@@ -16454,7 +16455,7 @@ impl Codegen {
       `     end is exact; the start only faults once an underflow crosses
       `     that same slack, up to one page - coarser, but still real
       `     protection where there was previously none at all. */
-      `  int64_t total = (data_pages + 2) * ps;
+      `  int64_t total = __fun_mc_guard_total_size(data_size);
       `  void* base = VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
       `  if (!base) return 0;
       `  DWORD old;
@@ -16472,6 +16473,27 @@ impl Codegen {
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  DWORD old;
       `  return VirtualProtect(base, (SIZE_T)total_size, PAGE_NOACCESS, &old) ? 0 : 1;
+      `}
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
+      `  if (data_pages < 1) data_pages = 1;
+      `  return (data_pages + 2) * ps;
+      `}
+      `/* Hands an already-guarded, already-freed region back out for a new
+      `   allocation once the quarantine (see std.memcheck's own note on
+      `   its own budget) has to recycle something to stay bounded - same
+      `   layout math as guard_alloc above, just reusing mmap_base instead
+      `   of reserving a fresh region, and only re-opening the data pages
+      `   (the two guard pages stay PAGE_NOACCESS throughout, never
+      `   touched here). */
+      `static void* __fun_mc_guard_reuse(void* mmap_base, int64_t total_size, int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (total_size / ps) - 2;
+      `  DWORD old;
+      `  VirtualProtect((char*)mmap_base + ps, (SIZE_T)(data_pages * ps), PAGE_READWRITE, &old);
+      `  void* guard = (char*)mmap_base + ps + data_pages * ps;
+      `  return (char*)guard - data_size;
       `}
       `static LONG WINAPI __fun_mc_veh(PEXCEPTION_POINTERS ep) {
       `  if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && __fun_mc_user_handler) {
@@ -16497,6 +16519,7 @@ impl Codegen {
       `}
       `#else
       `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size);
       `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
@@ -16513,7 +16536,7 @@ impl Codegen {
       `     end is exact; the start only faults once an underflow crosses
       `     that same slack, up to one page - coarser, but still real
       `     protection where there was previously none at all. */
-      `  int64_t total = (data_pages + 2) * ps;
+      `  int64_t total = __fun_mc_guard_total_size(data_size);
       `  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       `  if (base == MAP_FAILED) return 0;
       `  mprotect(base, (size_t)ps, PROT_NONE);
@@ -16529,6 +16552,26 @@ impl Codegen {
       `}
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
+      `}
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
+      `  if (data_pages < 1) data_pages = 1;
+      `  return (data_pages + 2) * ps;
+      `}
+      `/* Hands an already-guarded, already-freed region back out for a new
+      `   allocation once the quarantine (see std.memcheck's own note on
+      `   its own budget) has to recycle something to stay bounded - same
+      `   layout math as guard_alloc above, just reusing mmap_base instead
+      `   of reserving a fresh region, and only re-opening the data pages
+      `   (the two guard pages stay PROT_NONE throughout, never touched
+      `   here). */
+      `static void* __fun_mc_guard_reuse(void* mmap_base, int64_t total_size, int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (total_size / ps) - 2;
+      `  mprotect((char*)mmap_base + ps, (size_t)(data_pages * ps), PROT_READ | PROT_WRITE);
+      `  void* guard = (char*)mmap_base + ps + data_pages * ps;
+      `  return (char*)guard - data_size;
       `}
       `static void __fun_mc_trampoline(int sig, siginfo_t* info, void* ctx) {
       `  if (__fun_mc_user_handler) {
