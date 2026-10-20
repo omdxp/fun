@@ -1348,6 +1348,61 @@ test "dot-completion gives an honest empty reply, not every other name in the fi
   assert equals(out, "[]"), "expected an honest empty reply, not unrelated top-level names (`use`, `main`, `make_thing`, ...) standing in as fake members of an unresolvable receiver";
 }
 
+test "dot-completion on a call-inferred local still resolves through a working import, when a different, unrelated import is broken" {
+  // User-reported, generalized from the original std.log report: the
+  // whole document's own merged parse fails the instant ANY import
+  // fails to resolve, even one the receiver's own type has nothing to
+  // do with - which previously meant a `let`-inferred local (no type
+  // annotation of its own for the token-only fallback to read, unlike
+  // an explicitly-typed one) could never resolve in that state at
+  // all, regardless of whether the function it was actually bound to
+  // came from a working import or was declared right here in the same
+  // file.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document from_import;
+  from_import.uri = "file:///partial_fail_import.fn";
+  from_import.path = "src/tests/fixtures/_partial_fail_import_probe.fn";
+  from_import.text = `use std.log;
+  `use this_totally_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = logger_init(.Warn, .Json);
+  `  l.debug("x");
+  `}`;
+  from_import.version = 1;
+  str import_out = completion(&reads, from_import, 5, 4, false);
+  assert contains(import_out, `"label":"debug"`), "expected the call-inferred local's own methods, resolved through a different file's working import";
+  assert contains(import_out, `"label":"level","kind":5`), "expected its fields too";
+}
+
+test "dot-completion on a call-inferred local still resolves through a function declared in the same file, when an import is broken" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document from_local;
+  from_local.uri = "file:///partial_fail_local.fn";
+  from_local.path = "src/tests/fixtures/_partial_fail_local_probe.fn";
+  from_local.text = `use this_totally_does_not_exist_anywhere;
+  `
+  `compound Box {
+  `  num n;
+  `}
+  `fun make_box() Box {
+  `  Box created;
+  `  created.n = 1;
+  `  ret created;
+  `}
+  `fun main() {
+  `  let b = make_box();
+  `  b.n;
+  `}`;
+  from_local.version = 1;
+  str local_out = completion(&reads, from_local, 12, 4, false);
+  assert contains(local_out, `"label":"n","kind":5,"detail":"field"`), "expected the call-inferred local's own field, resolved through a function declared in this same file";
+}
+
 test "a document whose own imports failed to resolve shows the real reason, not a generic placeholder" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
