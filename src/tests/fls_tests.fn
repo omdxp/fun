@@ -1377,6 +1377,31 @@ test "dot-completion on a call-inferred local still resolves through a working i
   assert contains(import_out, `"label":"level","kind":5`), "expected its fields too";
 }
 
+test "hover on a call-inferred local still resolves when a different, unrelated import is broken" {
+  // hover.fn's own version of the same gap completion.fn had: hovering
+  // the local itself (not a dot-access on it) returned nothing at all
+  // once the document stopped parsing, even though the type it needed
+  // was perfectly reachable through a working import elsewhere in the
+  // same file.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hover_partial_fail.fn";
+  doc.path = "src/tests/fixtures/_hover_partial_fail_probe.fn";
+  doc.text = `use std.log;
+  `use this_totally_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = logger_init(.Warn, .Json);
+  `  l.debug("x");
+  `}`;
+  doc.version = 1;
+
+  // Right on `l` itself, line 4 "  let l = ...".
+  str hovered = hover(&reads, doc, 4, 6);
+  assert contains(hovered, "Logger l"), "expected the call-inferred local's own real type, not null";
+}
+
 test "dot-completion on a call-inferred local still resolves through a function declared in the same file, when an import is broken" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
