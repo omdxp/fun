@@ -2690,3 +2690,182 @@ test "operator overloading: a type with no matching operator keeps today's behav
   );
   assert equals(out, "7\n"), "expected ordinary numeric addition, unaffected by operator dispatch";
 }
+
+test "operator overloading: op_index_set dispatches a[i] = v, not raw C []=" {
+  str src = `use std.io;
+  `compound Grid { num a; num b; num c; }
+  `impl Grid {
+  `  op_index(num i) num {
+  `    if i == 0 { ret self.a; }
+  `    if i == 1 { ret self.b; }
+  `    ret self.c;
+  `  }
+  `  op_index_set(num i, num v) {
+  `    if i == 0 { self.a = v; } elif i == 1 { self.b = v; } else { self.c = v; }
+  `  }
+  `}
+  `fun main() {
+  `  Grid g; g.a = 0; g.b = 0; g.c = 0;
+  `  g[0] = 10; g[1] = 20; g[2] = 30;
+  `  println_fmt("{num} {num} {num}", g[0], g[1], g[2]);
+  `}`;
+  let out = emit_c(src, "op_index_set dispatch");
+  assert contains(out, "Grid__op_index_set(&g, "), "expected the assignment to compile to a direct call to the setter";
+  let ran = run_source(src, "op_index_set_dispatch", "op_index_set dispatches a[i] = v, not raw C []=");
+  assert equals(ran, "10 20 30\n"), "expected every index write to land on the right field";
+}
+
+test "operator overloading: a plain array/Vec<T>'s own [] assignment is unaffected" {
+  str src = `use std.io;
+  `fun main() {
+  `  num[] arr = [1, 2, 3];
+  `  arr[0] = 99;
+  `  println_fmt("{num}", arr[0]);
+  `}`;
+  let out = run_source(
+    src,
+    "op_index_set_no_overload",
+    "a plain array/Vec<T>'s own [] assignment is unaffected"
+  );
+  assert equals(out, "99\n"), "expected ordinary array index assignment, unaffected by operator dispatch";
+}
+
+test "operator overloading: a chained operand (a * 2 + b) dispatches both operators" {
+  str src = `use std.io;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_add(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x + other.x; r.y = self.y + other.y; r.z = self.z + other.z; ret r;
+  `  }
+  `  op_mul(num s) Vec3 {
+  `    Vec3 r; r.x = self.x * s; r.y = self.y * s; r.z = self.z * s; ret r;
+  `  }
+  `}
+  `fun main() {
+  `  Vec3 a; a.x = 1; a.y = 2; a.z = 3;
+  `  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  `  Vec3 c = a * 2 + b;
+  `  println_fmt("{num} {num} {num}", c.x, c.y, c.z);
+  `}`;
+  let out = emit_c(src, "chained operand dispatch");
+  assert contains(out, "Vec3__op_mul(&a, 2)"), "expected the inner * to compile to a direct call";
+  assert contains(out, "Vec3__op_add(&"), "expected the outer + to compile to a direct call too, not raw C + on the inner call's result";
+  let ran = run_source(src, "op_chained_dispatch", "a chained operand (a * 2 + b) dispatches both operators");
+  assert equals(ran, "12 24 36\n"), "expected a * 2 + b to componentwise compute (a*2) + b";
+}
+
+test "operator overloading: a field-access operand (self.pos + other.pos) dispatches" {
+  str src = `use std.io;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_add(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x + other.x; r.y = self.y + other.y; r.z = self.z + other.z; ret r;
+  `  }
+  `}
+  `compound Body { Vec3 pos; }
+  `impl Body {
+  `  combine(Body other) Vec3 { ret self.pos + other.pos; }
+  `}
+  `fun main() {
+  `  Body a; a.pos.x = 1; a.pos.y = 2; a.pos.z = 3;
+  `  Body b; b.pos.x = 10; b.pos.y = 20; b.pos.z = 30;
+  `  Vec3 r = a.combine(b);
+  `  println_fmt("{num} {num} {num}", r.x, r.y, r.z);
+  `}`;
+  let out = emit_c(src, "field-access operand dispatch");
+  assert contains(out, "Vec3__op_add(&"), "expected self.pos + other.pos to compile to a direct call, not raw C + on two structs";
+  let ran = run_source(src, "op_field_dispatch", "a field-access operand (self.pos + other.pos) dispatches");
+  assert equals(ran, "11 22 33\n"), "expected componentwise addition across two different receivers' own fields";
+}
+
+test "operator overloading: a nested index/unary operand dispatches too" {
+  str src = `use std.io;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_add(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x + other.x; r.y = self.y + other.y; r.z = self.z + other.z; ret r;
+  `  }
+  `  op_neg() Vec3 {
+  `    Vec3 r; r.x = -self.x; r.y = -self.y; r.z = -self.z; ret r;
+  `  }
+  `}
+  `compound Pair { Vec3 a; Vec3 b; }
+  `impl Pair {
+  `  op_index(num i) Vec3 { if i == 0 { ret self.a; } ret self.b; }
+  `}
+  `fun main() {
+  `  Pair p; p.a.x = 1; p.a.y = 2; p.a.z = 3; p.b.x = 10; p.b.y = 20; p.b.z = 30;
+  `  Vec3 c; c.x = 100; c.y = 200; c.z = 300;
+  `  Vec3 r1 = p[0] + c;
+  `  Vec3 a; a.x = 1; a.y = 2; a.z = 3;
+  `  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  `  Vec3 r2 = -a + b;
+  `  println_fmt("{num} {num} {num} / {num} {num} {num}", r1.x, r1.y, r1.z, r2.x, r2.y, r2.z);
+  `}`;
+  let out = emit_c(src, "nested index/unary operand dispatch");
+  assert contains(out, "Pair__op_index"), "expected p[0] to compile through op_index";
+  assert contains(out, "Vec3__op_neg"), "expected -a to compile through op_neg";
+  let ran = run_source(src, "op_nested_idx_unary", "a nested index/unary operand dispatches too");
+  assert equals(ran, "101 202 303 / 9 18 27\n"), "expected p[0] + c and -a + b to both componentwise compute correctly";
+}
+
+test "operator overloading: a plain function call's own result as an operand still does not dispatch" {
+  // Deliberately NOT fixed, unlike chained/field/index/unary operands:
+  // determining a *generic* call's own return type can trigger
+  // instantiating it, a real side effect the speculative operand-type
+  // check this feature relies on (tried on every operator in the
+  // codebase) can't risk - see `resolve_operator_operand`'s own doc
+  // comment. This asserts the documented gap stays a clean "doesn't
+  // dispatch, falls through to a real compile error" rather than
+  // silently regressing into something that looks like it works.
+  str src = `use std.io;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_add(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x + other.x; r.y = self.y + other.y; r.z = self.z + other.z; ret r;
+  `  }
+  `}
+  `fun get_vec3() Vec3 {
+  `  Vec3 v; v.x = 1; v.y = 2; v.z = 3; ret v;
+  `}
+  `fun main() {
+  `  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  `  Vec3 sum = get_vec3() + b;
+  `  println_fmt("{num} {num} {num}", sum.x, sum.y, sum.z);
+  `}`;
+  let out = emit_c(src, "op_call_result_not_dispatched");
+  assert !contains(out, "Vec3__op_add(&get_vec3"),
+  "expected a plain call result operand to stay undispatched, not silently compile to a direct call";
+}
+
+test "operator overloading: a nested operand near a generic Map<str, Vec<str>> stays correctly ordered" {
+  // Regression guard: resolving an operand's type must never trigger
+  // generic instantiation as a side effect (see `resolve_operator_
+  // operand`'s own doc comment on the `maybe_instantiate_generic_
+  // function` risk) - confirmed directly once already, breaking
+  // `std.cli`'s own real `Map<str, Vec<str>>` use the same way its own
+  // historical regression first did.
+  str src = `use std.io;
+  `use std.map;
+  `use std.vec;
+  `compound Vec3 { num x; num y; num z; }
+  `impl Vec3 {
+  `  op_add(Vec3 other) Vec3 {
+  `    Vec3 r; r.x = self.x + other.x; r.y = self.y + other.y; r.z = self.z + other.z; ret r;
+  `  }
+  `}
+  `fun main() {
+  `  Map<str, Vec<str>> m;
+  `  m.init(4);
+  `  Vec3 a; a.x = 1; a.y = 2; a.z = 3;
+  `  Vec3 b; b.x = 10; b.y = 20; b.z = 30;
+  `  Vec3 c = a + b;
+  `  println_fmt("{num} has={flag} {num} {num} {num}", m.len(), m.has("x"), c.x, c.y, c.z);
+  `}`;
+  let out = run_source(
+    src,
+    "op_near_generic_map",
+    "a nested operand near a generic Map<str, Vec<str>> stays correctly ordered"
+  );
+  assert equals(out, "0 has=false 11 22 33\n"), "expected the Map<str, Vec<str>> and the operator overload to both work correctly side by side";
+}
