@@ -488,7 +488,9 @@ impl Map<str, num> as Display {
   // Renders as `{"k": v, ...}` (entries are unordered).
   pub to_string() str {
     // Generously size: per entry "\"\": " + key + 20-digit value + ", ".
-    num budget = 2;
+    // Base is 3, not 2 - room for '{', '}' and the trailing '\0', which
+    // an empty map leaves with zero slack from any entry's own budget.
+    num budget = 3;
     num i = 0;
     for i < self.cap {
       if self.used[i] != false && self.tomb[i] == false {
@@ -535,7 +537,9 @@ impl Map<str, num> as Display {
 impl Map<str, str> as Display {
   // Renders as `{"k": "v", ...}` (entries are unordered).
   pub to_string() str {
-    num budget = 2;
+    // Base is 3, not 2 - room for '{', '}' and the trailing '\0', which
+    // an empty map leaves with zero slack from any entry's own budget.
+    num budget = 3;
     num i = 0;
     for i < self.cap {
       if self.used[i] != false && self.tomb[i] == false {
