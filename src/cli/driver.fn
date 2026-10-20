@@ -2963,12 +2963,28 @@ fun _test_suite_worker(raw* arg) raw* {
 // resource exhaustion, not a hang or a bug in any one test.
 const num default_test_suite_workers = 8;
 const num default_test_suite_workers_windows = 4;
+// Under `-memcheck`, this is the OUTER half of the same double-layered
+// oversubscription `FUN_TEST_INTRA_JOBS` (emit_test_runner) guards
+// against on the inner half: up to 8 test files compiling and running
+// at once, each spawning its own full-CPU-count worker pool internally
+// (guard-page mmap/mprotect per allocation makes every one of those
+// threads expensive), pegging every core at once for the whole run. 2
+// here, paired with the inner default also dropping to 2 under
+// memcheck, bounds that to 4 concurrent heavy threads regardless of
+// core count. Neither default changes anything for CI's own memcheck
+// step, which sets both env vars explicitly to restore the original
+// behavior - this only changes what a local run gets with no override
+// of its own.
+const num default_test_suite_workers_memcheck = 2;
 
-fun _test_suite_worker_count() num {
+fun _test_suite_worker_count(flag memcheck) num {
   str override_s = env_or("FUN_TEST_JOBS", "");
   num fallback = default_test_suite_workers;
   if runtime_backend_is_windows() {
     fallback = default_test_suite_workers_windows;
+  }
+  if memcheck {
+    fallback = default_test_suite_workers_memcheck;
   }
   if equals(override_s, "") {
     ret fallback;
@@ -2978,6 +2994,23 @@ fun _test_suite_worker_count() num {
     ret fallback;
   }
   ret parsed;
+}
+
+test "the test suite's own worker count defaults lower under -memcheck, unless FUN_TEST_JOBS overrides it" {
+  // Only exercises the unset-env fallback, not an explicit override:
+  // mutating FUN_TEST_JOBS here would be visible to every other test
+  // in this same process under the parallel runner, including this
+  // file's own other tests.
+  if !equals(env_or("FUN_TEST_JOBS", ""), "") {
+    // Something in the ambient environment already set it (CI's own
+    // memcheck step, say) - the default branch this test checks isn't
+    // reachable, and there's nothing safe to assert here instead.
+    ret;
+  }
+  flag plain_default_ok = _test_suite_worker_count(false) == default_test_suite_workers ||
+    _test_suite_worker_count(false) == default_test_suite_workers_windows;
+  assert plain_default_ok, "expected the ordinary default, platform-appropriate, when -memcheck is off";
+  assert _test_suite_worker_count(true) == default_test_suite_workers_memcheck, "expected the small memcheck-specific default";
 }
 
 // `fun test <dir>`/`fun test` (no path): discovers every `.fn` file under
@@ -3030,7 +3063,7 @@ pub fun run_test_suite(
     ret 0;
   }
 
-  num workers = _test_suite_worker_count();
+  num workers = _test_suite_worker_count(memcheck);
   if workers < 1 {
     workers = 1;
   }
