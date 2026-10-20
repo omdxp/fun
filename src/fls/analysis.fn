@@ -434,6 +434,20 @@ impl AnalysisCache {
     }
 
     num line_delta = doc.edit_replacement_lines - (doc.edit_end_line - doc.edit_start_line);
+    // A line-count change shifts where every LATER declaration's own
+    // statements/expressions really sit - but only their own top-level
+    // leading position gets corrected below (see the shift loop's own
+    // note on why that's deliberately shallow), never anything nested
+    // inside them. Unless this is the last declaration (old_end1 < 0,
+    // nothing of this file follows it at all), splicing here would
+    // leave hover/go-to-definition/completion reading stale line
+    // numbers for code this edit never touched, for as long as editing
+    // keeps hitting the fast path. Falling back to a full reparse
+    // whenever the line count actually changes and something real
+    // follows is always correct, just not the fast path.
+    if line_delta != 0 && old_end1 >= 0 {
+      ret false;
+    }
     num new_start_line0 = old_start1 - 1;
     num new_end_line0 = old_end1 - 1 + line_delta;
     if old_end1 < 0 {
