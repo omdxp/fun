@@ -2000,3 +2000,34 @@ test "a built program observes the file system and other processes" {
   assert contains(out, "dir=yes"), "expected the directory it made to be there";
   assert contains(out, "spawned=yes"), "expected the process it ran to report back";
 }
+
+test "memcheck's own quarantine recycles retired guard pages past its budget, with no false report" {
+  str src = `use std.c.mem;
+  `use std.io;
+  `fun main() num {
+  `  num i = 0;
+  `  for i < 20000 {
+  `    raw* p = malloc(8);
+  `    free(p);
+  `    i = i + 1;
+  `  }
+  `  print("done\n");
+  `  ret 0;
+  `}`;
+  let result = run_source_result_memcheck(
+    src,
+    "mc_quarantine_recycle",
+    "memcheck's own quarantine recycles retired guard pages past its budget, with no false report"
+  );
+  assert result.exit_code == 0, format(
+    "expected a clean exit, got {num}: {str}{str}",
+    result.exit_code,
+    result.stdout_text,
+    result.stderr_text
+  );
+  assert contains(result.stdout_text, "done"), "expected the program's own output";
+  assert !contains(result.stderr_text, "[memcheck]"), format(
+    "expected no memcheck report against ordinary alloc/free, got: {str}",
+    result.stderr_text
+  );
+}
