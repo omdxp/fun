@@ -54,6 +54,14 @@ pub compound Analyzed {
   // whole import graph just to rebuild it.
   GlobalSymbolsSnapshot symbols;
   flag has_symbols;
+  // The real reason this revision's imports failed to resolve (e.g.
+  // "import not found: stdlib/std/log.fn"), kept so `diagnose()` can show
+  // it instead of a generic placeholder. Empty, but still a real
+  // allocation (see `Document.path`'s own note on why), whenever `parsed`
+  // is true or `lexed` is false - the only case this is ever non-empty is
+  // a lexable file whose own text parses standalone but whose imports did
+  // not resolve.
+  str import_error;
 }
 
 // A top-level declaration's own identity: its kind and the name(s)
@@ -254,6 +262,7 @@ impl AnalysisCache {
     fresh.parsed = false;
     fresh.has_symbols = false;
     fresh.tokens.init(0);
+    fresh.import_error = substr("", 0, 0);
 
     let lexed = tokenize(doc.text, doc.path);
     if lexed.is_ok() {
@@ -299,13 +308,11 @@ impl AnalysisCache {
         fresh.has_symbols = true;
         self._inject_workspace_defines(&fresh.program.nodes, doc.path);
       } else {
-        // `_diagnose_uncached`'s own generic "this file's imports
-        // could not be resolved" is what a client actually sees - the
-        // real message here, built fresh by `_preload_one_file`, has
-        // nowhere else to go but freed right away. Printed first under
-        // `FLS_DEBUG_IMPORTS` (see `fun.fls.debugImports`), since this
-        // is the one place that ever sees why a file's own imports
-        // genuinely failed to resolve, not just that they did.
+        // `_diagnose_uncached` shows this verbatim instead of a generic
+        // placeholder - kept on `fresh` rather than freed right away.
+        // Also printed under `FLS_DEBUG_IMPORTS` (see
+        // `fun.fls.debugImports`) since that is still the one place that
+        // ever sees which document triggered it, not just the message.
         str err_msg = merged.unwrap_err();
         if _debug_imports() {
           // Both strings are already NUL-terminated, so a plain `%s`
@@ -322,7 +329,8 @@ impl AnalysisCache {
             err_msg
           );
         }
-        free(err_msg);
+        free(fresh.import_error);
+        fresh.import_error = err_msg;
         free_global_symbols_snapshot(&snap);
       }
     }
@@ -357,6 +365,7 @@ impl AnalysisCache {
       if found.has_symbols && !fast_done {
         free_global_symbols_snapshot(&found.symbols);
       }
+      free(found.import_error);
     }
 
     self.entries.put(doc.uri, fresh);

@@ -209,7 +209,10 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
       ret out;
     }
     str imports_msg = "this file's imports could not be resolved";
-    out.push(_at_start(DIAG_SEVERITY_ERROR, substr(imports_msg, 0, len(imports_msg))));
+    str message = len(read.import_error) > 0
+    ? substr(read.import_error, 0, len(read.import_error))
+    : substr(imports_msg, 0, len(imports_msg));
+    out.push(_at_start(DIAG_SEVERITY_ERROR, message));
     ret out;
   }
   ProgramMergeResult program = read.program;
