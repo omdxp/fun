@@ -2963,12 +2963,29 @@ fun _test_suite_worker(raw* arg) raw* {
 // resource exhaustion, not a hang or a bug in any one test.
 const num default_test_suite_workers = 8;
 const num default_test_suite_workers_windows = 4;
+// Under `-memcheck`, this is the OUTER half of the same double-layered
+// oversubscription `FUN_TEST_INTRA_JOBS` (emit_test_runner) guards
+// against on the inner half: up to 8 test files compiling and running
+// at once, each spawning its own full-CPU-count worker pool internally
+// (guard-page mmap/mprotect per allocation makes every one of those
+// threads expensive), pegging every core at once for the whole run. 2
+// here, paired with the inner default dropping to half the real CPU
+// count under memcheck, lands close to the real core count rather
+// than well past it, regardless of how many cores the machine
+// actually has. Neither default changes anything for CI's own
+// memcheck step, which sets both env vars explicitly to restore the
+// original behavior - this only changes what a local run gets with no
+// override of its own.
+const num default_test_suite_workers_memcheck = 2;
 
-fun _test_suite_worker_count() num {
+fun _test_suite_worker_count(flag memcheck) num {
   str override_s = env_or("FUN_TEST_JOBS", "");
   num fallback = default_test_suite_workers;
   if runtime_backend_is_windows() {
     fallback = default_test_suite_workers_windows;
+  }
+  if memcheck {
+    fallback = default_test_suite_workers_memcheck;
   }
   if equals(override_s, "") {
     ret fallback;
@@ -2978,6 +2995,23 @@ fun _test_suite_worker_count() num {
     ret fallback;
   }
   ret parsed;
+}
+
+test "the test suite's own worker count defaults lower under -memcheck, unless FUN_TEST_JOBS overrides it" {
+  // Only exercises the unset-env fallback, not an explicit override:
+  // mutating FUN_TEST_JOBS here would be visible to every other test
+  // in this same process under the parallel runner, including this
+  // file's own other tests.
+  if !equals(env_or("FUN_TEST_JOBS", ""), "") {
+    // Something in the ambient environment already set it (CI's own
+    // memcheck step, say) - the default branch this test checks isn't
+    // reachable, and there's nothing safe to assert here instead.
+    ret;
+  }
+  flag plain_default_ok = _test_suite_worker_count(false) == default_test_suite_workers ||
+    _test_suite_worker_count(false) == default_test_suite_workers_windows;
+  assert plain_default_ok, "expected the ordinary default, platform-appropriate, when -memcheck is off";
+  assert _test_suite_worker_count(true) == default_test_suite_workers_memcheck, "expected the small memcheck-specific default";
 }
 
 // `fun test <dir>`/`fun test` (no path): discovers every `.fn` file under
@@ -3030,7 +3064,7 @@ pub fun run_test_suite(
     ret 0;
   }
 
-  num workers = _test_suite_worker_count();
+  num workers = _test_suite_worker_count(memcheck);
   if workers < 1 {
     workers = 1;
   }
@@ -4224,6 +4258,82 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
   // A double-free is never a matter of process lifetime, so it's
   // caught unconditionally, with no opt-in needed.
   assert run_tests(doubled, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real double-free to fail the test under plain -memcheck";
+
+  // A real off-by-one, not a gross overread: `__fun_mc_guard_alloc`
+  // used to round the allocation's own size up to a whole page and put
+  // the guard page after that padding, so only an overflow bigger than
+  // the leftover slack (up to a whole page) ever touched the guard page
+  // at all. The allocation's own end is now aligned to the guard page
+  // directly, so even one element past it faults immediately.
+  str overflow = path_join(dir, "overflow.fn");
+  write_string(
+    overflow,
+    `use std.c.mem;
+    `test "writes one element past the end" {
+    `  num* arr = malloc(8 * 4);
+    `  arr[4] = 1;
+    `}
+);
+  assert run_tests(overflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a one-element overflow to fail the test under plain -memcheck";
+
+  // The other direction: a leading guard page too, added alongside the
+  // trailing one. mprotect only works at whole-page granularity, so (see
+  // `__fun_mc_guard_alloc`'s own note) only one end of a non-page-sized
+  // allocation can be byte-precise - the end is exact, the start only
+  // faults once an underflow crosses the same page-rounding slack the
+  // overflow fix above aligned away, which is up to a whole real page
+  // (4 KiB on most platforms, 16 KiB on Apple Silicon) - and a single
+  // jump far enough back to clear that on every platform overshoots
+  // past the guard page entirely on the smaller ones, landing in
+  // unrelated memory with no fault at all. Walking back one byte at a
+  // time instead is what actually crosses the guard on any platform,
+  // since it can never skip over it.
+  str underflow = path_join(dir, "underflow.fn");
+  write_string(
+    underflow,
+    `use std.c.mem;
+    `test "writes far enough before the start to cross the leading guard page" {
+    `  chr* p = malloc(16);
+    `  num i = 1;
+    `  for i < 40000 {
+    `    p[0 - i] = 'x';
+    `    i = i + 1;
+    `  }
+    `}
+);
+  assert run_tests(underflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real underflow to fail the test under plain -memcheck";
+
+  // User-reported question: `free(ptr); ptr += 1;` with no dereference
+  // afterward is not a use-after-free this (or any guard-page/ASan-style)
+  // checker can catch - no memory access ever happens, so no page fault
+  // ever fires. It is still undefined behaviour by the C standard's own
+  // pointer-provenance rules, just not a class of bug any runtime
+  // access-based tool observes; a real dereference afterward is.
+  str arith_only = path_join(dir, "arith_only.fn");
+  write_string(
+    arith_only,
+    `use std.c.mem;
+    `test "pointer arithmetic on a freed pointer, never dereferenced" {
+    `  num* p = malloc(8);
+    `  free(p);
+    `  p = p + 1;
+    `}
+);
+  assert run_tests(arith_only, &args, false, false, "", false, false, false, &defines, &cover, true) == 0, "expected pointer arithmetic alone, with no dereference, not to be flagged";
+
+  str arith_then_deref = path_join(dir, "arith_then_deref.fn");
+  write_string(
+    arith_then_deref,
+    `use std.c.mem;
+    `test "pointer arithmetic on a freed pointer, then dereferenced" {
+    `  num* p = malloc(8);
+    `  free(p);
+    `  p = p + 1;
+    `  num x = *p;
+    `  _ = x;
+    `}
+);
+  assert run_tests(arith_then_deref, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected the actual dereference after the arithmetic to be caught as a use-after-free";
 }
 
 // `-memcheck` auto-injects `use std.memcheck;` into whatever is being

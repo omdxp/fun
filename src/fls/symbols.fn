@@ -9,13 +9,19 @@
 
 use ..ast.ast;
 use ..lexer.token;
+use ..parser.import_resolver;
+use ..parser.parse_state;
+use ..parser.parser;
 use positions;
+use analysis;
+use imports;
 use std.string;
 use std.io;
 use std.vec;
 use std.c.mem;
 use std.option;
 use std.ctype;
+use std.fs;
 
 // What a name turned out to be.
 pub enum DeclarationKind {
@@ -460,16 +466,46 @@ fun _quote_escaped(str s) str {
 // `num times = 2`), spelled back the way a reader would read it (a
 // re-rendered numeric form rather than the exact source text, so
 // `0xFF` shows as `255`): "" for an initializer that isn't a plain
-// literal, a bare name, or a unary minus over one of those - covers
-// every shape a default parameter value is allowed to take (a
-// constant, a global, `nil`, or an enum variant's own bare name;
-// arbitrary expressions aren't legal there to begin with), but not
-// a qualified or dot-shorthand variant construction.
+// literal, a bare name, a payload-less dot-shorthand variant, or a
+// unary minus over one of those - covers every shape a default
+// parameter value is allowed to take (a constant, a global, `nil`, a
+// qualified or bare enum variant name, or its dot-shorthand spelling;
+// arbitrary expressions aren't legal there to begin with). User-
+// reported: `LogFormat format = .Text` rendered with no default at
+// all in hover/signature-help - every builtin-typed default (a
+// number, string, bool) showed fine, but this, the idiomatic way to
+// default an enum-typed parameter, silently vanished because this
+// function had no case for it at all, not because enum/compound/shape
+// defaults are unsupported in general (`nil` and a bare constant name
+// already worked).
 fun _literal_value_text(Node* val) str {
   if val == nil {
     ret substr("", 0, 0);
   }
   fit val.kind {
+    .Expression(e) -> {
+      // A payload-less dot-shorthand variant (`.Text`): parsed as a
+      // `.` binary expression whose own left side is a placeholder
+      // `.Blank` node (there's no real receiver to its left) and
+      // whose right side is the variant's own bare name - the same
+      // shape `_bare_enum_shorthand_variant` recognizes in
+      // typecheck.fn, duplicated here rather than imported since fls
+      // deliberately doesn't depend on the full typechecker.
+      if equals(e.op, ".") && e.has_left && e.has_right {
+        flag left_is_blank = false;
+        fit e.left.kind {
+          .Blank -> { left_is_blank = true; }
+          _ -> {}
+        }
+        if left_is_blank {
+          fit e.right.kind {
+            .Identifier(name) -> { ret format(".{str}", name); }
+            _ -> {}
+          }
+        }
+      }
+      ret substr("", 0, 0);
+    }
     // Copied, not returned directly: every other arm here returns an
     // owned string, so a caller can free this function's result
     // uniformly regardless of which arm produced it.
@@ -1862,6 +1898,239 @@ fun _signature_params_close(str signature) num {
     i = i + 1;
   }
   ret -1;
+}
+
+// Whether `name` was declared `let name = callee(...)` anywhere in
+// `tokens` - `callee`'s own bare name when so, "" otherwise. A `let`
+// with no type annotation has no `Type name` shape for a token-only
+// receiver-type lookup to find at all, which previously left a
+// dot-completion (or a hover) on a call-inferred local answering
+// nothing once the document stopped parsing (most commonly: a
+// a different import this local's own type doesn't even depend on
+// failed to resolve, collapsing the whole document's own tree even
+// though the type actually needed was perfectly reachable). This
+// recovers just the one piece that lookup needs - which function was
+// called - so `let_call_return_type_from_tokens` can resolve the rest.
+// Shared by completion.fn and navigation.fn, both of which hit this
+// exact gap in their own token-only fallback tier.
+pub fun let_call_callee_from_tokens(Vec<Token>* tokens, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    // `token_after`/`token_before` are both inclusive of the index
+    // handed in (the token "at or after"/"at or before" it) - every
+    // call below passes the previous token's own index + 1, matching
+    // the convention every other caller of these two already uses.
+    if token_is_keyword(t, "let") {
+      let name_tok = token_after(tokens, i + 1);
+      if name_tok.is_some() {
+        Token nt = name_tok.unwrap();
+        if nt.type == .Identifier && equals(token_word(nt), name) {
+          num name_idx = index_of_token(tokens, nt);
+          let eq_tok = token_after(tokens, name_idx + 1);
+          if eq_tok.is_some() && token_is_operator(eq_tok.unwrap(), "=") {
+            num eq_idx = index_of_token(tokens, eq_tok.unwrap());
+            let callee_tok = token_after(tokens, eq_idx + 1);
+            if callee_tok.is_some() && callee_tok.unwrap().type == .Identifier {
+              num callee_idx = index_of_token(tokens, callee_tok.unwrap());
+              let lparen = token_after(tokens, callee_idx + 1);
+              if lparen.is_some() && token_is_operator(lparen.unwrap(), "(") {
+                ret token_word(callee_tok.unwrap());
+              }
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// `callee`'s own declared return type, scanning this document's own
+// tokens for a plain top-level `fun callee(...) ReturnType {` - a
+// local function's own declaration never needs a real parse to find,
+// the same reasoning every other lookup in this fallback tier
+// already relies on. An imported `callee` is resolved separately (see
+// `let_call_return_type_from_tokens`); a method or a generic's own
+// specialized return type is out of scope here, matched by the
+// simpler plain top-level function shape alone.
+fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_keyword(t, "fun") {
+      let name_tok = token_after(tokens, i + 1);
+      if name_tok.is_some() {
+        Token nt = name_tok.unwrap();
+        if nt.type == .Identifier && equals(token_word(nt), callee) {
+          num name_idx = index_of_token(tokens, nt);
+          let lparen = token_after(tokens, name_idx + 1);
+          if lparen.is_some() && token_is_operator(lparen.unwrap(), "(") {
+            num lparen_idx = index_of_token(tokens, lparen.unwrap());
+            num depth = 1;
+            num j = lparen_idx + 1;
+            for j < tokens.len && depth > 0 {
+              if token_is_operator(tokens.get(j), "(") {
+                depth = depth + 1;
+              } elif token_is_symbol(tokens.get(j), ')') {
+                depth = depth - 1;
+              }
+              j = j + 1;
+            }
+            if depth == 0 {
+              StringBuilder b = string_builder_init(16);
+              num k = j;
+              flag any = false;
+              for k < tokens.len {
+                Token rt = tokens.get(k);
+                if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                  break;
+                }
+                if rt.type == .NewLine || rt.type == .Comment {
+                  k = k + 1;
+                  continue;
+                }
+                if any {
+                  b.append(" ");
+                }
+                any = true;
+                b.append(token_word(rt));
+                k = k + 1;
+              }
+              ret b.build();
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// A call-inferred local's own type (`let l = logger_init(...)`),
+// resolved without a real parse of `doc_path`: finds which function
+// was called (`let_call_callee_from_tokens`), then that function's
+// own declared return type, checked first in this document's own
+// tokens, then in each of its own resolved imports, parsed fresh and
+// independent of whatever is actually broken elsewhere in the
+// document. Returns a fresh allocation (or ""), always - the caller
+// owns whatever comes back and is responsible for freeing it once
+// done, same as any other `str`-returning function that actually
+// builds its own result rather than pointing into something that
+// already exists.
+pub fun let_call_return_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache* cache, str name) str {
+  str callee = let_call_callee_from_tokens(tokens, name);
+  if equals(callee, "") {
+    ret "";
+  }
+  str local = _local_fn_return_type_from_tokens(tokens, callee);
+  if !equals(local, "") {
+    ret local;
+  }
+  Vec<str> import_paths = resolved_import_paths(tokens, doc_path);
+  defer import_paths.free();
+  num k = 0;
+  for k < import_paths.len {
+    str path = import_paths.get(k);
+    k = k + 1;
+    str text = read_to_string(path);
+    if text == nil {
+      continue;
+    }
+    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    if merged.is_err() {
+      free(merged.unwrap_err());
+      continue;
+    }
+    ProgramMergeResult target = merged.unwrap();
+    let f = lookup_top_level(&target.nodes, callee);
+    if f.is_some() {
+      str rtype = return_type_from_detail(f.unwrap().detail);
+      if !equals(rtype, "") {
+        ret rtype;
+      }
+    }
+  }
+  ret "";
+}
+
+// `type_name`'s own `member_name` (a field or a method), resolved
+// without a real merged parse of `doc_path`: a standalone parse of
+// this document's own tokens alone (ignoring whatever import of its
+// own is actually broken - the same technique `diagnostics.fn`'s own
+// syntax-error localization already uses) finds a local declaration;
+// each of this document's own resolved imports, parsed fresh, finds
+// an imported one. Shared by hover and go-to-definition, both of
+// which need a member's own real declaration (not just its type
+// name, the way `let_call_return_type_from_tokens` above answers)
+// once the document stops parsing as a whole. Does not chase a
+// three-way split (a compound in one file, implemented from another,
+// used from a third) - the same precision ceiling every other lookup
+// in this fallback tier already accepts.
+pub fun member_declaration_from_tokens(
+  Vec<Token>* tokens,
+  str doc_path,
+  AnalysisCache* cache,
+  str type_name,
+  str member_name
+) Option<Declaration> {
+  Vec<str> no_args;
+  no_args.init(0);
+  defer no_args.free();
+
+  ParseState state = parse_state_new(doc_path, "");
+  state.tokens = tokens.clone();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let parse_failed = p.parse();
+  Option<Declaration> local_found = .None;
+  if parse_failed.is_none() {
+    let field = lookup_field(&state.nodes, type_name, member_name, no_args);
+    if field.is_some() {
+      local_found = field;
+    } else {
+      let method = lookup_method(&state.nodes, type_name, member_name, no_args);
+      if method.is_some() {
+        local_found = method;
+      }
+    }
+  }
+  free_node_tree(&state.nodes);
+  state.tokens.free();
+  state.global_symbols.free();
+  free_parse_state_internal(&state);
+  if local_found.is_some() {
+    ret local_found;
+  }
+
+  Vec<str> import_paths = resolved_import_paths(tokens, doc_path);
+  defer import_paths.free();
+  num k = 0;
+  for k < import_paths.len {
+    str path = import_paths.get(k);
+    k = k + 1;
+    str text = read_to_string(path);
+    if text == nil {
+      continue;
+    }
+    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    if merged.is_err() {
+      free(merged.unwrap_err());
+      continue;
+    }
+    ProgramMergeResult target = merged.unwrap();
+    let field = lookup_field(&target.nodes, type_name, member_name, no_args);
+    if field.is_some() {
+      ret field;
+    }
+    let method = lookup_method(&target.nodes, type_name, member_name, no_args);
+    if method.is_some() {
+      ret method;
+    }
+  }
+  ret .None;
 }
 
 // The bare return type of a rendered function/method signature

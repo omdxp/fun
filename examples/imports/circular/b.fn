@@ -1,0 +1,19 @@
+// Imports `a` right back - the import graph is a genuine A<->B cycle,
+// not a diamond. Import resolution has to tolerate reaching a file it
+// is already in the middle of resolving without looping forever or
+// losing either file's own declarations.
+use a;
+
+pub compound B {
+  num y;
+}
+
+pub fun make_b() B {
+  B b;
+  b.y = 2;
+  ret b;
+}
+
+pub fun use_a(A* a) num {
+  ret a.x;
+}

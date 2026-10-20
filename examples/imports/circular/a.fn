@@ -1,0 +1,18 @@
+// Imports `b`, which itself imports this file right back - a genuine
+// cycle, not a diamond (two independent paths converging on one shared
+// leaf). See `b.fn`'s own note and `main.fn` for what this proves.
+use b;
+
+pub compound A {
+  num x;
+}
+
+pub fun make_a() A {
+  A a;
+  a.x = 1;
+  ret a;
+}
+
+pub fun use_b(B* b) num {
+  ret b.y;
+}

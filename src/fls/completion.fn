@@ -92,6 +92,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   if position_in_comment(&tokens, line, character) {
     ret "[]";
   }
+  // A `.`/`,` typed while still writing a string's own content carries
+  // no meaning either - without this, it reads as a bare trigger the
+  // same way inside a comment does, and dumps every top-level name in
+  // scope into the middle of whatever the reader is actually typing.
+  if position_in_string(&tokens, line, character) {
+    ret "[]";
+  }
 
   num source_line = line + 1;
   str receiver = _receiver_before(&tokens, line, character);
@@ -187,6 +194,18 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
         if equals(local_type, "") {
           local_type = _receiver_type_from_tokens(&tokens, receiver);
         }
+        // Unlike every other source `local_type` can come from here (the
+        // receiver's own name, or a token borrowed straight out of
+        // `tokens`), this one is a fresh allocation of its own -
+        // `let_call_return_type_from_tokens` builds the resolved return
+        // type itself, rather than pointing into something that already
+        // exists. Freed right after its one use below, once nothing
+        // still needs it.
+        flag local_type_owned = false;
+        if equals(local_type, "") {
+          local_type = let_call_return_type_from_tokens(&tokens, doc.path, cache, receiver);
+          local_type_owned = !equals(local_type, "");
+        }
         if equals(local_type, "") {
           local_type = receiver;
         }
@@ -217,10 +236,21 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
             _members_of(&target.nodes, local_type, &items, snippets, doc.path);
           }
         }
+        if local_type_owned {
+          free(local_type);
+        }
       }
-      if items.len == 0 {
-        _written_names(&tokens, receiver, &items);
-      }
+      // Unlike the no-receiver fallback above, dumping every name ever
+      // written in the file here would be actively misleading, not
+      // just unhelpful: a dot-completion request means "what does this
+      // have", and nothing checked above could say - most commonly
+      // because an import this receiver's own type comes from (`use
+      // std.log;`, say) itself failed to resolve. Answering with
+      // unrelated top-level names (`"std"`, `"log"`, `"main"`, ...) as
+      // if they were real members reads as the language itself being
+      // broken rather than the actual problem (an unresolved import,
+      // visible in this document's own diagnostics instead). An empty
+      // reply here is the honest "don't know", not a regression.
     }
     ret _reply(&items);
   }

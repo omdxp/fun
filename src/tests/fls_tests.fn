@@ -1180,6 +1180,331 @@ test "dot-completion merges a method declared in a different file than the type"
   assert contains(out, `"label":"value"`), "expected a method declared in a different file (via use) to be offered";
 }
 
+test "dot-completion on a std.log Logger resolves across a real incremental edit, not just a fresh parse" {
+  // User-reported: completion on `l.debug(...)` etc. looked broken after
+  // `let l = logger_init(...)` was typed - this drives the exact fast
+  // single-declaration-reparse path (`_try_fast_reparse`) a real editor
+  // session takes, which a one-shot `completion()` call never exercises.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///logrepro.fn";
+  // Opened as it looks right after typing the `use` line and an empty
+  // `main`, and analyzed once (same as the server does for diagnostics
+  // on open) so the next edit has a previous revision to fast-reparse
+  // against.
+  docs.opened(uri, "use std.log;\n\nfun main() {\n}\n", 1);
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_logrepro_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // A single ranged edit inserting the body, exactly like a real
+  // editor's `didChange` replacing the blank line inside `main`'s braces.
+  str body = "  let l = logger_init(.Warn, .Json);\n  l.debug(\"this is debug\");\n  l.info(\"this is info\");\n";
+  docs.edited(uri, 3, 0, 3, 0, body, 2);
+  Document d2 = docs.at(uri).unwrap();
+  d2.path = "src/tests/fixtures/_logrepro_probe.fn";
+  assert d2.has_edit_range, "expected a single ranged edit to qualify for the fast-reparse path";
+
+  // Right after `l.` on the debug-call line (0-based line 4, col 4).
+  str out = completion(&reads, d2, 4, 4, false);
+  assert contains(out, `"label":"debug"`), "expected debug among Logger's own methods";
+  assert contains(out, `"label":"info"`), "expected info among Logger's own methods";
+  assert contains(out, `"label":"warn"`), "expected warn among Logger's own methods";
+  assert contains(out, `"label":"error"`), "expected error among Logger's own methods";
+  assert contains(out, `"label":"level","kind":5`), "expected Logger's own fields too";
+}
+
+test "a fast-reparse edit that renames a top-level declaration falls back to a full reparse, not stale symbols" {
+  // `_try_fast_reparse`'s own central invariant: a declaration whose
+  // identity (kind + name) changed must never take the fast splice -
+  // every other declaration's own seeded symbol table still has the old
+  // name, which a caller 3 edits later would otherwise see as still
+  // valid. Proven by actually renaming one, then calling the new name
+  // from elsewhere and confirming it resolves (only possible if the
+  // rename forced a real full reparse that rebuilt the symbol table).
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///identity_change.fn";
+  docs.opened(uri, "fun helper() num {\n  ret 1;\n}\n\nfun main() {\n}\n", 1);
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_identity_change_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // Rename `helper` to `helper2` - a single ranged edit entirely inside
+  // that one declaration's own signature line.
+  docs.edited(uri, 0, 0, 0, 19, "fun helper2() num {", 2);
+  Document d2 = docs.at(uri).unwrap();
+  d2.path = "src/tests/fixtures/_identity_change_probe.fn";
+  let _a2 = reads.of(d2);
+
+  // Now call the renamed function from inside `main`'s own body - a
+  // second, separate ranged edit, entirely inside `main` this time.
+  docs.edited(uri, 5, 0, 5, 0, "  let x = helper2();\n  _ = x;\n", 3);
+  Document d3 = docs.at(uri).unwrap();
+  d3.path = "src/tests/fixtures/_identity_change_probe.fn";
+
+  // Right after `helper2(` on the new call line.
+  str hovered = hover(&reads, d3, 5, 13);
+  assert contains(hovered, "helper2"), "expected the renamed function's own new name to resolve, not a stale 'helper'";
+  assert contains(hovered, "num"), "expected its own real return type too";
+}
+
+test "a fast-reparse edit spanning two declarations falls back to a full reparse" {
+  // The edit's own old range (end of `a`'s body through the start of
+  // `b`'s) touches more than one declaration - `_try_fast_reparse` must
+  // refuse rather than splice against whichever one `_decl_index_at_line`
+  // happens to land on.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///cross_decl_edit.fn";
+  docs.opened(uri, "fun a() num {\n  ret 1;\n}\n\nfun b() num {\n  ret 2;\n}\n", 1);
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_cross_decl_edit_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // Replace from the start of `a`'s own body line through the end of
+  // `b`'s own signature line, crossing straight over the boundary
+  // between the two declarations.
+  docs.edited(uri, 1, 0, 4, 13, "  ret 1;\n}\n\nfun c() num {", 2);
+  Document d2 = docs.at(uri).unwrap();
+  d2.path = "src/tests/fixtures/_cross_decl_edit_probe.fn";
+  let a2 = reads.of(d2);
+  assert a2.parsed, "expected the merged document to still parse after a correct full reparse";
+
+  // `c` only exists after this edit, so it resolving at all (rather than
+  // completion still offering the no-longer-real `b`) proves the symbol
+  // table was genuinely rebuilt, not spliced against a stale boundary.
+  str out = completion(&reads, d2, 0, 0, false);
+  assert contains(out, `"label":"c"`), "expected the real post-edit function 'c' to resolve";
+}
+
+test "a fast-reparse edit that changes the file's own line count never leaves a later declaration's nested positions stale" {
+  // Real bug, caught by this test: `_try_fast_reparse`'s own line-delta
+  // shift (see its header comment) only corrects each remaining
+  // top-level declaration's own leading position, deliberately not
+  // every nested statement/expression inside it. Before this test's own
+  // fix, an edit that added or removed a line left every nested
+  // position in every later declaration stale - hover on code the edit
+  // never touched (here, `main`'s own `b.data`, a different declaration
+  // entirely) silently went from a real answer to `null`. Now such an
+  // edit falls back to a full reparse instead, which is always correct.
+  Documents docs = documents_new();
+  defer docs.free();
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  str uri = "file:///impl_fast_reparse.fn";
+  docs.opened(
+    uri,
+    "compound Box<T> {\n  T data;\n}\n\nimpl Box<T> {\n  pub get() T {\n    ret self.data;\n  }\n}\n\nfun main() {\n  Box<num> b;\n  b.data = 1;\n}\n",
+    1
+  );
+  Document d1 = docs.at(uri).unwrap();
+  d1.path = "src/tests/fixtures/_impl_fast_reparse_probe.fn";
+  let _a1 = reads.of(d1);
+
+  // Two sequential edits inside the impl's own `get` method body - the
+  // second one inserts a whole new line, shifting `main` (and every
+  // nested position inside it) down by one from where it started.
+  docs.edited(uri, 6, 0, 6, 18, "    num x = 1;", 2);
+  let _a2 = reads.of(docs.at(uri).unwrap());
+  docs.edited(uri, 6, 15, 6, 15, "\n    ret self.data + x;", 3);
+  Document d3 = docs.at(uri).unwrap();
+  d3.path = "src/tests/fixtures/_impl_fast_reparse_probe.fn";
+  let a3 = reads.of(d3);
+  assert a3.parsed, "expected the method to still parse after two sequential edits, one of them line-count-changing";
+
+  // Hover on `b.data` in `main`, a separate declaration never touched by
+  // either edit, now sitting one line further down than it started.
+  str hovered = hover(&reads, d3, 13, 4);
+  assert contains(hovered, "num data"), "expected Box<num>'s own specialized field type, not a stale-position null";
+}
+
+test "dot-completion gives an honest empty reply, not every other name in the file, when the receiver's own import failed to resolve" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///unresolved_import_probe.fn";
+  doc.path = "src/tests/fixtures/_unresolved_import_probe.fn";
+  doc.text = `use this_module_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = make_thing();
+  `  l.whatever("x");
+  `}`;
+  doc.version = 1;
+
+  // Right after `l.` on the whatever-call line.
+  str out = completion(&reads, doc, 4, 4, false);
+  assert equals(out, "[]"), "expected an honest empty reply, not unrelated top-level names (`use`, `main`, `make_thing`, ...) standing in as fake members of an unresolvable receiver";
+}
+
+test "dot-completion on a call-inferred local still resolves through a working import, when a different, unrelated import is broken" {
+  // User-reported, generalized from the original std.log report: the
+  // whole document's own merged parse fails the instant any import
+  // fails to resolve, even one the receiver's own type has nothing to
+  // do with - which previously meant a `let`-inferred local (no type
+  // annotation of its own for the token-only fallback to read, unlike
+  // an explicitly-typed one) could never resolve in that state at
+  // all, regardless of whether the function it was actually bound to
+  // came from a working import or was declared right here in the same
+  // file.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document from_import;
+  from_import.uri = "file:///partial_fail_import.fn";
+  from_import.path = "src/tests/fixtures/_partial_fail_import_probe.fn";
+  from_import.text = `use std.log;
+  `use this_totally_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = logger_init(.Warn, .Json);
+  `  l.debug("x");
+  `}`;
+  from_import.version = 1;
+  str import_out = completion(&reads, from_import, 5, 4, false);
+  assert contains(import_out, `"label":"debug"`), "expected the call-inferred local's own methods, resolved through a different file's working import";
+  assert contains(import_out, `"label":"level","kind":5`), "expected its fields too";
+}
+
+test "hover on a call-inferred local still resolves when a different, unrelated import is broken" {
+  // hover.fn's own version of the same gap completion.fn had: hovering
+  // the local itself (not a dot-access on it) returned nothing at all
+  // once the document stopped parsing, even though the type it needed
+  // was perfectly reachable through a working import elsewhere in the
+  // same file.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hover_partial_fail.fn";
+  doc.path = "src/tests/fixtures/_hover_partial_fail_probe.fn";
+  doc.text = `use std.log;
+  `use this_totally_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = logger_init(.Warn, .Json);
+  `  l.debug("x");
+  `}`;
+  doc.version = 1;
+
+  // Right on `l` itself, line 4 "  let l = ...".
+  str hovered = hover(&reads, doc, 4, 6);
+  assert contains(hovered, "Logger l"), "expected the call-inferred local's own real type, not null";
+}
+
+test "go-to-definition on a member of a call-inferred local resolves through a working import, when a different import is broken" {
+  // navigation.fn's own version of the same gap: `l.debug` jumping
+  // nowhere once the document stopped parsing, even when `debug`'s own
+  // real declaration was perfectly reachable through std.log's own
+  // working import.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///def_partial_fail_import.fn";
+  doc.path = "src/tests/fixtures/_def_partial_fail_import_probe.fn";
+  doc.text = `use std.log;
+  `use this_totally_does_not_exist_anywhere;
+  `
+  `fun main() {
+  `  let l = logger_init(.Warn, .Json);
+  `  l.debug("x");
+  `}`;
+  doc.version = 1;
+
+  // Right on `debug` in `l.debug("x")`, line 5.
+  str out = definition(&reads, doc, 5, 4);
+  assert contains(out, "log.fn"), "expected the jump to land in std.log's own file";
+  assert contains(out, `"character":6`), "expected the jump to land right on debug's own name";
+}
+
+test "go-to-definition on a member of a call-inferred local resolves through a function and impl declared in the same file, when an import is broken" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///def_partial_fail_local.fn";
+  doc.path = "src/tests/fixtures/_def_partial_fail_local_probe.fn";
+  doc.text = `use this_totally_does_not_exist_anywhere;
+  `
+  `compound Box {
+  `  num n;
+  `}
+  `impl Box {
+  `  pub doubled() num {
+  `    ret self.n * 2;
+  `  }
+  `}
+  `fun make_box() Box {
+  `  Box created;
+  `  created.n = 1;
+  `  ret created;
+  `}
+  `fun main() {
+  `  let b = make_box();
+  `  b.doubled();
+  `}`;
+  doc.version = 1;
+
+  // Right on `doubled` in `b.doubled();`, line 17.
+  str out = definition(&reads, doc, 17, 6);
+  assert contains(out, `"line":6`), "expected the jump to land on doubled's own declaration line";
+  assert contains(out, `"character":6`), "expected the jump to land right on doubled's own name";
+}
+
+test "dot-completion on a call-inferred local still resolves through a function declared in the same file, when an import is broken" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document from_local;
+  from_local.uri = "file:///partial_fail_local.fn";
+  from_local.path = "src/tests/fixtures/_partial_fail_local_probe.fn";
+  from_local.text = `use this_totally_does_not_exist_anywhere;
+  `
+  `compound Box {
+  `  num n;
+  `}
+  `fun make_box() Box {
+  `  Box created;
+  `  created.n = 1;
+  `  ret created;
+  `}
+  `fun main() {
+  `  let b = make_box();
+  `  b.n;
+  `}`;
+  from_local.version = 1;
+  str local_out = completion(&reads, from_local, 12, 4, false);
+  assert contains(local_out, `"label":"n","kind":5,"detail":"field"`), "expected the call-inferred local's own field, resolved through a function declared in this same file";
+}
+
+test "a document whose own imports failed to resolve shows the real reason, not a generic placeholder" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+  Document doc;
+  doc.uri = "file:///unresolved_import_diag.fn";
+  doc.path = "src/tests/fixtures/_unresolved_import_diag_probe.fn";
+  doc.text = `use this_module_does_not_exist_anywhere;
+  `fun main() {}`;
+  doc.version = 1;
+
+  let diags = diagnose(&reads, &dcache, doc);
+  assert diags.len == 1, "expected exactly one diagnostic for the unresolved import";
+  str msg = diags.get(0).message;
+  assert !equals(msg, "this file's imports could not be resolved"), "expected the real reason, not the old generic placeholder";
+  assert contains(msg, "this_module_does_not_exist_anywhere"), "expected the real import error naming what failed to resolve";
+}
+
 test "a bare capitalized condition isn't mistaken for a compound-init literal" {
   str src = `const flag Ready = true;
   `fun check() num {
@@ -4269,6 +4594,40 @@ test "hover on a function or method shows a defaulted parameter's own default va
   assert contains(method_hover, "num x = 10"), "expected the method's own defaulted param";
 }
 
+test "hover and signature help show a dot-shorthand enum variant as a parameter's own default value" {
+  // User-reported: a builtin-typed default (`num`/`str`/`flag`) always
+  // showed, but an enum-typed one defaulted the idiomatic way (a bare
+  // `.Variant`, the same shorthand `std.log`'s own `logger_init` uses
+  // for `LogFormat format = .Text`) rendered with no default at all,
+  // as though the parameter were required - `_literal_value_text` had
+  // no case for a dot-shorthand expression, only plain literals, a
+  // bare name, `nil`, and a unary minus over one of those.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///defparam_enum.fn";
+  doc.path = "defparam_enum.fn";
+  doc.text = `enum Format {
+  `  Text,
+  `  Json,
+  `}
+  `fun render(str body, Format f = .Text) str {
+  `  ret body;
+  `}
+  `fun main() {
+  `  let r = render("hi");
+  `  _ = r;
+  `}`;
+  doc.version = 1;
+
+  str fn_hover = hover(&reads, doc, 4, 4);
+  assert contains(fn_hover, "Format f = .Text"), "expected the dot-shorthand default to show, not a required-looking param";
+
+  // Right after `render(` on the call line.
+  str sig = signature_help(&reads, doc, 8, 17);
+  assert contains(sig, `"label":"Format f = .Text"`), "expected signature help's own parameter list to show it too";
+}
+
 test "hovering a parameter shows only its own type and name, not the enclosing function's own doc comment leaked onto it" {
   // A parameter's own line is always its enclosing function's own
   // declaration line, never a separate one of its own - the ordinary
@@ -7136,6 +7495,37 @@ test "completion never triggers on a '.' typed inside a comment" {
 
   str out = completion(&reads, doc, 1, 10, false);
   assert equals(out, "[]"), "expected no completion at all for a '.' inside a comment";
+}
+
+test "completion never triggers on a '.' or ',' typed inside a string literal's own content" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///dotstring.fn";
+  doc.path = "dotstring.fn";
+  doc.text = `fun main() {
+  `  str s = "x, y.z";
+  `}`;
+  doc.version = 1;
+
+  // Right after the '.' inside "x, y.z".
+  str after_dot = completion(&reads, doc, 1, 16, false);
+  assert equals(after_dot, "[]"), "expected no completion for a '.' typed as part of a string's own content";
+
+  // Right after the ',' inside "x, y.z".
+  str after_comma = completion(&reads, doc, 1, 13, false);
+  assert equals(after_comma, "[]"), "expected no completion for a ',' typed as part of a string's own content either";
+
+  // A raw (backtick) string that spans multiple lines suppresses the
+  // same way on every line it covers, not just its first.
+  Document raw_doc;
+  raw_doc.uri = "file:///dotrawstring.fn";
+  raw_doc.path = "dotrawstring.fn";
+  raw_doc.text = "fun main() {\n  str s = `line one.\n  `line two, more.\n  `;\n}";
+  raw_doc.version = 1;
+  // Right after the ',' on the raw string's own second line.
+  str raw_out = completion(&reads, raw_doc, 2, 12, false);
+  assert equals(raw_out, "[]"), "expected no completion inside a multi-line raw string's own later line either";
 }
 
 test "hover on a 'let'-inferred function value shows the value's own type, not the referenced function's declaration" {

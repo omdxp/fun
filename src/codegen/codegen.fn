@@ -16438,18 +16438,36 @@ impl Codegen {
       `static __fun_mc_handler_t __fun_mc_user_handler = 0;
       `#ifdef _WIN32
       `static int64_t __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int64_t)si.dwPageSize; }
-      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  int64_t total = (data_pages + 1) * ps;
+      `  /* A leading and trailing guard page: mprotect only works at
+      `     whole-page granularity, so a non-page-sized allocation can be
+      `     byte-precise against at most one of its two ends (the data's
+      `     own page-rounding slack has to sit somewhere, and whichever
+      `     side it sits on is the side that stays imprecise) - this is a
+      `     hard constraint of the technique itself, the same reason a
+      `     real tool like Electric Fence offers under/overflow detection
+      `     as a mode switch, never both byte-precise at once. The slack
+      `     sits before the data (see the return statement below), so the
+      `     end is exact; the start only faults once an underflow crosses
+      `     that same slack, up to one page - coarser, but still real
+      `     protection where there was previously none at all. */
+      `  int64_t total = (data_pages + 2) * ps;
       `  void* base = VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
       `  if (!base) return 0;
-      `  void* guard = (char*)base + data_pages * ps;
       `  DWORD old;
+      `  VirtualProtect(base, (SIZE_T)ps, PAGE_NOACCESS, &old);
+      `  void* guard = (char*)base + ps + data_pages * ps;
       `  VirtualProtect(guard, (SIZE_T)ps, PAGE_NOACCESS, &old);
       `  *out_total_size = total;
-      `  return base;
+      `  *out_mmap_base = base;
+      `  /* The user's own data ends exactly where the trailing guard page
+      `     starts, not somewhere in the padding before it - an overflow
+      `     of even one byte lands on the guard page immediately, rather
+      `     than needing to cross the whole page-rounding slack first. */
+      `  return (char*)guard - data_size;
       `}
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  DWORD old;
@@ -16467,19 +16485,47 @@ impl Codegen {
       `  AddVectoredExceptionHandler(1, __fun_mc_veh);
       `  return 0;
       `}
+      `/* A deliberate no-op, not a stub left unfinished: a vectored
+      `   exception handler doesn't need an alternate stack of its own
+      `   registered ahead of time the way a POSIX signal handler does
+      `   (see this same function's own POSIX definition below) - the
+      `   OS already reserves room for one to run on a stack-overflow
+      `   exception. Still called unconditionally from the platform-
+      `   agnostic Fun side (std.memcheck's own allocation entry
+      `   points), so it has to exist here too, just with nothing to do. */
+      `static void __fun_mc_ensure_altstack(void) {
+      `}
       `#else
       `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
-      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size) {
+      `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
       `  if (data_pages < 1) data_pages = 1;
-      `  int64_t total = (data_pages + 1) * ps;
+      `  /* A leading and trailing guard page: mprotect only works at
+      `     whole-page granularity, so a non-page-sized allocation can be
+      `     byte-precise against at most one of its two ends (the data's
+      `     own page-rounding slack has to sit somewhere, and whichever
+      `     side it sits on is the side that stays imprecise) - this is a
+      `     hard constraint of the technique itself, the same reason a
+      `     real tool like Electric Fence offers under/overflow detection
+      `     as a mode switch, never both byte-precise at once. The slack
+      `     sits before the data (see the return statement below), so the
+      `     end is exact; the start only faults once an underflow crosses
+      `     that same slack, up to one page - coarser, but still real
+      `     protection where there was previously none at all. */
+      `  int64_t total = (data_pages + 2) * ps;
       `  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       `  if (base == MAP_FAILED) return 0;
-      `  void* guard = (char*)base + data_pages * ps;
+      `  mprotect(base, (size_t)ps, PROT_NONE);
+      `  void* guard = (char*)base + ps + data_pages * ps;
       `  mprotect(guard, (size_t)ps, PROT_NONE);
       `  *out_total_size = total;
-      `  return base;
+      `  *out_mmap_base = base;
+      `  /* The user's own data ends exactly where the trailing guard page starts,
+      `     not somewhere in the padding before it - an overflow of even
+      `     one byte lands on the guard page immediately, rather than
+      `     needing to cross the whole page-rounding slack first. */
+      `  return (char*)guard - data_size;
       `}
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
@@ -16489,12 +16535,40 @@ impl Codegen {
       `    __fun_mc_user_handler((int64_t)sig, info ? info->si_addr : 0, ctx);
       `  }
       `}
+      `#define __FUN_MC_ALTSTACK_SIZE 65536
+      `static _Thread_local char __fun_mc_altstack[__FUN_MC_ALTSTACK_SIZE];
+      `static _Thread_local int64_t __fun_mc_altstack_done = 0;
+      `/* A real SIGSEGV the fault handler needs to actually run for is a
+      `   stack overflow just as often as a guarded-page violation (this
+      `   project's own parser recursion has hit that before - see
+      `   emit_test_runner's own worker-thread stack size note) - and a
+      `   signal handler with no alternate stack of its own cannot run at
+      `   all once the faulting thread's stack is exhausted, the same way
+      `   the fault that's supposed to be caught can't be. Without this,
+      `   such a crash either re-faults inside the handler itself (an
+      `   unhandled SIGSEGV, exit 139, no report at all) or runs on
+      `   whatever sliver of stack remains and aborts partway through
+      `   (exit 134, a correct-looking report for the wrong reason) -
+      `   both nondeterministic, and both seen in CI before this fix.
+      `   sigaltstack itself is per-thread, not process-wide like
+      `   sigaction, so this runs once per thread (the cheap flag check
+      `   above costs nothing on every later allocation on the same
+      `   thread) rather than once per process. */
+      `static void __fun_mc_ensure_altstack(void) {
+      `  if (__fun_mc_altstack_done) return;
+      `  __fun_mc_altstack_done = 1;
+      `  stack_t ss;
+      `  ss.ss_sp = __fun_mc_altstack;
+      `  ss.ss_size = __FUN_MC_ALTSTACK_SIZE;
+      `  ss.ss_flags = 0;
+      `  sigaltstack(&ss, 0);
+      `}
       `static int64_t __fun_mc_register_handler(void* handler) {
       `  __fun_mc_user_handler = (__fun_mc_handler_t)handler;
       `  struct sigaction sa;
       `  memset(&sa, 0, sizeof(sa));
       `  sa.sa_sigaction = __fun_mc_trampoline;
-      `  sa.sa_flags = SA_SIGINFO;
+      `  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
       `  sigemptyset(&sa.sa_mask);
       `  int64_t rc1 = (int64_t)sigaction(SIGSEGV, &sa, 0);
       `  /* Accessing an mprotect'd PROT_NONE page raises SIGBUS rather
@@ -16508,6 +16582,9 @@ impl Codegen {
       `#endif
       `static int64_t __fun_mc_ptr_in_range(void* addr, void* base, int64_t size) {
       `  return ((char*)addr >= (char*)base && (char*)addr < (char*)base + size) ? 1 : 0;
+      `}
+      `static int64_t __fun_mc_ptr_to_num(void* ptr) {
+      `  return (int64_t)(size_t)ptr;
       `}
       `extern void* __fun_memcheck_malloc(int64_t size, char* file, int64_t line);
       `extern void* __fun_memcheck_calloc(int64_t count, int64_t size, char* file, int64_t line);
@@ -19207,9 +19284,28 @@ impl Codegen {
     // every concurrently-running file sizing its own pool to the full CPU
     // count independently. Unset by default - a directly-invoked `fun
     // test file.fn` gets the full pool.
+    //
+    // Under `-memcheck`, the unset fallback itself drops to half the
+    // real CPU count instead of the whole thing: guard-page mmap/
+    // mprotect makes every one of these threads expensive, and the
+    // outer per-file pool (`_test_suite_worker_count` in driver.fn)
+    // already multiplies whatever this picks by up to 2 files running
+    // at once - half the CPU count times 2 concurrent files lands
+    // close to the real core count rather than well past it. A flat
+    // small constant here instead (tried first) serializes a file
+    // with many test blocks far more than the thermal problem this is
+    // actually solving requires - a file with hundreds of tests and
+    // only 2 workers took most of an hour on its own. An explicit
+    // `FUN_TEST_INTRA_JOBS` still overrides this the same as always,
+    // which is what CI's own memcheck step sets to keep its own
+    // timing exactly as it was before this default changed.
     self.state.write("        int nworkers;\n");
     self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
-    self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+    if self.memcheck {
+      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count() / 2; }\n");
+    } else {
+      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+    }
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
     self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");

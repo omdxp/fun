@@ -1,0 +1,11 @@
+use a;
+use b;
+use std.io;
+
+fun main() {
+  A av = make_a();
+  B bv = make_b();
+  num r1 = use_b(&bv);
+  num r2 = use_a(&av);
+  print(format("{num} {num}\n", r1, r2));
+}

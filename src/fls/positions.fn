@@ -204,6 +204,45 @@ pub fun position_in_comment(Vec<Token>* tokens, num line, num character) flag {
   ret false;
 }
 
+// Whether `line`/`character` falls inside a string literal's own span,
+// quotes included - a `.`/`,` typed as part of the string's own content
+// (still being written) carries no meaning as a completion trigger, the
+// same reasoning as `position_in_comment` above. Handles both an ordinary
+// `"..."` (always one line) and a backtick raw string, which can span
+// several - `t.pos.end_line` differs from `t.pos.line` exactly then.
+pub fun position_in_string(Vec<Token>* tokens, num line, num character) flag {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.type != .String {
+      continue;
+    }
+    if t.pos.end_line == t.pos.line {
+      if t.pos.line != source_line {
+        continue;
+      }
+      if source_col >= t.pos.start_col && source_col <= t.pos.end_col {
+        ret true;
+      }
+      continue;
+    }
+    if source_line < t.pos.line || source_line > t.pos.end_line {
+      continue;
+    }
+    if source_line == t.pos.line && source_col < t.pos.start_col {
+      continue;
+    }
+    if source_line == t.pos.end_line && source_col > t.pos.end_col {
+      continue;
+    }
+    ret true;
+  }
+  ret false;
+}
+
 // True for a token that is only there for the reader.
 fun _is_trivia(Token t) flag {
   fit t.type {
