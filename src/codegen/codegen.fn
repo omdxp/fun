@@ -16485,6 +16485,16 @@ impl Codegen {
       `  AddVectoredExceptionHandler(1, __fun_mc_veh);
       `  return 0;
       `}
+      `/* A deliberate no-op, not a stub left unfinished: a vectored
+      `   exception handler doesn't need an alternate stack of its own
+      `   registered ahead of time the way a POSIX signal handler does
+      `   (see this same function's own POSIX definition below) - the
+      `   OS already reserves room for one to run on a stack-overflow
+      `   exception. Still called unconditionally from the platform-
+      `   agnostic Fun side (std.memcheck's own allocation entry
+      `   points), so it has to exist here too, just with nothing to do. */
+      `static void __fun_mc_ensure_altstack(void) {
+      `}
       `#else
       `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
       `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
