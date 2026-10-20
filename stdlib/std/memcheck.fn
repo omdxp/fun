@@ -69,11 +69,70 @@ num __mc_hash_used_count = 0;
 num* __mc_hash_keys = nil;
 flag* __mc_hash_used = nil;
 num* __mc_hash_vals = nil;
+num __mc_quarantine_bytes = 0;
+num __mc_quarantine_capacity = 0;
+num __mc_quarantine_head = 0;
+num __mc_quarantine_count = 0;
+num* __mc_quarantine_queue = nil;
+
+// A region recycled out of the quarantine, waiting for a new allocation
+// whose own total guarded size matches exactly - same reasoning as
+// `__mc_table`'s "exact total_size" note on `__mc_freelist_take` below.
+num __mc_freelist_capacity = 0;
+num __mc_freelist_count = 0;
+raw** __mc_freelist_base = nil;
+num* __mc_freelist_size = nil;
 
 // How much room a report line gets (plenty for every field this module
 // ever prints, file paths included). Fixed rather than measured, so
 // building one never allocates more than once.
 const num __mc_msg_cap = 4096;
+
+// `std.string`'s own `format_num`, duplicated rather than imported:
+// this module can't depend on `std.string` at all (see this file's own
+// top note on why), and a plain decimal digit-by-digit build is the
+// one way to put a number into one of this file's own report messages
+// without `snprintf`'s `%lld` - which, on a platform where `int64_t` is
+// `long` rather than `long long` (Linux's LP64 among them), is a real
+// type mismatch the C compiler warns on, harmless only because both
+// happen to be 8 bytes on every platform this project targets.
+// Allocated through the real, unredirected allocator and freed by
+// every caller right after the one `snprintf` it feeds, same as this
+// module's own `msg` buffers.
+fun __mc_format_num(num n) str {
+  str buf = __fun_real_malloc(21);
+  if n == 0 {
+    buf[0] = '0';
+    buf[1] = '\0';
+    ret buf;
+  }
+  flag neg = n < 0;
+  if neg {
+    n = 0 - n;
+  }
+  str digits = "0123456789";
+  num pos = 0;
+  for n > 0 {
+    buf[pos] = digits[n % 10];
+    n = n / 10;
+    pos = pos + 1;
+  }
+  if neg {
+    buf[pos] = '-';
+    pos = pos + 1;
+  }
+  buf[pos] = '\0';
+  num start = 0;
+  num end = pos - 1;
+  for start < end {
+    chr tmp = buf[start];
+    buf[start] = buf[end];
+    buf[end] = tmp;
+    start = start + 1;
+    end = end - 1;
+  }
+  ret buf;
+}
 
 // Opts a running program out of the leak sweep below: real for every
 // `-memcheck` build unless `-memcheck-leaks` turns it back on, never
@@ -89,6 +148,16 @@ fun __fun_real_malloc(num size) raw*;
 fun __fun_real_realloc(raw* ptr, num size) raw*;
 fun __fun_mc_guard_alloc(num data_size, num* out_total_size, raw** out_mmap_base) raw*;
 fun __fun_mc_guard_protect_all(raw* base, num total_size) num;
+// What `__fun_mc_guard_alloc` would set `out_total_size` to for a given
+// `data_size`, without actually reserving anything - lets the quarantine
+// below look for a reusable region of the right size before deciding to
+// reserve a fresh one.
+fun __fun_mc_guard_total_size(num data_size) num;
+// Reopens an already-guarded, already-freed region's data pages for a
+// new allocation (see `__mc_freelist_take`'s own note) instead of
+// reserving a fresh one - same `(char*)guard - data_size` layout
+// `__fun_mc_guard_alloc` returns, just skipping the real reservation.
+fun __fun_mc_guard_reuse(raw* mmap_base, num total_size, num data_size) raw*;
 fun __fun_mc_register_handler(raw* handler) num;
 fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
 // A pointer's own bit pattern as a number - the one piece of raw-C glue
@@ -174,9 +243,15 @@ fun __mc_hash_grow() {
   }
 }
 
-// Inserts `ptr -> idx`, assuming `ptr` isn't already present - true at
-// the only call site, right after a fresh allocation appends a brand-new
-// entry to `__mc_table`.
+// Inserts `ptr -> idx`. Usually `ptr` is brand new (a fresh allocation
+// appending a brand-new entry to `__mc_table`), but once the quarantine
+// below recycles a retired region, the SAME pointer value comes back
+// around for a different, later allocation - so this scans the probe
+// sequence for an existing key first and overwrites its value in place
+// rather than assuming every insert is new. That overwrite-in-place is
+// exactly why no tombstone is needed anywhere in this table: a slot is
+// never cleared back to empty, only ever written to (first time or
+// again), so a lookup can still stop at the first empty slot it meets.
 fun __mc_hash_insert(raw* ptr, num idx) {
   if __mc_hash_capacity == 0 || (__mc_hash_used_count + 1) * 2 > __mc_hash_capacity {
     __mc_hash_grow();
@@ -184,6 +259,10 @@ fun __mc_hash_insert(raw* ptr, num idx) {
   num key = __fun_mc_ptr_to_num(ptr);
   num slot = key % __mc_hash_capacity;
   for __mc_hash_used[slot] {
+    if __mc_hash_keys[slot] == key {
+      __mc_hash_vals[slot] = idx;
+      ret;
+    }
     slot = (slot + 1) % __mc_hash_capacity;
   }
   __mc_hash_keys[slot] = key;
@@ -212,6 +291,128 @@ fun __mc_hash_lookup(raw* ptr) num {
     steps = steps + 1;
   }
   ret -1;
+}
+
+// A freed allocation's guard pages stay in place forever by design (see
+// this file's own top note) so a use-after-free can never land on a
+// reused, now-valid address - but "forever" against a real test suite's
+// own allocation volume means unbounded growth: a single allocation-
+// heavy file was enough to exhaust a CI runner's memory outright before
+// this budget existed (every `mmap`/`VirtualAlloc` call costs real
+// pages that nothing ever gives back). Capped the same way a real tool
+// like AddressSanitizer caps its own quarantine: once more than this
+// many bytes are sitting freed-but-still-guarded, the OLDEST ones give
+// up their guarantee and go back into circulation for a new allocation
+// - a sufficiently delayed use-after-free past that point reads or
+// writes the new owner's memory instead of faulting, same accepted
+// trade a bounded quarantine always makes. 256 MiB is far more than any
+// single real bug needs to surface (a UAF that only reproduces after a
+// quarter-gigabyte of other allocations churn through first would be
+// exceptionally rare), while staying well inside what any CI runner or
+// dev machine has room for.
+const num __mc_quarantine_budget = 268435456;
+
+fun __mc_quarantine_grow_if_needed() {
+  if __mc_quarantine_count < __mc_quarantine_capacity {
+    ret;
+  }
+  num new_cap = __mc_quarantine_capacity * 2;
+  if new_cap < 64 {
+    new_cap = 64;
+  }
+  num* grown = __fun_real_malloc(new_cap * sizeof(num));
+  num i = 0;
+  for i < __mc_quarantine_count {
+    grown[i] = __mc_quarantine_queue[(__mc_quarantine_head + i) % __mc_quarantine_capacity];
+    i = i + 1;
+  }
+  if __mc_quarantine_capacity > 0 {
+    __fun_real_free(__mc_quarantine_queue);
+  }
+  __mc_quarantine_queue = grown;
+  __mc_quarantine_capacity = new_cap;
+  __mc_quarantine_head = 0;
+}
+
+// Queues `idx` (an allocation `__fun_memcheck_free` just marked freed)
+// for eventual recycling. Caller must already hold `__mc_mu`.
+fun __mc_quarantine_push(num idx) {
+  __mc_quarantine_grow_if_needed();
+  num tail = (__mc_quarantine_head + __mc_quarantine_count) % __mc_quarantine_capacity;
+  __mc_quarantine_queue[tail] = idx;
+  __mc_quarantine_count = __mc_quarantine_count + 1;
+}
+
+fun __mc_quarantine_pop() num {
+  num idx = __mc_quarantine_queue[__mc_quarantine_head];
+  __mc_quarantine_head = (__mc_quarantine_head + 1) % __mc_quarantine_capacity;
+  __mc_quarantine_count = __mc_quarantine_count - 1;
+  ret idx;
+}
+
+fun __mc_freelist_grow_if_needed() {
+  if __mc_freelist_count < __mc_freelist_capacity {
+    ret;
+  }
+  num new_cap = __mc_freelist_capacity * 2;
+  if new_cap < 64 {
+    new_cap = 64;
+  }
+  raw** grown_base = __fun_real_malloc(new_cap * sizeof(raw*));
+  num* grown_size = __fun_real_malloc(new_cap * sizeof(num));
+  num i = 0;
+  for i < __mc_freelist_count {
+    grown_base[i] = __mc_freelist_base[i];
+    grown_size[i] = __mc_freelist_size[i];
+    i = i + 1;
+  }
+  if __mc_freelist_capacity > 0 {
+    __fun_real_free(__mc_freelist_base);
+    __fun_real_free(__mc_freelist_size);
+  }
+  __mc_freelist_base = grown_base;
+  __mc_freelist_size = grown_size;
+  __mc_freelist_capacity = new_cap;
+}
+
+fun __mc_freelist_push(raw* mmap_base, num total_size) {
+  __mc_freelist_grow_if_needed();
+  __mc_freelist_base[__mc_freelist_count] = mmap_base;
+  __mc_freelist_size[__mc_freelist_count] = total_size;
+  __mc_freelist_count = __mc_freelist_count + 1;
+}
+
+// A recycled region whose own total guarded size is exactly `total_size`,
+// or nil - exact-size matching only, so a hit can be handed straight to
+// `__fun_mc_guard_reuse` with the same page geometry `__fun_mc_guard_alloc`
+// would have produced fresh, keeping the "end is exact against the guard
+// page" guarantee intact for the new allocation too. A linear scan: the
+// freelist only ever holds entries bounded by `__mc_quarantine_budget`
+// worth of allocations, not the whole run's history.
+fun __mc_freelist_take(num total_size) raw* {
+  num i = 0;
+  for i < __mc_freelist_count {
+    if __mc_freelist_size[i] == total_size {
+      raw* base = __mc_freelist_base[i];
+      __mc_freelist_count = __mc_freelist_count - 1;
+      __mc_freelist_base[i] = __mc_freelist_base[__mc_freelist_count];
+      __mc_freelist_size[i] = __mc_freelist_size[__mc_freelist_count];
+      ret base;
+    }
+    i = i + 1;
+  }
+  ret nil;
+}
+
+// Pops the oldest quarantined allocations back into the freelist until
+// the budget is met again. Caller must already hold `__mc_mu`.
+fun __mc_quarantine_drain_if_over_budget() {
+  for __mc_quarantine_bytes > __mc_quarantine_budget && __mc_quarantine_count > 0 {
+    num idx = __mc_quarantine_pop();
+    AllocInfo* entry = &__mc_table[idx];
+    __mc_quarantine_bytes = __mc_quarantine_bytes - entry.total_size;
+    __mc_freelist_push(entry.mmap_base, entry.total_size);
+  }
 }
 
 // Doubles the table's own capacity (64 to start) via the real,
@@ -244,15 +445,26 @@ fun __mc_find(raw* ptr) num {
 // trailing guard page) from a genuinely unrelated fault (inside
 // neither). Still a linear scan: only the fault handler calls this, on
 // the crash path, not the hot path `__mc_find` above needed fixing.
+// Keeps scanning past the first match rather than returning early: once
+// the quarantine recycles a region (see its own note above), the same
+// mmap_base/total_size span can belong to more than one historical
+// entry here - the retired one still sitting at its old index, and
+// whatever allocation reused that exact address sitting at a higher
+// one. The higher index is always the one that's actually live (or
+// most recently freed) at the address right now, so it's the only one
+// whose metadata a report should ever name; stopping at the first
+// match would misattribute a fault against the new allocation to the
+// stale old one instead.
 fun __mc_find_by_range(raw* addr) num {
   num i = 0;
+  num found = -1;
   for i < __mc_count {
     if __fun_mc_ptr_in_range(addr, __mc_table[i].mmap_base, __mc_table[i].total_size) != 0 {
-      ret i;
+      found = i;
     }
     i = i + 1;
   }
-  ret -1;
+  ret found;
 }
 
 // Registered with `__fun_mc_register_handler`, called from the
@@ -279,20 +491,25 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
     info_base = __mc_table[idx].base;
   }
   let _ulk = __mc_mu.unlock();
-  str msg = malloc(__mc_msg_cap);
+  str msg = __fun_real_malloc(__mc_msg_cap);
   if idx >= 0 {
+    str seq_s = __mc_format_num(info_seq);
+    str size_s = __mc_format_num(info_size);
+    str line_s = __mc_format_num(info_line);
     if is_freed {
+      str freed_line_s = __mc_format_num(info_freed_line);
       let _n = snprintf(
         msg,
         __mc_msg_cap,
-        "[memcheck] use-after-free: allocation #%lld (%lld bytes), allocated at %s:%lld, freed at %s:%lld",
-        info_seq,
-        info_size,
+        "[memcheck] use-after-free: allocation #%s (%s bytes), allocated at %s:%s, freed at %s:%s",
+        seq_s,
+        size_s,
         info_file,
-        info_line,
+        line_s,
         info_freed_file,
-        info_freed_line
+        freed_line_s
       );
+      __fun_real_free(freed_line_s);
     } else {
       // Live, so the fault is a genuine out-of-bounds access against one
       // of the two guard pages - which one tells an overrun from an
@@ -305,30 +522,33 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
         let _n = snprintf(
           msg,
           __mc_msg_cap,
-          "[memcheck] buffer underflow: before the start of allocation #%lld (%lld bytes), allocated at %s:%lld",
-          info_seq,
-          info_size,
+          "[memcheck] buffer underflow: before the start of allocation #%s (%s bytes), allocated at %s:%s",
+          seq_s,
+          size_s,
           info_file,
-          info_line
+          line_s
         );
       } else {
         let _n = snprintf(
           msg,
           __mc_msg_cap,
-          "[memcheck] buffer overflow: past the end of allocation #%lld (%lld bytes), allocated at %s:%lld",
-          info_seq,
-          info_size,
+          "[memcheck] buffer overflow: past the end of allocation #%s (%s bytes), allocated at %s:%s",
+          seq_s,
+          size_s,
           info_file,
-          info_line
+          line_s
         );
       }
     }
+    __fun_real_free(seq_s);
+    __fun_real_free(size_s);
+    __fun_real_free(line_s);
   } else {
     str lit = "[memcheck] memory access violation (not within any tracked allocation)";
     let _n = snprintf(msg, __mc_msg_cap, "%s", lit);
   }
   let _fp = fprintf(stderr_stream(), "%s\n", msg);
-  free(msg);
+  __fun_real_free(msg);
   let _ff = fflush(stderr_stream());
   abort();
 }
@@ -356,18 +576,24 @@ fun __mc_leak_sweep() {
     num line = __mc_table[i].line;
     let _ulk = __mc_mu.unlock();
     if !is_freed {
-      str msg = malloc(__mc_msg_cap);
+      str msg = __fun_real_malloc(__mc_msg_cap);
+      str seq_s = __mc_format_num(seq);
+      str size_s = __mc_format_num(size);
+      str line_s = __mc_format_num(line);
       let _n = snprintf(
         msg,
         __mc_msg_cap,
-        "[memcheck] leak: allocation #%lld, %lld bytes, allocated at %s:%lld, never freed",
-        seq,
-        size,
+        "[memcheck] leak: allocation #%s, %s bytes, allocated at %s:%s, never freed",
+        seq_s,
+        size_s,
         file,
-        line
+        line_s
       );
       let _fp = fprintf(stderr_stream(), "%s\n", msg);
-      free(msg);
+      __fun_real_free(msg);
+      __fun_real_free(seq_s);
+      __fun_real_free(size_s);
+      __fun_real_free(line_s);
       leaks = leaks + 1;
     }
     i = i + 1;
@@ -402,11 +628,46 @@ pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
   if real_size <= 0 {
     real_size = 1;
   }
-  num total_size = 0;
+  num total_size = __fun_mc_guard_total_size(real_size);
+  let _lkf = __mc_mu.lock();
+  raw* recycled = __mc_freelist_take(total_size);
+  let _ulkf = __mc_mu.unlock();
   raw* mmap_base = nil;
-  raw* base = __fun_mc_guard_alloc(real_size, &total_size, &mmap_base);
+  raw* base = nil;
+  if recycled != nil {
+    mmap_base = recycled;
+    base = __fun_mc_guard_reuse(recycled, total_size, real_size);
+  } else {
+    num fresh_total = 0;
+    base = __fun_mc_guard_alloc(real_size, &fresh_total, &mmap_base);
+    total_size = fresh_total;
+  }
   if base == nil {
-    ret nil;
+    // The quarantine above exists specifically so this almost never
+    // happens under real workloads (see its own note); if it still
+    // does, the system is genuinely out of memory. Reporting that
+    // clearly and stopping beats returning nil here: ordinary `.fn`
+    // code almost never checks an allocation for nil (same as most
+    // real-world C), so letting this propagate silently just turns an
+    // honest out-of-memory condition into a confusing, unattributed
+    // null-pointer crash somewhere else entirely.
+    str msg = __fun_real_malloc(__mc_msg_cap);
+    str size_s = __mc_format_num(real_size);
+    str line_s = __mc_format_num(line);
+    let _n = snprintf(
+      msg,
+      __mc_msg_cap,
+      "[memcheck] out of memory: allocation of %s bytes failed at %s:%s",
+      size_s,
+      file,
+      line_s
+    );
+    let _fp = fprintf(stderr_stream(), "%s\n", msg);
+    __fun_real_free(msg);
+    __fun_real_free(size_s);
+    __fun_real_free(line_s);
+    let _ff = fflush(stderr_stream());
+    abort();
   }
   let _lk = __mc_mu.lock();
   __mc_grow_if_needed();
@@ -450,12 +711,16 @@ pub fun __fun_memcheck_realloc(raw* ptr, num size, str file, num line) raw* {
   }
   let _ulk = __mc_mu.unlock();
   raw* new_ptr = __fun_memcheck_malloc(size, file, line);
-  if have_old {
+  // A failed allocation leaves the original block valid and untouched,
+  // same contract real `realloc` makes - freeing `ptr` anyway here
+  // would leave the caller holding a dangling pointer it still thinks
+  // is good, with no way to tell its "realloc" actually failed.
+  if have_old && new_ptr != nil {
     num copy_size = old_size;
     if size < copy_size {
       copy_size = size;
     }
-    if new_ptr != nil && copy_size > 0 {
+    if copy_size > 0 {
       let _cp = memcpy(new_ptr, ptr, copy_size);
     }
     __fun_memcheck_free(ptr, file, line);
@@ -484,22 +749,32 @@ pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
     str dbl_freed_file = entry.freed_file;
     num dbl_freed_line = entry.freed_line;
     let _ulk1 = __mc_mu.unlock();
-    str msg = malloc(__mc_msg_cap);
+    str msg = __fun_real_malloc(__mc_msg_cap);
+    str dbl_seq_s = __mc_format_num(dbl_seq);
+    str dbl_size_s = __mc_format_num(dbl_size);
+    str dbl_alloc_line_s = __mc_format_num(dbl_alloc_line);
+    str dbl_freed_line_s = __mc_format_num(dbl_freed_line);
+    str line_s = __mc_format_num(line);
     let _n = snprintf(
       msg,
       __mc_msg_cap,
-      "[memcheck] double-free: allocation #%lld, %lld bytes, allocated at %s:%lld, already freed at %s:%lld, double-freed at %s:%lld",
-      dbl_seq,
-      dbl_size,
+      "[memcheck] double-free: allocation #%s, %s bytes, allocated at %s:%s, already freed at %s:%s, double-freed at %s:%s",
+      dbl_seq_s,
+      dbl_size_s,
       dbl_alloc_file,
-      dbl_alloc_line,
+      dbl_alloc_line_s,
       dbl_freed_file,
-      dbl_freed_line,
+      dbl_freed_line_s,
       file,
-      line
+      line_s
     );
     let _fp = fprintf(stderr_stream(), "%s\n", msg);
-    free(msg);
+    __fun_real_free(msg);
+    __fun_real_free(dbl_seq_s);
+    __fun_real_free(dbl_size_s);
+    __fun_real_free(dbl_alloc_line_s);
+    __fun_real_free(dbl_freed_line_s);
+    __fun_real_free(line_s);
     let _ff = fflush(stderr_stream());
     abort();
   }
@@ -507,5 +782,8 @@ pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
   entry.is_freed = true;
   entry.freed_file = file;
   entry.freed_line = line;
+  __mc_quarantine_push(idx);
+  __mc_quarantine_bytes = __mc_quarantine_bytes + entry.total_size;
+  __mc_quarantine_drain_if_over_budget();
   let _ulk2 = __mc_mu.unlock();
 }

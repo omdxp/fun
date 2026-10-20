@@ -49,7 +49,17 @@ jobs:
       # for the other two lanes to verify that this one doesn't already.
       - name: Set up emscripten
         if: matrix.os == 'ubuntu-24.04'
-        uses: mymindstorm/setup-emsdk@v14
+        # Pinned, not "latest": emscripten-core/setup-emsdk@v16 defaults to
+        # whatever emsdk version is newest at the time, and that recently
+        # started bundling a Node build its own generated code requires
+        # (26.x) that this runner's own Node (22.23.3) can't run -
+        # confirmed directly as a real CI failure, not just the harmless
+        # Node-20-deprecation notice the older action tag printed. 6.0.13
+        # is the exact version a real, successful run on this same
+        # workflow resolved "latest" to not long ago.
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 6.0.13
       - name: Set up MSVC for Windows
         if: matrix.os == 'windows-latest'
         uses: omdxp/msvc-dev-cmd@v1
@@ -107,9 +117,9 @@ jobs:
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
           cat > /tmp/wasm_ci_smoke.fn << 'FNEOF'
-          use std.c.io;
+          use std.io;
           fun main() num {
-            printf("wasm ci smoke: %lld\n", 6 * 7);
+            println_fmt("wasm ci smoke: {num}", 6 * 7);
             ret 0;
           }
           FNEOF
@@ -169,9 +179,12 @@ jobs:
         timeout-minutes: 60
         run: |
           export FUN_STDLIB_DIR="$PWD/stdlib"
-          # Keeps this runner's original parallelism (see driver.fn/codegen.fn).
-          export FUN_TEST_JOBS=8
-          export FUN_TEST_INTRA_JOBS="$(nproc)"
+          # Runs at -memcheck's own lower default parallelism (see
+          # driver.fn/codegen.fn), not this runner's full speed: every
+          # guarded allocation costs at least a few whole pages even for
+          # a tiny payload, and full parallelism means more of them live
+          # at once, not just more time saved - genuinely risks this
+          # runner's own memory ceiling, not only wall-clock time.
           ./fun-out/bin/fun test . -memcheck
       - name: Summarize coverage
         if: always() && matrix.os == 'ubuntu-24.04'

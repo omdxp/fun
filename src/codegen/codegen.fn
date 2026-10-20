@@ -4912,42 +4912,228 @@ impl Codegen {
     ret .None;
   }
 
-  // The resolved dispatch target for `op` on `operand`'s own static
-  // type, if codegen can name both - `.None` either means `operand`'s
-  // type can't be resolved here at all (only a bare local variable is
-  // attempted - see below), that type simply has no matching `impl`
-  // method (a builtin numeric/`str`/pointer operand, the overwhelming
-  // common case), or that `op` has no operator-overload mapping at
-  // all. Either way the caller's own meaning is identical: fall back
-  // to the builtin operator unchanged.
+  // `emit_operator_call`, for `op_index_set`'s own two arguments (the
+  // index, then the value) instead of at most one - `a[i] = v` on a
+  // type with no real array/`Vec<T>` field, emitted as a plain call
+  // the same way `a[i]` read through `op_index` already is.
+  emit_operator_index_set_call(
+    ChainResolution recv_r,
+    str mangled,
+    Node* index_node,
+    Node* value_node
+  ) Option<CodegenErrorKind> {
+    self.state.write(mangled);
+    self.state.write("(");
+    if recv_r.is_pointer {
+      self.state.write(recv_r.text);
+    } elif recv_r.is_call_result {
+      str recv_tmp_name = self.hoist_call_result_operand(
+        recv_r.text,
+        recv_r.type_name,
+        recv_r.is_pointer
+      );
+      self.state.write("&");
+      self.state.write(recv_tmp_name);
+    } else {
+      self.state.write("&");
+      self.state.write(recv_r.text);
+    }
+    self.state.write(", ");
+    let ierr = self.emit_expr(*index_node);
+    if ierr.is_some() {
+      ret ierr;
+    }
+    self.state.write(", ");
+    let verr = self.emit_expr(*value_node);
+    if verr.is_some() {
+      ret verr;
+    }
+    self.state.write(")");
+    ret .None;
+  }
+
+  // `operand`'s own static type for operator-dispatch purposes, if
+  // codegen can name it at all - pure, no side effects, by construction
+  // rather than by care: unlike `resolve_field_chain`, this never
+  // touches a call's own emission or a generic impl method's lazy
+  // draining. Tried *speculatively*, for every binary/unary operator in
+  // the entire codebase including deep inside stdlib generics that have
+  // nothing to do with operator overloading (`Map<K,V>`'s own `%`/`==`
+  // on its internal fields among them), so it has to stay side-effect-
+  // free regardless of operand shape - calling `resolve_field_chain`
+  // itself this speculatively once broke forward-declaration ordering
+  // inside `Map<str, Vec<str>>` internals, a real, confirmed regression
+  // from its call-result case's own hoisting and lazy-emission side
+  // effects.
   //
-  // Restricted to a bare `.Identifier` operand on purpose, not every
-  // shape `resolve_field_chain` can resolve (a field chain, a call
-  // result, ...) - this runs *speculatively*, for every binary
-  // operator in the entire codebase, including deep inside stdlib
-  // generics that have nothing to do with operator overloading
-  // (`Map<K,V>`'s own `%`/`==` on its internal fields among them), so
-  // it must never have a side effect when it doesn't end up
-  // dispatching. A plain local's own resolution is pure table lookups
-  // (`lookup_local_type_name`/`lookup_local_dtype`); `resolve_field_
-  // chain`'s other cases are not - its call-result case in particular
-  // hoists into a scratch buffer and can trigger a generic impl
-  // method's lazy emission, confirmed directly as a real, severe
-  // regression: calling it speculatively on an arbitrary expression
-  // disrupted forward-declaration ordering inside `Map<str, Vec<str>>`
-  // internals, breaking its *own*, otherwise-unrelated codegen. A
-  // chained `a + b + c` or `self.pos + other.pos` is real, scoped-out
-  // v1 territory, not a silent gap - see the operator-overloading docs.
+  // Three shapes resolve, each bottoming out at a bare local:
+  // - `.Identifier`: `resolve_field_chain`'s own identifier case - pure
+  // table lookups.
+  // - `a.b` (`.Expression(".")`, an ordinary field name, not a tuple
+  // index or a bare enum variant): resolved by hand here rather than
+  // `resolve_field_chain`, which mixes this pure case into others
+  // that are not (a call-as-receiver, `EnumName.Variant` used bare) -
+  // recursing into this same function keeps every link in the chain
+  // held to the same restriction, not just the outermost one.
+  // - `a * 2` (`.Expression(op2)` where `op2` has its own operator
+  // mapping): recursing resolves `op2`'s own dispatch on its left
+  // operand *as a type lookup only* - `lookup_impl_method`/
+  // `lookup_impl_method_rtype` are pure table scans, so confirming a
+  // nested dispatch exists costs nothing even when, as here, it's
+  // checked on every operand regardless of whether the outer operator
+  // ends up dispatching too. The result is marked `is_call_result`
+  // with an empty `text` - a signal to `resolve_operator_dispatch`
+  // below to actually render it, which is the one step with any real
+  // cost, and so the only step gated behind already knowing a real
+  // dispatch chain exists.
+  resolve_operator_operand(Node* operand) Option<ChainResolution> {
+    fit operand.kind {
+      .Identifier(_) -> { ret self.resolve_field_chain(operand); }
+      .Expression(inner_e) -> {
+        // Deliberately no `"()"` case: a plain call result used
+        // directly (`get_vec3() + b`, no intermediate `let`) looks
+        // just as safe to resolve speculatively as the field-chain and
+        // nested-operator cases below, since `_resolve_call_rtype`
+        // documents itself as type-only with nothing rendered or
+        // spliced - but for a *generic* function it also calls
+        // `maybe_instantiate_generic_function`, a real instantiation/
+        // registration side effect, not just a type lookup. Confirmed
+        // directly: trying it here reintroduced this same function's
+        // own historical regression (see its own doc comment above),
+        // breaking forward-declaration ordering inside
+        // `Map<str, Vec<str>>` internals again, just from a different
+        // call site this time (`std.cli`'s own generic Map use). Bind
+        // the call to its own `let` first - the same gap the
+        // operator-overloading docs already describe.
+        if equals(inner_e.op, ".") && inner_e.has_left && inner_e.has_right {
+          str field_name = "";
+          fit inner_e.right.kind {
+            .Identifier(name) -> { field_name = name; }
+            _ -> { ret .None; }
+          }
+          let recv_r = self.resolve_operator_operand(inner_e.left)?;
+          let field_info = self.lookup_compound_field(recv_r.type_name, field_name)?;
+          StringBuilder sb = string_builder_init(8);
+          sb.append(recv_r.text);
+          if recv_r.is_pointer {
+            sb.append("->");
+          } else {
+            sb.append(".");
+          }
+          sb.append(field_name);
+          ChainResolution r;
+          r.text = sb.build();
+          r.type_name = field_info.type_name;
+          r.is_pointer = field_info.is_pointer;
+          r.dtype = field_info.dtype;
+          r.is_call_result = recv_r.is_call_result;
+          ret .Some(r);
+        }
+        let inner_method = operator_method_name(inner_e.op);
+        if equals(inner_method, "") || !inner_e.has_left {
+          ret .None;
+        }
+        let inner_recv = self.resolve_operator_operand(inner_e.left)?;
+        let inner_mangled = self.lookup_impl_method(inner_recv.type_name, inner_method)?;
+        let inner_rtype = self.lookup_impl_method_rtype(inner_recv.type_name, inner_method)?;
+        let inner_type_name = self.resolve_type_name(*inner_rtype)?;
+        ChainResolution r2;
+        r2.text = "";
+        r2.type_name = inner_type_name;
+        r2.is_pointer = dtype_is_pointer(*inner_rtype);
+        r2.dtype = .Some(*inner_rtype);
+        r2.is_call_result = true;
+        ret .Some(r2);
+      }
+      // `-a + b`/`!a && b`: a nested *unary*-dispatched operand, the
+      // same idea as the nested binary case above, just with `op_neg`/
+      // `op_not`'s own fixed names instead of `operator_method_name`
+      // (unary operators don't go through that mapping at all - see
+      // the unary call site's own doc comment).
+      .Unary(u) -> {
+        if u.is_left_operanded_unary || u.has_indirection ||
+          (!equals(u.op, "-") && !equals(u.op, "!")) {
+          ret .None;
+        }
+        str u_method = "op_neg";
+        if equals(u.op, "!") {
+          u_method = "op_not";
+        }
+        let u_recv = self.resolve_operator_operand(u.operand)?;
+        let u_mangled = self.lookup_impl_method(u_recv.type_name, u_method)?;
+        let u_rtype = self.lookup_impl_method_rtype(u_recv.type_name, u_method)?;
+        let u_type_name = self.resolve_type_name(*u_rtype)?;
+        ChainResolution r3;
+        r3.text = "";
+        r3.type_name = u_type_name;
+        r3.is_pointer = dtype_is_pointer(*u_rtype);
+        r3.dtype = .Some(*u_rtype);
+        r3.is_call_result = true;
+        ret .Some(r3);
+      }
+      _ -> { ret .None; }
+    }
+  }
+
+  // `resolve_operator_operand`'s result, with a real, rendered `text`:
+  // a bare local or field chain already has one (pure string building),
+  // so this is a no-op for those. A nested dispatched-operator operand
+  // (`a * 2` as the left of `+ b`) comes back with `text` empty - the
+  // one signal that rendering is still owed - and only then is it
+  // actually emitted, into a scratch buffer with the same isolation
+  // `resolve_field_chain`'s own call-result case uses, now that a real
+  // dispatch chain is confirmed to exist rather than merely possible.
+  materialize_operator_operand(ChainResolution recv_r, Node* operand) Option<ChainResolution> {
+    if !recv_r.is_call_result || !equals(recv_r.text, "") {
+      ret .Some(recv_r);
+    }
+    if self.hoist_scratch_depth == 0 {
+      self.root_state = self.state;
+      self.root_hoist_pos = self.hoist_insert_pos;
+      self.root_stmt_start_pos = self.current_stmt_start_pos;
+    }
+    self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+    CodegenState op_scratch = self.new_scratch_state();
+    CodegenState* saved_op_state = self.state;
+    let saved_op_hoist_pos = self.hoist_insert_pos;
+    let saved_op_stmt_start_pos = self.current_stmt_start_pos;
+    let prev_op_suppress = self.suppress_generic_impl_method_draining;
+    self.state = &op_scratch;
+    self.hoist_insert_pos = .None;
+    self.current_stmt_start_pos = .None;
+    self.suppress_generic_impl_method_draining = true;
+    let operr = self.emit_expr(*operand);
+    self.state = saved_op_state;
+    self.hoist_insert_pos = saved_op_hoist_pos;
+    self.current_stmt_start_pos = saved_op_stmt_start_pos;
+    self.suppress_generic_impl_method_draining = prev_op_suppress;
+    self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+    if self.hoist_scratch_depth == 0 {
+      self.current_stmt_start_pos = self.root_stmt_start_pos;
+      self.hoist_insert_pos = self.root_hoist_pos;
+    }
+    if !prev_op_suppress && !self.draining_generic_impl_methods {
+      self.drain_pending_generic_impl_methods();
+    }
+    if operr.is_some() {
+      ret .None;
+    }
+    ChainResolution r;
+    r.text = op_scratch.out.build();
+    r.type_name = recv_r.type_name;
+    r.is_pointer = recv_r.is_pointer;
+    r.dtype = recv_r.dtype;
+    r.is_call_result = true;
+    ret .Some(r);
+  }
+
   resolve_operator_dispatch(str op, Node* operand) Option<OperatorDispatchTarget> {
     let method = operator_method_name(op);
     if equals(method, "") {
       ret .None;
     }
-    fit operand.kind {
-      .Identifier(_) -> {}
-      _ -> { ret .None; }
-    }
-    let recv_r = self.resolve_field_chain(operand)?;
+    let recv_r0 = self.resolve_operator_operand(operand)?;
+    let recv_r = self.materialize_operator_operand(recv_r0, operand)?;
     let mangled = self.lookup_impl_method(recv_r.type_name, method)?;
     OperatorDispatchTarget t;
     t.recv = recv_r;
@@ -5897,31 +6083,24 @@ impl Codegen {
         // `resolve_operator_dispatch`/`operator_method_name` - those
         // map the same `"-"` text to `op_sub`, the *binary* operator's
         // own method name, so the lookup is inlined here with the
-        // right name instead. Restricted to a bare `.Identifier`
-        // operand, same as `resolve_operator_dispatch`'s own doc
-        // comment explains for the binary case: this runs
-        // speculatively for every unary `-`/`!` in the whole codebase,
-        // so `resolve_field_chain`'s non-trivial, side-effecting cases
-        // (a call result's own hoisting in particular) must never run
-        // here on spec.
-        flag unary_operand_is_identifier = false;
-        fit u.operand.kind {
-          .Identifier(_) -> { unary_operand_is_identifier = true; }
-          _ -> {}
-        }
+        // right name instead. Operand resolution itself goes through
+        // `resolve_operator_operand`/`materialize_operator_operand`,
+        // the same side-effect-free-until-confirmed path the binary
+        // case uses - see their own doc comments.
         if !u.is_left_operanded_unary && !u.has_indirection &&
-        unary_operand_is_identifier &&
-        (equals(u.op, "-") || equals(u.op, "!")) {
+          (equals(u.op, "-") || equals(u.op, "!")) {
           str op_method = "op_neg";
           if equals(u.op, "!") {
             op_method = "op_not";
           }
-          let recv_r_opt = self.resolve_field_chain(u.operand);
-          if recv_r_opt.is_some() {
-            let recv_r = recv_r_opt.unwrap();
-            let mangled_opt = self.lookup_impl_method(recv_r.type_name, op_method);
+          let recv_r0_opt = self.resolve_operator_operand(u.operand);
+          if recv_r0_opt.is_some() {
+            let mangled_opt = self.lookup_impl_method(recv_r0_opt.unwrap().type_name, op_method);
             if mangled_opt.is_some() {
-              ret self.emit_operator_call(recv_r, mangled_opt.unwrap(), .None);
+              let recv_r_opt = self.materialize_operator_operand(recv_r0_opt.unwrap(), u.operand);
+              if recv_r_opt.is_some() {
+                ret self.emit_operator_call(recv_r_opt.unwrap(), mangled_opt.unwrap(), .None);
+              }
             }
           }
         }
@@ -5993,6 +6172,42 @@ impl Codegen {
                 }
                 self.state.write(")");
                 ret .None;
+              }
+            }
+            _ -> {}
+          }
+        }
+        // `a[i] = v` on a type with a matching `op_index_set` impl
+        // method: resolved and emitted directly here, before `e.left`
+        // ever reaches `emit_index` - that function dispatches `[]`'s
+        // own *read* method (`op_index`), which would be wrong to call
+        // in assignment-target position even if it existed (its
+        // result isn't an assignable C lvalue).
+        if equals(e.op, "=") && e.has_left && e.has_right {
+          fit e.left.kind {
+            .Expression(idx_e) -> {
+              if equals(idx_e.op, "[]") && idx_e.has_left && idx_e.has_right {
+                Node* index_node = idx_e.right;
+                flag has_bracket = false;
+                fit idx_e.right.kind {
+                  .Bracket(inner) -> {
+                    index_node = inner;
+                    has_bracket = true;
+                  }
+                  _ -> {}
+                }
+                if has_bracket {
+                  let dispatched_set = self.resolve_operator_dispatch("[]=", idx_e.left);
+                  if dispatched_set.is_some() {
+                    let target = dispatched_set.unwrap();
+                    ret self.emit_operator_index_set_call(
+                      target.recv,
+                      target.mangled,
+                      index_node,
+                      e.right
+                    );
+                  }
+                }
               }
             }
             _ -> {}
@@ -16438,6 +16653,7 @@ impl Codegen {
       `static __fun_mc_handler_t __fun_mc_user_handler = 0;
       `#ifdef _WIN32
       `static int64_t __fun_mc_page_size(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int64_t)si.dwPageSize; }
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size);
       `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
@@ -16454,7 +16670,7 @@ impl Codegen {
       `     end is exact; the start only faults once an underflow crosses
       `     that same slack, up to one page - coarser, but still real
       `     protection where there was previously none at all. */
-      `  int64_t total = (data_pages + 2) * ps;
+      `  int64_t total = __fun_mc_guard_total_size(data_size);
       `  void* base = VirtualAlloc(NULL, (SIZE_T)total, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
       `  if (!base) return 0;
       `  DWORD old;
@@ -16472,6 +16688,27 @@ impl Codegen {
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  DWORD old;
       `  return VirtualProtect(base, (SIZE_T)total_size, PAGE_NOACCESS, &old) ? 0 : 1;
+      `}
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
+      `  if (data_pages < 1) data_pages = 1;
+      `  return (data_pages + 2) * ps;
+      `}
+      `/* Hands an already-guarded, already-freed region back out for a new
+      `   allocation once the quarantine (see std.memcheck's own note on
+      `   its own budget) has to recycle something to stay bounded - same
+      `   layout math as guard_alloc above, just reusing mmap_base instead
+      `   of reserving a fresh region, and only re-opening the data pages
+      `   (the two guard pages stay PAGE_NOACCESS throughout, never
+      `   touched here). */
+      `static void* __fun_mc_guard_reuse(void* mmap_base, int64_t total_size, int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (total_size / ps) - 2;
+      `  DWORD old;
+      `  VirtualProtect((char*)mmap_base + ps, (SIZE_T)(data_pages * ps), PAGE_READWRITE, &old);
+      `  void* guard = (char*)mmap_base + ps + data_pages * ps;
+      `  return (char*)guard - data_size;
       `}
       `static LONG WINAPI __fun_mc_veh(PEXCEPTION_POINTERS ep) {
       `  if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && __fun_mc_user_handler) {
@@ -16497,6 +16734,7 @@ impl Codegen {
       `}
       `#else
       `static int64_t __fun_mc_page_size(void) { return (int64_t)sysconf(_SC_PAGESIZE); }
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size);
       `static void* __fun_mc_guard_alloc(int64_t data_size, int64_t* out_total_size, void** out_mmap_base) {
       `  int64_t ps = __fun_mc_page_size();
       `  int64_t data_pages = (data_size + ps - 1) / ps;
@@ -16513,7 +16751,7 @@ impl Codegen {
       `     end is exact; the start only faults once an underflow crosses
       `     that same slack, up to one page - coarser, but still real
       `     protection where there was previously none at all. */
-      `  int64_t total = (data_pages + 2) * ps;
+      `  int64_t total = __fun_mc_guard_total_size(data_size);
       `  void* base = mmap(0, (size_t)total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       `  if (base == MAP_FAILED) return 0;
       `  mprotect(base, (size_t)ps, PROT_NONE);
@@ -16529,6 +16767,26 @@ impl Codegen {
       `}
       `static int64_t __fun_mc_guard_protect_all(void* base, int64_t total_size) {
       `  return mprotect(base, (size_t)total_size, PROT_NONE) == 0 ? 0 : 1;
+      `}
+      `static int64_t __fun_mc_guard_total_size(int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (data_size + ps - 1) / ps;
+      `  if (data_pages < 1) data_pages = 1;
+      `  return (data_pages + 2) * ps;
+      `}
+      `/* Hands an already-guarded, already-freed region back out for a new
+      `   allocation once the quarantine (see std.memcheck's own note on
+      `   its own budget) has to recycle something to stay bounded - same
+      `   layout math as guard_alloc above, just reusing mmap_base instead
+      `   of reserving a fresh region, and only re-opening the data pages
+      `   (the two guard pages stay PROT_NONE throughout, never touched
+      `   here). */
+      `static void* __fun_mc_guard_reuse(void* mmap_base, int64_t total_size, int64_t data_size) {
+      `  int64_t ps = __fun_mc_page_size();
+      `  int64_t data_pages = (total_size / ps) - 2;
+      `  mprotect((char*)mmap_base + ps, (size_t)(data_pages * ps), PROT_READ | PROT_WRITE);
+      `  void* guard = (char*)mmap_base + ps + data_pages * ps;
+      `  return (char*)guard - data_size;
       `}
       `static void __fun_mc_trampoline(int sig, siginfo_t* info, void* ctx) {
       `  if (__fun_mc_user_handler) {

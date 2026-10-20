@@ -717,6 +717,16 @@ fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, 
     // else (globals, heap) before growth ever needs to kick in.
     argv_args.push("-sINITIAL_MEMORY=167772160");
     argv_args.push("-sALLOW_MEMORY_GROWTH=1");
+    // Deliberately leaves out emcc's own suggested
+    // `-sGROWABLE_ARRAYBUFFERS=2` for this `-pthread` +
+    // `-sALLOW_MEMORY_GROWTH` combination (`-Wpthreads-mem-growth`'s own
+    // build-time warning otherwise): confirmed directly that it bumps
+    // the compiled output's own minimum required Node version from
+    // 18.3 to 26.0 - a version nothing currently deployed (including
+    // this project's own CI runners) actually has. A real runtime
+    // requirement this strict is a far worse trade than one cosmetic
+    // build warning about non-wasm code perf on growth, which is the
+    // only thing this flag would have bought.
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
     }

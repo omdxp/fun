@@ -482,6 +482,18 @@ pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResu
 // either stream and how it ended. Some expectations are about a program
 // being stopped rather than about what it printed.
 pub fun run_source_result(str src, str name, str label) ProcessResult {
+  ret _run_source_result_mode(src, name, label, false);
+}
+
+// `run_source_result`, compiled with `-memcheck` on (see
+// `transpile_file_memcheck`) - for a fixture whose expectations are
+// about what the allocator itself does (a leak, double-free, overflow,
+// or genuine use-after-free report), not just the program's own logic.
+pub fun run_source_result_memcheck(str src, str name, str label) ProcessResult {
+  ret _run_source_result_mode(src, name, label, true);
+}
+
+fun _run_source_result_mode(str src, str name, str label, flag memcheck) ProcessResult {
   str base = _fixture_base(name);
 
   StringBuilder fb = string_builder_init(64);
@@ -497,7 +509,7 @@ pub fun run_source_result(str src, str name, str label) ProcessResult {
   assert write_string(source_path, src), format("{str}: could not stage {str}", label, source_path);
   defer remove_file(source_path);
 
-  let emitted = transpile_file(source_path);
+  let emitted = memcheck ? transpile_file_memcheck(source_path) : transpile_file(source_path);
   if emitted.is_err() {
     allow assert_constant, "reports the stage that rejected the staged source";
     assert false, format("{str}: {str}", label, emitted.unwrap_err());
