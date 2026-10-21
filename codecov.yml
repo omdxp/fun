@@ -1,0 +1,30 @@
+# This project's own real coverage gate is `fun test . -cover -cover-min
+# 80 -cover-exclude ...` in ci-dev.yml - the `-cover-exclude` list there
+# is the actual, intentional policy on what counts (a thin CLI entry
+# point, a process's own stdin/stdout loop, a platform-specific backend
+# only one CI lane ever runs). This file points Codecov's own reporting
+# at that same policy, rather than Codecov's unrelated SaaS defaults
+# (a strict 80% on every PR's own changed lines, and project coverage
+# that must never drop at all) silently becoming a second, stricter,
+# unintended gate on top of the one this project actually chose.
+ignore:
+  - "examples/**"
+  - "scripts/**"
+  - "editors/**"
+  - "src/cli/main.fn"
+  - "src/fls/main.fn"
+  - "src/fls/server.fn"
+  - "src/cli/coverage_samples/**"
+  - "stdlib/std/sync_backend_windows.fn"
+  - "src/cli/upgrade.fn"
+
+coverage:
+  status:
+    project:
+      default:
+        target: 80%
+        threshold: 2%
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
