@@ -452,19 +452,18 @@ function countChar(text, ch) {
 }
 
 function collectTopComment(lines) {
+  // Strict, same reasoning as collectCommentAbove: a module doc's own
+  // paragraph break is always a bare `//` (still a comment line), never
+  // a genuinely blank line - this codebase's own convention throughout
+  // stdlib. A real blank line only ever means the module comment has
+  // ended, so stopping there is never wrong, and continuing past it (as
+  // this used to) absorbed the first declaration's own doc comment into
+  // the module-level text, confirmed as a real bug (std.c.atomic.fn).
   const out = [];
-  let seenComment = false;
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.startsWith("//")) {
       out.push(trimmed.replace(/^\/\/\s?/, ""));
-      seenComment = true;
-      continue;
-    }
-    if (trimmed === "") {
-      if (seenComment) {
-        out.push("");
-      }
       continue;
     }
     break;
