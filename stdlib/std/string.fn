@@ -13,8 +13,12 @@ use std.error;
 // list of separately-owned fragments, since a fragment's own literal
 // or allocated status can't be told apart later.
 pub compound StringBuilder {
+  // The backing buffer - never read/written directly, only through
+  // this compound's own `append`/`build` methods.
   str buf;
+  // How many bytes of `buf` are actually in use.
   num total_len;
+  // How many bytes `buf` can hold before it needs to grow.
   num cap;
 }
 

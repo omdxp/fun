@@ -1375,11 +1375,16 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .copy-link-btn {
+  display: inline-flex;
+  align-items: center;
   border: 1px solid var(--border-strong);
   background: var(--surface-3);
   color: var(--text);
   border-radius: 8px;
   padding: 6px 10px;
+  font: inherit;
+  line-height: 1;
+  text-decoration: none;
   cursor: pointer;
   white-space: nowrap;
   transition: border-color 120ms ease, background 120ms ease;
@@ -1468,6 +1473,17 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   background: var(--surface-2);
 }
 
+.symbol-detail h3 {
+  margin-bottom: 6px;
+}
+
+.symbol-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .compound-fields {
   margin-top: 14px;
 }
@@ -1515,6 +1531,8 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .detail-link-btn {
+  display: inline-flex;
+  align-items: center;
   border: 1px solid var(--border-strong);
   background: var(--surface-3);
   color: var(--text);
@@ -1522,6 +1540,8 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
   padding: 3px 8px;
   cursor: pointer;
   font-size: 11px;
+  line-height: 1;
+  text-decoration: none;
   transition: border-color 120ms ease;
 }
 
@@ -1596,11 +1616,15 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .modal-close {
+  display: inline-flex;
+  align-items: center;
   border: 1px solid var(--border-strong);
   background: var(--surface-3);
   color: var(--text);
   border-radius: 8px;
   padding: 6px 12px;
+  font: inherit;
+  line-height: 1;
   cursor: pointer;
   transition: border-color 120ms ease;
 }
@@ -1646,23 +1670,29 @@ pre.err { border-color: #6b2b3f; color: #ffd5df; }
 }
 
 .modal-content {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
+}
+
+.modal-content-scroll {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
-  min-height: 0;
   padding-right: 6px;
 }
 
 .modal-content-tabs {
   display: flex;
   gap: 6px;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--border);
   margin: -2px -2px 14px;
   padding: 2px 2px 0;
-  position: sticky;
-  top: 0;
   background: var(--bg-elev);
-  z-index: 1;
 }
 
 .modal-content-tab {

@@ -555,6 +555,11 @@ export default function App() {
     stdlibModalCardRef.current?.scrollTo({ top: 0 });
   }, [modalContentTab, isNarrowViewport]);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
+  // A direct link to the real source line, pinned to the release tag
+  // this generated content was built from - not `main`, which drifts
+  // out from under a page generated at an older version.
+  const githubSourceUrl = (modulePath: string, line: number) =>
+    `https://github.com/omdxp/fun/blob/v${content.funVersion}/stdlib/std/${modulePath}#L${line}`;
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
@@ -1830,12 +1835,23 @@ export default function App() {
                 const symbolView = modalContentTab === "symbol" &&
                   activeSymbol && (
                     <article className="symbol-detail">
-                          <h3>
-                            {activeSymbol.name}{" "}
-                            <span className="muted">
-                              (line {activeSymbol.line})
+                          <h3>{activeSymbol.name}</h3>
+                          <div className="symbol-detail-meta">
+                            <span className="muted small">
+                              line {activeSymbol.line}
                             </span>
-                          </h3>
+                            <a
+                              className="detail-link-btn"
+                              href={githubSourceUrl(
+                                activeModule.module,
+                                activeSymbol.line,
+                              )}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              View source
+                            </a>
+                          </div>
                           <HighlightedCode
                             code={activeSymbol.signature}
                             lang="fun"
@@ -1880,6 +1896,20 @@ export default function App() {
                                           <span className="muted small">
                                             line {field.line}
                                           </span>
+                                          <a
+                                            className="detail-link-btn"
+                                            href={githubSourceUrl(
+                                              activeModule.module,
+                                              field.line,
+                                            )}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            onClick={(event) =>
+                                              event.stopPropagation()
+                                            }
+                                          >
+                                            View source
+                                          </a>
                                           <button
                                             type="button"
                                             className="detail-link-btn"
@@ -1952,6 +1982,20 @@ export default function App() {
                                             <span className="muted small">
                                               line {member.line}
                                             </span>
+                                            <a
+                                              className="detail-link-btn"
+                                              href={githubSourceUrl(
+                                                activeModule.module,
+                                                member.line,
+                                              )}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              onClick={(event) =>
+                                                event.stopPropagation()
+                                              }
+                                            >
+                                              View source
+                                            </a>
                                             <button
                                               type="button"
                                               className="detail-link-btn"
@@ -2024,6 +2068,20 @@ export default function App() {
                                             <span className="muted small">
                                               line {variant.line}
                                             </span>
+                                            <a
+                                              className="detail-link-btn"
+                                              href={githubSourceUrl(
+                                                activeModule.module,
+                                                variant.line,
+                                              )}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              onClick={(event) =>
+                                                event.stopPropagation()
+                                              }
+                                            >
+                                              View source
+                                            </a>
                                             <button
                                               type="button"
                                               className="detail-link-btn"
@@ -2066,11 +2124,20 @@ export default function App() {
                         </article>
                   );
 
+                // `tabsStrip` stays outside the scrolling div below it on
+                // purpose - it used to be `position: sticky` inside that
+                // same scrolling flow, which hit a real WebKit repaint bug
+                // (confirmed directly: stale content bled through behind it
+                // during scroll, Chromium unaffected). Structurally outside
+                // the scroll area, the same way `.modal-head` already is,
+                // it never needs to repaint on scroll at all.
                 const contentInner = (
                   <>
                     {tabsStrip}
-                    {moduleView}
-                    {symbolView}
+                    <div className="modal-content-scroll">
+                      {moduleView}
+                      {symbolView}
+                    </div>
                   </>
                 );
 
@@ -2100,6 +2167,17 @@ export default function App() {
                           </p>
                         </div>
                         <div className="modal-actions">
+                          <a
+                            className="copy-link-btn"
+                            href={githubSourceUrl(
+                              activeModule.module,
+                              activeSymbol?.line ?? 1,
+                            )}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            View source
+                          </a>
                           <button
                             type="button"
                             className="copy-link-btn"

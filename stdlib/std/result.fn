@@ -29,7 +29,9 @@ use std.c.string;
 
 // A fallible result: `Ok(value)` on success, `Err(error)` on failure.
 pub enum Result<T, E = Error> {
+  // Holds the success value.
   Ok(T),
+  // Holds the failure value.
   Err(E),
 }
 

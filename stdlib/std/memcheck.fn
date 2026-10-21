@@ -998,6 +998,9 @@ fun __mc_slab_malloc(num real_size, num requested, str file, num line) raw* {
   ret slot;
 }
 
+// `malloc` redirected through the memory checker under `-memcheck` -
+// guarded directly for a large request, or carved out of a shared slab
+// arena for a small one (see `__MC_SLAB_MAX_CLASS`'s own note on why).
 pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
   __mc_ensure_started();
   __fun_mc_ensure_altstack();
@@ -1080,6 +1083,9 @@ pub fun __fun_memcheck_calloc(num count, num size, str file, num line) raw* {
   ret __fun_memcheck_malloc(count * size, file, line);
 }
 
+// `realloc` redirected through the memory checker under `-memcheck` -
+// always a fresh allocation plus a copy, since a guarded or slab-slot
+// block can't grow in place.
 pub fun __fun_memcheck_realloc(raw* ptr, num size, str file, num line) raw* {
   if ptr == nil {
     ret __fun_memcheck_malloc(size, file, line);
@@ -1111,6 +1117,9 @@ pub fun __fun_memcheck_realloc(raw* ptr, num size, str file, num line) raw* {
   ret new_ptr;
 }
 
+// `free` redirected through the memory checker under `-memcheck` -
+// catches a double-free immediately, then revokes (or quarantines) the
+// freed memory so a later use-after-free faults instead of succeeding.
 pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
   if ptr == nil {
     ret;

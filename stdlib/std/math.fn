@@ -15,8 +15,11 @@ use std.error;
 // }
 // ```
 pub enum Sign {
+  // Strictly less than zero.
   Negative,
+  // Exactly zero.
   Zero,
+  // Strictly greater than zero.
   Positive,
 }
 

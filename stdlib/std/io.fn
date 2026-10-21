@@ -554,10 +554,15 @@ impl File {
 // a rotating file sink. Dispatch is a `fit` match over the enum, so it stays
 // zero-cost with no vtable.
 pub enum Sink {
+  // The process's own standard output.
   Stdout,
+  // The process's own standard error.
   Stderr,
+  // The process's own standard input.
   Stdin,
+  // An already-open file.
   File(File),
+  // A size-capped file that rotates to a new generation when full.
   Rotating(RotatingSink*),
 }
 
@@ -693,10 +698,16 @@ pub fun writeln_to(Sink s, str msg) {
 // generations are shifted up (dropping the oldest), and a fresh `path` is opened.
 // Intended for a single writer; guard with a Mutex for concurrent use.
 pub compound RotatingSink {
+  // The active generation's own path (`path.1`, `path.2`, ... name the
+  // older, rotated-out generations).
   str path;
+  // Rotates once the active generation would exceed this many bytes.
   num max_bytes;
+  // How many generations to keep; the oldest is deleted once exceeded.
   num max_files;
+  // The active generation's own open file.
   File current;
+  // Bytes written to the active generation so far.
   num written;
 }
 
@@ -749,10 +760,12 @@ impl RotatingSink {
     ret ok_w;
   }
 
+  // Flushes the active generation's own buffered writes.
   pub flush() flag {
     ret self.current.flush();
   }
 
+  // Closes the active generation's own file.
   pub close() {
     self.current.close();
   }

@@ -40,6 +40,8 @@ pub shape Hasher {
 
 // SHA-256, streamed.
 pub compound Sha256 {
+  // The native hash context - opaque, owned entirely by `update`/
+  // `finalize`.
   raw* handle;
 }
 
@@ -51,10 +53,12 @@ pub fun sha256_new() Sha256 {
 }
 
 impl Sha256 as Hasher {
+  // Feeds more data into the running SHA-256 hash.
   pub update(str data) {
     __fun_hash_update(self.handle, data, len(data));
   }
 
+  // Finalizes the hash, returned as a lowercase hex digest.
   pub finalize() str {
     str out = __fun_hash_finalize(self.handle);
     self.handle = nil;
@@ -71,6 +75,8 @@ pub fun sha256(str data) str {
 
 // SHA-512, streamed.
 pub compound Sha512 {
+  // The native hash context - opaque, owned entirely by `update`/
+  // `finalize`.
   raw* handle;
 }
 
@@ -82,10 +88,12 @@ pub fun sha512_new() Sha512 {
 }
 
 impl Sha512 as Hasher {
+  // Feeds more data into the running SHA-512 hash.
   pub update(str data) {
     __fun_hash_update(self.handle, data, len(data));
   }
 
+  // Finalizes the hash, returned as a lowercase hex digest.
   pub finalize() str {
     str out = __fun_hash_finalize(self.handle);
     self.handle = nil;
@@ -127,7 +135,9 @@ pub fun random_bytes(num n) str {
 // (`Aes256Gcm`: a 32-byte key as 64 hex chars, a 12-byte nonce as 24) -
 // `random_bytes` is the usual way to generate a fresh one of either.
 pub shape AeadCipher {
+  // Encrypts `plaintext`, authenticating `aad` without encrypting it.
   encrypt(str plaintext, str key, str nonce, str aad) Result<str, Error>;
+  // Verifies the tag and decrypts `ciphertext`, checking `aad` matches.
   decrypt(str ciphertext, str key, str nonce, str aad) Result<str, Error>;
 }
 
@@ -139,6 +149,8 @@ pub compound Aes256Gcm {
 }
 
 impl Aes256Gcm as AeadCipher {
+  // Encrypts `plaintext`, authenticating `aad` alongside it without
+  // encrypting it. Returns hex-encoded ciphertext with its tag appended.
   pub encrypt(str plaintext, str key, str nonce, str aad) Result<str, Error> {
     if len(key) != 64 {
       ret err_kind(.Invalid, "Aes256Gcm: key must be 64 hex chars (32 bytes)", "");
@@ -153,6 +165,9 @@ impl Aes256Gcm as AeadCipher {
     ret .Ok(out);
   }
 
+  // Verifies the tag and decrypts `ciphertext`, checking `aad` matches
+  // what `encrypt` authenticated it with. `Err` on a wrong key or any
+  // tampering - there is no plaintext to hand back in that case.
   pub decrypt(str ciphertext, str key, str nonce, str aad) Result<str, Error> {
     if len(key) != 64 {
       ret err_kind(.Invalid, "Aes256Gcm: key must be 64 hex chars (32 bytes)", "");
@@ -176,16 +191,23 @@ impl Aes256Gcm as AeadCipher {
 // default asymmetric signature scheme. Key and signature bytes are hex,
 // same reason as everywhere else in this module.
 pub shape Signer {
+  // Signs `message`, returning a hex-encoded signature.
   sign(str message) str;
 }
+// Verifies a signature produced by the matching `Signer`.
 pub shape Verifier {
+  // True when `signature` is a valid signature of `message`.
   verify(str message, str signature) flag;
 }
 
+// An Ed25519 private key, for signing.
 pub compound Ed25519PrivateKey {
+  // The key, as lowercase hex.
   str hex;
 }
+// An Ed25519 public key, for verifying.
 pub compound Ed25519PublicKey {
+  // The key, as lowercase hex.
   str hex;
 }
 
@@ -212,12 +234,16 @@ pub fun ed25519_generate() Result<(Ed25519PrivateKey, Ed25519PublicKey), Error> 
 }
 
 impl Ed25519PrivateKey as Signer {
+  // Signs `message` with this private key, returning a hex-encoded
+  // Ed25519 signature.
   pub sign(str message) str {
     ret __fun_ed25519_sign(self.hex, message, len(message));
   }
 }
 
 impl Ed25519PublicKey as Verifier {
+  // True when `signature` is a valid Ed25519 signature of `message`
+  // under this public key.
   pub verify(str message, str signature) flag {
     ret __fun_ed25519_verify(self.hex, message, len(message), signature) == 1;
   }

@@ -6,8 +6,11 @@
 use shapes;
 use option;
 
+// A half-open integer range `[start, end)`.
 pub compound Range {
+  // The first value, included.
   num start;
+  // The value iteration stops before, excluded.
   num end;
 }
 

@@ -58,12 +58,20 @@ pub fun environ_ptr() str[];
 // Opaque set of child-side file actions (dup2/close operations) applied,
 // in order, right after `posix_spawn` forks and before it execs.
 pub fun posix_spawn_file_actions_init(posix_spawn_file_actions_t* actions) num;
+// Releases a file-actions set initialized by `posix_spawn_file_actions_init`.
+// Returns 0 on success, a nonzero errno-style code on failure (C semantics).
 pub fun posix_spawn_file_actions_destroy(posix_spawn_file_actions_t* actions) num;
+// Queues a `dup2(fildes, newfildes)` to run in the child right after fork,
+// before exec - the usual way to wire a pipe end onto stdin/stdout/stderr.
+// Returns 0 on success, a nonzero errno-style code on failure (C semantics).
 pub fun posix_spawn_file_actions_adddup2(
   posix_spawn_file_actions_t* actions,
   num fildes,
   num newfildes
 ) num;
+// Queues a `close(fildes)` to run in the child right after fork, before
+// exec. Returns 0 on success, a nonzero errno-style code on failure (C
+// semantics).
 pub fun posix_spawn_file_actions_addclose(posix_spawn_file_actions_t* actions, num fildes) num;
 
 // Spawns a new process running `file`, searching PATH (posix_spawnp

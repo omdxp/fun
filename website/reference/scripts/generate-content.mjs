@@ -452,19 +452,18 @@ function countChar(text, ch) {
 }
 
 function collectTopComment(lines) {
+  // Strict, same reasoning as collectCommentAbove: a module doc's own
+  // paragraph break is always a bare `//` (still a comment line), never
+  // a genuinely blank line - this codebase's own convention throughout
+  // stdlib. A real blank line only ever means the module comment has
+  // ended, so stopping there is never wrong, and continuing past it (as
+  // this used to) absorbed the first declaration's own doc comment into
+  // the module-level text, confirmed as a real bug (std.c.atomic.fn).
   const out = [];
-  let seenComment = false;
   for (const line of lines) {
     const trimmed = line.trim();
     if (trimmed.startsWith("//")) {
       out.push(trimmed.replace(/^\/\/\s?/, ""));
-      seenComment = true;
-      continue;
-    }
-    if (trimmed === "") {
-      if (seenComment) {
-        out.push("");
-      }
       continue;
     }
     break;
@@ -473,20 +472,21 @@ function collectTopComment(lines) {
 }
 
 function collectCommentAbove(lines, declLineIdx) {
+  // Strict on purpose, matching fls's own doc_comment_above (src/fls/
+  // symbols.fn): a blank line stops the walk immediately, full stop.
+  // The previous, lenient version kept walking through blank lines
+  // once it had seen a comment, which let an unrelated floating
+  // banner comment (e.g. a section header a few lines above, itself
+  // separated from the declaration by a blank line) get glued onto
+  // this symbol's own doc text - confirmed as a real bug, not a
+  // theoretical one, producing mixed text in the rendered explorer.
   const chunk = [];
-  let sawComment = false;
   let i = declLineIdx - 1;
 
   while (i >= 0) {
     const trimmed = lines[i].trim();
     if (trimmed.startsWith("//")) {
       chunk.unshift(trimmed.replace(/^\/\/\s?/, ""));
-      sawComment = true;
-      i -= 1;
-      continue;
-    }
-    if (trimmed === "" && sawComment) {
-      chunk.unshift("");
       i -= 1;
       continue;
     }

@@ -8,8 +8,11 @@
 use shapes;
 use option;
 
+// A half-open range `[start, end)` over any `Steppable<T>`.
 pub compound StepRange<T: Steppable<T>> {
+  // The first value, included.
   T start;
+  // The value iteration stops before, excluded.
   T end;
 }
 

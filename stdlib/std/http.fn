@@ -23,12 +23,19 @@ use std.time;
 
 // An HTTP request method.
 pub enum HttpMethod {
+  // Retrieve a resource.
   Get,
+  // Submit data, typically creating a resource.
   Post,
+  // Replace a resource in full.
   Put,
+  // Remove a resource.
   Delete,
+  // Partially update a resource.
   Patch,
+  // Like `Get`, but the response has no body - headers only.
   Head,
+  // Ask what methods/headers a target supports.
   Options,
 }
 
@@ -162,12 +169,22 @@ pub fun http_status_is_redirect(HttpStatus s) flag {
 // mutate `self` directly, the same convention `Guarded<T>`/`Mutex` use),
 // matching how the rest of this codebase is written.
 pub compound HttpRequest {
+  // The request's own HTTP method.
   HttpMethod method;
+  // The parsed target URL.
   Url url;
+  // Headers to send, set via `set_header`.
   Map<str, str> headers;
+  // The request body, set via `set_body`. Ignored when `has_body` is
+  // false.
   str body;
+  // Whether `body` was actually set - distinguishes an empty body from
+  // no body at all.
   flag has_body;
+  // How many redirects `send()` will still follow before giving up.
   num max_redirects;
+  // How long to wait for the response before giving up, in
+  // milliseconds. 0 means no timeout.
   num timeout_ms;
 }
 
@@ -279,8 +296,11 @@ impl HttpRequest {
 // A parsed HTTP response: status, headers, and body (already decoded if
 // the wire body was chunked).
 pub compound HttpResponse {
+  // The response's own status line.
   HttpStatus status;
+  // Every response header, as sent.
   Map<str, str> headers;
+  // The response body, already decoded if the wire body was chunked.
   str body;
 }
 
@@ -706,9 +726,13 @@ pub fun http_options(str raw_url) Result<HttpResponse, Error> {
 
 // An incoming request as a server sees it: method, path, headers, body.
 pub compound HttpServerRequest {
+  // The request's own HTTP method.
   HttpMethod method;
+  // The request path, as sent (no query-string parsing here).
   str path;
+  // Every request header, as sent.
   Map<str, str> headers;
+  // The request body, already read in full.
   str body;
 }
 
@@ -724,8 +748,11 @@ impl HttpServerRequest {
 // wants to set - Content-Length is always computed and sent
 // automatically, the same as a client request's body).
 pub compound HttpServerResponse {
+  // The status to send.
   HttpStatus status;
+  // Headers to send alongside it.
   Map<str, str> headers;
+  // The response body to send.
   str body;
 }
 
@@ -761,9 +788,11 @@ compound _HttpRoute {
 // their method and path (exact match only in this first cut - a
 // wildcard/path-parameter router is a bigger, separate feature).
 pub compound HttpRouter {
+  // Every registered route, checked in registration order.
   Vec<_HttpRoute> routes;
 }
 
+// Creates an empty router, with no routes registered yet.
 pub fun http_router_new() HttpRouter {
   HttpRouter r;
   r.routes.init(8);
