@@ -13,6 +13,7 @@
   </p>
   <p>
     <a href="https://github.com/omdxp/fun/actions"><img src="https://img.shields.io/github/actions/workflow/status/omdxp/fun/ci-dev.yml?branch=main" alt="CI status" /></a>
+    <a href="https://codecov.io/gh/omdxp/fun"><img src="https://codecov.io/gh/omdxp/fun/graph/badge.svg" alt="Code coverage" /></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License" /></a>
   </p>
 </div>

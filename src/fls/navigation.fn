@@ -1650,13 +1650,28 @@ fun _import_hover_result(str target, Span s) str {
     ret NO_HOVER;
   }
   str shown = text;
+  flag shown_owned = false;
   if !ends_with(target, "README.md") {
     shown = leading_doc_comment(text);
+    shown_owned = true;
+    free(text);
     if equals(shown, "") {
+      if shown_owned {
+        free(shown);
+      }
       ret NO_HOVER;
     }
   }
-  ret _hover_result(shown, s);
+  // `_hover_result` only reads `markdown` (quoting it into its own,
+  // separately-built JSON string), never takes ownership of it - this
+  // call's own to free, whichever of `text`/`shown` it still is.
+  str result = _hover_result(shown, s);
+  if shown_owned {
+    free(shown);
+  } else {
+    free(text);
+  }
+  ret result;
 }
 
 // `as` reads two different ways depending on the statement it sits
