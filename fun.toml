@@ -1,6 +1,21 @@
 [package]
 name = "fun"
 version = "0.68.0"
+description = "A statically typed programming language that transpiles to C, built for predictable performance, straightforward tooling, and portable deployment."
+license = "MIT"
+authors = ["omdxp <omar@omdxp.com>"]
+repository = "https://github.com/omdxp/fun"
+
+[coverage]
+min = 80
+# Sample programs and scripts that are not the compiler, the two
+# process entry points, the language server's stdin/stdout loop (its
+# own analysis is covered), the Windows-only sync backend (only one CI
+# lane ever runs it), and `fun upgrade`'s own top-level command
+# (everything it calls is tested against a local fixture - see
+# upgrade.fn's own tests - but running the command itself would
+# replace the very fun/fls this test suite runs under).
+exclude = ["examples", "scripts", "editors", "src/cli/main.fn", "src/fls/main.fn", "src/fls/server.fn", "src/cli/coverage_samples", "stdlib/std/sync_backend_windows.fn", "src/cli/upgrade.fn"]
 
 [[exe]]
 name = "fun"

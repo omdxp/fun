@@ -475,6 +475,7 @@ fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Star
 fun add <name> -git <url> [-path <subfolder>] [-tag <ref> | -branch <ref> | -rev <sha>] [-token-env <VAR>]
                          (adds or updates a [deps] entry in fun.toml, see Get Started)
 fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun.lock)
+fun upgrade [-check]    (downloads and installs the latest fun release over whatever's on PATH; -check only reports whether one exists)
 ```
 
 - `-no-exec`/`-outf`/`-out` apply the same way under `-test`/`-fuzz`
@@ -487,6 +488,30 @@ fun deps update [<name>] (re-resolves tag/branch [deps] entries and rewrites fun
   compile and debug itself.
 - `-warn-unused`/`-warn-unused-lenient` also apply under `-test`/`-fuzz`,
   both forms.
+
+## Upgrading
+
+`fun upgrade` finds whatever `fun` is currently first on `PATH`,
+downloads the matching release asset for the host OS/architecture from
+GitHub, and replaces both it and `fls` (and the bundled standard
+library) in place - no reinstalling by hand. `fun upgrade -check` only
+reports whether a newer release exists, without downloading anything.
+
+On Windows, replacing a binary that's actively running can fail with
+a sharing violation (the same reason `release.yml`'s own self-hosted
+build copies a stage's binary aside before overwriting it) - if that
+happens, `fun upgrade` prints the exact command to finish the swap by
+hand once nothing still has the file open. A machine-wide install
+under Program Files (the MSI installer's `-Scope Machine`) is left
+alone entirely: `fun upgrade` would need elevation it doesn't have,
+and overwriting those files in place regardless would desync the
+MSI's own installed-file tracking from what's actually on disk -
+download and run the latest `.msi` from the releases page instead.
+
+A project can also require a minimum `fun` version itself, via
+`min_fun_version` in `[package]` (see "The build manifest" in Get
+Started) - `fun build` refuses to build an older compiler against it
+and points at `fun upgrade`.
 
 ## Environment Variables
 
