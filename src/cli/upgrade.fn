@@ -517,7 +517,11 @@ test "_find_asset_url matches an asset by exact name" {
 // environment-dependent for). `_move_over`/`_rm_rf` below only touch a
 // scratch directory, so they're real, local-only coverage.
 
-test "_move_over replaces an existing destination, atomically on POSIX" {
+// Each spawns a real child process (`_move_over`/`_rm_rf` shell out),
+// the same reasoning `deps.fn`'s own git-fetch tests are already
+// `sequential` for - this project's test runner's default parallelism
+// isn't safe for concurrent real process spawns on Windows.
+sequential test "_move_over replaces an existing destination, atomically on POSIX" {
   str dir = "fun-out/upgrade_test_move";
   make_dir_all(dir);
   str src = path_join(dir, "src.txt");
@@ -530,7 +534,7 @@ test "_move_over replaces an existing destination, atomically on POSIX" {
   _rm_rf(dir);
 }
 
-test "_rm_rf removes a directory tree" {
+sequential test "_rm_rf removes a directory tree" {
   str dir = "fun-out/upgrade_test_rmrf";
   make_dir_all(path_join(dir, "nested"));
   write_string(path_join(dir, "nested/a.txt"), "x");
@@ -539,7 +543,7 @@ test "_rm_rf removes a directory tree" {
   assert !exists(dir), "expected the directory to be gone after _rm_rf";
 }
 
-test "_prepare_work_dir clears a stale directory and makes a fresh one" {
+sequential test "_prepare_work_dir clears a stale directory and makes a fresh one" {
   str dir = "fun-out/upgrade_test_workdir";
   make_dir_all(dir);
   write_string(path_join(dir, "stale.txt"), "leftover");
