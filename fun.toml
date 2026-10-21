@@ -1,6 +1,10 @@
 [package]
 name = "fun"
 version = "0.68.0"
+description = "A statically typed programming language that transpiles to C, built for predictable performance, straightforward tooling, and portable deployment."
+license = "MIT"
+authors = ["omdxp <omar@omdxp.com>"]
+repository = "https://github.com/omdxp/fun"
 
 [coverage]
 min = 80
