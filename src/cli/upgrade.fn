@@ -634,7 +634,40 @@ sequential test "_move_over replaces an existing destination, atomically on POSI
   str dst = path_join(dir, "dst.txt");
   write_string(src, "new content");
   write_string(dst, "old content");
-  assert _move_over(src, dst), "expected the move to succeed";
+  // Temporary diagnostics: no Windows machine to reproduce this on
+  // directly, and this exact test has already failed there through
+  // two different fixes - print the real command's own result instead
+  // of guessing a third blind one.
+  flag moved = _move_over(src, dst);
+  if !moved {
+    Vec<str> diag_args;
+    diag_args.init(0);
+    if runtime_backend_is_windows() {
+      diag_args.push("cmd");
+      diag_args.push("/c");
+      diag_args.push("move");
+      diag_args.push("/y");
+      diag_args.push(src);
+      diag_args.push(dst);
+    } else {
+      diag_args.push("sh");
+      diag_args.push("-c");
+      diag_args.push(format("mv -f '{str}' '{str}'", src, dst));
+    }
+    let diag = _sh(&diag_args);
+    diag_args.free();
+    if diag.is_err() {
+      println(format("[diag] _sh itself errored: {str}", diag.unwrap_err()));
+    } else {
+      let dr = diag.unwrap();
+      println(format("[diag] exit_code={num}", dr.exit_code));
+      println(format("[diag] stdout={str}", dr.stdout_text));
+      println(format("[diag] stderr={str}", dr.stderr_text));
+    }
+    println(format("[diag] src exists={flag}", exists(src)));
+    println(format("[diag] dst exists={flag}", exists(dst)));
+  }
+  assert moved, "expected the move to succeed";
   assert equals(read_to_string(dst), "new content"), "expected the destination to hold the new content";
   assert !exists(src), "expected the source to be gone after the move";
   _rm_rf(dir);
