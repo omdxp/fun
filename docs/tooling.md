@@ -160,12 +160,14 @@ min = 80                       # or 87.5
 exclude = ["examples", "scripts"]
 ```
 
-A GitHub Actions job that uploads to Codecov:
+A GitHub Actions job that uploads to Codecov (this project's own
+`ci-dev.yml` does exactly this):
 
 ```yaml
 - run: fun test -cover -cover-report lcov
-- uses: codecov/codecov-action@v4
+- uses: codecov/codecov-action@v5
   with:
+    token: ${{ secrets.CODECOV_TOKEN }}
     files: lcov.info
 ```
 
