@@ -657,8 +657,23 @@ sequential test "_move_over replaces an existing destination, atomically on POSI
 
 sequential test "_rm_rf removes a directory tree" {
   str dir = "fun-out/upgrade_test_rmrf";
-  make_dir_all(path_join(dir, "nested"));
-  write_string(path_join(dir, "nested/a.txt"), "x");
+  str nested = path_join(dir, "nested");
+  let made = make_dir_all(nested);
+  flag wrote = write_string(path_join(nested, "a.txt"), "x");
+  if !exists(dir) {
+    // Temporary diagnostics, same reasoning as the last round: no
+    // Windows machine to reproduce on, and this is a brand new
+    // failure shape (setup, not _rm_rf itself).
+    if made.is_err() {
+      println(format("[diag] make_dir_all({str}) errored: {str}", nested, made.unwrap_err().message));
+    } else {
+      println(format("[diag] make_dir_all({str}) ok={flag}", nested, made.unwrap()));
+    }
+    println(format("[diag] write_string wrote={flag}", wrote));
+    println(format("[diag] is_dir(nested)={flag}", is_dir(nested)));
+    println(format("[diag] is_dir(dir)={flag}", is_dir(dir)));
+    println(format("[diag] exists(nested)={flag}", exists(nested)));
+  }
   assert exists(dir), "expected the directory to exist before removal";
   _rm_rf(dir);
   assert !exists(dir), "expected the directory to be gone after _rm_rf";
