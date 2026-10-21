@@ -334,3 +334,36 @@ pub fun find_on_path(str program) str {
   }
   ret trim(lines.get(0));
 }
+
+// The process's current working directory, or "" on failure. Shells
+// out rather than binding a real OS primitive (`getcwd`/
+// `GetCurrentDirectoryA`), the same reasoning `find_on_path` above
+// gives for not binding one either: a program invoked the ordinary
+// way already has a shell able to answer this for it directly, with
+// no new C surface - `pwd` (POSIX) or `cd` with no arguments, which
+// prints it (Windows' `cmd.exe`).
+pub fun current_dir() str {
+  Vec<str> args;
+  args.init(0);
+  if runtime_backend_is_windows() {
+    args.push("cmd");
+    args.push("/c");
+    args.push("cd");
+  } else {
+    args.push("sh");
+    args.push("-c");
+    args.push("pwd");
+  }
+  str[] argv = argv_from(&args);
+  let r = run(argv);
+  free_argv(argv);
+  args.free();
+  if r.is_err() {
+    ret "";
+  }
+  let res = r.unwrap();
+  if res.exit_code != 0 {
+    ret "";
+  }
+  ret trim(res.stdout_text);
+}
