@@ -112,6 +112,15 @@ path = "src/main.fn"
 ```
 
 - `version` is optional (defaults to `0.0.0`).
+- The rest of `[package]` is optional too, and purely informational
+  except `min_fun_version`:
+  - `description`, `license`, `repository` - plain strings.
+  - `authors = ["name <email>", ...]` - an array of strings.
+  - `min_fun_version = "0.70.0"` - a plain `MAJOR.MINOR.PATCH` floor on
+    the compiler itself. `fun build` compares it against the running
+    `fun`'s own version and refuses to build (pointing at `fun
+    upgrade`) when it's older than this, before anything else about
+    the project is even looked at.
 - An optional `[coverage]` table sets what `fun test -cover` enforces:
   `min = 80` (a percentage, decimals allowed) fails the run below it, and
   `exclude = ["examples", "scripts"]` leaves files or directories out of the
