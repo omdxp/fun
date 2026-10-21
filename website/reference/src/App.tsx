@@ -1835,11 +1835,11 @@ export default function App() {
                 const symbolView = modalContentTab === "symbol" &&
                   activeSymbol && (
                     <article className="symbol-detail">
-                          <h3>
-                            {activeSymbol.name}{" "}
-                            <span className="muted">
-                              (line {activeSymbol.line})
-                            </span>{" "}
+                          <h3>{activeSymbol.name}</h3>
+                          <div className="symbol-detail-meta">
+                            <span className="muted small">
+                              line {activeSymbol.line}
+                            </span>
                             <a
                               className="detail-link-btn"
                               href={githubSourceUrl(
@@ -1851,7 +1851,7 @@ export default function App() {
                             >
                               View source
                             </a>
-                          </h3>
+                          </div>
                           <HighlightedCode
                             code={activeSymbol.signature}
                             lang="fun"
@@ -2124,11 +2124,20 @@ export default function App() {
                         </article>
                   );
 
+                // `tabsStrip` stays outside the scrolling div below it on
+                // purpose - it used to be `position: sticky` inside that
+                // same scrolling flow, which hit a real WebKit repaint bug
+                // (confirmed directly: stale content bled through behind it
+                // during scroll, Chromium unaffected). Structurally outside
+                // the scroll area, the same way `.modal-head` already is,
+                // it never needs to repaint on scroll at all.
                 const contentInner = (
                   <>
                     {tabsStrip}
-                    {moduleView}
-                    {symbolView}
+                    <div className="modal-content-scroll">
+                      {moduleView}
+                      {symbolView}
+                    </div>
                   </>
                 );
 
