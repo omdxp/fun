@@ -14,6 +14,7 @@ use std.string;
 use std.path;
 use std.fs;
 use std.sys;
+use std.process;
 use std.vec;
 use std.set;
 use std.map;
@@ -162,15 +163,70 @@ pub fun stdlib_root(str input_file_path) str {
     }
     free(candidate);
     let parent = dirname(dir);
-    if equals(parent, dir) || equals(parent, "") {
+    if equals(parent, "") {
       free(parent);
       break;
+    }
+    if equals(parent, dir) {
+      // `dirname`'s own contract for a bare relative segment with no
+      // slash in it at all (e.g. `"src"`, walked up from `"src/cli"`)
+      // is to hand back that same string unchanged - there's nothing
+      // left to strip, not "already at a real root". Real POSIX
+      // `dirname(1)` treats that same input as `"."` instead; without
+      // this, the loop stopped one level short of ever trying the
+      // working directory itself, silently never finding a real
+      // `stdlib/std` sitting right there for any relative input path
+      // (every normal `fun build` invocation, since `fun.toml`'s own
+      // `[[exe]] path` is always relative) - confirmed directly, not
+      // theoretical: this is the whole reason a plain `fun build` run
+      // from this very repo's own root only ever worked by the
+      // accident of this function's final bare-literal fallback
+      // happening to also resolve relative to the working directory.
+      free(parent);
+      if equals(dir, ".") {
+        break;
+      }
+      free(dir);
+      dir = substr(".", 0, 1);
+      depth = depth + 1;
+      continue;
     }
     free(dir);
     dir = parent;
     depth = depth + 1;
   }
   free(dir);
+
+  // Neither an explicit override nor a `stdlib/std` found walking up
+  // (the latter only ever matches inside this compiler's own source
+  // checkout, not a real install) - what every real release bundle
+  // (and `fun upgrade`) actually lays out is `<prefix>/bin/fun` (and
+  // `fls`) next to `<prefix>/share/fun/std`, so wherever `PATH` would
+  // resolve either one to right now is the last thing worth trying
+  // before giving up outright - the exact same "ask, don't assume"
+  // resolution `fun upgrade` already uses to find its own install.
+  str fun_path = find_on_path("fun");
+  if equals(fun_path, "") {
+    free(fun_path);
+    fun_path = find_on_path("fls");
+  }
+  if !equals(fun_path, "") {
+    str bin_dir = dirname(fun_path);
+    str prefix = dirname(bin_dir);
+    free(bin_dir);
+    str candidate = path_join(prefix, "share/fun");
+    free(prefix);
+    str probe = path_join(candidate, "std");
+    flag found = is_dir(probe);
+    free(probe);
+    if found {
+      free(fun_path);
+      ret candidate;
+    }
+    free(candidate);
+  }
+  free(fun_path);
+
   // A fresh copy, not the bare literal: every other return from this
   // function hands the caller something it owns and frees (see each
   // one's own note above) - this is the one path that didn't, and
