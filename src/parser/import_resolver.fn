@@ -1781,11 +1781,22 @@ sequential test "stdlib_root falls back to the installed fun's own share/fun/std
     // forward-slash path that genuinely exists still gets "The system
     // cannot find the path specified." back from it, the same real
     // bug `fun upgrade`'s own `_win_path` already works around.
+    //
+    // Deliberately no quotes anywhere in this compound string (safe
+    // here: a CI checkout's own path never has spaces in it) - nesting
+    // literal quotes inside a `cmd /c "..."` argument hits a real
+    // conflict between the standard Win32 argv-quoting algorithm this
+    // process's own spawn helper uses (which escapes an embedded `"`
+    // as `\"`) and `cmd.exe`'s own, different `/c` escaping rules,
+    // which don't agree on what `\"` means - confirmed directly, not
+    // theoretical: every quoted form of this command failed with the
+    // exact same "cannot find the path specified" cmd.exe gives a
+    // command line it couldn't parse at all.
     str win_scratch = replace_char(scratch, '/', '\\');
     str win_exe = replace_char(exe, '/', '\\');
     args.push("cmd");
     args.push("/c");
-    args.push(format("cd /d \"{str}\" && set FUN_STDLIB_DIR= && \"{str}\" build", win_scratch, win_exe));
+    args.push(format("cd /d {str} && set FUN_STDLIB_DIR= && {str} build", win_scratch, win_exe));
     free(win_scratch);
     free(win_exe);
   } else {
