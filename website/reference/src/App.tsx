@@ -555,6 +555,11 @@ export default function App() {
     stdlibModalCardRef.current?.scrollTo({ top: 0 });
   }, [modalContentTab, isNarrowViewport]);
   const releaseUrl = `https://github.com/omdxp/fun/releases/tag/v${content.funVersion}`;
+  // A direct link to the real source line, pinned to the release tag
+  // this generated content was built from - not `main`, which drifts
+  // out from under a page generated at an older version.
+  const githubSourceUrl = (modulePath: string, line: number) =>
+    `https://github.com/omdxp/fun/blob/v${content.funVersion}/stdlib/std/${modulePath}#L${line}`;
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
@@ -1834,7 +1839,18 @@ export default function App() {
                             {activeSymbol.name}{" "}
                             <span className="muted">
                               (line {activeSymbol.line})
-                            </span>
+                            </span>{" "}
+                            <a
+                              className="detail-link-btn"
+                              href={githubSourceUrl(
+                                activeModule.module,
+                                activeSymbol.line,
+                              )}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              View source
+                            </a>
                           </h3>
                           <HighlightedCode
                             code={activeSymbol.signature}
@@ -1880,6 +1896,20 @@ export default function App() {
                                           <span className="muted small">
                                             line {field.line}
                                           </span>
+                                          <a
+                                            className="detail-link-btn"
+                                            href={githubSourceUrl(
+                                              activeModule.module,
+                                              field.line,
+                                            )}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            onClick={(event) =>
+                                              event.stopPropagation()
+                                            }
+                                          >
+                                            View source
+                                          </a>
                                           <button
                                             type="button"
                                             className="detail-link-btn"
@@ -1952,6 +1982,20 @@ export default function App() {
                                             <span className="muted small">
                                               line {member.line}
                                             </span>
+                                            <a
+                                              className="detail-link-btn"
+                                              href={githubSourceUrl(
+                                                activeModule.module,
+                                                member.line,
+                                              )}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              onClick={(event) =>
+                                                event.stopPropagation()
+                                              }
+                                            >
+                                              View source
+                                            </a>
                                             <button
                                               type="button"
                                               className="detail-link-btn"
@@ -2024,6 +2068,20 @@ export default function App() {
                                             <span className="muted small">
                                               line {variant.line}
                                             </span>
+                                            <a
+                                              className="detail-link-btn"
+                                              href={githubSourceUrl(
+                                                activeModule.module,
+                                                variant.line,
+                                              )}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              onClick={(event) =>
+                                                event.stopPropagation()
+                                              }
+                                            >
+                                              View source
+                                            </a>
                                             <button
                                               type="button"
                                               className="detail-link-btn"
@@ -2100,6 +2158,17 @@ export default function App() {
                           </p>
                         </div>
                         <div className="modal-actions">
+                          <a
+                            className="copy-link-btn"
+                            href={githubSourceUrl(
+                              activeModule.module,
+                              activeSymbol?.line ?? 1,
+                            )}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            View source
+                          </a>
                           <button
                             type="button"
                             className="copy-link-btn"
