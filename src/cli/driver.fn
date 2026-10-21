@@ -94,6 +94,9 @@ pub compound Options {
   flag fmt_check_all;
   // `fun lint`'s `-summary`: print only the totals, not each warning.
   flag lint_summary;
+  // `fun upgrade -check`: report whether a newer release exists,
+  // without downloading or installing it.
+  flag upgrade_check;
   // Arguments after `--`, passed to the compiled program.
   Vec<str> program_args;
   // Constants injected into the program, from `-D name=value`.
@@ -307,7 +310,7 @@ pub fun parse_args(str[] argv) Options {
     str head = leading.unwrap();
     if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
       equals(head, "init") || equals(head, "add") || equals(head, "deps") ||
-      equals(head, "lint") {
+      equals(head, "lint") || equals(head, "upgrade") {
       o.subcommand = head;
       first_positional = 1;
     }
@@ -333,6 +336,7 @@ pub fun parse_args(str[] argv) Options {
   o.fmt_check = parsed.has("fmt-check");
   o.fmt_check_all = parsed.has("fmt-check-all");
   o.lint_summary = parsed.has("summary");
+  o.upgrade_check = parsed.has("check");
   o.test_flag = parsed.has("test");
   o.fuzz_flag = parsed.has("fuzz");
   o.fuzz_target = parsed.get_or("fuzz-target", "");
@@ -1356,6 +1360,7 @@ pub fun help_text() str {
   `  fun add <name> -git <url> [-path <p>] [-tag <t> | -branch <b> | -rev <sha>] [-token-env <VAR>]
   `                           adds or updates a [deps] entry in fun.toml
   `  fun deps update [<name>]  re-resolves tag/branch [deps] entries and rewrites fun.lock
+  `  fun upgrade [-check]     downloads and installs the latest fun release; -check only reports whether one exists
   `  fun -fmt-check-all [-in <file_or_dir>]
   `  fun -version
   `
@@ -2016,6 +2021,19 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
   Manifest m = loaded.unwrap();
   defer m.free();
 
+  if !equals(m.min_fun_version, "") && semver_cmp(PACKAGE_VERSION, m.min_fun_version) < 0 {
+    writeln_to(
+      Sink.Stderr,
+      format(
+      "[Error]\npackage `{str}` requires fun {str} or newer (this is {str}) - run `fun upgrade`",
+      m.package_name,
+      m.min_fun_version,
+      PACKAGE_VERSION
+      )
+    );
+    ret 1;
+  }
+
   if m.kind() == .Empty {
     writeln_to(
       Sink.Stderr,
@@ -2347,6 +2365,14 @@ pub fun init_project(str kind) num {
 
   StringBuilder toml = string_builder_init(64);
   toml.append(format("[package]\nname = \"{str}\"\nversion = \"0.1.0\"\n", name));
+  // Commented out: every one of these is optional (see
+  // `docs/get-started.md`'s "[package]" section), so a fresh project
+  // isn't forced to fill them in, but `fun init` still shows what's
+  // available rather than leaving a newcomer to find them in the docs.
+  toml.append(format(
+    "# description = \"\"\n# license = \"\"\n# authors = []\n# repository = \"\"\n# min_fun_version = \"{str}\"\n",
+    PACKAGE_VERSION
+  ));
 
   if wants_lib {
     toml.append("\n[lib]\npath = \"src/lib.fn\"\n");

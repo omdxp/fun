@@ -2,6 +2,7 @@
 // then builds and runs it unless asked not to.
 
 use driver;
+use upgrade;
 use std.string;
 use std.io;
 use std.fs;
@@ -80,6 +81,9 @@ fun main(str[] args) num {
   }
   if equals(opts.subcommand, "lint") {
     ret run_lint(opts.input, opts.lint_summary);
+  }
+  if equals(opts.subcommand, "upgrade") {
+    ret upgrade_cli(opts.upgrade_check);
   }
   if equals(opts.subcommand, "test") {
     apply_manifest_coverage(&opts.cover);

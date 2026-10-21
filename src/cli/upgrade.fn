@@ -1,0 +1,551 @@
+// `fun upgrade`: downloads and installs the latest fun release over
+// whatever `fun`/`fls` this process finds on PATH.
+//
+// Everything network- or archive-shaped shells out to a trusted system
+// tool - `curl` for the GitHub API call and the actual asset download,
+// `tar` (bsdtar handles both `.tar.gz` and `.zip`, and ships on every
+// platform this project releases for, including modern Windows) for
+// extraction - the same "shell out, don't reimplement a wire/file
+// format" convention `src/cli/deps.fn` already uses for git. `std.json`
+// still does the actual parsing of curl's captured JSON text, which is
+// a legitimate `str` use (unlike the binary asset itself): it is plain
+// text, never contains a NUL byte.
+
+use manifest;
+use std.string;
+use std.vec;
+use std.option;
+use std.result;
+use std.error;
+use std.process;
+use std.fs;
+use std.path;
+use std.sys;
+use std.io;
+use std.json;
+use std.runtime_backend;
+use ..codegen.host_arch;
+
+const str _upgrade_repo = "omdxp/fun";
+
+// Runs `argv`, capturing output - the same shape `deps.fn`'s own `_git`
+// uses, generalized to any program rather than just `git`.
+fun _sh(Vec<str>* args) Result<ProcessResult, str> {
+  str[] argv = argv_from(args);
+  defer free_argv(argv);
+  let r = run(argv);
+  if r.is_err() {
+    ret .Err(format("{str}: {str}", args.get(0), r.unwrap_err().message));
+  }
+  ret .Ok(r.unwrap());
+}
+
+// "darwin"/"linux" via `uname -s`, or "windows" - the three shapes
+// `_release_target` builds an asset name from. "" when none of the
+// three is recognized (an OS this project doesn't release for).
+fun _host_os_name() str {
+  if runtime_backend_is_windows() {
+    ret "windows";
+  }
+  Vec<str> args;
+  args.init(2);
+  args.push("uname");
+  args.push("-s");
+  let r = _sh(&args);
+  args.free();
+  if r.is_err() {
+    ret "";
+  }
+  str lower = to_lower(trim(r.unwrap().stdout_text));
+  if equals(lower, "darwin") {
+    ret "macos";
+  }
+  if equals(lower, "linux") {
+    ret "linux";
+  }
+  ret "";
+}
+
+// The `release.yml` build target string a release asset is named
+// after, e.g. `x86_64-linux-gnu`, `aarch64-macos`, `x86_64-windows-gnu`
+// - see that workflow's own matrix for the exact set this project
+// publishes.
+fun _release_target(str os_name, str cpu_arch) str {
+  if equals(os_name, "macos") {
+    ret format("{str}-macos", cpu_arch);
+  }
+  if equals(os_name, "linux") {
+    ret format("{str}-linux-gnu", cpu_arch);
+  }
+  ret format("{str}-windows-gnu", cpu_arch);
+}
+
+// The exact release-asset filename for `target`: a plain
+// `fun-{target}.tar.gz` on Unix, or `fun-{target}-{bare_tag}.zip` on
+// Windows, where `bare_tag` is the release tag with its leading `v`
+// stripped - see `release.yml`'s own packaging steps, which this must
+// match exactly.
+fun _release_asset_name(str target, flag is_windows, str tag) str {
+  if is_windows {
+    str bare_tag = tag;
+    if starts_with(tag, "v") {
+      bare_tag = substr(tag, 1, len(tag) - 1);
+    }
+    ret format("fun-{str}-{str}.zip", target, bare_tag);
+  }
+  ret format("fun-{str}.tar.gz", target);
+}
+
+// `GET /repos/omdxp/fun/releases/latest`, parsed. GitHub rejects a
+// request with no `User-Agent` outright, hence the header.
+fun _fetch_latest_release() Result<JsonValue, str> {
+  Vec<str> args;
+  args.init(0);
+  args.push("curl");
+  args.push("-fsSL");
+  args.push("-H");
+  args.push("User-Agent: fun-upgrade");
+  args.push("-H");
+  args.push("Accept: application/vnd.github+json");
+  args.push(format("https://api.github.com/repos/{str}/releases/latest", _upgrade_repo));
+  let r = _sh(&args);
+  args.free();
+  if r.is_err() {
+    ret .Err(r.unwrap_err());
+  }
+  let res = r.unwrap();
+  if res.exit_code != 0 {
+    ret .Err(format(
+      "curl exited {num} fetching the latest release (is curl installed, and is there a network connection?)",
+      res.exit_code
+    ));
+  }
+  let parsed = parse(res.stdout_text);
+  if parsed.is_err() {
+    ret .Err("GitHub's latest-release response wasn't valid JSON");
+  }
+  ret .Ok(parsed.unwrap());
+}
+
+// A clone of the matching asset's `browser_download_url` (the
+// original is freed along with `release`, so this must outlive it).
+fun _find_asset_url(JsonValue* release, str asset_name) Option<str> {
+  let assets = release.get("assets");
+  if assets.is_none() {
+    ret .None;
+  }
+  let arr = assets.unwrap().as_array();
+  if arr.is_none() {
+    ret .None;
+  }
+  for asset : arr.unwrap() {
+    let name = asset.get("name");
+    if name.is_none() {
+      continue;
+    }
+    if !equals(name.unwrap().as_str().unwrap_or(""), asset_name) {
+      continue;
+    }
+    let url = asset.get("browser_download_url");
+    if url.is_none() {
+      continue;
+    }
+    let s = url.unwrap().as_str();
+    if s.is_none() {
+      continue;
+    }
+    ret .Some(substr(s.unwrap(), 0, len(s.unwrap())));
+  }
+  ret .None;
+}
+
+// Where PATH currently resolves `fun`/`fun.exe` to - what every future
+// bare `fun` invocation will actually run, and so the one thing this
+// command needs to know in order to replace the right installation
+// (there may be more than one `fun` on disk).
+fun _find_installed_fun() str {
+  if runtime_backend_is_windows() {
+    Vec<str> args;
+    args.init(2);
+    args.push("where");
+    args.push("fun");
+    let r = _sh(&args);
+    args.free();
+    if r.is_err() {
+      ret "";
+    }
+    let res = r.unwrap();
+    if res.exit_code != 0 {
+      ret "";
+    }
+    // `where` can print more than one match; PATH resolves to
+    // whichever comes first.
+    Vec<str> lines = split(trim(res.stdout_text), '\n');
+    defer lines.free();
+    if lines.len == 0 {
+      ret "";
+    }
+    ret trim(lines.get(0));
+  }
+  Vec<str> args;
+  args.init(3);
+  args.push("sh");
+  args.push("-c");
+  // A shell builtin, not its own executable - needs a real shell.
+  args.push("command -v fun");
+  let r = _sh(&args);
+  args.free();
+  if r.is_err() {
+    ret "";
+  }
+  let res = r.unwrap();
+  if res.exit_code != 0 {
+    ret "";
+  }
+  ret trim(res.stdout_text);
+}
+
+// A clean scratch directory for this command's own download/extract
+// work, under the OS temp directory - cleared first, the same
+// clear-then-reuse convention `driver.fn`'s own `_scratch_project`
+// uses for its test fixtures, just rooted outside the project since
+// `fun upgrade` has to work with no `fun.toml` around at all.
+fun _upgrade_work_dir() str {
+  str base = env_or("TMPDIR", "");
+  if equals(base, "") {
+    base = env_or("TEMP", "");
+  }
+  if equals(base, "") {
+    base = env_or("TMP", "");
+  }
+  if equals(base, "") {
+    if runtime_backend_is_windows() {
+      base = "C:\\Windows\\Temp";
+    } else {
+      base = "/tmp";
+    }
+  }
+  ret path_join(base, "fun-upgrade");
+}
+
+fun _rm_rf(str path) {
+  Vec<str> args;
+  args.init(0);
+  if runtime_backend_is_windows() {
+    args.push("cmd");
+    args.push("/c");
+    args.push(format("rmdir /s /q \"{str}\" 2>nul", path));
+  } else {
+    args.push("sh");
+    args.push("-c");
+    args.push(format("rm -rf '{str}'", path));
+  }
+  let _r = _sh(&args);
+  args.free();
+}
+
+fun _prepare_work_dir(str dir) Option<str> {
+  _rm_rf(dir);
+  let made = make_dir_all(dir);
+  if made.is_err() {
+    ret .Some(format("couldn't create a scratch directory at {str}: {str}", dir, made.unwrap_err().message));
+  }
+  ret .None;
+}
+
+// Downloads `url` to `dest` with `curl` - binary-safe, unlike
+// `std.http`'s own `str`-bodied response (see `stdlib/std/string.fn`'s
+// NUL-terminated `str`: a real binary download is virtually
+// guaranteed to contain a NUL byte, which would silently truncate it).
+fun _download(str url, str dest) Option<str> {
+  Vec<str> args;
+  args.init(0);
+  args.push("curl");
+  args.push("-fsSL");
+  args.push("-o");
+  args.push(dest);
+  args.push(url);
+  let r = _sh(&args);
+  args.free();
+  if r.is_err() {
+    ret .Some(r.unwrap_err());
+  }
+  if r.unwrap().exit_code != 0 {
+    ret .Some(format("curl exited {num} downloading {str}", r.unwrap().exit_code, url));
+  }
+  ret .None;
+}
+
+// Extracts `archive` (`.tar.gz` or `.zip` - bsdtar's `tar` auto-detects
+// either) into `dest_dir`.
+fun _extract(str archive, str dest_dir) Option<str> {
+  Vec<str> args;
+  args.init(0);
+  args.push("tar");
+  args.push("-xf");
+  args.push(archive);
+  args.push("-C");
+  args.push(dest_dir);
+  let r = _sh(&args);
+  args.free();
+  if r.is_err() {
+    ret .Some(r.unwrap_err());
+  }
+  if r.unwrap().exit_code != 0 {
+    ret .Some(format("tar exited {num} extracting {str}", r.unwrap().exit_code, archive));
+  }
+  ret .None;
+}
+
+// Moves `src` onto `dst`, overwriting it - atomic, and safe over a
+// currently-running binary, on POSIX (`mv` is a plain `rename`); best
+// effort on Windows, where replacing a file still mapped for execution
+// (almost always true of the running `fun.exe` itself) fails outright.
+// `flag` is whether it actually landed.
+fun _move_over(str src, str dst) flag {
+  Vec<str> args;
+  args.init(0);
+  if runtime_backend_is_windows() {
+    args.push("cmd");
+    args.push("/c");
+    args.push(format("move /y \"{str}\" \"{str}\" >nul 2>nul", src, dst));
+  } else {
+    args.push("sh");
+    args.push("-c");
+    args.push(format("mv -f '{str}' '{str}'", src, dst));
+  }
+  let r = _sh(&args);
+  args.free();
+  if r.is_err() {
+    ret false;
+  }
+  ret r.unwrap().exit_code == 0;
+}
+
+// `fun upgrade [-check]`. With `-check`, only reports whether a newer
+// release exists - nothing is downloaded or installed.
+pub fun upgrade_cli(flag check_only) num {
+  println(format("fun {str}: checking the latest release...", PACKAGE_VERSION));
+  let latest = _fetch_latest_release();
+  if latest.is_err() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", latest.unwrap_err()));
+    ret 1;
+  }
+  JsonValue release = latest.unwrap();
+  defer release.free();
+
+  let tag_val = release.get("tag_name");
+  if tag_val.is_none() || tag_val.unwrap().as_str().is_none() {
+    writeln_to(Sink.Stderr, "[Error]\nGitHub's latest-release response had no tag_name");
+    ret 1;
+  }
+  str tag = tag_val.unwrap().as_str().unwrap();
+  str latest_version = tag;
+  if starts_with(tag, "v") {
+    latest_version = substr(tag, 1, len(tag) - 1);
+  }
+
+  if semver_cmp(latest_version, PACKAGE_VERSION) <= 0 {
+    println(format("already on the latest version (v{str})", PACKAGE_VERSION));
+    ret 0;
+  }
+
+  println(format("a new version is available: v{str} -> v{str}", PACKAGE_VERSION, latest_version));
+  if check_only {
+    println("run `fun upgrade` (without -check) to install it");
+    ret 0;
+  }
+
+  str os_name = _host_os_name();
+  if equals(os_name, "") {
+    writeln_to(Sink.Stderr, "[Error]\ncouldn't determine the host OS to pick a release asset");
+    ret 1;
+  }
+  str cpu_arch = host_arch_name();
+  if equals(cpu_arch, "") {
+    writeln_to(Sink.Stderr, "[Error]\ncouldn't determine the host architecture to pick a release asset");
+    ret 1;
+  }
+  flag is_windows = equals(os_name, "windows");
+  str target = _release_target(os_name, cpu_arch);
+  str asset_name = _release_asset_name(target, is_windows, tag);
+
+  let asset_url = _find_asset_url(&release, asset_name);
+  if asset_url.is_none() {
+    writeln_to(
+      Sink.Stderr,
+      format("[Error]\nv{str} has no release asset named `{str}` for this platform", latest_version, asset_name)
+    );
+    ret 1;
+  }
+
+  str fun_path = _find_installed_fun();
+  if equals(fun_path, "") {
+    writeln_to(Sink.Stderr, "[Error]\ncouldn't find an installed `fun` on PATH to upgrade");
+    ret 1;
+  }
+  str bin_dir = dirname(fun_path);
+  str prefix = dirname(bin_dir);
+
+  str work_dir = _upgrade_work_dir();
+  let prepared = _prepare_work_dir(work_dir);
+  if prepared.is_some() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", prepared.unwrap()));
+    ret 1;
+  }
+
+  str archive_ext = "tar.gz";
+  if is_windows {
+    archive_ext = "zip";
+  }
+  str archive_path = path_join(work_dir, format("release.{str}", archive_ext));
+  println(format("downloading {str}...", asset_name));
+  let downloaded = _download(asset_url.unwrap(), archive_path);
+  if downloaded.is_some() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", downloaded.unwrap()));
+    ret 1;
+  }
+
+  str extract_dir = path_join(work_dir, "extract");
+  make_dir_all(extract_dir);
+  let extracted = _extract(archive_path, extract_dir);
+  if extracted.is_some() {
+    writeln_to(Sink.Stderr, format("[Error]\n{str}", extracted.unwrap()));
+    ret 1;
+  }
+
+  str bundle_dir = path_join(extract_dir, format("fun-{str}", target));
+  str exe_ext = "";
+  if is_windows {
+    exe_ext = ".exe";
+  }
+
+  Vec<str> pending;
+  pending.init(0);
+  flag all_ok = true;
+
+  str fun_src = path_join(bundle_dir, format("bin/fun{str}", exe_ext));
+  str fun_dst = path_join(bin_dir, format("fun{str}", exe_ext));
+  if !_move_over(fun_src, fun_dst) {
+    all_ok = false;
+    pending.push(format("fun{str} is in use - close it (and any editor's fls) and run: {str}", exe_ext, _manual_move_hint(fun_src, fun_dst, is_windows)));
+  }
+
+  str fls_src = path_join(bundle_dir, format("bin/fls{str}", exe_ext));
+  str fls_dst = path_join(bin_dir, format("fls{str}", exe_ext));
+  if !_move_over(fls_src, fls_dst) {
+    all_ok = false;
+    pending.push(format("fls{str} is in use - close your editor's language server and run: {str}", exe_ext, _manual_move_hint(fls_src, fls_dst, is_windows)));
+  }
+
+  str share_src = path_join(bundle_dir, "share/fun");
+  str share_dst = path_join(prefix, "share/fun");
+  _rm_rf(share_dst);
+  if !_move_over(share_src, share_dst) {
+    all_ok = false;
+    pending.push(format("the standard library at {str} wasn't replaced - run: {str}", share_dst, _manual_move_hint(share_src, share_dst, is_windows)));
+  }
+
+  _rm_rf(work_dir);
+
+  if all_ok {
+    println(format("upgraded fun v{str} -> v{str}", PACKAGE_VERSION, latest_version));
+    pending.free();
+    ret 0;
+  }
+
+  println(format("partially upgraded (v{str} -> v{str}); finish manually:", PACKAGE_VERSION, latest_version));
+  for line : pending {
+    println(format("  {str}", line));
+  }
+  pending.free();
+  ret 1;
+}
+
+fun _manual_move_hint(str src, str dst, flag is_windows) str {
+  if is_windows {
+    ret format("move /y \"{str}\" \"{str}\"", src, dst);
+  }
+  ret format("mv -f '{str}' '{str}'", src, dst);
+}
+
+test "is_valid_semver/semver_cmp are reachable from here too" {
+  // A thin smoke test: the real coverage for these lives in
+  // manifest.fn's own tests. This just confirms `use manifest;`
+  // actually exposes them to this file, the way `upgrade_cli` relies
+  // on above.
+  assert is_valid_semver("1.0.0"), "expected a plain version to be valid";
+  assert semver_cmp("1.0.0", "1.0.1") == -1, "expected an older version to compare lower";
+}
+
+test "_release_target names the three published platforms" {
+  assert equals(_release_target("linux", "x86_64"), "x86_64-linux-gnu"), "expected the linux target";
+  assert equals(_release_target("macos", "aarch64"), "aarch64-macos"), "expected the macos target";
+  assert equals(_release_target("windows", "x86_64"), "x86_64-windows-gnu"), "expected the windows target";
+}
+
+test "_release_asset_name matches release.yml's own packaging" {
+  assert equals(_release_asset_name("x86_64-linux-gnu", false, "v1.2.3"), "fun-x86_64-linux-gnu.tar.gz"), "expected a plain unix tarball name";
+  assert equals(_release_asset_name("aarch64-macos", false, "v1.2.3"), "fun-aarch64-macos.tar.gz"), "expected a plain macos tarball name";
+  assert equals(_release_asset_name("x86_64-windows-gnu", true, "v1.2.3"), "fun-x86_64-windows-gnu-1.2.3.zip"), "expected the windows zip to carry the bare tag";
+}
+
+test "_find_asset_url matches an asset by exact name" {
+  let parsed = parse(`{
+    `"tag_name": "v1.2.3",
+    `"assets": [
+    `  {"name": "fun-x86_64-linux-gnu.tar.gz", "browser_download_url": "https://example.com/a.tar.gz"},
+    `  {"name": "fun-aarch64-macos.tar.gz", "browser_download_url": "https://example.com/b.tar.gz"}
+    `]
+  `}
+);
+  assert parsed.is_ok(), "expected the sample release JSON to parse";
+  JsonValue release = parsed.unwrap();
+  defer release.free();
+  let found = _find_asset_url(&release, "fun-aarch64-macos.tar.gz");
+  assert found.is_some(), "expected a matching asset to be found";
+  assert equals(found.unwrap(), "https://example.com/b.tar.gz"), "expected its download URL";
+  let missing = _find_asset_url(&release, "fun-aarch64-windows-gnu-1.2.3.zip");
+  assert missing.is_none(), "expected no match for a platform with no asset";
+}
+
+// `_fetch_latest_release`/`_download`/`_host_os_name`/
+// `_find_installed_fun` are deliberately not covered here: each one
+// needs either real network access or a real PATH-resolved `fun`,
+// neither of which a sandboxed `fun test` run can rely on (the exact
+// reasoning `deps.fn`'s own git-fetch tests are already known to be
+// environment-dependent for). `_move_over`/`_rm_rf` below only touch a
+// scratch directory, so they're real, local-only coverage.
+
+test "_move_over replaces an existing destination, atomically on POSIX" {
+  str dir = "fun-out/upgrade_test_move";
+  make_dir_all(dir);
+  str src = path_join(dir, "src.txt");
+  str dst = path_join(dir, "dst.txt");
+  write_string(src, "new content");
+  write_string(dst, "old content");
+  assert _move_over(src, dst), "expected the move to succeed";
+  assert equals(read_to_string(dst), "new content"), "expected the destination to hold the new content";
+  assert !exists(src), "expected the source to be gone after the move";
+  _rm_rf(dir);
+}
+
+test "_rm_rf removes a directory tree" {
+  str dir = "fun-out/upgrade_test_rmrf";
+  make_dir_all(path_join(dir, "nested"));
+  write_string(path_join(dir, "nested/a.txt"), "x");
+  assert exists(dir), "expected the directory to exist before removal";
+  _rm_rf(dir);
+  assert !exists(dir), "expected the directory to be gone after _rm_rf";
+}
+
+test "_prepare_work_dir clears a stale directory and makes a fresh one" {
+  str dir = "fun-out/upgrade_test_workdir";
+  make_dir_all(dir);
+  write_string(path_join(dir, "stale.txt"), "leftover");
+  let prepared = _prepare_work_dir(dir);
+  assert prepared.is_none(), "expected a fresh work dir to prepare cleanly";
+  assert exists(dir), "expected the work dir to exist";
+  assert !exists(path_join(dir, "stale.txt")), "expected the stale file to be gone";
+  _rm_rf(dir);
+}
