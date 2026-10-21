@@ -501,7 +501,12 @@ On Windows, replacing a binary that's actively running can fail with
 a sharing violation (the same reason `release.yml`'s own self-hosted
 build copies a stage's binary aside before overwriting it) - if that
 happens, `fun upgrade` prints the exact command to finish the swap by
-hand once nothing still has the file open.
+hand once nothing still has the file open. A machine-wide install
+under Program Files (the MSI installer's `-Scope Machine`) is left
+alone entirely: `fun upgrade` would need elevation it doesn't have,
+and overwriting those files in place regardless would desync the
+MSI's own installed-file tracking from what's actually on disk -
+download and run the latest `.msi` from the releases page instead.
 
 A project can also require a minimum `fun` version itself, via
 `min_fun_version` in `[package]` (see "The build manifest" in Get

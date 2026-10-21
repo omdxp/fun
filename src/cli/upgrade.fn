@@ -205,6 +205,31 @@ fun _find_installed_fun() str {
   ret trim(res.stdout_text);
 }
 
+// Whether `path` contains "Program Files" as a path segment, case-
+// insensitively. Windows keeps that literal, English folder name on
+// disk even on a localized install (only Explorer's own display name
+// is translated), and both `Program Files` and `Program Files (x86)`
+// start with it - so this one substring check covers both without
+// reading `%ProgramFiles%`/`%ProgramFiles(x86)%` at all, which would
+// otherwise need two lookups and still be no more reliable (nothing
+// stops a path from legitimately living under either root by some
+// other name than the env var's own default value).
+fun _looks_like_program_files(str path) flag {
+  ret contains(to_lower(path), "program files");
+}
+
+// Whether `path` is a machine-wide install under Program Files,
+// almost always put there by this project's own MSI
+// (`scripts/installer/install.ps1 -Scope Machine`), the only thing
+// that ever installs fun there. `fun upgrade` refuses to touch one:
+// it would need elevation this process doesn't have, and overwriting
+// its files in place regardless would desync the MSI's own
+// installed-file tracking from what's actually on disk - the right
+// fix there is a new .msi, not a raw file swap.
+fun _under_program_files(str path) flag {
+  ret runtime_backend_is_windows() && _looks_like_program_files(path);
+}
+
 // A clean scratch directory for this command's own download/extract
 // work, under the OS temp directory - cleared first, the same
 // clear-then-reuse convention `driver.fn`'s own `_scratch_project`
@@ -410,6 +435,17 @@ pub fun upgrade_cli(flag check_only) num {
   str bin_dir = dirname(fun_path);
   str prefix = dirname(bin_dir);
 
+  if _under_program_files(prefix) {
+    writeln_to(
+      Sink.Stderr,
+      format(
+      "[Error]\n{str} is installed system-wide under Program Files, most likely via the MSI installer - fun upgrade only replaces a user-writable install in place, not one Windows' own installer database tracks.\nDownload and run the latest .msi from https://github.com/omdxp/fun/releases/latest instead.",
+      fun_path
+      )
+    );
+    ret 1;
+  }
+
   str work_dir = _upgrade_work_dir();
   let prepared = _prepare_work_dir(work_dir);
   if prepared.is_some() {
@@ -505,6 +541,21 @@ test "_win_path converts forward slashes for cmd.exe's own builtins" {
   assert equals(_win_path("fun-out/a/b.txt"), "fun-out\\a\\b.txt"), "expected every forward slash converted";
   assert equals(_win_path("already\\backslash"), "already\\backslash"), "expected no change when already backslash-separated";
 }
+
+test "_looks_like_program_files matches both Program Files roots, case-insensitively" {
+  assert _looks_like_program_files("C:\\Program Files\\fun\\bin\\fun.exe"), "expected the default machine-wide root to match";
+  assert _looks_like_program_files("c:\\program files (x86)\\fun\\bin\\fun.exe"), "expected the 32-bit root to match too, any case";
+  assert !_looks_like_program_files("C:\\Users\\me\\AppData\\Local\\fun\\bin\\fun.exe"), "expected a user-scope install not to match";
+}
+
+test "_under_program_files is always false off Windows" {
+  // The real path-matching logic is `_looks_like_program_files`,
+  // already covered above and platform-independent; this only
+  // confirms this wrapper's own early-out, since `runtime_backend_is_windows()`
+  // can't be faked to exercise its other branch from here.
+  assert !_under_program_files("C:\\Program Files\\fun\\bin\\fun.exe") ||
+    runtime_backend_is_windows(), "expected false off Windows regardless of the path";
+  }
 
 test "_release_target names the three published platforms" {
   assert equals(_release_target("linux", "x86_64"), "x86_64-linux-gnu"), "expected the linux target";
