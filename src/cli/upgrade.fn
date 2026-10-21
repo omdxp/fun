@@ -232,9 +232,17 @@ fun _rm_rf(str path) {
   Vec<str> args;
   args.init(0);
   if runtime_backend_is_windows() {
+    // Each token its own argv element, not one pre-quoted string -
+    // this project's own Windows command-line builder re-escapes
+    // argv for `CommandLineToArgvW`, which `cmd.exe`'s own `/c`
+    // quote-handling does not match; a string with embedded `\"`
+    // round-trips mangled, not literally.
     args.push("cmd");
     args.push("/c");
-    args.push(format("rmdir /s /q \"{str}\" 2>nul", path));
+    args.push("rmdir");
+    args.push("/s");
+    args.push("/q");
+    args.push(path);
   } else {
     args.push("sh");
     args.push("-c");
@@ -306,9 +314,14 @@ fun _move_over(str src, str dst) flag {
   Vec<str> args;
   args.init(0);
   if runtime_backend_is_windows() {
+    // See `_rm_rf`'s own note: separate argv elements, not one
+    // pre-quoted string.
     args.push("cmd");
     args.push("/c");
-    args.push(format("move /y \"{str}\" \"{str}\" >nul 2>nul", src, dst));
+    args.push("move");
+    args.push("/y");
+    args.push(src);
+    args.push(dst);
   } else {
     args.push("sh");
     args.push("-c");
@@ -509,13 +522,106 @@ test "_find_asset_url matches an asset by exact name" {
   assert missing.is_none(), "expected no match for a platform with no asset";
 }
 
-// `_fetch_latest_release`/`_download`/`_host_os_name`/
-// `_find_installed_fun` are deliberately not covered here: each one
-// needs either real network access or a real PATH-resolved `fun`,
-// neither of which a sandboxed `fun test` run can rely on (the exact
-// reasoning `deps.fn`'s own git-fetch tests are already known to be
-// environment-dependent for). `_move_over`/`_rm_rf` below only touch a
-// scratch directory, so they're real, local-only coverage.
+// Test-only: an absolute cwd, so a `file://` URL below resolves
+// correctly (`file://` needs an absolute path, and there's no cwd
+// lookup in the stdlib to reach for instead of shelling one).
+fun _test_cwd() str {
+  if runtime_backend_is_windows() {
+    Vec<str> args;
+    args.init(3);
+    args.push("cmd");
+    args.push("/c");
+    args.push("cd");
+    let r = _sh(&args);
+    args.free();
+    ret trim(r.unwrap().stdout_text);
+  }
+  Vec<str> args;
+  args.init(1);
+  args.push("pwd");
+  let r = _sh(&args);
+  args.free();
+  ret trim(r.unwrap().stdout_text);
+}
+
+// A `file://` URL for `abs_path` - Windows needs a third slash before
+// the drive letter, and forward slashes throughout either way.
+fun _file_url(str abs_path) str {
+  str forward = replace_char(abs_path, '\\', '/');
+  if runtime_backend_is_windows() {
+    ret format("file:///{str}", forward);
+  }
+  ret format("file://{str}", forward);
+}
+
+// `_fetch_latest_release` alone is not covered here: it needs the real
+// GitHub API, and `upgrade_cli` itself is not covered here either -
+// unlike everything else in this file, actually running it would
+// replace the very `fun`/`fls` this test suite is running under.
+// Everything else it calls - including a real network download and a
+// real archive extraction - is exercised below, against a local
+// fixture instead of the real network (`curl`/`tar` both understand a
+// `file://` URL and a local path identically to a remote one).
+
+sequential test "_download fetches a real file via a file:// URL" {
+  str dir = "fun-out/upgrade_test_download";
+  _rm_rf(dir);
+  make_dir_all(dir);
+  str src = path_join(dir, "source.txt");
+  write_string(src, "hello from a fixture");
+  str abs_src = path_join(_test_cwd(), src);
+  str dst = path_join(dir, "downloaded.txt");
+  let err = _download(_file_url(abs_src), dst);
+  assert err.is_none(), "expected the file:// download to succeed";
+  assert equals(read_to_string(dst), "hello from a fixture"), "expected the downloaded content to match";
+  _rm_rf(dir);
+}
+
+sequential test "_extract reads a real tar.gz, bsdtar auto-detecting the format" {
+  str dir = "fun-out/upgrade_test_extract";
+  _rm_rf(dir);
+  str payload_dir = path_join(dir, "payload");
+  make_dir_all(payload_dir);
+  write_string(path_join(payload_dir, "a.txt"), "inside the archive");
+  str archive = path_join(dir, "payload.tar.gz");
+  Vec<str> args;
+  args.init(0);
+  args.push("tar");
+  args.push("-czf");
+  args.push(archive);
+  args.push("-C");
+  args.push(dir);
+  args.push("payload");
+  let made = _sh(&args);
+  flag made_ok = made.is_ok() && made.unwrap().exit_code == 0;
+  args.free();
+  assert made_ok, "expected the fixture archive to build";
+
+  str extract_dir = path_join(dir, "extracted");
+  make_dir_all(extract_dir);
+  let err = _extract(archive, extract_dir);
+  assert err.is_none(), "expected the real archive to extract cleanly";
+  assert equals(
+    read_to_string(path_join(extract_dir, "payload/a.txt")),
+    "inside the archive"
+  ), "expected the extracted file's content to match";
+  _rm_rf(dir);
+}
+
+sequential test "_host_os_name recognizes the real host" {
+  str name = _host_os_name();
+  if runtime_backend_is_windows() {
+    assert equals(name, "windows"), "expected windows to be recognized without shelling out";
+  } else {
+    assert equals(name, "macos") || equals(name, "linux"), "expected a real `uname -s` to map to macos or linux";
+  }
+}
+
+sequential test "_find_installed_fun finds the real fun this test suite runs under" {
+  str path = _find_installed_fun();
+  assert !equals(path, ""), "expected PATH to resolve a real fun - the one running this test suite";
+  assert exists(path), "expected the resolved path to actually exist";
+}
 
 // Each spawns a real child process (`_move_over`/`_rm_rf` shell out),
 // the same reasoning `deps.fn`'s own git-fetch tests are already
