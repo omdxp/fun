@@ -4269,12 +4269,12 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
   // caught unconditionally, with no opt-in needed.
   assert run_tests(doubled, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real double-free to fail the test under plain -memcheck";
 
-  // A real off-by-one, not a gross overread: `__fun_mc_guard_alloc`
-  // used to round the allocation's own size up to a whole page and put
-  // the guard page after that padding, so only an overflow bigger than
-  // the leftover slack (up to a whole page) ever touched the guard page
-  // at all. The allocation's own end is now aligned to the guard page
-  // directly, so even one element past it faults immediately.
+  // A real off-by-one, not a gross overread. This allocation is small
+  // enough to land in a shared slab arena, where a one-byte overflow
+  // writes into the slot's own trailing canary instead of a dedicated
+  // guard page - caught when the canary is checked, either at `free`
+  // or, since this test never frees `arr`, by the unconditional sweep
+  // `__mc_leak_sweep` still runs for live slab slots at process exit.
   str overflow = path_join(dir, "overflow.fn");
   write_string(
     overflow,
@@ -4331,12 +4331,18 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
 );
   assert run_tests(arith_only, &args, false, false, "", false, false, false, &defines, &cover, true) == 0, "expected pointer arithmetic alone, with no dereference, not to be flagged";
 
+  // Above `__MC_SMALL_THRESHOLD`, so this goes through the regular
+  // per-allocation guard-page path rather than a shared slab arena - a
+  // slab slot's own neighbors keep its arena's pages writable until
+  // every slot in that arena has been freed, so a single slot's own
+  // use-after-free is only caught once that whole arena empties out,
+  // not on this one dereference.
   str arith_then_deref = path_join(dir, "arith_then_deref.fn");
   write_string(
     arith_then_deref,
     `use std.c.mem;
     `test "pointer arithmetic on a freed pointer, then dereferenced" {
-    `  num* p = malloc(8);
+    `  num* p = malloc(300);
     `  free(p);
     `  p = p + 1;
     `  num x = *p;

@@ -83,6 +83,17 @@ num __mc_freelist_count = 0;
 raw** __mc_freelist_base = nil;
 num* __mc_freelist_size = nil;
 
+num __mc_slab_arena_count = 0;
+num __mc_slab_arena_capacity = 0;
+
+// One arena at a time stays open per size class, so a run of
+// same-class requests keeps filling it instead of starting a fresh one
+// each time.
+num __mc_slab_current_arena_0 = -1;
+num __mc_slab_current_arena_1 = -1;
+num __mc_slab_current_arena_2 = -1;
+num __mc_slab_current_arena_3 = -1;
+
 // How much room a report line gets (plenty for every field this module
 // ever prints, file paths included). Fixed rather than measured, so
 // building one never allocates more than once.
@@ -164,6 +175,10 @@ fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
 // `__mc_hash_insert`/`__mc_hash_lookup` below need to turn a `raw*` into
 // something `%` can hash on.
 fun __fun_mc_ptr_to_num(raw* ptr) num;
+// Byte-offset pointer arithmetic for the small-allocation slab pool
+// below (see its own note on `__MC_SLAB_MAX_CLASS`) - `raw*` is
+// `void*` on the C side, and `void*` arithmetic isn't valid C.
+fun __fun_mc_slot_addr(raw* data_base, num slot_idx, num slot_size) raw*;
 fun __fun_real_free(raw* ptr);
 // Per-thread, unlike `__mc_ensure_started` below: `sigaction`'s own
 // handler registration is process-wide, but the alternate stack a
@@ -196,9 +211,41 @@ compound AllocInfo {
   num line;
   str freed_file;
   num freed_line;
+  // Set only for a small allocation carved out of a shared slab (see
+  // `__MC_SLAB_MAX_CLASS`'s own note) rather than its own dedicated
+  // guard pages. `mmap_base`/`total_size` above describe the *whole*
+  // arena in this case (so a fault anywhere in it still attributes to
+  // some entry that lived there - `__mc_find_by_range`'s own "prefer
+  // the newest match" rule picks whichever is most likely still
+  // relevant), not this one slot's own handful of bytes.
+  flag is_slab_slot;
+  num slab_arena_idx;
+  num slab_slot_idx;
 }
 AllocInfo* __mc_table = nil;
 Mutex __mc_mu;
+
+// One shared, guarded region of `__MC_SLAB_SLOTS` fixed-size slots, all
+// of them `slot_size` bytes - one single size class (see
+// `__mc_slab_class_for`, further down). `data_base`/`mmap_base`/
+// `total_size` describe the whole arena the same way an ordinary
+// `AllocInfo` would describe one allocation - an arena is, from
+// `__fun_mc_guard_alloc`'s own perspective, just one big allocation.
+// `free_slots` is this arena's own small free list, for a slot
+// recycled within it before the whole thing retires.
+compound MCSlabArena {
+  raw* mmap_base;
+  num total_size;
+  raw* data_base;
+  num slot_size;
+  num used_slots;
+  num next_free_slot;
+  num* free_slots;
+  num free_slots_count;
+  num free_slots_cap;
+  flag retired;
+}
+MCSlabArena* __mc_slab_arenas = nil;
 
 fun __mc_hash_alloc(num capacity) {
   __mc_hash_keys = __fun_real_malloc(capacity * sizeof(num));
@@ -558,11 +605,9 @@ fun __mc_fault_handler(num sig, raw* fault_addr, raw* ctx) {
 // freeing it yet. Forces a nonzero exit on any leak found, even though
 // `main` itself already returned cleanly - what makes this usable in CI.
 fun __mc_leak_sweep() {
-  if __mc_suppress_leak_sweep {
-    ret;
-  }
   num i = 0;
   num leaks = 0;
+  num overflows = 0;
   for i < __mc_count {
     // Locked just for this one read, not across the `format`/`free`
     // below - those are further allocator calls (`free` redirects
@@ -570,11 +615,47 @@ fun __mc_leak_sweep() {
     // while this same thread still held it.
     let _lk = __mc_mu.lock();
     flag is_freed = __mc_table[i].is_freed;
+    flag is_slab = __mc_table[i].is_slab_slot;
+    raw* base = __mc_table[i].base;
+    num slab_arena_idx = __mc_table[i].slab_arena_idx;
     num seq = __mc_table[i].seq;
     num size = __mc_table[i].size;
     str file = __mc_table[i].file;
     num line = __mc_table[i].line;
     let _ulk = __mc_mu.unlock();
+    // A slab slot's own overflow is normally only caught when it is
+    // freed (see `__MC_SLAB_MAX_CLASS`'s own note on why) - a slot
+    // that is still live when the whole process exits never gets that
+    // chance otherwise, so this checks it here instead. Unconditional,
+    // unlike the leak report just below: an overflow is a real bug
+    // regardless of process lifetime, the same reasoning a double-free
+    // is always caught with no opt-in needed.
+    if is_slab && !is_freed &&
+      !__mc_slab_check_canary(base, size, __mc_slab_arenas[slab_arena_idx].slot_size) {
+      str msg2 = __fun_real_malloc(__mc_msg_cap);
+      str seq_s2 = __mc_format_num(seq);
+      str size_s2 = __mc_format_num(size);
+      str line_s2 = __mc_format_num(line);
+      let _n2 = snprintf(
+        msg2,
+        __mc_msg_cap,
+        "[memcheck] buffer overflow: allocation #%s (%s bytes), allocated at %s:%s, corrupted a byte past its own request (caught at exit, never freed to catch it sooner)",
+        seq_s2,
+        size_s2,
+        file,
+        line_s2
+      );
+      let _fp2 = fprintf(stderr_stream(), "%s\n", msg2);
+      __fun_real_free(msg2);
+      __fun_real_free(seq_s2);
+      __fun_real_free(size_s2);
+      __fun_real_free(line_s2);
+      overflows = overflows + 1;
+    }
+    if __mc_suppress_leak_sweep {
+      i = i + 1;
+      continue;
+    }
     if !is_freed {
       str msg = __fun_real_malloc(__mc_msg_cap);
       str seq_s = __mc_format_num(seq);
@@ -599,9 +680,249 @@ fun __mc_leak_sweep() {
     i = i + 1;
   }
   let _ff = fflush(stderr_stream());
+  if overflows > 0 {
+    exit(1);
+  }
   if leaks > 0 {
     exit(1);
   }
+}
+
+// Every allocation above gets its own dedicated leading+trailing guard
+// page pair - exact, immediate (hardware-trapped) overflow/underflow/
+// use-after-free detection, at a minimum cost of 2 guard pages *per
+// allocation* (on a 16 KiB-page runner, 32 KiB of pure overhead for
+// even a 1-byte request). A real test suite's own normal workload -
+// thousands of small AST nodes, tokens, short-lived strings - makes
+// that minimum the dominant cost by a wide margin: confirmed directly,
+// a single compile-heavy test file's own real allocation volume,
+// inflated this way, exceeded a standard CI runner's entire memory
+// budget on its own, with every leak already fixed and the quarantine
+// above already bounding freed memory - this was genuinely the next
+// bottleneck, not a leftover symptom of one.
+//
+// A request at or under `__MC_SLAB_MAX_CLASS` is instead carved out of
+// a shared "slab" - one guarded region sized for `__MC_SLAB_SLOTS`
+// fixed-size slots, paying the 2-guard-page cost once for the whole
+// slab rather than once per slot (amortized to a few hundred bytes of
+// overhead per allocation instead of tens of kilobytes). Slots come in
+// a handful of fixed size classes (`__mc_slab_class_for`/
+// `__mc_slab_class_slot_size`) rather than one single size, so a
+// request near the top of the range doesn't pay for a slot sized for
+// the bottom of it - each arena is carved into slots of exactly one
+// class's size, and a request lands in the smallest class that still
+// fits it. The trade:
+// - Overflow is caught at free time, not the instant it happens - a
+// canary byte written past the caller's own requested size, within
+// the slot, is checked when the slot is freed. An overflow large
+// enough to escape the slot into a neighbor is not reliably caught.
+// - Use-after-free is caught at slab granularity, not per slot: the
+// whole slab's own pages only go to `PROT_NONE` once every slot ever
+// handed out of it has been freed. A stale pointer into a freed slot
+// still faults correctly once the slab is fully retired; before
+// that, while sibling slots are still live, it does not.
+// A request above the threshold is entirely unaffected - the exact
+// same immediate, per-allocation detection as before.
+const num __MC_SLAB_CLASS_0 = 64;
+const num __MC_SLAB_CLASS_1 = 256;
+const num __MC_SLAB_CLASS_2 = 1024;
+const num __MC_SLAB_CLASS_3 = 4096;
+const num __MC_SLAB_MAX_CLASS = 4096;
+const num __MC_SLAB_SLOTS = 512;
+
+// The smallest size class that still fits `real_size`.
+fun __mc_slab_class_for(num real_size) num {
+  if real_size <= __MC_SLAB_CLASS_0 {
+    ret 0;
+  }
+  if real_size <= __MC_SLAB_CLASS_1 {
+    ret 1;
+  }
+  if real_size <= __MC_SLAB_CLASS_2 {
+    ret 2;
+  }
+  ret 3;
+}
+
+fun __mc_slab_class_slot_size(num class_idx) num {
+  if class_idx == 0 {
+    ret __MC_SLAB_CLASS_0;
+  }
+  if class_idx == 1 {
+    ret __MC_SLAB_CLASS_1;
+  }
+  if class_idx == 2 {
+    ret __MC_SLAB_CLASS_2;
+  }
+  ret __MC_SLAB_CLASS_3;
+}
+
+fun __mc_slab_get_current_arena(num class_idx) num {
+  if class_idx == 0 {
+    ret __mc_slab_current_arena_0;
+  }
+  if class_idx == 1 {
+    ret __mc_slab_current_arena_1;
+  }
+  if class_idx == 2 {
+    ret __mc_slab_current_arena_2;
+  }
+  ret __mc_slab_current_arena_3;
+}
+
+fun __mc_slab_set_current_arena(num class_idx, num arena_idx) {
+  if class_idx == 0 {
+    __mc_slab_current_arena_0 = arena_idx;
+    ret;
+  }
+  if class_idx == 1 {
+    __mc_slab_current_arena_1 = arena_idx;
+    ret;
+  }
+  if class_idx == 2 {
+    __mc_slab_current_arena_2 = arena_idx;
+    ret;
+  }
+  __mc_slab_current_arena_3 = arena_idx;
+}
+// An arbitrary fill byte for the canary region past a slot's own
+// requested size - not zero (plenty of real data is zero-filled), not
+// a common ASCII value so a coincidental match is unlikely, and kept
+// under 128 on purpose: `str`'s own `chr` is a signed `char` on the C
+// side, so a byte at or above 128 reads back negative (sign-extended)
+// while the plain numeric constant compared against it does not -
+// every canary would mismatch on its own write, not just a real
+// overflow, with nothing past this line even hinting why.
+const num __MC_SLAB_CANARY_BYTE = 90;
+
+fun __mc_slab_grow_arenas_if_needed() {
+  if __mc_slab_arena_count < __mc_slab_arena_capacity {
+    ret;
+  }
+  num new_cap = __mc_slab_arena_capacity * 2;
+  if new_cap < 8 {
+    new_cap = 8;
+  }
+  MCSlabArena* grown = __fun_real_realloc(__mc_slab_arenas, new_cap * sizeof(MCSlabArena));
+  __mc_slab_arenas = grown;
+  __mc_slab_arena_capacity = new_cap;
+}
+
+// A fresh arena of `slot_size`-byte slots, its whole data region
+// guarded exactly like any other tracked allocation. Caller must
+// already hold `__mc_mu`.
+fun __mc_slab_new_arena(num slot_size) num {
+  __mc_slab_grow_arenas_if_needed();
+  num data_bytes = __MC_SLAB_SLOTS* slot_size;
+  num total_size = 0;
+  raw* mmap_base = nil;
+  raw* data_base = __fun_mc_guard_alloc(data_bytes, &total_size, &mmap_base);
+  if data_base == nil {
+    ret -1;
+  }
+  MCSlabArena a;
+  a.mmap_base = mmap_base;
+  a.total_size = total_size;
+  a.data_base = data_base;
+  a.slot_size = slot_size;
+  a.used_slots = 0;
+  a.next_free_slot = 0;
+  a.free_slots = nil;
+  a.free_slots_count = 0;
+  a.free_slots_cap = 0;
+  a.retired = false;
+  num idx = __mc_slab_arena_count;
+  __mc_slab_arenas[idx] = a;
+  __mc_slab_arena_count = idx + 1;
+  ret idx;
+}
+
+fun __mc_slab_free_list_push(num arena_idx, num slot_idx) {
+  MCSlabArena* a = &__mc_slab_arenas[arena_idx];
+  if a.free_slots_count >= a.free_slots_cap {
+    num new_cap = a.free_slots_cap * 2;
+    if new_cap < 16 {
+      new_cap = 16;
+    }
+    num* grown = __fun_real_realloc(a.free_slots, new_cap * sizeof(num));
+    a.free_slots = grown;
+    a.free_slots_cap = new_cap;
+  }
+  a.free_slots[a.free_slots_count] = slot_idx;
+  a.free_slots_count = a.free_slots_count + 1;
+}
+
+// A slot handed out of `arena_idx` (its own free list first, then its
+// bump pointer), or -1 once it has none of either left. Caller must
+// already hold `__mc_mu`.
+fun __mc_slab_take_slot(num arena_idx) num {
+  MCSlabArena* a = &__mc_slab_arenas[arena_idx];
+  if a.free_slots_count > 0 {
+    a.free_slots_count = a.free_slots_count - 1;
+    ret a.free_slots[a.free_slots_count];
+  }
+  if a.next_free_slot < __MC_SLAB_SLOTS {
+    num slot = a.next_free_slot;
+    a.next_free_slot = a.next_free_slot + 1;
+    ret slot;
+  }
+  ret -1;
+}
+
+// Finds (or makes) an arena of `class_idx`'s own slot size with room
+// for one more slot, and hands out that slot's own address, writing
+// which arena/slot it came from into `out_arena_idx`/`out_slot_idx`.
+// Caller must already hold `__mc_mu`.
+fun __mc_slab_alloc_slot(num class_idx, num* out_arena_idx, num* out_slot_idx) raw* {
+  num slot_size = __mc_slab_class_slot_size(class_idx);
+  num current = __mc_slab_get_current_arena(class_idx);
+  if current >= 0 {
+    MCSlabArena* cur = &__mc_slab_arenas[current];
+    if !cur.retired {
+      num slot = __mc_slab_take_slot(current);
+      if slot >= 0 {
+        *out_arena_idx = current;
+        *out_slot_idx = slot;
+        ret __fun_mc_slot_addr(cur.data_base, slot, slot_size);
+      }
+    }
+  }
+  num new_idx = __mc_slab_new_arena(slot_size);
+  if new_idx < 0 {
+    ret nil;
+  }
+  __mc_slab_set_current_arena(class_idx, new_idx);
+  num slot = __mc_slab_take_slot(new_idx);
+  *out_arena_idx = new_idx;
+  *out_slot_idx = slot;
+  ret __fun_mc_slot_addr(__mc_slab_arenas[new_idx].data_base, slot, slot_size);
+}
+
+// Fills a slot's own canary region (everything past `real_size`, up to
+// the slot's own `slot_size`) with the fill byte, checked back by
+// `__mc_slab_check_canary` when the slot is freed.
+fun __mc_slab_write_canary(raw* slot, num real_size, num slot_size) {
+  str s = slot;
+  num i = real_size;
+  for i < slot_size {
+    s[i] = __MC_SLAB_CANARY_BYTE;
+    i = i + 1;
+  }
+}
+
+// True when every canary byte this slot's own allocation left behind
+// is still intact - false means something wrote past its own
+// requested size, caught here rather than the instant it happened.
+fun __mc_slab_check_canary(raw* slot, num real_size, num slot_size) flag {
+  str s = slot;
+  num i = real_size;
+  for i < slot_size {
+    if s[i] != __MC_SLAB_CANARY_BYTE {
+      ret false;
+    }
+    i = i + 1;
+  }
+  ret true;
 }
 
 // Registers the fault handler and the leak sweep exactly once, on the
@@ -621,12 +942,71 @@ fun __mc_ensure_started() {
   let _rc2 = atexit(__mc_leak_sweep);
 }
 
+// `__fun_memcheck_malloc`'s own slab path for a request at or under
+// `__MC_SLAB_MAX_CLASS` - see that constant's own note for why this
+// exists at all. `requested` is the caller's real ask (what a report
+// shows); `real_size` is already clamped to at least 1.
+fun __mc_slab_malloc(num real_size, num requested, str file, num line) raw* {
+  num class_idx = __mc_slab_class_for(real_size);
+  let _lk = __mc_mu.lock();
+  num arena_idx = -1;
+  num slot_idx = -1;
+  raw* slot = __mc_slab_alloc_slot(class_idx, &arena_idx, &slot_idx);
+  if slot == nil {
+    let _ulk0 = __mc_mu.unlock();
+    str msg = __fun_real_malloc(__mc_msg_cap);
+    str size_s = __mc_format_num(requested);
+    str line_s = __mc_format_num(line);
+    let _n = snprintf(
+      msg,
+      __mc_msg_cap,
+      "[memcheck] out of memory: allocation of %s bytes failed at %s:%s",
+      size_s,
+      file,
+      line_s
+    );
+    let _fp = fprintf(stderr_stream(), "%s\n", msg);
+    __fun_real_free(msg);
+    __fun_real_free(size_s);
+    __fun_real_free(line_s);
+    let _ff = fflush(stderr_stream());
+    abort();
+  }
+  __mc_slab_write_canary(slot, real_size, __mc_slab_class_slot_size(class_idx));
+  MCSlabArena* a = &__mc_slab_arenas[arena_idx];
+  a.used_slots = a.used_slots + 1;
+  __mc_grow_if_needed();
+  AllocInfo info;
+  info.base = slot;
+  info.mmap_base = a.mmap_base;
+  info.size = requested;
+  info.total_size = a.total_size;
+  info.is_freed = false;
+  info.seq = __mc_next_seq;
+  info.file = file;
+  info.line = line;
+  info.freed_file = "";
+  info.freed_line = 0;
+  info.is_slab_slot = true;
+  info.slab_arena_idx = arena_idx;
+  info.slab_slot_idx = slot_idx;
+  __mc_next_seq = __mc_next_seq + 1;
+  __mc_table[__mc_count] = info;
+  __mc_hash_insert(slot, __mc_count);
+  __mc_count = __mc_count + 1;
+  let _ulk = __mc_mu.unlock();
+  ret slot;
+}
+
 pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
   __mc_ensure_started();
   __fun_mc_ensure_altstack();
   num real_size = size;
   if real_size <= 0 {
     real_size = 1;
+  }
+  if real_size <= __MC_SLAB_MAX_CLASS {
+    ret __mc_slab_malloc(real_size, size, file, line);
   }
   num total_size = __fun_mc_guard_total_size(real_size);
   let _lkf = __mc_mu.lock();
@@ -682,6 +1062,9 @@ pub fun __fun_memcheck_malloc(num size, str file, num line) raw* {
   info.line = line;
   info.freed_file = "";
   info.freed_line = 0;
+  info.is_slab_slot = false;
+  info.slab_arena_idx = -1;
+  info.slab_slot_idx = -1;
   __mc_next_seq = __mc_next_seq + 1;
   __mc_table[__mc_count] = info;
   __mc_hash_insert(base, __mc_count);
@@ -777,6 +1160,50 @@ pub fun __fun_memcheck_free(raw* ptr, str file, num line) {
     __fun_real_free(line_s);
     let _ff = fflush(stderr_stream());
     abort();
+  }
+  if entry.is_slab_slot {
+    num slab_slot_size = __mc_slab_arenas[entry.slab_arena_idx].slot_size;
+    if !__mc_slab_check_canary(entry.base, entry.size, slab_slot_size) {
+      num ovf_seq = entry.seq;
+      num ovf_size = entry.size;
+      str ovf_file = entry.file;
+      num ovf_line = entry.line;
+      let _ulk3 = __mc_mu.unlock();
+      str msg = __fun_real_malloc(__mc_msg_cap);
+      str ovf_seq_s = __mc_format_num(ovf_seq);
+      str ovf_size_s = __mc_format_num(ovf_size);
+      str ovf_line_s = __mc_format_num(ovf_line);
+      let _n2 = snprintf(
+        msg,
+        __mc_msg_cap,
+        "[memcheck] buffer overflow: allocation #%s (%s bytes), allocated at %s:%s, corrupted a byte past its own request (caught at free, not the instant it happened)",
+        ovf_seq_s,
+        ovf_size_s,
+        ovf_file,
+        ovf_line_s
+      );
+      let _fp2 = fprintf(stderr_stream(), "%s\n", msg);
+      __fun_real_free(msg);
+      __fun_real_free(ovf_seq_s);
+      __fun_real_free(ovf_size_s);
+      __fun_real_free(ovf_line_s);
+      let _ff2 = fflush(stderr_stream());
+      abort();
+    }
+    entry.is_freed = true;
+    entry.freed_file = file;
+    entry.freed_line = line;
+    let _ms = memset(entry.base, 0, slab_slot_size);
+    MCSlabArena* a = &__mc_slab_arenas[entry.slab_arena_idx];
+    a.used_slots = a.used_slots - 1;
+    if a.used_slots <= 0 {
+      let _rc2 = __fun_mc_guard_protect_all(a.mmap_base, a.total_size);
+      a.retired = true;
+    } else {
+      __mc_slab_free_list_push(entry.slab_arena_idx, entry.slab_slot_idx);
+    }
+    let _ulk4 = __mc_mu.unlock();
+    ret;
   }
   let _rc = __fun_mc_guard_protect_all(entry.mmap_base, entry.total_size);
   entry.is_freed = true;
