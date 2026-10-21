@@ -4726,6 +4726,98 @@ fun _literal_elem_type_text(Node* el) str {
   }
 }
 
+// The `idx`th element of a rendered tuple type like "(num, str)" -
+// depth-aware, the same split `_tuple_element_completions` in
+// completion.fn does for the same shape, just stopping at one member
+// instead of collecting the whole list.
+fun _tuple_member_at(str rendered_type, num idx) str {
+  if len(rendered_type) < 2 {
+    ret "";
+  }
+  str inner = substr(rendered_type, 1, len(rendered_type) - 2);
+  num depth = 0;
+  num start = 0;
+  num i = 0;
+  num n = len(inner);
+  num member_i = 0;
+  for i < n {
+    chr c = inner[i];
+    if c == '(' || c == '<' {
+      depth = depth + 1;
+    } elif c == ')' || c == '>' {
+      depth = depth - 1;
+    } elif c == ',' && depth == 0 {
+      if member_i == idx {
+        str out = trim(substr(inner, start, i - start));
+        free(inner);
+        ret out;
+      }
+      member_i = member_i + 1;
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if member_i == idx && start < n {
+    str out = trim(substr(inner, start, n - start));
+    free(inner);
+    ret out;
+  }
+  free(inner);
+  ret "";
+}
+
+// The `idx`th element's type for a destructured `let (a, b) = expr;`
+// binding, inferred from `expr`'s own type the same way a plain,
+// single-name `let` already is (`infer_let_local_type_with_args`) -
+// `_destructure_binding_detail`'s own bare-tuple-literal case only
+// covers `let (a, b) = (1, "x");` directly; this covers the general
+// case (a call, or any other expression) whose own type happens to be
+// a tuple. `open_paren_pos` is the destructuring pattern's own `(`,
+// matched against `tokens` by position the same way `index_of_token`
+// matches any other token - there's no single name token to anchor
+// the usual "find `=` right after the name" scan on.
+fun infer_destructure_elem_type(
+  Vec<Token>* tokens,
+  Pos open_paren_pos,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num idx
+) str {
+  num i = 0;
+  num open_idx = -1;
+  for i < tokens.len {
+    let t = tokens.get(i);
+    if t.pos.line == open_paren_pos.line && t.pos.start_col == open_paren_pos.start_col {
+      open_idx = i;
+      break;
+    }
+    i = i + 1;
+  }
+  if open_idx < 0 {
+    ret "";
+  }
+  let close_opt = matching_rparen(tokens, open_idx);
+  if close_opt.is_none() {
+    ret "";
+  }
+  num close_idx = close_opt.unwrap();
+  let eq_tok_opt = token_after(tokens, close_idx + 1);
+  if eq_tok_opt.is_none() || !token_is_operator(eq_tok_opt.unwrap(), "=") {
+    ret "";
+  }
+  num eq_idx = index_of_token(tokens, eq_tok_opt.unwrap());
+  let val_tok_opt = token_after(tokens, eq_idx + 1);
+  if val_tok_opt.is_none() {
+    ret "";
+  }
+  str whole = _infer_type(tokens, val_tok_opt.unwrap(), program, file, line, nil, 0);
+  if equals(whole, "") || !starts_with(whole, "(") {
+    ret whole;
+  }
+  ret _tuple_member_at(whole, idx);
+}
+
 // The hover/go-to-definition detail for the `idx`th name in a
 // destructuring `VariableNode`'s own `destructure_names`. A declared
 // tuple type (`(num, str) (a, b) = expr;`) gives real precision
@@ -4739,7 +4831,15 @@ fun _literal_elem_type_text(Node* el) str {
 // form's own names ever resolved through hover, go-to-definition, or a
 // later reference to them at all, not just imprecisely - a real,
 // previously-undiscovered gap this fixes for both forms uniformly.
-fun _destructure_binding_detail(VariableNode v, num idx) str {
+fun _destructure_binding_detail(
+  Vec<Token>* tokens,
+  VariableNode v,
+  num idx,
+  Vec<Node>* program,
+  str file,
+  num line,
+  Pos var_pos
+) str {
   if v.var_type != nil && v.var_type.is_tuple && idx < v.var_type.tuple_members.len {
     str elem_type_text = render_type(v.var_type.tuple_members.get(idx));
     str out = format("{str} {str}", elem_type_text, v.destructure_names.get(idx));
@@ -4758,6 +4858,13 @@ fun _destructure_binding_detail(VariableNode v, num idx) str {
       }
       _ -> {}
     }
+  }
+  // The general case: the initializer isn't a bare tuple literal (a
+  // call, most commonly), so its own type has to be inferred the same
+  // way a plain `let` already is, then split at `idx`.
+  str inferred = infer_destructure_elem_type(tokens, var_pos, program, file, line, idx);
+  if !equals(inferred, "") {
+    ret format("{str} {str}", inferred, v.destructure_names.get(idx));
   }
   ret v.destructure_names.get(idx);
 }
@@ -4781,7 +4888,14 @@ fun _lookup_in_body(
         num dni = 0;
         for dni < v.destructure_names.len {
           if equals(v.destructure_names.get(dni), name) {
-            ret .Some(_declaration(name, .Local, _destructure_binding_detail(v, dni), body.pos));
+            ret .Some(
+              _declaration(
+              name,
+              .Local,
+              _destructure_binding_detail(tokens, v, dni, program, file, line, body.pos),
+              body.pos
+              )
+            );
           }
           dni = dni + 1;
         }

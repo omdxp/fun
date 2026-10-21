@@ -7748,6 +7748,33 @@ test "hover on a declared-type destructuring binding name shows its own real ele
   assert contains(hovered_ref, "dec"), format("expected a later reference to a destructured name to resolve too, not just its own binding site, got: {str}", hovered_ref);
 }
 
+test "hover on a let-inferred destructuring binding name shows its initializer's own real element type" {
+  // User-reported: `_destructure_binding_detail`'s general case only
+  // ever inferred a type from a bare tuple LITERAL initializer
+  // (`let (a, b) = (1, "hi");`); anything else (a call returning a
+  // tuple, here) fell straight back to the bare name alone, untyped -
+  // even though the exact same binding resolved fine (goto-def, later
+  // references), just with no type shown on hover.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///inferdestrhover.fn";
+  doc.path = "inferdestrhover.fn";
+  doc.text = `fun pair() (num, str) {
+  `  ret (1, "hi");
+  `}
+  `fun main() {
+  `  let (a, b) = pair();
+  `  print(a);
+  `}`;
+  doc.version = 1;
+
+  str hovered_a = hover(&reads, doc, 4, 7);
+  assert contains(hovered_a, "num"), format("expected the first destructured name's own hover to infer 'num' from its call initializer, got: {str}", hovered_a);
+  str hovered_b = hover(&reads, doc, 4, 10);
+  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to infer 'str' from its call initializer, got: {str}", hovered_b);
+}
+
 test "hover on a for-loop destructuring binding name shows its own real element type" {
   // `_lookup_in_body`'s `.StatementFor`/`.Iter` case had the same gap
   // `.Variable` did before this whole fix: it only ever checked a
@@ -7916,27 +7943,6 @@ test "hover on an inferred-form destructuring binding name shows a best-effort l
   assert contains(hovered_a, "num"), format("expected the first destructured name's own hover to show its best-effort literal type 'num', got: {str}", hovered_a);
   str hovered_b = hover(&reads, doc, 1, 10);
   assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its best-effort literal type 'str', got: {str}", hovered_b);
-}
-
-test "hover on an inferred-form destructuring binding from a call still resolves the name, untyped" {
-  // A call-returned tuple has no literal shape to read element types
-  // from, and no declared type either - this still resolves the name
-  // itself (go-to-definition, "what is this") rather than nothing at
-  // all, just without a type annotation.
-  AnalysisCache reads = analysis_cache_new();
-  defer reads.free();
-  Document doc;
-  doc.uri = "file:///inferredcalldestrhover.fn";
-  doc.path = "inferredcalldestrhover.fn";
-  doc.text = `fun pair() (num, str) { ret (1, "hi"); }
-  `fun main() {
-  `  let (a, b) = pair();
-  `  print(a);
-  `}`;
-  doc.version = 1;
-
-  str hovered_a = hover(&reads, doc, 2, 7);
-  assert contains(hovered_a, "a"), format("expected the destructured name to resolve even without a real element type, got: {str}", hovered_a);
 }
 
 test "hover on a fit destructuring binding resolves through a propagated field-access subject" {
