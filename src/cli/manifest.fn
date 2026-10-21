@@ -84,6 +84,16 @@ pub enum PackageKind {
 pub compound Manifest {
   str package_name;
   str version;
+  // The rest of `[package]`: all optional, "" (or an empty `authors`)
+  // when not given. Informational only - nothing in this codebase
+  // reads `description`/`license`/`authors`/`repository` back, except
+  // `min_fun_version`, which `fun build` enforces against the running
+  // compiler's own version (see `semver_cmp`).
+  str description;
+  str license;
+  str repository;
+  Vec<str> authors;
+  str min_fun_version;
   flag has_lib;
   LibTarget lib;
   Vec<ExeTarget> exes;
@@ -111,6 +121,7 @@ impl Manifest {
   }
 
   pub free() {
+    self.authors.free();
     self.exes.free();
     self.deps.free();
   }
@@ -232,6 +243,87 @@ pub fun _parse_string_array(str value) Vec<str> {
   ret out;
 }
 
+// Whether `v` is a plain `MAJOR.MINOR.PATCH` version - a `-`/`+`
+// suffix is allowed and ignored, matching `semver_cmp` below. This
+// project's own release tags, and so `PACKAGE_VERSION`, are always
+// exactly this shape (see `release.yml`'s version-match check).
+pub fun is_valid_semver(str v) flag {
+  str core = _semver_core(v);
+  Vec<str> parts = split(core, '.');
+  flag ok = parts.len == 3;
+  if ok {
+    for part : parts {
+      let n = try_parse_int(part);
+      if n.is_err() || n.unwrap() < 0 {
+        ok = false;
+      }
+    }
+  }
+  parts.free();
+  ret ok;
+}
+
+// -1 when `a` is an older version than `b`, 0 when they're the same,
+// 1 when `a` is newer - a numeric comparison of the `MAJOR.MINOR.PATCH`
+// core, not a lexical string compare (which gets `"0.9.0"` vs
+// `"0.10.0"` backwards). Used by `fun build`'s `min_fun_version` check
+// and `fun upgrade`'s "already on the latest version" check.
+pub fun semver_cmp(str a, str b) num {
+  num a_major = 0;
+  num a_minor = 0;
+  num a_patch = 0;
+  num b_major = 0;
+  num b_minor = 0;
+  num b_patch = 0;
+  _semver_parse(a, &a_major, &a_minor, &a_patch);
+  _semver_parse(b, &b_major, &b_minor, &b_patch);
+  if a_major != b_major {
+    ret _semver_cmp_num(a_major, b_major);
+  }
+  if a_minor != b_minor {
+    ret _semver_cmp_num(a_minor, b_minor);
+  }
+  ret _semver_cmp_num(a_patch, b_patch);
+}
+
+fun _semver_cmp_num(num a, num b) num {
+  if a < b {
+    ret -1;
+  }
+  if a > b {
+    ret 1;
+  }
+  ret 0;
+}
+
+// `v` with a trailing `-pre`/`+build` suffix (if any) cut off.
+fun _semver_core(str v) str {
+  num cut = index_of_char(v, '-');
+  num plus = index_of_char(v, '+');
+  if plus >= 0 && (cut < 0 || plus < cut) {
+    cut = plus;
+  }
+  if cut < 0 {
+    ret v;
+  }
+  ret substr(v, 0, cut);
+}
+
+fun _semver_parse(str v, num* major, num* minor, num* patch) {
+  Vec<str> parts = split(_semver_core(v), '.');
+  *major = _semver_part(&parts, 0);
+  *minor = _semver_part(&parts, 1);
+  *patch = _semver_part(&parts, 2);
+  parts.free();
+}
+
+fun _semver_part(Vec<str>* parts, num idx) num {
+  if idx >= parts.len {
+    ret 0;
+  }
+  ret parse_int(parts.get(idx));
+}
+
 // Reads `text` as a manifest. Targets are taken exactly as declared;
 // see `resolve_targets` for filling in the conventional defaults.
 pub fun parse_manifest(str text) Result<Manifest, str> {
@@ -241,6 +333,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   Manifest m;
   m.package_name = "";
   m.version = "";
+  m.description = "";
+  m.license = "";
+  m.repository = "";
+  m.authors.init(0);
+  m.min_fun_version = "";
   m.has_lib = false;
   m.lib.name = "";
   m.lib.path = "";
@@ -261,6 +358,17 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.version = pkg.unwrap().get_str("version");
   if equals(m.version, "") {
     m.version = "0.0.0";
+  }
+  m.description = pkg.unwrap().get_str("description");
+  m.license = pkg.unwrap().get_str("license");
+  m.repository = pkg.unwrap().get_str("repository");
+  m.authors = _parse_string_array(pkg.unwrap().get_str("authors"));
+  m.min_fun_version = pkg.unwrap().get_str("min_fun_version");
+  if !equals(m.min_fun_version, "") && !is_valid_semver(m.min_fun_version) {
+    ret .Err(format(
+      "[package] `min_fun_version` must be a plain `MAJOR.MINOR.PATCH` version, found `{str}`",
+      m.min_fun_version
+    ));
   }
 
   num ti = 0;
@@ -619,6 +727,66 @@ test "a version left out defaults to 0.0.0" {
   let m = parse_manifest(text).unwrap();
   assert equals(m.version, "0.0.0"), "expected the default version";
   assert m.kind() == .Empty, "expected no targets before resolution";
+}
+
+test "the rest of [package] is optional, and empty when left out" {
+  str text = `[package]
+  `name = "demo"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.description, ""), "expected no description";
+  assert equals(m.license, ""), "expected no license";
+  assert equals(m.repository, ""), "expected no repository";
+  assert m.authors.len == 0, "expected no authors";
+  assert equals(m.min_fun_version, ""), "expected no min_fun_version";
+}
+
+test "description, license, authors, repository, and min_fun_version all parse" {
+  str text = `[package]
+  `name = "demo"
+  `version = "1.0.0"
+  `description = "a demo package"
+  `license = "MIT"
+  `authors = ["a", "b"]
+  `repository = "https://github.com/a/demo"
+  `min_fun_version = "0.60.0"`;
+  let m = parse_manifest(text).unwrap();
+  assert equals(m.description, "a demo package"), "expected the description";
+  assert equals(m.license, "MIT"), "expected the license";
+  assert equals(m.repository, "https://github.com/a/demo"), "expected the repository";
+  assert m.authors.len == 2, "expected two authors";
+  assert equals(m.authors.get(0), "a"), "expected the first author";
+  assert equals(m.authors.get(1), "b"), "expected the second author";
+  assert equals(m.min_fun_version, "0.60.0"), "expected the min_fun_version";
+}
+
+test "a malformed min_fun_version is rejected" {
+  str text = `[package]
+  `name = "demo"
+  `min_fun_version = "not-a-version"`;
+  let r = parse_manifest(text);
+  assert r.is_err(), "expected a malformed min_fun_version to be rejected";
+}
+
+test "is_valid_semver accepts a plain MAJOR.MINOR.PATCH, with or without a suffix" {
+  assert is_valid_semver("1.2.3"), "expected a plain version to be valid";
+  assert is_valid_semver("0.0.0"), "expected an all-zero version to be valid";
+  assert is_valid_semver("1.2.3-beta"), "expected a pre-release suffix to be allowed";
+  assert is_valid_semver("1.2.3+build5"), "expected a build suffix to be allowed";
+  assert !is_valid_semver("1.2"), "expected a two-component version to be rejected";
+  assert !is_valid_semver("1.2.3.4"), "expected a four-component version to be rejected";
+  assert !is_valid_semver("banana"), "expected a non-numeric version to be rejected";
+  assert !is_valid_semver(""), "expected an empty version to be rejected";
+}
+
+test "semver_cmp compares numerically, not lexically" {
+  assert semver_cmp("1.2.3", "1.2.3") == 0, "expected equal versions to compare equal";
+  assert semver_cmp("1.2.3", "1.2.4") == -1, "expected a smaller patch to compare older";
+  assert semver_cmp("1.2.3", "1.3.0") == -1, "expected a smaller minor to compare older";
+  assert semver_cmp("2.0.0", "1.9.9") == 1, "expected a bigger major to compare newer";
+  // The whole point of a numeric compare: "0.10.0" sorts after "0.9.0"
+  // numerically, even though it sorts before it as a plain string.
+  assert semver_cmp("0.9.0", "0.10.0") == -1, "expected a numeric, not lexical, comparison";
+  assert semver_cmp("1.0.0-beta", "1.0.0") == 0, "expected a pre-release suffix to be ignored";
 }
 
 test "comments and blank lines are ignored" {
