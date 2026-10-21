@@ -473,20 +473,21 @@ function collectTopComment(lines) {
 }
 
 function collectCommentAbove(lines, declLineIdx) {
+  // Strict on purpose, matching fls's own doc_comment_above (src/fls/
+  // symbols.fn): a blank line stops the walk immediately, full stop.
+  // The previous, lenient version kept walking through blank lines
+  // once it had seen a comment, which let an unrelated floating
+  // banner comment (e.g. a section header a few lines above, itself
+  // separated from the declaration by a blank line) get glued onto
+  // this symbol's own doc text - confirmed as a real bug, not a
+  // theoretical one, producing mixed text in the rendered explorer.
   const chunk = [];
-  let sawComment = false;
   let i = declLineIdx - 1;
 
   while (i >= 0) {
     const trimmed = lines[i].trim();
     if (trimmed.startsWith("//")) {
       chunk.unshift(trimmed.replace(/^\/\/\s?/, ""));
-      sawComment = true;
-      i -= 1;
-      continue;
-    }
-    if (trimmed === "" && sawComment) {
-      chunk.unshift("");
       i -= 1;
       continue;
     }
