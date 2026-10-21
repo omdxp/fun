@@ -770,11 +770,21 @@ pub fun lookup(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num l
 }
 
 // The declaration of `name` among what the whole program declares.
-pub fun lookup_top_level(Vec<Node>* program, str name) Option<Declaration> {
+// `module_path`, when given, restricts the match to a declaration whose
+// own source file is exactly that path - what a receiver written
+// through an import alias needs (`two.pick()` in `use mod2 as two;`),
+// since the bare name alone can collide with another aliased module's
+// same-named export that happened to merge first and so kept the
+// unqualified name (see `import_resolver.fn`'s own `alias_rename_keys`
+// note); every other caller leaves it at "" and matches by name alone.
+pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
     i = i + 1;
+    if !equals(module_path, "") && !equals(n.pos.filename, module_path) {
+      continue;
+    }
     fit n.kind {
       .Function(f) -> {
         if equals(f.name, name) {

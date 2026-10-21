@@ -1078,6 +1078,46 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
         }
       }
     }
+    // `receiver` might name an import alias instead of any value at all
+    // (`use mod2 as two; two.pick()`) - nothing above resolves that,
+    // since an alias carries no type of its own. Resolving `pick`
+    // within `two`'s own target module specifically, rather than by
+    // bare name across the whole merged program, is what tells it apart
+    // from another aliased module's same-named export: a same-named
+    // collision gets renamed to keep the merged program compiling (see
+    // `import_resolver.fn`'s own `alias_rename_keys` note), so the bare
+    // name alone always matches whichever module merged first.
+    str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, receiver);
+    if !equals(alias_target, "") {
+      // The straightforward case: `name` still declares under its own
+      // bare name in `alias_target`'s own file (nothing else merged
+      // ahead of it needed the same name).
+      let aliased = lookup_top_level(&program.nodes, name, alias_target);
+      if aliased.is_some() {
+        ret aliased;
+      }
+      // The colliding case: `alias_target`'s own `name` lost the race
+      // to merge first, so `_rename_colliding_functions` renamed it
+      // (`two::pick` -> `two__pick`) to keep the merged program
+      // compiling - the renamed copy is what's actually in
+      // `program.nodes` now, under a name nothing was ever written to
+      // call it by.
+      str rename_key = format("{str}::{str}", receiver, name);
+      num ri = 0;
+      for ri < program.alias_rename_keys.len {
+        if equals(program.alias_rename_keys.get(ri), rename_key) {
+          str renamed = program.alias_rename_targets.get(ri);
+          let renamed_decl = lookup_top_level(&program.nodes, renamed);
+          if renamed_decl.is_some() {
+            Declaration d = renamed_decl.unwrap();
+            d.name = substr(name, 0, len(name));
+            d.detail = replace_str(d.detail, renamed, name);
+            ret .Some(d);
+          }
+        }
+        ri = ri + 1;
+      }
+    }
     // `receiver` might not be a local at all, but an enum type named
     // directly (`OptionalInt.Some`), the qualified form of a fit
     // destructuring pattern (or an ordinary variant-constructing call

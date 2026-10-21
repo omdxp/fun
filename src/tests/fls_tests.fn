@@ -1180,6 +1180,48 @@ test "dot-completion merges a method declared in a different file than the type"
   assert contains(out, `"label":"value"`), "expected a method declared in a different file (via use) to be offered";
 }
 
+test "go-to-definition through an import alias picks the right module when both declare the same name" {
+  // User-reported, from the playground's own "Alias Imports" sample:
+  // go-to-definition on a call through an alias always landed on the
+  // first-merged module, regardless of which alias was actually
+  // clicked, whenever two aliased modules declare a same-named
+  // function (mod1/mod2 here both declare `pick`, renamed to
+  // `two__pick` for mod2 by the merge - see `import_resolver.fn`'s own
+  // `alias_rename_keys` note - so a bare-name lookup always finds
+  // mod1's copy).
+  write_string("src/tests/fixtures/_alias_collision_mod1.fn", "pub fun pick() num {\n  ret 10;\n}\n");
+  defer remove_file("src/tests/fixtures/_alias_collision_mod1.fn");
+  write_string("src/tests/fixtures/_alias_collision_mod2.fn", "pub fun pick() num {\n  ret 32;\n}\n");
+  defer remove_file("src/tests/fixtures/_alias_collision_mod2.fn");
+
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///alias_collision_probe.fn";
+  doc.path = "src/tests/fixtures/_alias_collision_probe.fn";
+  doc.text = `use _alias_collision_mod1 as one;
+  `use _alias_collision_mod2 as two;
+  `fun main() num {
+  `  ret one.pick() + two.pick();
+  `}`;
+  doc.version = 1;
+
+  // "  ret one.pick() + two.pick();" - "pick" after "one." spans
+  // columns 10-13; "pick" after "two." spans columns 23-26.
+  // `one.pick` must jump to mod1's own declaration.
+  str def_one = definition(&reads, doc, 3, 11);
+  assert contains(def_one, "_alias_collision_mod1.fn"), "expected one.pick to jump to mod1, not always the same file";
+
+  // `two.pick` must jump to mod2's own declaration - the exact case
+  // that used to always land on mod1 instead.
+  str def_two = definition(&reads, doc, 3, 24);
+  assert contains(def_two, "_alias_collision_mod2.fn"), "expected two.pick to jump to mod2, not mod1 again";
+
+  // Hover shares `resolve_at`, so the same fix covers it too.
+  str hover_two = hover(&reads, doc, 3, 24);
+  assert contains(hover_two, "pick"), "expected hover through the alias to resolve at all";
+}
+
 test "dot-completion on a std.log Logger resolves across a real incremental edit, not just a fresh parse" {
   // User-reported: completion on `l.debug(...)` etc. looked broken after
   // `let l = logger_init(...)` was typed - this drives the exact fast
