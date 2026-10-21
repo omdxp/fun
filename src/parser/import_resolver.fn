@@ -15,6 +15,7 @@ use std.path;
 use std.fs;
 use std.sys;
 use std.process;
+use std.runtime_backend;
 use std.vec;
 use std.set;
 use std.map;
@@ -1765,15 +1766,28 @@ sequential test "stdlib_root falls back to the installed fun's own share/fun/std
   ), "expected to write the scratch main.fn";
 
   str repo_root = current_dir();
-  str exe = path_join(repo_root, "fun-out/bin/fun");
+  str exe_name = "fun-out/bin/fun";
+  if runtime_backend_is_windows() {
+    exe_name = "fun-out/bin/fun.exe";
+  }
+  str exe = path_join(repo_root, exe_name);
   free(repo_root);
 
   Vec<str> args;
   args.init(0);
   if runtime_backend_is_windows() {
+    // `cmd.exe`'s own `cd` builtin has its own path parser, separate
+    // from the Win32 API a real `.exe` would call directly - a
+    // forward-slash path that genuinely exists still gets "The system
+    // cannot find the path specified." back from it, the same real
+    // bug `fun upgrade`'s own `_win_path` already works around.
+    str win_scratch = replace_char(scratch, '/', '\\');
+    str win_exe = replace_char(exe, '/', '\\');
     args.push("cmd");
     args.push("/c");
-    args.push(format("cd /d \"{str}\" && set FUN_STDLIB_DIR= && \"{str}\" build", scratch, exe));
+    args.push(format("cd /d \"{str}\" && set FUN_STDLIB_DIR= && \"{str}\" build", win_scratch, win_exe));
+    free(win_scratch);
+    free(win_exe);
   } else {
     args.push("sh");
     args.push("-c");
