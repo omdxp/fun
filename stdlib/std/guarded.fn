@@ -8,8 +8,12 @@
 use std.sync;
 use std.string;
 
+// A value of any type, protected by a `Mutex`.
 pub compound Guarded<T> {
+  // Held around every read/write of `__value` below.
   Mutex __lock;
+  // The protected value itself - never touched directly, only through
+  // this compound's own `get`/`set`/`lock` methods.
   T __value;
 }
 

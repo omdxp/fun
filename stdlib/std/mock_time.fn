@@ -40,6 +40,7 @@ pub fun system_clock() SystemClock {
 }
 
 impl SystemClock as Clock {
+  // The real current time.
   pub now() Timestamp {
     ret now();
   }
@@ -49,6 +50,8 @@ impl SystemClock as Clock {
 // ever advances when the test explicitly tells it to (`advance`/`set`) --
 // never the real wall clock.
 pub compound MockClock {
+  // The fake clock's own current time - only ever moved by `advance`/
+  // `set`, never the real wall clock.
   Timestamp current;
 }
 
@@ -69,6 +72,7 @@ pub fun mock_clock_at(num epoch_seconds) MockClock {
 }
 
 impl MockClock as Clock {
+  // The fake clock's current time, exactly as last set/advanced to.
   pub now() Timestamp {
     ret self.current;
   }

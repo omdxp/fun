@@ -29,7 +29,9 @@ use std.c.string;
 
 // An optional value: `Some(v)` holds a `T`; `None` holds nothing.
 pub enum Option<T> {
+  // Holds a value.
   Some(T),
+  // Holds nothing.
   None,
 }
 

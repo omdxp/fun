@@ -14,7 +14,11 @@
 use std.c.atomic;
 use std.c.string;
 
+// A lock-free atomic value holding a `num` or `flag`.
 pub compound Atomic<T: num | flag> {
+  // `T`'s own bytes, reinterpreted as the single machine word every
+  // `__fun_atomic_*` operation acts on - never read or written
+  // directly, only through this compound's own methods.
   num __bits;
 }
 

@@ -43,15 +43,21 @@ pub enum LogFormat {
 // to hold a mixed-type value; a value needing more structure can pass its JSON
 // text via `.Str`.
 pub enum FieldVal {
+  // A string value.
   Str(str),
+  // An integer value.
   Num(num),
+  // A decimal value.
   Dec(dec),
+  // A boolean value.
   Flag(flag)
 }
 
 // An ordered key/value pair attached to a log record.
 pub compound Field {
+  // The field's own name.
   str key;
+  // The field's own value.
   FieldVal val;
 }
 
@@ -208,10 +214,16 @@ pub compound LogRecord {
   Vec<Field> fields;
   // Copied logger config so `emit()` is self-contained.
   LogLevel min;
+  // Copied from the logger: the wire format to emit as.
   LogFormat format;
+  // Copied from the logger: where `emit()` writes to.
   Sink sink;
+  // Copied from the logger: whether to stamp a timestamp field.
   flag with_timestamp;
+  // Copied from the logger: the logger's own name field, if any.
   str name;
+  // Copied from the logger: whether an `Error`/`Fatal` record also
+  // goes to stderr, even when `sink` points elsewhere.
   flag route_err;
   // False when this record is below the logger's threshold; every builder
   // method and `emit()` become no-ops so filtered-out logging stays cheap.

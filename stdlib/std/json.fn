@@ -27,12 +27,17 @@ use std.c.mem;
 
 // Any JSON value. Arrays and objects nest recursively.
 pub enum JsonValue {
+  // The JSON `null` literal.
   Null,
+  // A JSON boolean.
   Bool(flag),
   // JSON numbers are decimals; integer-looking values still round-trip as integers.
   Num(dec),
+  // A JSON string.
   Str(str),
+  // A JSON array.
   Array(Vec<JsonValue>),
+  // A JSON object.
   Object(Map<str, JsonValue>),
 }
 
@@ -395,7 +400,9 @@ fun _json_valid_number(str text) flag {
 
 // Cursor state threaded through the parser: the source plus the current offset.
 pub compound JsonParser {
+  // The full JSON text being parsed.
   str src;
+  // The next unconsumed byte offset into `src`.
   num pos;
 }
 
@@ -621,6 +628,7 @@ pub fun parse(str src) Result<JsonValue, Error> {
 // A `JsonValue` serializes to its JSON text (the text-layer conversion, same
 // `To<T>` mechanism std.serde's `to_string()` dispatches through).
 impl JsonValue as To<str> {
+  // The JSON text for this value.
   pub to() str {
     ret self.to_string();
   }

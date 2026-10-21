@@ -24,6 +24,7 @@ pub compound CliArgs {
   // Set by cli_parse_flags when a value flag was the last argument, with
   // nothing following it to take as its value.
   flag missing_value;
+  // Which flag was missing its value, when `missing_value` is set.
   str missing_value_flag;
 }
 

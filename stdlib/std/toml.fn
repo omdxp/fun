@@ -25,10 +25,15 @@ use std.shapes;
 // another nested inline table - this parser's own "narrow subset"
 // philosophy (see the module doc) extends here too.
 pub enum TomlValue {
+  // A quoted string.
   Str(str),
+  // A whole number.
   Int(num),
+  // A decimal number.
   Float(dec),
+  // A boolean.
   Bool(flag),
+  // An inline table (`{ key = value, ... }`).
   Table(Map<str, TomlValue>),
 }
 
@@ -205,13 +210,15 @@ fun _free_toml_value_map(Map<str, TomlValue>* m) {
   m.free();
 }
 
-// A parsed TOML document: keys mapped to typed values.
 // A `[name]` section's own `key = value` pairs.
 pub compound TomlTable {
+  // The section's own name, e.g. `"package"` for `[package]`.
   str name;
+  // This section's own `key = value` pairs.
   Map<str, TomlValue> values;
 }
 
+// A parsed TOML document: keys mapped to typed values.
 pub compound TomlDoc {
   // Keys written before any section header.
   Map<str, TomlValue> values;
@@ -261,6 +268,7 @@ impl TomlTable {
     ret substr(s, 0, len(s));
   }
 
+  // Frees this section's own name and every value in it.
   pub free() {
     free(self.name);
     _free_toml_value_map(&self.values);
