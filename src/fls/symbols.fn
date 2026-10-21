@@ -2039,9 +2039,19 @@ pub fun let_call_return_type_from_tokens(Vec<Token>* tokens, str doc_path, Analy
     if text == nil {
       continue;
     }
+    // `text` is this call's own entry source, not an import's - never
+    // cached internally (every import path here is parsed standalone,
+    // treated as its own "entry" purely to look its own top level up),
+    // so it is this loop's own to free once that lookup is done. Freed
+    // after `rtype` is extracted (a fresh `substr`, not an alias into
+    // `text`), never before - this function is called repeatedly for
+    // every degraded-parse fallback resolution, and a whole file's own
+    // text leaking on every one of those calls was adding up to real
+    // memory pressure.
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       free(merged.unwrap_err());
+      free(text);
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -2049,9 +2059,11 @@ pub fun let_call_return_type_from_tokens(Vec<Token>* tokens, str doc_path, Analy
     if f.is_some() {
       str rtype = return_type_from_detail(f.unwrap().detail);
       if !equals(rtype, "") {
+        free(text);
         ret rtype;
       }
     }
+    free(text);
   }
   ret "";
 }
@@ -2115,20 +2127,29 @@ pub fun member_declaration_from_tokens(
     if text == nil {
       continue;
     }
+    // Same reasoning as `let_call_return_type_from_tokens`'s own
+    // identical loop: `text` is this call's own entry source, never
+    // cached internally, so it is this loop's own to free - `field`/
+    // `method` alias into `target.nodes`' own AST (retained by the
+    // caching layer, never freed here), never into `text` itself.
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       free(merged.unwrap_err());
+      free(text);
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
     let field = lookup_field(&target.nodes, type_name, member_name, no_args);
     if field.is_some() {
+      free(text);
       ret field;
     }
     let method = lookup_method(&target.nodes, type_name, member_name, no_args);
     if method.is_some() {
+      free(text);
       ret method;
     }
+    free(text);
   }
   ret .None;
 }

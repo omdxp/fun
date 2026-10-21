@@ -227,13 +227,19 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
             if text == nil {
               continue;
             }
+            // `text` is this call's own entry source, never cached
+            // internally - this loop's own to free once `_members_of`
+            // has copied whatever it needs out of `target.nodes`' own
+            // AST (which stays retained by the caching layer).
             let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
             if merged.is_err() {
               free(merged.unwrap_err());
+              free(text);
               continue;
             }
             ProgramMergeResult target = merged.unwrap();
             _members_of(&target.nodes, local_type, &items, snippets, doc.path);
+            free(text);
           }
         }
         if local_type_owned {
@@ -1065,9 +1071,12 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     if text == nil {
       continue;
     }
+    // `text` is this call's own entry source, never cached internally
+    // - this loop's own to free once the lookup below is done.
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       free(merged.unwrap_err());
+      free(text);
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
@@ -1075,8 +1084,10 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     no_args.init(0);
     let field = lookup_field(&target.nodes, type_name, field_name, no_args);
     if field.is_some() {
+      free(text);
       ret bare_type_from_detail(field.unwrap().detail);
     }
+    free(text);
   }
   ret "";
 }
@@ -1095,13 +1106,18 @@ fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCa
     if text == nil {
       continue;
     }
+    // `text` is this call's own entry source, never cached internally
+    // - this loop's own to free once `_enum_variant_completions` has
+    // copied whatever it needs out of `target.nodes`' own AST.
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       free(merged.unwrap_err());
+      free(text);
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
     _enum_variant_completions(&target.nodes, type_name, items);
+    free(text);
   }
 }
 
@@ -1627,21 +1643,27 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     if text == nil {
       continue;
     }
+    // `text` is this call's own entry source, never cached internally
+    // - this loop's own to free, on every exit out of this iteration.
     let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
     if merged.is_err() {
       free(merged.unwrap_err());
+      free(text);
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
     let f = lookup_top_level(&target.nodes, callee_name);
     if f.is_none() {
+      free(text);
       continue;
     }
     Vec<str> params = split_signature_params(f.unwrap().detail);
     defer free_params_vec(&params);
     if arg_index < params.len {
+      free(text);
       ret bare_type_from_detail(params.get(arg_index));
     }
+    free(text);
   }
   ret "";
 }
@@ -2672,13 +2694,21 @@ fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<I
   if text == nil {
     ret;
   }
+  // `text` is this call's own entry source, never cached internally -
+  // this function's own to free once `_alias_module_completions` has
+  // copied whatever it needs out of `target.entry_nodes` (every
+  // token's own text is already its own fresh allocation from
+  // lexing, never an alias into the original source buffer, so
+  // freeing `text` here never touches anything still in use).
   let merged = parse_program_cached(module_path, text, &cache.imports, cache.imports.parallel_preload);
   if merged.is_err() {
     free(merged.unwrap_err());
+    free(text);
     ret;
   }
   ProgramMergeResult target = merged.unwrap();
   _alias_module_completions(&target.entry_nodes, module_path, items, snippets);
+  free(text);
 }
 
 // `e`'s own variants, when it is the enum `type_name` names, rendered
