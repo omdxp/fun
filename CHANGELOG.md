@@ -1,3 +1,97 @@
+## [0.69.0] - 2026-10-21
+
+### 🚀 Features
+
+- Memcheck now also catches buffer underflow, via a leading guard page
+- Add member_declaration_from_tokens, shared degraded-parse member lookup
+- Fun test's own outer worker pool defaults lower under -memcheck
+- A compiled test binary's own inner worker pool defaults lower under -memcheck
+- Operator overloading covers index assignment and chained operands
+- *(manifest)* Description, license, authors, repository, min_fun_version
+- *(cli)* Add fun upgrade, and enforce min_fun_version on fun build
+- More [package] manifest fields, min_fun_version gate, fun upgrade command (#211)
+- *(reference)* Add a View source link alongside each symbol's Copy link
+
+### 🐛 Bug Fixes
+
+- Fls shows the real import-resolution error, not a generic placeholder
+- Dot-completion no longer dumps unrelated names when the receiver's type can't be resolved
+- Completion no longer triggers on '.'/',' typed inside a string literal
+- Memcheck now catches a one-element buffer overflow, not just a whole-page one
+- A line-count-changing fast-reparse edit no longer leaves later declarations stale
+- A dot-shorthand enum default value now shows in hover/signature help
+- A call-inferred local now resolves even when an unrelated import is broken
+- Hover on a call-inferred local now resolves when an unrelated import is broken
+- Go-to-definition on a call-inferred local's member now resolves through a broken import
+- Memcheck's crash handler now survives a real stack overflow
+- Add the missing Windows stub for __fun_mc_ensure_altstack
+- -memcheck's own inner worker default scales with real core count, not a flat 2
+- Memcheck's allocation lookup was O(n) under one lock, O(n^2) total
+- Map<str,_>.to_string() under-budgets its buffer by one byte
+- Fls completion/diagnostic bugs, memcheck overflow precision (#207)
+- Memcheck's guard pages grew forever, exhausting real memory
+- Memcheck's own reports warned under -Wformat on Linux
+- Wasm CI smoke test warnings, and bump the deprecated setup-emsdk action
+- Pin emsdk to a known-working version, not latest
+- Drop the emcc flag that bumped the wasm output's own Node requirement
+- Memcheck's real memory ceiling; operator overloading improvements (#208)
+- *(fls)* Free leaked source text in import-resolution helpers
+- *(codegen)* Always take ownership of a variadic 's'-tagged argument
+- *(memcheck)* Pool small allocations into shared guarded slabs
+- Memcheck's guard-page overhead and three real leaks; add Codecov (#210)
+- *(upgrade)* Mark the real-subprocess tests sequential
+- *(upgrade)* Windows cmd quoting, plus real local-fixture coverage
+- *(upgrade)* Give cmd.exe's own builtins backslash paths
+- *(fs)* Exists() must check is_dir first, not just fopen
+- *(upgrade)* Refuse to touch a Program Files (MSI) install
+- *(reference)* Make the std explorer's doc-comment extraction strict
+- *(reference)* Module-top comment also absorbed the first symbol's own doc
+- *(reference)* Real WebKit scroll-paint bug behind the symbol tabs
+
+### 📚 Documentation
+
+- Document -memcheck's own lower default test parallelism
+- Update the stale comment and env-var table for the revised inner default
+- Update operator overloading for op_index_set and the new operand shapes
+- Document the new [package] fields and fun upgrade
+- *(stdlib)* Fill every remaining doc-comment gap in std explorer
+- Fill every stdlib doc-comment gap, fix std explorer's mixed text (#212)
+
+### 🚜 Refactor
+
+- Move call-inferred-local resolution into symbols.fn, shared with hover
+
+### 🎨 Styling
+
+- Drop caps-emphasis words from this session's own comments
+
+### 🧪 Testing
+
+- Regression coverage for the import-diagnostic, dot-completion, and string-trigger fixes
+- Regression coverage for overflow precision and free-then-arithmetic-only
+- Cross-file generic/fast-reparse regression coverage from this session's torture pass
+- Regression coverage for a genuine A<->B import cycle, already handled correctly
+- Regression coverage for buffer underflow detection
+- Regression coverage for the dot-shorthand default value fix
+- Regression coverage for call-inferred locals through a broken sibling import
+- Regression coverage for hover on a call-inferred local through a broken import
+- Regression coverage for memcheck's quarantine recycling
+- Regression coverage for operator overloading's new dispatch
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Update CHANGELOG.md
+- Restore the memcheck step's own original parallelism explicitly
+- Keep -memcheck's lower default parallelism in CI too
+- Upload coverage to Codecov
+- Move the coverage min/exclude into fun.toml's own [coverage]
+- Fill in fun.toml's new [package] fields for real
+- Bump version to 0.69.0
+
+### 💼 Other
+
+- *(upgrade)* Print the real cmd.exe result on a failed test move
+- *(upgrade)* Diagnose the remaining _rm_rf setup failure on Windows
 ## [0.68.0] - 2026-10-15
 
 ### 🚀 Features
