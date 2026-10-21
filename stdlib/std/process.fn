@@ -7,6 +7,7 @@ use std.result;
 use std.error;
 use std.channel;
 use std.vec;
+use std.runtime_backend;
 
 // The outcome of a captured child process run: its exit status and the full
 // text it wrote to stdout/stderr.
@@ -287,4 +288,49 @@ pub fun wait_exit_code(num pid) num {
 // `kill` returns -1/`ESRCH`, ignored here).
 pub fun kill_pid(num pid) {
   let _rc = kill(pid, 9);
+}
+
+// Where `program` resolves to on `PATH` right now, or "" if it isn't
+// found there at all - the same shell-out `command -v`/`where` convention
+// `fun upgrade` already uses to find its own installed binary, not a
+// new primitive. Deliberately not "the exact file this process itself
+// is running from" (which would need a real, platform-specific OS
+// binding this project has no call for anywhere else): for a `fun`/
+// `fls` invoked the ordinary way, from a shell, `PATH` resolution
+// already answers "where would running this command find it" exactly,
+// with no new C surface at all.
+pub fun find_on_path(str program) str {
+  Vec<str> args;
+  args.init(0);
+  if runtime_backend_is_windows() {
+    args.push("where");
+    args.push(program);
+  } else {
+    args.push("sh");
+    args.push("-c");
+    // A shell builtin, not its own executable - needs a real shell.
+    StringBuilder cmd = string_builder_init(16);
+    cmd.append("command -v ");
+    cmd.append(program);
+    args.push(cmd.build());
+  }
+  str[] argv = argv_from(&args);
+  let r = run(argv);
+  free_argv(argv);
+  args.free();
+  if r.is_err() {
+    ret "";
+  }
+  let res = r.unwrap();
+  if res.exit_code != 0 {
+    ret "";
+  }
+  // `where` can print more than one match; PATH resolves to whichever
+  // comes first.
+  Vec<str> lines = split(trim(res.stdout_text), '\n');
+  defer lines.free();
+  if lines.len == 0 {
+    ret "";
+  }
+  ret trim(lines.get(0));
 }
