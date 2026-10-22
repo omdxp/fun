@@ -125,6 +125,21 @@ jobs:
           FNEOF
           FUN_CC=emcc ./fun-out/bin/fun -in /tmp/wasm_ci_smoke.fn > /tmp/wasm_ci_smoke.out
           grep -q "wasm ci smoke: 42" /tmp/wasm_ci_smoke.out
+      # The smoke test above only proves the wasm *backend* still works
+      # for an arbitrary program; it never compiles the compiler's own
+      # wasm-targeted frontends, so a change that makes either one
+      # transitively import something emscripten_mode rejects (a real
+      # regression that shipped once already - `find_on_path`'s
+      # std.process dependency landing in import_resolver.fn, which
+      # both of these also need) would pass this job clean and only
+      # break on an actual release's own website build.
+      - name: Compile the wasm-targeted compiler frontends
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 5
+        run: |
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          FUN_CC=emcc ./fun-out/bin/fun -in src/cli/wasm_frontend_main.fn -out /tmp/wasm_frontend_main.c -no-exec
+          FUN_CC=emcc ./fun-out/bin/fun -in src/fls/wasm_fls_main.fn -out /tmp/wasm_fls_main.c -no-exec
       - name: Run the test suite on ${{ matrix.lane }}
         if: matrix.os != 'ubuntu-24.04'
         timeout-minutes: 20
