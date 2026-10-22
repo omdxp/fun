@@ -18912,6 +18912,11 @@ impl Codegen {
     self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
     if self.coverage {
       collect_test_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+      // Shares the same skip list `in_test_range` already checks for
+      // every statement about to be instrumented - an `allow no_cover`
+      // function's own statements are excluded from the counters the
+      // exact same way a test/fuzz body's own are.
+      collect_no_cover_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
     }
     self.write_prelude();
     self.register_function_signatures(nodes);
