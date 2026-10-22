@@ -525,7 +525,7 @@ fun _import_dir(str current_file, str parent_specifier) str {
 // of sync with what a real diagnostic's own message prefix carries.
 fun _all_warning_ids() Vec<str> {
   Vec<str> out;
-  out.init(15);
+  out.init(16);
   out.push(warning_id_name(.ReturnLocalPtr));
   out.push(warning_id_name(.FitNonExhaustive));
   out.push(warning_id_name(.FitUnreachableBranch));
@@ -541,6 +541,7 @@ fun _all_warning_ids() Vec<str> {
   out.push(warning_id_name(.SharedMutableCaptureRace));
   out.push(warning_id_name(.IntegerLiteralOutOfRange));
   out.push(warning_id_name(.ChannelCapacityOverflow));
+  out.push(warning_id_name(.NoCover));
   ret out;
 }
 
@@ -564,8 +565,10 @@ fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num charac
   str stripped = trim_left(substr(raw_line, 0, cut));
 
   str after_kw = "";
+  flag is_allow = false;
   if starts_with(stripped, "allow") && _kw_boundary(stripped, 5) {
     after_kw = substr(stripped, 5, len(stripped) - 5);
+    is_allow = true;
   } elif starts_with(stripped, "expect") && _kw_boundary(stripped, 6) {
     after_kw = substr(stripped, 6, len(stripped) - 6);
   } else {
@@ -604,6 +607,11 @@ fun _try_warning_id_completions(Vec<Item>* items, str text, num line, num charac
   for k < ids.len {
     str id = ids.get(k);
     k = k + 1;
+    // `expect no_cover` can never fire - nothing ever reports it - so
+    // `no_cover`/`no_covers` is only worth offering after `allow`.
+    if !is_allow && equals(id, warning_id_name(.NoCover)) {
+      continue;
+    }
     if equals(prefix, "") || starts_with(id, prefix) {
       items.push(_item(id, .Constant, "warning id - next occurrence"));
     }

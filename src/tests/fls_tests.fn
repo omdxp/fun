@@ -3382,6 +3382,43 @@ sequential test "completion lists a dependency's own modules for 'use deps.<name
   assert contains(out, `"label":"some","kind":17`), "expected the dependency's own fetched module offered, bare of its .fn extension";
 }
 
+test "hover on no_cover describes it as an allow-only coverage directive" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///no_cover_hover.fn";
+  doc.path = "no_cover_hover.fn";
+  doc.text = `allow no_cover, "deliberately untestable";
+  `fun f() num {
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 0, 8);
+  assert !equals(hovered, "null"), "expected no_cover to resolve on hover";
+  assert contains(hovered, "coverage"), "expected the hover text to actually describe no_cover's own purpose";
+  assert contains(hovered, "expect"), "expected the hover text to explain why expect specifically doesn't apply to it";
+}
+
+test "completion offers no_cover after allow, but not after expect" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///no_cover_completion.fn";
+  doc.path = "no_cover_completion.fn";
+  doc.text = "allow no_";
+  doc.version = 1;
+
+  str out = completion(&reads, doc, 0, 9, false);
+  assert contains(out, `"label":"no_cover"`), "expected no_cover offered after allow";
+  assert contains(out, `"label":"no_covers"`), "expected the plural whole-file spelling offered too";
+
+  doc.text = "expect no_";
+  str out2 = completion(&reads, doc, 0, 10, false);
+  assert !contains(out2, `"label":"no_cover"`), "expected no_cover left out after expect - nothing ever reports it";
+  assert !contains(out2, `"label":"no_covers"`), "expected the plural spelling left out after expect too";
+}
+
 test "completion offers a warning id for the first argument of allow/expect, filtered by prefix" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

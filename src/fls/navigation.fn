@@ -2531,5 +2531,15 @@ pub fun warning_id_doc(WarningId id) str {
       `send count are both statically known literals.`
       ;
     }
+    .NoCover -> {
+      ret `Not a detectable condition like every other warning id -
+      `allow no_cover excludes the next function (or allow no_covers,
+      `the whole file) from the code-coverage report entirely, for
+      `code that's genuinely unsafe to exercise automatically (a test
+      `that would deadlock this project's own parallel test-runner
+      `scheduler). Only valid with allow, never expect: nothing ever
+      `reports it, so expect could never be satisfied.`
+      ;
+    }
   }
 }
