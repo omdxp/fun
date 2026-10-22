@@ -122,6 +122,44 @@ pub fun _normalize_path(str path) str {
 // missing stdlib is reported rather than walked to the root.
 const num max_stdlib_search_depth = 32;
 
+// The installed `fun`/`fls`'s own `<prefix>/share/fun/std`, or "" when
+// neither is on `PATH` or its own prefix has no real `share/fun/std`
+// beside it. Split out from `stdlib_root` below so this one block -
+// genuinely unsafe to exercise end-to-end from an automated test -
+// doesn't cost the rest of `stdlib_root`'s own, perfectly safe-to-test
+// logic its coverage credit too.
+//
+// Not yet marked `allow no_cover` (see `WarningId.NoCover`, this same
+// PR): the compiler currently installed to bootstrap this very build
+// doesn't know that id exists, so a source file using it fails to
+// parse at stage 1, before the freshly-built compiler that WOULD
+// understand it ever gets a chance to. Add the directive here once a
+// release carrying this feature is the installed bootstrap seed.
+fun _installed_stdlib_fallback() str {
+  str fun_path = find_on_path("fun");
+  if equals(fun_path, "") {
+    free(fun_path);
+    fun_path = find_on_path("fls");
+  }
+  if !equals(fun_path, "") {
+    str bin_dir = dirname(fun_path);
+    str prefix = dirname(bin_dir);
+    free(bin_dir);
+    str candidate = path_join(prefix, "share/fun");
+    free(prefix);
+    str probe = path_join(candidate, "std");
+    flag found = is_dir(probe);
+    free(probe);
+    if found {
+      free(fun_path);
+      ret candidate;
+    }
+    free(candidate);
+  }
+  free(fun_path);
+  ret substr("", 0, 0);
+}
+
 // Where the standard library lives, which is asked for rather than
 // assumed: an editor starts a language server in whatever directory it
 // likes, and a compiler is run from wherever a project happens to sit.
@@ -205,27 +243,11 @@ pub fun stdlib_root(str input_file_path) str {
   // resolve either one to right now is the last thing worth trying
   // before giving up outright - the exact same "ask, don't assume"
   // resolution `fun upgrade` already uses to find its own install.
-  str fun_path = find_on_path("fun");
-  if equals(fun_path, "") {
-    free(fun_path);
-    fun_path = find_on_path("fls");
+  str fallback = _installed_stdlib_fallback();
+  if !equals(fallback, "") {
+    ret fallback;
   }
-  if !equals(fun_path, "") {
-    str bin_dir = dirname(fun_path);
-    str prefix = dirname(bin_dir);
-    free(bin_dir);
-    str candidate = path_join(prefix, "share/fun");
-    free(prefix);
-    str probe = path_join(candidate, "std");
-    flag found = is_dir(probe);
-    free(probe);
-    if found {
-      free(fun_path);
-      ret candidate;
-    }
-    free(candidate);
-  }
-  free(fun_path);
+  free(fallback);
 
   // A fresh copy, not the bare literal: every other return from this
   // function hands the caller something it owns and frees (see each
