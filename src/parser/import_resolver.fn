@@ -25,7 +25,6 @@ use std.task;
 use std.sync;
 use std.channel;
 use std.c.mem;
-use std.c.io;
 
 // Converts one `use`-statement's dotted `path` into an actual `.fn` file
 // path under `root`: segments join with `/`, and a run of N consecutive
@@ -212,24 +211,14 @@ pub fun stdlib_root(str input_file_path) str {
     free(fun_path);
     fun_path = find_on_path("fls");
   }
-  fprintf(stderr_stream(), "[DBGSR] fun_path=[%s] len=%lld\n", fun_path, len(fun_path));
   if !equals(fun_path, "") {
     str bin_dir = dirname(fun_path);
     str prefix = dirname(bin_dir);
+    free(bin_dir);
     str candidate = path_join(prefix, "share/fun");
+    free(prefix);
     str probe = path_join(candidate, "std");
     flag found = is_dir(probe);
-    fprintf(
-      stderr_stream(),
-      "[DBGSR] bin_dir=[%s] prefix=[%s] candidate=[%s] probe=[%s] found=%lld\n",
-      bin_dir,
-      prefix,
-      candidate,
-      probe,
-      found
-    );
-    free(bin_dir);
-    free(prefix);
     free(probe);
     if found {
       free(fun_path);
@@ -1807,7 +1796,13 @@ sequential test "stdlib_root falls back to the installed fun's own share/fun/std
     str win_exe = replace_char(exe, '/', '\\');
     args.push("cmd");
     args.push("/c");
-    args.push(format("cd /d {str} && set FUN_STDLIB_DIR= && {str} build", win_scratch, win_exe));
+    // No space between `=` and `&&`: `set VAR= ` (with that trailing
+    // space, even just one, right before the next command) sets VAR
+    // to a single space, not empty - confirmed directly, the same
+    // single-space value `stdlib_root`'s own `!= nil && != ""` check
+    // then treats as a real override, pointing it at " /std" instead
+    // of falling through to this fallback at all.
+    args.push(format("cd /d {str} && set FUN_STDLIB_DIR=&& {str} build", win_scratch, win_exe));
     free(win_scratch);
     free(win_exe);
   } else {
