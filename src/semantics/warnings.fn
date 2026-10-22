@@ -44,6 +44,7 @@ pub fun warning_id_name(WarningId id) str {
     .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
     .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
     .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
+    .NoCover -> { ret "no_cover"; }
   }
   ret "";
 }

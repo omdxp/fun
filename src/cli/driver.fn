@@ -2330,6 +2330,22 @@ fun _init_gitignore_source() str {
   ret `/fun-out/`;
 }
 
+// The package (and lib/exe target) name a fresh `fun init` picks: the
+// working directory's own name, the same default `cargo init`/`npm
+// init` already use, rather than a hardcoded placeholder every project
+// then has to go rename by hand. Falls back to "app" when the
+// directory's name can't be determined, or would make an invalid TOML
+// string once quoted (a literal `"` or `\` in a directory name, however
+// unlikely).
+fun _init_project_name() str {
+  str dir = current_dir();
+  str base = basename(dir);
+  if equals(base, "") || contains(base, "\"") || contains(base, "\\") {
+    ret "app";
+  }
+  ret base;
+}
+
 // `fun init [lib|exe|mix]`: writes a `fun.toml`, a `src/` directory, and
 // a `.gitignore` for a new package in the working directory. `kind` is
 // one of `lib`, `exe`, or `mix`; empty defaults to `exe`.
@@ -2355,7 +2371,7 @@ pub fun init_project(str kind) num {
     ret 1;
   }
 
-  str name = "app";
+  str name = _init_project_name();
 
   let made_dir = make_dir_all("src");
   if made_dir.is_err() {

@@ -62,4 +62,79 @@ fun main() {
 }
 `,
   },
+  {
+    title: "Fizz Buzz",
+    code: `use std.io;
+
+fun main() {
+  num i = 1;
+  for i <= 20 {
+    if i % 15 == 0 {
+      println("FizzBuzz");
+    } elif i % 3 == 0 {
+      println("Fizz");
+    } elif i % 5 == 0 {
+      println("Buzz");
+    } else {
+      println_fmt("{num}", i);
+    }
+    i = i + 1;
+  }
+}
+`,
+  },
+  {
+    title: "Enums + Fit",
+    code: `use std.io;
+
+enum Shape {
+  Circle(num),
+  Rectangle(num, num),
+}
+
+fun area(Shape s) num {
+  fit s {
+    Shape.Circle(r) -> { ret r * r * 3; }
+    Shape.Rectangle(w, h) -> { ret w * h; }
+  }
+  ret 0;
+}
+
+fun main() {
+  Shape c = Shape.Circle(4);
+  Shape r = Shape.Rectangle(3, 5);
+  println_fmt("circle area={num}", area(c));
+  println_fmt("rectangle area={num}", area(r));
+}
+`,
+  },
+  {
+    title: "Error Handling",
+    code: `use std.io;
+use std.result;
+
+fun divide(num a, num b) Result<num, str> {
+  if b == 0 {
+    ret .Err("division by zero");
+  }
+  ret .Ok(a / b);
+}
+
+fun compute(num a, num b) Result<num, str> {
+  num half = divide(a, b)!;
+  ret .Ok(half + 1);
+}
+
+fun main() {
+  fit compute(10, 2) {
+    .Ok(v) -> { println_fmt("ok={num}", v); }
+    .Err(e) -> { println_fmt("err={str}", e); }
+  }
+  fit compute(10, 0) {
+    .Ok(v) -> { println_fmt("ok={num}", v); }
+    .Err(e) -> { println_fmt("err={str}", e); }
+  }
+}
+`,
+  },
 ];

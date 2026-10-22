@@ -1,5 +1,5 @@
-// BSD-style sockets: POSIX (sys/socket.h, netinet/in.h, arpa/inet.h,
-// unistd.h) on Linux/macOS, Winsock2 on Windows.
+// BSD-style sockets: POSIX (sys/socket.h, netinet/in.h, arpa/inet.h) on
+// Linux/macOS, Winsock2 on Windows.
 //
 // These are declarations only; implementations come from the system libc
 // on POSIX. On Windows the compiler's prelude redirects `socket` to a
@@ -7,37 +7,54 @@
 // Winsock `socket()`, and `close` to one that tries `_close` then
 // `closesocket`; every other name here (`bind`, `listen`, `accept`,
 // `recv`, `send`, `htons`, ...) matches Winsock2's own naming directly.
+// `close` itself (a plain unistd.h function, not socket-specific) comes
+// from `std.c.process`, the module that already owns unistd.h bindings -
+// declaring it a second time here collided as soon as anything pulled in
+// both modules at once.
+
+// `close` itself is only re-exported for callers of this module, never
+// called from this file's own body, so the unused-import warning is a
+// false positive.
+allow unused_import, "re-export for close: std.c.process already owns unistd.h bindings";
+use std.c.process;
 
 // Socket API
 // Creates a socket descriptor, returning the fd or -1 (C semantics).
 pub fun socket(num domain, num type, num protocol) num;
+
 // Binds a socket to a local address. Returns 0 on success, -1 on error (C semantics).
 pub fun bind(num sockfd, raw* addr, num addrlen) num;
+
 // Marks a socket as listening with the given backlog. Returns 0 on success,
 // -1 on error (C semantics).
 pub fun listen(num sockfd, num backlog) num;
+
 // Accepts a connection from a listening socket (`addr`/`addrlen` may be
 // null). Returns the client fd or -1 (C semantics).
 pub fun accept(num sockfd, raw* addr, raw* addrlen) num;
+
 // Connects a socket to a remote address. Returns 0 on success, -1 on error
 // (C semantics).
 pub fun connect(num sockfd, raw* addr, num addrlen) num;
+
 // Receives up to `len` bytes from a socket into `buf`. Returns bytes read or
 // -1 (C semantics).
 pub fun recv(num sockfd, raw* buf, num len, num flags) num;
+
 // Sends up to `len` bytes from `buf` to a socket. Returns bytes sent or -1
 // (C semantics).
 pub fun send(num sockfd, raw* buf, num len, num flags) num;
-// Closes a file/socket descriptor. Returns 0 on success, -1 on error (C semantics).
-pub fun close(num fd) num;
 
 // Byte order helpers
 // Converts a short from host to network byte order.
 pub fun htons(num hostshort) num;
+
 // Converts a long from host to network byte order.
 pub fun htonl(num hostlong) num;
+
 // Converts a short from network to host byte order.
 pub fun ntohs(num netshort) num;
+
 // Converts a long from network to host byte order.
 pub fun ntohl(num netlong) num;
 

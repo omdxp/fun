@@ -41,9 +41,14 @@ use std.c.string;
 use std.c.io;
 use std.sync;
 
+// The live table of every tracked allocation (`__mc_table` below), how
+// many of its `__mc_capacity` slots are filled, and the next sequence
+// number a fresh entry gets (what a report names it by).
 num __mc_count = 0;
 num __mc_capacity = 0;
 num __mc_next_seq = 0;
+// Set once `__mc_ensure_started` has registered the fault handler and
+// leak sweep, so it only ever runs that setup once.
 flag __mc_started = false;
 // Set by codegen's own `emit_main_thread_wrapper`/`emit_test_runner`,
 // as the very first statement of a program's real entry point, unless
@@ -69,6 +74,10 @@ num __mc_hash_used_count = 0;
 num* __mc_hash_keys = nil;
 flag* __mc_hash_used = nil;
 num* __mc_hash_vals = nil;
+
+// The queue of freed-but-still-guarded allocation indices waiting to be
+// recycled (see `__mc_quarantine_budget`'s own note), and how many
+// bytes of guarded memory they account for right now.
 num __mc_quarantine_bytes = 0;
 num __mc_quarantine_capacity = 0;
 num __mc_quarantine_head = 0;
@@ -83,6 +92,8 @@ num __mc_freelist_count = 0;
 raw** __mc_freelist_base = nil;
 num* __mc_freelist_size = nil;
 
+// Every slab arena ever created (`MCSlabArena` below), and how many of
+// its slots are filled.
 num __mc_slab_arena_count = 0;
 num __mc_slab_arena_capacity = 0;
 
@@ -155,10 +166,25 @@ pub fun __fun_memcheck_disable_leak_sweep() {
 // Runtime hooks codegen's own preamble provides when `-memcheck` is on
 // (see `write_prelude`'s own `self.memcheck` block) - real
 // implementations live there, not here.
+//
+// The real, unredirected `malloc` - every allocation this module makes
+// for its own bookkeeping goes through this, never the public,
+// redirected one it is tracking.
 fun __fun_real_malloc(num size) raw*;
+
+// The real, unredirected `realloc`, same reason as `__fun_real_malloc`.
 fun __fun_real_realloc(raw* ptr, num size) raw*;
+
+// Reserves a fresh guarded region for `data_size` bytes, writing its
+// real total size and mmap/VirtualAlloc base to `out_total_size`/
+// `out_mmap_base`, and returns the user-facing data pointer.
 fun __fun_mc_guard_alloc(num data_size, num* out_total_size, raw** out_mmap_base) raw*;
+
+// Revokes access to every page of a guarded region (`total_size` bytes
+// starting at `base`), turning a later read or write through it into an
+// immediate fault.
 fun __fun_mc_guard_protect_all(raw* base, num total_size) num;
+
 // What `__fun_mc_guard_alloc` would set `out_total_size` to for a given
 // `data_size`, without actually reserving anything - lets the quarantine
 // below look for a reusable region of the right size before deciding to
@@ -169,8 +195,13 @@ fun __fun_mc_guard_total_size(num data_size) num;
 // reserving a fresh one - same `(char*)guard - data_size` layout
 // `__fun_mc_guard_alloc` returns, just skipping the real reservation.
 fun __fun_mc_guard_reuse(raw* mmap_base, num total_size, num data_size) raw*;
+
+// Installs `handler` as the process's SIGSEGV/access-violation trampoline.
 fun __fun_mc_register_handler(raw* handler) num;
+
+// True when `addr` falls within the `size`-byte region starting at `base`.
 fun __fun_mc_ptr_in_range(raw* addr, raw* base, num size) num;
+
 // A pointer's own bit pattern as a number - the one piece of raw-C glue
 // `__mc_hash_insert`/`__mc_hash_lookup` below need to turn a `raw*` into
 // something `%` can hash on.
@@ -179,7 +210,10 @@ fun __fun_mc_ptr_to_num(raw* ptr) num;
 // below (see its own note on `__MC_SLAB_MAX_CLASS`) - `raw*` is
 // `void*` on the C side, and `void*` arithmetic isn't valid C.
 fun __fun_mc_slot_addr(raw* data_base, num slot_idx, num slot_size) raw*;
+
+// The real, unredirected `free`, same reason as `__fun_real_malloc`.
 fun __fun_real_free(raw* ptr);
+
 // Per-thread, unlike `__mc_ensure_started` below: `sigaction`'s own
 // handler registration is process-wide, but the alternate stack a
 // signal handler needs in order to still run once a thread's own
@@ -222,7 +256,13 @@ compound AllocInfo {
   num slab_arena_idx;
   num slab_slot_idx;
 }
+// Every allocation tracked right now, `__mc_count` of its `__mc_capacity`
+// slots filled, guarded by `__mc_mu`.
 AllocInfo* __mc_table = nil;
+
+// Guards every read and write of `__mc_table` and its supporting tables
+// (the hash set, quarantine, freelist, slab arenas) - see this file's
+// own top note on why the fault handler can never deadlock against it.
 Mutex __mc_mu;
 
 // One shared, guarded region of `__MC_SLAB_SLOTS` fixed-size slots, all
@@ -245,8 +285,11 @@ compound MCSlabArena {
   num free_slots_cap;
   flag retired;
 }
+// Every slab arena ever created, `__mc_slab_arena_count` of its
+// `__mc_slab_arena_capacity` slots filled.
 MCSlabArena* __mc_slab_arenas = nil;
 
+// Allocates a fresh hash table of `capacity` slots, all empty.
 fun __mc_hash_alloc(num capacity) {
   __mc_hash_keys = __fun_real_malloc(capacity * sizeof(num));
   __mc_hash_used = __fun_real_malloc(capacity * sizeof(flag));
@@ -359,6 +402,7 @@ fun __mc_hash_lookup(raw* ptr) num {
 // dev machine has room for.
 const num __mc_quarantine_budget = 268435456;
 
+// Doubles the quarantine queue's own capacity once it's full.
 fun __mc_quarantine_grow_if_needed() {
   if __mc_quarantine_count < __mc_quarantine_capacity {
     ret;
@@ -390,6 +434,7 @@ fun __mc_quarantine_push(num idx) {
   __mc_quarantine_count = __mc_quarantine_count + 1;
 }
 
+// Pops and returns the oldest queued index.
 fun __mc_quarantine_pop() num {
   num idx = __mc_quarantine_queue[__mc_quarantine_head];
   __mc_quarantine_head = (__mc_quarantine_head + 1) % __mc_quarantine_capacity;
@@ -397,6 +442,7 @@ fun __mc_quarantine_pop() num {
   ret idx;
 }
 
+// Doubles the freelist's own capacity once it's full.
 fun __mc_freelist_grow_if_needed() {
   if __mc_freelist_count < __mc_freelist_capacity {
     ret;
@@ -422,6 +468,7 @@ fun __mc_freelist_grow_if_needed() {
   __mc_freelist_capacity = new_cap;
 }
 
+// Appends a recycled `(mmap_base, total_size)` pair to the freelist.
 fun __mc_freelist_push(raw* mmap_base, num total_size) {
   __mc_freelist_grow_if_needed();
   __mc_freelist_base[__mc_freelist_count] = mmap_base;
@@ -744,6 +791,7 @@ fun __mc_slab_class_for(num real_size) num {
   ret 3;
 }
 
+// The fixed slot size for `class_idx`.
 fun __mc_slab_class_slot_size(num class_idx) num {
   if class_idx == 0 {
     ret __MC_SLAB_CLASS_0;
@@ -757,6 +805,7 @@ fun __mc_slab_class_slot_size(num class_idx) num {
   ret __MC_SLAB_CLASS_3;
 }
 
+// The arena index currently open for `class_idx`, or -1 if none.
 fun __mc_slab_get_current_arena(num class_idx) num {
   if class_idx == 0 {
     ret __mc_slab_current_arena_0;
@@ -770,6 +819,7 @@ fun __mc_slab_get_current_arena(num class_idx) num {
   ret __mc_slab_current_arena_3;
 }
 
+// Records `arena_idx` as the arena currently open for `class_idx`.
 fun __mc_slab_set_current_arena(num class_idx, num arena_idx) {
   if class_idx == 0 {
     __mc_slab_current_arena_0 = arena_idx;
@@ -795,6 +845,7 @@ fun __mc_slab_set_current_arena(num class_idx, num arena_idx) {
 // overflow, with nothing past this line even hinting why.
 const num __MC_SLAB_CANARY_BYTE = 90;
 
+// Doubles the slab arena table's own capacity once it's full.
 fun __mc_slab_grow_arenas_if_needed() {
   if __mc_slab_arena_count < __mc_slab_arena_capacity {
     ret;
@@ -837,6 +888,7 @@ fun __mc_slab_new_arena(num slot_size) num {
   ret idx;
 }
 
+// Returns `slot_idx` to `arena_idx`'s own free list for reuse.
 fun __mc_slab_free_list_push(num arena_idx, num slot_idx) {
   MCSlabArena* a = &__mc_slab_arenas[arena_idx];
   if a.free_slots_count >= a.free_slots_cap {

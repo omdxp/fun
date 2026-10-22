@@ -149,6 +149,15 @@ fun test file.fn -cover                  # just that file's own tests
   coverage is below it, for a CI gate.
 - `-cover-exclude <path,...>` leaves files or directories out of the report
   (`-cover-exclude examples,scripts`).
+- `allow no_cover, "reason";` right above a function (or `allow
+  no_covers, "reason";` for the whole file) leaves just that one
+  function, or every function in the file, out of the report - the
+  same per-function grain `-warn-unused`'s own `allow`/`expect`
+  directives already give warnings (see [Warning
+  Controls](language.md#language-warning-controls)), for code that is
+  genuinely unsafe to exercise from an automated test rather than
+  merely inconvenient to. Unlike `-cover-exclude`, this is not a
+  whole-file concession: the rest of the file still counts normally.
 
 The minimum and the exclusions can live in `fun.toml`, so a bare
 `fun test -cover` enforces them everywhere (on the command line, `-cover-min`

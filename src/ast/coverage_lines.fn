@@ -10,6 +10,10 @@ use ast;
 use std.io;
 use std.string;
 use std.vec;
+use std.set;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
 
 // True when `stmt` is a statement that gets its own counter. A block, the
 // `elif`/`else` continuation of an `if` chain, and a warning-control
@@ -65,20 +69,43 @@ pub fun collect_statement_lines(Node* stmt, Vec<str>* files, Vec<num>* lines) {
 }
 
 // Appends the counted lines of every function and method body among
-// `nodes`, which is one file's own top-level declarations.
+// `nodes`, which is one file's own top-level declarations - except a
+// function, `impl`, or whole file `allow no_cover` excludes (see
+// `collect_no_cover_ranges`'s own note on `Next`/`WholeFile` scope);
+// those lines must never reach the denominator at all, not just be
+// left uncounted when hit, or they'd report as uncovered instead of
+// not measured.
 pub fun collect_program_lines(Vec<Node>* nodes, Vec<str>* files, Vec<num>* lines) {
+  Set<str> whole_file = set_init("", 4);
+  defer whole_file.free();
+  flag pending_next = false;
+
   for n : nodes {
     fit n.kind {
+      .StatementWarningControl(wc) -> {
+        if wc.action == .Allow && wc.id == .NoCover && n.has_pos {
+          fit wc.scope {
+            .Next -> { pending_next = true; }
+            .WholeFile -> { whole_file.add(n.pos.filename); }
+          }
+        }
+      }
       .Function(f) -> {
-        if f.has_body {
+        flag excluded = pending_next ||
+          (n.has_pos && whole_file.has(n.pos.filename));
+        pending_next = false;
+        if f.has_body && !excluded {
           collect_statement_lines(f.body, files, lines);
         }
       }
       .Impl(i) -> {
+        flag excluded = pending_next ||
+          (n.has_pos && whole_file.has(n.pos.filename));
+        pending_next = false;
         for m : i.methods {
           fit m.kind {
             .Function(mf) -> {
-              if mf.has_body {
+              if mf.has_body && !excluded {
                 collect_statement_lines(mf.body, files, lines);
               }
             }
@@ -188,6 +215,88 @@ pub fun collect_test_ranges(Vec<Node>* nodes, Vec<str>* files, Vec<num>* from, V
   }
 }
 
+// Parses `src` into its own top-level nodes, asserting it compiles -
+// shared by the `collect_no_cover_ranges`/`collect_program_lines`
+// tests below, both of which need a real `Vec<Node>` to walk rather
+// than a hand-built one.
+fun _parsed_nodes(str src) Vec<Node> {
+  let tokens = tokenize(src, "t.fn");
+  assert !tokens.is_err(), "expected the source to lex";
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  assert p.parse().is_none(), "expected the source to parse";
+  ret state.nodes;
+}
+
+test "collect_program_lines leaves out a function allow no_cover excludes, but still counts another" {
+  Vec<Node> nodes = _parsed_nodes(
+    `allow no_cover, "deliberately untestable";
+    `fun skipped() num {
+    `  ret 1;
+    `}
+    `fun kept() num {
+    `  ret 2;
+    `}`
+  );
+  Vec<str> files;
+  files.init(8);
+  Vec<num> lines;
+  lines.init(8);
+  collect_program_lines(&nodes, &files, &lines);
+  assert lines.len == 1, format("expected only kept()'s own statement declared, got {num}", lines.len);
+}
+
+test "collect_program_lines leaves out every function in a file allow no_covers (plural) excludes" {
+  Vec<Node> nodes = _parsed_nodes(
+    `allow no_covers, "deliberately untestable, whole file";
+    `fun a() num {
+    `  ret 1;
+    `}
+    `fun b() num {
+    `  ret 2;
+    `}`
+  );
+  Vec<str> files;
+  files.init(8);
+  Vec<num> lines;
+  lines.init(8);
+  collect_program_lines(&nodes, &files, &lines);
+  assert lines.len == 0, format("expected no lines declared for a whole-file exclusion, got {num}", lines.len);
+}
+
+test "collect_no_cover_ranges records only the one function its own directive covers" {
+  Vec<Node> nodes = _parsed_nodes(
+    `allow no_cover, "deliberately untestable";
+    `fun skipped() num {
+    `  ret 1;
+    `}
+    `fun kept() num {
+    `  ret 2;
+    `}`
+  );
+  // Ground truth for each function's own statement line, independent
+  // of this test's own exact source layout.
+  Vec<str> all_files;
+  all_files.init(8);
+  Vec<num> all_lines;
+  all_lines.init(8);
+  collect_program_lines(&nodes, &all_files, &all_lines);
+  assert all_lines.len == 1, "expected kept()'s own line as ground truth";
+  num kept_line = all_lines.get(0);
+
+  Vec<str> skip_files;
+  skip_files.init(4);
+  Vec<num> skip_from;
+  skip_from.init(4);
+  Vec<num> skip_to;
+  skip_to.init(4);
+  collect_no_cover_ranges(&nodes, &skip_files, &skip_from, &skip_to);
+  assert skip_files.len == 1, format("expected exactly one no_cover range, got {num}", skip_files.len);
+  assert !in_test_range("t.fn", kept_line, &skip_files, &skip_from, &skip_to), "expected kept()'s own line to fall outside the recorded range";
+}
+
 // True when a statement at `line` of `filename` sits inside one of the
 // ranges `collect_test_ranges` recorded.
 pub fun in_test_range(str filename, num line, Vec<str>* files, Vec<num>* from, Vec<num>* to) flag {
@@ -199,4 +308,86 @@ pub fun in_test_range(str filename, num line, Vec<str>* files, Vec<num>* from, V
     i = i + 1;
   }
   ret false;
+}
+
+// A function or method's own `(file, from, to)` range, the same shape
+// `collect_test_ranges` records for a test/fuzz body - shared by
+// `collect_no_cover_ranges` below for both a free function and a
+// method found inside an `impl`'s own method list.
+fun _record_no_cover_range(Node* decl, Node* body, Vec<str>* files, Vec<num>* from, Vec<num>* to) {
+  Vec<str> body_files;
+  body_files.init(8);
+  Vec<num> body_lines;
+  body_lines.init(8);
+  collect_statement_lines(body, &body_files, &body_lines);
+  num last = decl.pos.line;
+  for bl : body_lines {
+    if bl > last {
+      last = bl;
+    }
+  }
+  files.push(decl.pos.filename);
+  from.push(decl.pos.line);
+  to.push(last);
+  body_files.free();
+  body_lines.free();
+}
+
+// Records where `allow no_cover`/`allow no_covers` (see
+// `WarningId.NoCover`) excludes a function, a whole `impl`'s worth of
+// methods, or a whole file from coverage - appended to the same
+// `(files, from, to)` triple `collect_test_ranges` already fills, so a
+// single `in_test_range` check (despite its name) covers both kinds of
+// exclusion with no caller-side change.
+//
+// `Next` scope applies to the very next `.Function`/`.Impl` among
+// `nodes` - skipping over anything else in between (a compound, an
+// enum, ...) rather than resetting on it, since those aren't a
+// sensible target for the directive anyway. `WholeFile` scope applies
+// to every function/method whose own position names that same file,
+// wherever in `nodes` it falls - needed because `nodes` here may be a
+// whole merged, multi-file program, not just one file's own
+// declarations, so "the rest of this list" would reach into a
+// different file entirely.
+pub fun collect_no_cover_ranges(Vec<Node>* nodes, Vec<str>* files, Vec<num>* from, Vec<num>* to) {
+  Set<str> whole_file = set_init("", 4);
+  defer whole_file.free();
+  flag pending_next = false;
+
+  for n : nodes {
+    fit n.kind {
+      .StatementWarningControl(wc) -> {
+        if wc.action == .Allow && wc.id == .NoCover && n.has_pos {
+          fit wc.scope {
+            .Next -> { pending_next = true; }
+            .WholeFile -> { whole_file.add(n.pos.filename); }
+          }
+        }
+      }
+      .Function(f) -> {
+        flag applies = pending_next || (n.has_pos && whole_file.has(n.pos.filename));
+        pending_next = false;
+        if f.has_body && applies {
+          _record_no_cover_range(&n, f.body, files, from, to);
+        }
+      }
+      .Impl(i) -> {
+        flag applies = pending_next || (n.has_pos && whole_file.has(n.pos.filename));
+        pending_next = false;
+        if applies {
+          for m : i.methods {
+            fit m.kind {
+              .Function(mf) -> {
+                if mf.has_body {
+                  _record_no_cover_range(m, mf.body, files, from, to);
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
 }

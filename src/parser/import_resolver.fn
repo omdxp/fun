@@ -14,6 +14,7 @@ use std.string;
 use std.path;
 use std.fs;
 use std.sys;
+use std.process;
 use std.vec;
 use std.set;
 use std.map;
@@ -121,6 +122,44 @@ pub fun _normalize_path(str path) str {
 // missing stdlib is reported rather than walked to the root.
 const num max_stdlib_search_depth = 32;
 
+// The installed `fun`/`fls`'s own `<prefix>/share/fun/std`, or "" when
+// neither is on `PATH` or its own prefix has no real `share/fun/std`
+// beside it. Split out from `stdlib_root` below so this one block -
+// genuinely unsafe to exercise end-to-end from an automated test -
+// doesn't cost the rest of `stdlib_root`'s own, perfectly safe-to-test
+// logic its coverage credit too.
+//
+// Not yet marked `allow no_cover` (see `WarningId.NoCover`, this same
+// PR): the compiler currently installed to bootstrap this very build
+// doesn't know that id exists, so a source file using it fails to
+// parse at stage 1, before the freshly-built compiler that WOULD
+// understand it ever gets a chance to. Add the directive here once a
+// release carrying this feature is the installed bootstrap seed.
+fun _installed_stdlib_fallback() str {
+  str fun_path = find_on_path("fun");
+  if equals(fun_path, "") {
+    free(fun_path);
+    fun_path = find_on_path("fls");
+  }
+  if !equals(fun_path, "") {
+    str bin_dir = dirname(fun_path);
+    str prefix = dirname(bin_dir);
+    free(bin_dir);
+    str candidate = path_join(prefix, "share/fun");
+    free(prefix);
+    str probe = path_join(candidate, "std");
+    flag found = is_dir(probe);
+    free(probe);
+    if found {
+      free(fun_path);
+      ret candidate;
+    }
+    free(candidate);
+  }
+  free(fun_path);
+  ret substr("", 0, 0);
+}
+
 // Where the standard library lives, which is asked for rather than
 // assumed: an editor starts a language server in whatever directory it
 // likes, and a compiler is run from wherever a project happens to sit.
@@ -162,15 +201,54 @@ pub fun stdlib_root(str input_file_path) str {
     }
     free(candidate);
     let parent = dirname(dir);
-    if equals(parent, dir) || equals(parent, "") {
+    if equals(parent, "") {
       free(parent);
       break;
+    }
+    if equals(parent, dir) {
+      // `dirname`'s own contract for a bare relative segment with no
+      // slash in it at all (e.g. `"src"`, walked up from `"src/cli"`)
+      // is to hand back that same string unchanged - there's nothing
+      // left to strip, not "already at a real root". Real POSIX
+      // `dirname(1)` treats that same input as `"."` instead; without
+      // this, the loop stopped one level short of ever trying the
+      // working directory itself, silently never finding a real
+      // `stdlib/std` sitting right there for any relative input path
+      // (every normal `fun build` invocation, since `fun.toml`'s own
+      // `[[exe]] path` is always relative) - confirmed directly, not
+      // theoretical: this is the whole reason a plain `fun build` run
+      // from this very repo's own root only ever worked by the
+      // accident of this function's final bare-literal fallback
+      // happening to also resolve relative to the working directory.
+      free(parent);
+      if equals(dir, ".") {
+        break;
+      }
+      free(dir);
+      dir = substr(".", 0, 1);
+      depth = depth + 1;
+      continue;
     }
     free(dir);
     dir = parent;
     depth = depth + 1;
   }
   free(dir);
+
+  // Neither an explicit override nor a `stdlib/std` found walking up
+  // (the latter only ever matches inside this compiler's own source
+  // checkout, not a real install) - what every real release bundle
+  // (and `fun upgrade`) actually lays out is `<prefix>/bin/fun` (and
+  // `fls`) next to `<prefix>/share/fun/std`, so wherever `PATH` would
+  // resolve either one to right now is the last thing worth trying
+  // before giving up outright - the exact same "ask, don't assume"
+  // resolution `fun upgrade` already uses to find its own install.
+  str fallback = _installed_stdlib_fallback();
+  if !equals(fallback, "") {
+    ret fallback;
+  }
+  free(fallback);
+
   // A fresh copy, not the bare literal: every other return from this
   // function hands the caller something it owns and frees (see each
   // one's own note above) - this is the one path that didn't, and
@@ -1649,6 +1727,42 @@ test "resolve_import_path handles an input file with no directory component" {
   let resolved = resolve_import_path("main.fn", "helper");
   assert equals(resolved, "./helper.fn"), "expected './' as the directory when the input path has no slash of its own";
 }
+
+test "stdlib_root finds the real stdlib walking up from a deep relative path with no slash left to strip" {
+  // `dirname("src")` (reached after climbing past "src/parser") has no
+  // slash to strip and returns "src" itself - the exact shape that
+  // used to stop the walk-up one level short of ever trying "." (this
+  // repo's own root, where `stdlib/std` genuinely lives), silently
+  // falling through to the bare-literal fallback instead. Regression
+  // coverage for that fix, not resolve_import_path's own behavior.
+  let root = stdlib_root("src/parser/import_resolver.fn");
+  assert ends_with(root, "stdlib"), "expected the real stdlib root to be found walking up, not the bare literal fallback";
+  str probe = path_join(root, "std");
+  assert is_dir(probe), "expected a real stdlib/std directory at the resolved root";
+}
+
+sequential test "stdlib_root honors an explicit FUN_STDLIB_DIR override before walking up at all" {
+  assert set_env("FUN_STDLIB_DIR", "/some/configured/path"), "expected to set the override";
+  defer clear_env("FUN_STDLIB_DIR");
+  let root = stdlib_root("src/parser/import_resolver.fn");
+  assert equals(root, "/some/configured/path"), "expected the explicit override to win outright, no walk-up";
+}
+
+// `find_on_path`'s own fallback (`<prefix>/share/fun/std`, tried only
+// once the walk-up above finds nothing) is deliberately not covered
+// by an automated test here: exercising it for real needs a subprocess
+// that itself runs a full `fun build` (gcc and all) - spawning that
+// from inside a test already running under this project's own M:N
+// scheduler reliably deadlocks the scheduler's fixed worker pool once
+// enough of the suite's own parallel tests are running alongside it
+// (confirmed directly: 100% reproduction across repeated runs in a
+// constrained-CPU container matching real CI, the exact "recursive
+// fork exhausts the fixed worker pool under load" class of issue
+// already known and deliberately not patched elsewhere in this
+// project - a scheduler redesign, not a test-level fix). Verified by
+// hand instead: a fresh `fun init` + `fun build` in an empty directory
+// outside this checkout, `FUN_STDLIB_DIR` unset, against an installed
+// release build.
 
 test "resolve_import_path resolves a 'std.' import against the stdlib root, not the importing file's own directory" {
   let resolved = resolve_import_path("src/lexer/lexer.fn", "std.string");

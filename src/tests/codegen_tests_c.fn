@@ -2001,6 +2001,43 @@ test "a built program observes the file system and other processes" {
   assert contains(out, "spawned=yes"), "expected the process it ran to report back";
 }
 
+test "find_on_path resolves a real program and reports \"\" for one that doesn't exist" {
+  str src = `use std.c.io;
+  `use std.process;
+  `use std.runtime_backend;
+  `fun main() num {
+  `  str probe = "sh";
+  `  if runtime_backend_is_windows() { probe = "cmd"; }
+  `  str found = find_on_path(probe);
+  `  str missing = find_on_path("definitely_not_a_real_program_xyz123");
+  `  printf("found=%d missing_empty=%d\n", len(found) > 0, equals(missing, ""));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "find_on_path_probe",
+    "find_on_path resolves a real program and reports an empty string for one that doesn't exist"
+  );
+  assert contains(out, "found=1"), "expected a real, always-present program to resolve";
+  assert contains(out, "missing_empty=1"), "expected a nonexistent program to report empty, not crash";
+}
+
+test "current_dir reports a real, non-empty working directory" {
+  str src = `use std.c.io;
+  `use std.process;
+  `fun main() num {
+  `  str dir = current_dir();
+  `  printf("nonempty=%d\n", len(dir) > 0);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "current_dir_probe",
+    "current_dir reports a real, non-empty working directory"
+  );
+  assert contains(out, "nonempty=1"), "expected a real working directory to come back";
+}
+
 test "memcheck's own quarantine recycles retired guard pages past its budget, with no false report" {
   str src = `use std.c.mem;
   `use std.io;

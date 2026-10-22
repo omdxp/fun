@@ -170,6 +170,16 @@ pub enum WarningId {
   IntegerLiteralOutOfRange,
   // More blocking sends issued into a bounded channel than it can hold.
   ChannelCapacityOverflow,
+  // Not a detectable condition like every id above it - a directive
+  // (`allow`, never `expect`) telling the code-coverage tool to leave
+  // the next function (or the whole file) out of its report entirely,
+  // for one genuinely untestable-in-process shape: a test that would
+  // have to spawn a subprocess that itself forks further (compiling
+  // and running a nested program) deadlocks this project's own M:N
+  // test-runner scheduler once enough of the suite's other parallel
+  // tests are already running - a scheduler limitation, not something
+  // a test can safely work around.
+  NoCover,
 }
 
 // Which way a `WarningCtrlNode` controls its target warning: `allow` silences
@@ -201,6 +211,7 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
     "shared_mutable_capture_race" -> { ret .Some(.SharedMutableCaptureRace); }
     "integer_literal_out_of_range" -> { ret .Some(.IntegerLiteralOutOfRange); }
     "channel_capacity_overflow" -> { ret .Some(.ChannelCapacityOverflow); }
+    "no_cover" -> { ret .Some(.NoCover); }
     _ -> { ret .None; }
   }
 }
@@ -244,14 +255,14 @@ pub fun warning_id_or_plural_from_string(str name) Option<WarningIdRef> {
 }
 
 test "warning_id_or_plural_from_string resolves every warning id both singular and plural" {
-  // Covers all 15 ids, including the one irregular case
+  // Covers all 16 ids, including the one irregular case
   // (`fit_unreachable_branch` -> `...branches` needs the "es" strip,
   // not a plain "s" strip) and the one that already ends in "e"
   // (`integer_literal_out_of_range` -> `...ranges` is a plain "s"
   // strip, not "es" - the "es" attempt on it must fail closed and fall
   // through rather than matching a bogus "...rang").
-  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,integer_literal_out_of_range,channel_capacity_overflow";
-  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,integer_literal_out_of_ranges,channel_capacity_overflows";
+  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,integer_literal_out_of_range,channel_capacity_overflow,no_cover";
+  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,integer_literal_out_of_ranges,channel_capacity_overflows,no_covers";
   Vec<str> sing = split(singulars, ',');
   Vec<str> plur = split(plurals, ',');
   assert sing.len == plur.len, "expected a matched singular/plural pair per id";
@@ -314,6 +325,7 @@ impl WarningId as To<str> {
       .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
       .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
       .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
+      .NoCover -> { ret "no_cover"; }
     }
   }
 }
