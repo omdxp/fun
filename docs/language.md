@@ -1620,6 +1620,15 @@ behavior.
   fires when the capacity and the send count are statically known
   literals, the channel is never received-from, and no `fork` runs
   first.
+- `no_cover`: not a detectable condition like every ID above it - a
+  directive telling `fun test . -cover` to leave the next function (or,
+  plural `no_covers`, the whole file) out of its report entirely, for
+  code that is genuinely unsafe to exercise automatically (for
+  instance, a test that would itself have to spawn a subprocess
+  recursively running `fun build`, which can deadlock this project's
+  own parallel test-runner scheduler). Valid only with `allow`, never
+  `expect`: nothing ever reports it, so `expect` could never be
+  satisfied.
 
 ### Control statements
 
@@ -1635,8 +1644,9 @@ behavior.
 
 `allow`/`expect` are statement directives that work inside function
 bodies; `unused_variable`, `unused_import`, `unused_function`,
-`unused_compound`, and `unused_type_alias` may also be controlled at
-module scope, anywhere before the imports/declarations they cover. The
+`unused_compound`, `unused_type_alias`, and `no_cover` may also be
+controlled at module scope, anywhere before the imports/declarations
+they cover. The
 reason string is required and documents why the warning is being
 allowed/expected. No warning ID needs a plural form registered by
 hand: `unused_imports`, `unused_variables`, `fit_non_exhaustives`, and
