@@ -6721,6 +6721,7 @@ impl Parser {
       .UnusedFunction -> { ret true; }
       .UnusedCompound -> { ret true; }
       .UnusedTypeAlias -> { ret true; }
+      .NoCover -> { ret true; }
       _ -> { ret false; }
     }
   }
@@ -6744,7 +6745,7 @@ impl Parser {
     let maybe_ref = warning_id_or_plural_from_string(id_name);
     if maybe_ref.is_none() {
       let msg = format(
-        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow, or one of their plural forms to cover the whole file)",
+        "unknown warning id '{str}' (expected one of: return_local_ptr, fit_non_exhaustive, fit_unreachable_branch, unreachable_code, assert_constant, unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, missing_return, blocking_fork_deadlock, shared_mutable_capture_race, integer_literal_out_of_range, channel_capacity_overflow, no_cover, or one of their plural forms to cover the whole file)",
         id_name
       );
       defer free(msg);
@@ -6754,9 +6755,17 @@ impl Parser {
     let id_ref = maybe_ref.unwrap();
     WarningId warning_id = id_ref.id;
 
+    // `no_cover` tells the coverage tool to leave code out of its
+    // report - there is no corresponding event that could ever make
+    // `expect` true, unlike every other id here.
+    if warning_id == .NoCover && action == .Expect {
+      self.state.err("'no_cover' only makes sense with 'allow', not 'expect' - it has no corresponding warning that could ever fire");
+      ret .Some(.InvalidStatement);
+    }
+
     if !self.has_current_function &&
       !self._warning_control_is_valid_in_module_scope(warning_id) {
-      self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, unused_compound, and unused_type_alias may be controlled at module scope");
+      self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, and no_cover may be controlled at module scope");
       ret .Some(.InvalidStatement);
     }
 
