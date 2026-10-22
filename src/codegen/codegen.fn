@@ -5665,10 +5665,25 @@ impl Codegen {
     // `root_hoist_pos`/`root_state` whenever `hoist_scratch_depth > 0`,
     // this only widens the gate that used to bail out before ever
     // reaching it.
-    flag use_hoist = self.msvc_mode &&
+    // `emscripten_mode` takes the same hoisted path MSVC already needs
+    // (not because the wasm32 target itself rejects a GNU statement
+    // expression - `clang`'s own docs describe it as a true frontend
+    // extension, not a target-conditional one) but because the real
+    // `clang-16` build this project's own wasm-targeted playground
+    // compiles through (wasmer's own `clang/clang` package) crashes
+    // its frontend outright on this exact shape: a struct-valued
+    // local's own initializer being a statement expression whose
+    // early `return` constructs a different struct literal through
+    // nested designated initializers into an anonymous union member.
+    // Confirmed directly with a minimal, hand-written C file wholly
+    // unrelated to this compiler, not theoretical - a real third-
+    // party toolchain bug, not a correctness issue in the GNU form
+    // itself, which remains exactly as it is for every native target.
+    flag avoid_stmt_expr = self.msvc_mode || self.emscripten_mode;
+    flag use_hoist = avoid_stmt_expr &&
       (self.current_stmt_start_pos.is_some() ||
       (self.hoist_scratch_depth > 0 && self.root_stmt_start_pos.is_some()));
-    if !self.msvc_mode {
+    if !avoid_stmt_expr {
       // GNU statement expression: evaluate once, branch, continue with
       // the unwrapped payload.
       self.state.write("({ __auto_type ");
@@ -5691,18 +5706,19 @@ impl Codegen {
       ret .None;
     }
     if !use_hoist {
-      // MSVC with no known statement start (e.g. nested inside another
-      // hoisted construct's own scratch evaluation): there is no C
-      // expression form of "conditionally return" without GNU
-      // statement expressions, and no statement to hoist before -
-      // reported as a real codegen error rather than emitting silently
-      // wrong C.
+      // MSVC or wasm, with no known statement start (e.g. nested
+      // inside another hoisted construct's own scratch evaluation):
+      // there is no C expression form of "conditionally return"
+      // without GNU statement expressions, and no statement to hoist
+      // before - reported as a real codegen error rather than
+      // emitting silently wrong C.
       ret .Some(.UnsupportedNode);
     }
     StringBuilder try_decl_sb = string_builder_init(64);
-    // MSVC-only text (the GNU path renders this whole thing inline as a
-    // statement expression on the enclosing statement's own line, so it
-    // needs no `#line` of its own): this temp-and-guard splice is hand-
+    // MSVC/wasm-only text (the GNU path renders this whole thing
+    // inline as a statement expression on the enclosing statement's
+    // own line, so it needs no `#line` of its own): this temp-and-
+    // guard splice is hand-
     // assembled outside the ordinary per-statement `#line` flush, same
     // class of gap as `hoist_call_result_to_temp`'s own receiver temp -
     // without this, a debugger stepping into `expr?`/`expr!` under
