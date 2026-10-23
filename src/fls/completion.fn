@@ -207,6 +207,17 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
           local_type_owned = !equals(local_type, "");
         }
         if equals(local_type, "") {
+          // `receiver` may itself be a chained call's own result
+          // (`l.debug_r("msg").`), not a bound local at all - the one
+          // shape none of the lookups above try, each built around a
+          // name with its own declaration to find.
+          num receiver_idx = _receiver_identifier_index_before(&tokens, line, character);
+          if receiver_idx >= 0 {
+            local_type = chain_tail_type_from_tokens(&tokens, doc.path, cache, receiver_idx);
+            local_type_owned = !equals(local_type, "");
+          }
+        }
+        if equals(local_type, "") {
           local_type = receiver;
         }
         _members_from_tokens(&tokens, local_type, &items);
@@ -2258,6 +2269,13 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
   num source_col = character + 1;
   str receiver = "";
   flag last_was_dot = false;
+  // Depth of an open `(` this scan is presently inside: a call's own
+  // argument list (`debug_r("msg")`) is skipped wholesale, without
+  // touching `receiver`/`last_was_dot` at all, so a chain ending in a
+  // call (`l.debug_r("msg").`) still reads back as "the receiver is
+  // `debug_r`", the same as a plain field would, instead of resetting
+  // to "no receiver at all" the instant the call's own `(` is seen.
+  num paren_depth = 0;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -2270,6 +2288,18 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
       continue;
     }
     if t.pos.line != source_line || t.pos.end_col > source_col {
+      continue;
+    }
+    if paren_depth > 0 {
+      if token_is_operator(t, "(") {
+        paren_depth = paren_depth + 1;
+      } elif token_is_symbol(t, ')') {
+        paren_depth = paren_depth - 1;
+      }
+      continue;
+    }
+    if token_is_operator(t, "(") {
+      paren_depth = 1;
       continue;
     }
     if token_is_operator(t, ".") {
@@ -2291,6 +2321,228 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
     ret "";
   }
   ret receiver;
+}
+
+// `_receiver_before`'s own token index, not just its word - what
+// `chain_tail_type_from_tokens` needs to look at the tokens
+// surrounding the receiver itself (whether it has its own dotted
+// prefix, whether it's immediately followed by a call's own `(`),
+// not just the name. -1 for the same cases `_receiver_before` itself
+// returns "" for.
+fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num character) num {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num receiver_idx = -1;
+  flag last_was_dot = false;
+  num paren_depth = 0;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    num this_idx = i;
+    i = i + 1;
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.end_col > source_col {
+      continue;
+    }
+    if paren_depth > 0 {
+      if token_is_operator(t, "(") {
+        paren_depth = paren_depth + 1;
+      } elif token_is_symbol(t, ')') {
+        paren_depth = paren_depth - 1;
+      }
+      continue;
+    }
+    if token_is_operator(t, "(") {
+      paren_depth = 1;
+      continue;
+    }
+    if token_is_operator(t, ".") {
+      last_was_dot = true;
+      continue;
+    }
+    fit t.type {
+      .Identifier -> {
+        receiver_idx = this_idx;
+        last_was_dot = false;
+      }
+      _ -> {
+        receiver_idx = -1;
+        last_was_dot = false;
+      }
+    }
+  }
+  if !last_was_dot {
+    ret -1;
+  }
+  ret receiver_idx;
+}
+
+// `idx`'s own identifier: itself, when `tokens[idx]` already is one,
+// or the callee's own index when it's instead the closing `)` of a
+// call (`debug_r("msg")` -> `debug_r`'s index), walking back through
+// the call's own argument list depth-tracked (so a nested call inside
+// an argument is never mistaken for the one actually ending here).
+// -1 when neither shape applies.
+fun _skip_back_over_call(Vec<Token>* tokens, num idx) num {
+  if idx < 0 {
+    ret -1;
+  }
+  Token t = tokens.get(idx);
+  if !token_is_symbol(t, ')') {
+    if t.type == .Identifier {
+      ret idx;
+    }
+    ret -1;
+  }
+  num depth = 1;
+  num j = idx - 1;
+  for j >= 0 && depth > 0 {
+    Token jt = tokens.get(j);
+    if token_is_symbol(jt, ')') {
+      depth = depth + 1;
+    } elif token_is_operator(jt, "(") {
+      depth = depth - 1;
+    }
+    if depth == 0 {
+      break;
+    }
+    j = j - 1;
+  }
+  if depth != 0 {
+    ret -1;
+  }
+  let callee = token_before(tokens, j);
+  if callee.is_none() {
+    ret -1;
+  }
+  ret index_of_token(tokens, callee.unwrap());
+}
+
+// The type of whatever sits at `tokens[idx]`, walking back through
+// the *whole* dotted chain leading to it, token-only: resolved
+// without a real parse of `doc_path`, the same tier `let_call_return_
+// type_from_tokens`/`member_declaration_from_tokens` already occupy,
+// needed for exactly the shape neither of those covers - a method (or
+// field) read directly off a chained call's own result
+// (`l.debug_r("msg").`), with no intervening `let` binding to hang a
+// lookup off of. Mirrors `chain_receiver`/`chain_ending_receiver`'s
+// own real-AST algorithm (recurse on the prefix, then look the tail
+// segment up as a method when it's itself a call, a field otherwise)
+// but one token-only hop at a time. "" when any hop can't be resolved
+// this way - the same realistic ceiling every fallback in this tier
+// already accepts (an import this document's own broken parse can't
+// see through, a generic whose concrete type needs more than a bare
+// name, an index expression `x[0].` ending the chain, `self` as a
+// chain's own base - each already unresolved before this existed, not
+// newly so).
+fun chain_tail_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache* cache, num idx) str {
+  Token tok = tokens.get(idx);
+  if tok.type != .Identifier {
+    ret "";
+  }
+  str name = token_word(tok);
+  let after = token_after(tokens, idx + 1);
+  flag is_call = after.is_some() && token_is_operator(after.unwrap(), "(");
+  let before = token_before(tokens, idx);
+  flag has_dot_prefix = before.is_some() && token_is_operator(before.unwrap(), ".");
+
+  if !has_dot_prefix {
+    if !is_call {
+      // A plain local/param base - not this function's own job (the
+      // ordinary, already-working receiver fallback chain handles it).
+      ret "";
+    }
+    // A bare top-level call used directly, no receiver of its own
+    // (`make_logger().debug(...)`): same local-then-imports order
+    // `let_call_return_type_from_tokens` already uses once it has a
+    // callee name, just reached without a `let` binding to find one
+    // through first.
+    str local_rtype = _local_fn_return_type_from_tokens(tokens, name);
+    if !equals(local_rtype, "") {
+      ret local_rtype;
+    }
+    Vec<str> import_paths = resolved_import_paths(tokens, doc_path);
+    defer import_paths.free();
+    num k = 0;
+    for k < import_paths.len {
+      str path = import_paths.get(k);
+      k = k + 1;
+      str text = read_to_string(path);
+      if text == nil {
+        continue;
+      }
+      let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+      if merged.is_err() {
+        free(merged.unwrap_err());
+        free(text);
+        continue;
+      }
+      ProgramMergeResult target = merged.unwrap();
+      let f = lookup_top_level(&target.nodes, name);
+      if f.is_some() {
+        str rtype = return_type_from_detail(f.unwrap().detail);
+        if !equals(rtype, "") {
+          free(text);
+          ret rtype;
+        }
+      }
+      free(text);
+    }
+    ret "";
+  }
+
+  num dot_idx = index_of_token(tokens, before.unwrap());
+  num prev_idx = _skip_back_over_call(tokens, dot_idx - 1);
+  if prev_idx < 0 {
+    ret "";
+  }
+  Token prev_tok = tokens.get(prev_idx);
+  let prev_before = token_before(tokens, prev_idx);
+  flag prev_has_dot = prev_before.is_some() &&
+    token_is_operator(prev_before.unwrap(), ".");
+  let prev_after = token_after(tokens, prev_idx + 1);
+  flag prev_is_call = prev_after.is_some() && token_is_operator(prev_after.unwrap(), "(");
+  // `_receiver_type_from_tokens`'s own result is borrowed (a `token_
+  // word` straight out of `tokens`, never freed by any of its other
+  // callers either); the recursive call's is this same function's
+  // own fresh allocation, same as every other `ret` below - tracked
+  // so the one case that owns it actually gets freed.
+  str prefix_type = "";
+  flag prefix_type_owned = false;
+  if !prev_has_dot && !prev_is_call {
+    prefix_type = _receiver_type_from_tokens(tokens, token_word(prev_tok));
+    if equals(prefix_type, "") {
+      // `_receiver_type_from_tokens` only reads an *explicit* "Type
+      // name" declaration - `let l = logger_init(...)` has no such
+      // token for "l" at all, its type purely inferred from the call.
+      // Same fallback the ordinary (non-chained) receiver dispatch
+      // already tries for exactly this shape.
+      prefix_type = let_call_return_type_from_tokens(tokens, doc_path, cache, token_word(prev_tok));
+      prefix_type_owned = !equals(prefix_type, "");
+    }
+  } else {
+    prefix_type = chain_tail_type_from_tokens(tokens, doc_path, cache, prev_idx);
+    prefix_type_owned = !equals(prefix_type, "");
+  }
+  if equals(prefix_type, "") {
+    ret "";
+  }
+
+  let decl = member_declaration_from_tokens(tokens, doc_path, cache, prefix_type, name);
+  str result = "";
+  if decl.is_some() {
+    if is_call {
+      result = return_type_from_detail(decl.unwrap().detail);
+    } else {
+      result = bare_type_from_detail(decl.unwrap().detail);
+    }
+  }
+  if prefix_type_owned {
+    free(prefix_type);
+  }
+  ret result;
 }
 
 // The identifier touching `line`/`character`, dot or no dot before it

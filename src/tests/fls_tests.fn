@@ -1101,6 +1101,62 @@ test "a method completion item's own labelDetails excludes the implicit self" {
   assert contains(out, `"labelDetails":{"detail":"(num n)","description":"flag"}`), "expected self excluded from the method's own labelDetails, matching its snippet";
 }
 
+test "dot-completion resolves a chained method call's own return type, not every name in scope" {
+  // User-reported, from the same std.log sample: `l.debug_r("x").`
+  // offered nothing relevant - `_receiver_before`'s own receiver
+  // detection only recognized a bare identifier, resetting to "no
+  // receiver at all" the instant it saw `debug_r`'s own call `(`,
+  // and nothing resolved a chained call's return type at all even
+  // once that was fixed. `chain_tail_type_from_tokens` walks the
+  // whole chain back to its own base (here, `l`'s own let-inferred
+  // type), then looks each call up as a method along the way.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Json);
+  `  l.debug_r("x").;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chain_completion_probe.fn";
+  doc.path = "chain_completion_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot following `debug_r("x")`'s own closing paren.
+  str out = completion(&reads, doc, 4, 17, false);
+  assert contains(out, `"label":"emit"`) && contains(out, `"label":"str_field"`) &&
+    contains(out, `"label":"with"`), "expected LogRecord's own members, debug_r's own return type";
+  assert !contains(out, `"label":"debug_r"`), "expected a real chain resolution, not every declared name";
+}
+
+test "dot-completion resolves a method chain three calls deep, not just the first one" {
+  // Same user report, extended one hop further to make sure the fix
+  // generalizes past a single chained call - `chain_tail_type_from_
+  // tokens` recurses on its own prefix, so this exercises that
+  // recursion for real rather than just trusting it reads that way.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Json);
+  `  l.debug_r("x").str_field("k", "v").;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chain_completion_deep_probe.fn";
+  doc.path = "chain_completion_deep_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot following `str_field("k", "v")`'s own closing
+  // paren - two calls deep, not just the one right after `l`.
+  str out = completion(&reads, doc, 4, 37, false);
+  assert contains(out, `"label":"emit"`) && contains(out, `"label":"with"`),
+  "expected LogRecord's own members two calls deep in the chain, not just one";
+}
+
 test "dot-completion on a defaulted parameter resolves the real enum, not every name in scope" {
   // User-reported, from `std.log`'s own `logger_init(.Debug, .Text)`:
   // completion on a bare `.Variant` argument only worked for the

@@ -1973,7 +1973,7 @@ pub fun let_call_callee_from_tokens(Vec<Token>* tokens, str name) str {
 // `let_call_return_type_from_tokens`); a method or a generic's own
 // specialized return type is out of scope here, matched by the
 // simpler plain top-level function shape alone.
-fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
+pub fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
