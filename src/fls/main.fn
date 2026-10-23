@@ -2,10 +2,17 @@
 // output until it asks to stop.
 
 use server;
+use ..cli.stdlib_env;
 use std.io;
 use std.string;
 
 fun main(str[] args) num {
+  // Every editor that spawns `fls` bare, over PATH, needs the same
+  // stdlib-location fallback `fun build` already has - without it, an
+  // editor with no override of its own (and no `./stdlib/std` to walk
+  // up to, since the opened project isn't this compiler's own
+  // checkout) fails every `use std.*` with "import not found".
+  ensure_stdlib_dir_env();
   // Normally launched by an editor with no args, over stdio. `--version`
   // and `--help` exist for installers and PATH debugging.
   if args[1] != 0 {
