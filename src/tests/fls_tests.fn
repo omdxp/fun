@@ -1101,6 +1101,44 @@ test "a method completion item's own labelDetails excludes the implicit self" {
   assert contains(out, `"labelDetails":{"detail":"(num n)","description":"flag"}`), "expected self excluded from the method's own labelDetails, matching its snippet";
 }
 
+test "dot-completion on a defaulted parameter resolves the real enum, not every name in scope" {
+  // User-reported, from `std.log`'s own `logger_init(.Debug, .Text)`:
+  // completion on a bare `.Variant` argument only worked for the
+  // first parameter. The second parameter here (and the third, past
+  // two defaults in a row) both carry a default value of their own
+  // (`Color c = .Red`), which used to make `bare_type_from_detail`
+  // split the rendered parameter piece at the wrong point and fall
+  // through to dumping every declared name instead of the real enum.
+  str src = `enum Color { Red, Green, Blue }
+  `fun paint(num id, Color c = .Red, Color other = .Blue) num {
+  `  ret id;
+  `}
+  `fun caller() num {
+  `  ret paint(1, .Green, .Blue);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///defaulted_param_probe.fn";
+  doc.path = "defaulted_param_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // "  ret paint(1, .Green, .Blue);" - right after the first dot
+  // (the second argument, `Color c`'s own position).
+  str out_second = completion(&reads, doc, 5, 16, false);
+  assert contains(out_second, `"label":"Red"`) && contains(out_second, `"label":"Green"`) &&
+    contains(out_second, `"label":"Blue"`), "expected Color's own variants for the second argument";
+  assert !contains(out_second, `"label":"paint"`), "expected a real enum match, not every declared name";
+
+  // Right after the second dot (the third argument, `Color other`'s
+  // own position - past two defaulted parameters now, not just one).
+  str out_third = completion(&reads, doc, 5, 24, false);
+  assert contains(out_third, `"label":"Red"`) && contains(out_third, `"label":"Green"`) &&
+    contains(out_third, `"label":"Blue"`), "expected Color's own variants for the third argument too";
+  assert !contains(out_third, `"label":"paint"`), "expected a real enum match, not every declared name";
+}
+
 test "completion offers a call snippet with one tab stop per parameter" {
   str src = `fun probe(str name, num count) flag {
   `  ret true;

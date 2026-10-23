@@ -1491,11 +1491,19 @@ pub fun free_params_vec(Vec<str>* params) {
 
 // The declared type half of one rendered parameter piece
 // (`split_signature_params`'s own output: "T a" -> "T", "Vec<T>* data"
-// -> "Vec<T>*"), the inverse of inlay_hints.fn's own
-// param_name_from_piece (which keeps the trailing name instead). Kept
-// as its own copy here rather than imported, since inlay_hints.fn
-// already imports this file and importing it back would cycle.
-fun _param_type_from_piece(str piece) str {
+// -> "Vec<T>*", "LogFormat format = .Text" -> "LogFormat"), the
+// inverse of inlay_hints.fn's own param_name_from_piece (which keeps
+// the trailing name instead). `bare_type_from_detail` looks similar
+// but isn't a substitute here: it finds the *last* top-level space to
+// split type from name, which lands inside (or right after) a
+// default value's own text instead of at the real type/name boundary
+// - this strips any `" = ..."` suffix first, then walks back over the
+// name's own identifier characters, so it works regardless of which
+// parameter (or how many earlier ones also have defaults) the piece
+// came from. Kept as its own copy here rather than imported, since
+// inlay_hints.fn already imports this file and importing it back
+// would cycle.
+pub fun _param_type_from_piece(str piece) str {
   str name_part = piece;
   num eq = index_of_str(piece, " = ");
   flag owned = false;
