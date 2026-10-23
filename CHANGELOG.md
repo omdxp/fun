@@ -1,3 +1,68 @@
+## [0.70.2] - 2026-10-23
+
+### 🐛 Bug Fixes
+
+- *(codegen)* Avoid a real clang-16 wasm32-wasi frontend crash
+- *(codegen)* Avoid a real clang-16 wasm32-wasi frontend crash (#215)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.70.2
+## [0.70.1] - 2026-10-22
+
+### 🐛 Bug Fixes
+
+- Keep std.process out of import_resolver.fn, broke the wasm build
+- Real wasm-build regression from PR #213's find_on_path (#214)
+
+### ⚙️ Miscellaneous Tasks
+
+- Compile both wasm-targeted compiler frontends every run
+- Bump version to 0.70.1
+## [0.70.0] - 2026-10-22
+
+### 🚀 Features
+
+- *(process)* Add find_on_path, shelling out to command -v/where
+- *(init)* Derive package/target names from the working directory
+- *(playground)* Add Fizz Buzz, Enums + Fit, and Error Handling samples
+- Add the no_cover warning id for per-function coverage exclusion
+- *(cover)* Make -cover actually respect allow no_cover
+- *(fls)* Hover and completion support for no_cover
+
+### 🐛 Bug Fixes
+
+- Stdlib_root's walk-up never actually reached the working directory
+- *(net)* Dedupe close() declaration with std.c.process
+- *(fls)* Resolve a method through an import alias by its real module
+- *(test)* Use the real .exe path and backslashes for the fallback test on Windows
+- *(fls)* Infer a destructured let's own element type from its initializer
+- *(test)* Drop nested quotes in the Windows fallback-test command
+- *(test)* Clear FUN_STDLIB_DIR without a trailing space before &&
+- Stdlib resolution for fresh fun init/build after fun upgrade (#213)
+
+### 📚 Documentation
+
+- *(memcheck)* Fill doc-comment gaps and add blank lines between fns
+- Document the no_cover warning id
+
+### 🚜 Refactor
+
+- Split the installed-fun stdlib fallback into its own function
+
+### 🧪 Testing
+
+- Cover stdlib_root's walk-up fix and find_on_path/current_dir
+- Drop the stdlib fallback subprocess test, verified by hand instead
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Update CHANGELOG.md
+- Bump version to 0.70.0
+
+### 💼 Other
+
+- Temporary stderr trace for the Windows stdlib fallback bug
 ## [0.69.0] - 2026-10-21
 
 ### 🚀 Features
