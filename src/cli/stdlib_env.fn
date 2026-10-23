@@ -1,0 +1,80 @@
+// Shared fallback for resolving the real stdlib location when
+// `FUN_STDLIB_DIR` isn't set and walking up from the current directory
+// finds nothing - used by both the compiler's own entry point
+// (`main.fn`) and the language server's (`src/fls/main.fn`). Every
+// editor that spawns `fls` bare, over `PATH`, with no stdlib override
+// of its own needs this exact same fallback `fun build` already has;
+// without it, each editor extension has to reinvent it (the VS Code
+// extension does, at some length) or hit "import not found" outright
+// (confirmed as a real Zed report).
+
+use ..parser.import_resolver;
+use std.string;
+use std.sys;
+use std.fs;
+use std.path;
+use std.process;
+
+// Sets `FUN_STDLIB_DIR` for the rest of this process when it isn't
+// already set, from wherever `PATH` would resolve this same `fun` (or
+// `fls`) to right now - what every real release bundle (and `fun
+// upgrade`) actually lays out is `<prefix>/bin/fun` beside `<prefix>/
+// share/fun/std`. A no-op when the override is already set, or
+// neither binary is on `PATH`, or its own prefix has no real
+// `share/fun/std` beside it: `import_resolver.fn`'s own walk-up (or a
+// still-unset `FUN_STDLIB_DIR`, reported honestly as "import not
+// found") covers every other case already.
+//
+// Deliberately kept out of `stdlib_root()` itself: `import_resolver.fn`
+// is also what the wasm-targeted frontends (`lower.fn`/
+// `wasm_frontend_main.fn`/`wasm_fls_main.fn`) import to resolve a
+// std.* import inside a browser sandbox, and `std.process` (needed to
+// ask `PATH` at all) transitively pulls in `std.c.process`, which
+// trips `codegen.fn`'s own `emscripten_mode` rejection the instant
+// anything imports it - confirmed directly, not theoretical, as a real
+// website build failing outright. Neither `main.fn` nor `fls/main.fn`
+// is ever wasm-targeted, so asking `PATH` here costs that invariant
+// nothing.
+pub fun ensure_stdlib_dir_env() {
+  str configured = env("FUN_STDLIB_DIR");
+  if configured != nil && !equals(configured, "") {
+    ret;
+  }
+  // `stdlib_root`'s own walk-up (from the current directory, a stand-in
+  // for whatever input file this process goes on to compile or serve)
+  // already wins over asking `PATH` at all; only its own last-resort
+  // bare literal sentinel means walking up genuinely found nothing.
+  // Without this check, running inside this compiler's own source
+  // checkout - which already has a real `./stdlib/std` right there -
+  // would still reach for whatever's installed on `PATH` instead,
+  // silently resolving against a stale, already-installed stdlib
+  // rather than this checkout's own newer one.
+  str walked_up = stdlib_root(".");
+  flag already_resolved = !equals(walked_up, "stdlib");
+  free(walked_up);
+  if already_resolved {
+    ret;
+  }
+  str fun_path = find_on_path("fun");
+  if equals(fun_path, "") {
+    free(fun_path);
+    fun_path = find_on_path("fls");
+  }
+  if equals(fun_path, "") {
+    free(fun_path);
+    ret;
+  }
+  str bin_dir = dirname(fun_path);
+  str prefix = dirname(bin_dir);
+  free(bin_dir);
+  free(fun_path);
+  str candidate = path_join(prefix, "share/fun");
+  free(prefix);
+  str probe = path_join(candidate, "std");
+  flag found = is_dir(probe);
+  free(probe);
+  if found {
+    let _rc = set_env("FUN_STDLIB_DIR", candidate);
+  }
+  free(candidate);
+}

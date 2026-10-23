@@ -245,9 +245,27 @@ pub fun deps_project_root(str input_file_path) str {
       ret dir;
     }
     let parent = dirname(dir);
-    if equals(parent, dir) || equals(parent, "") {
+    if equals(parent, "") {
       free(parent);
       break;
+    }
+    if equals(parent, dir) {
+      // Same `dirname` bare-segment contract `stdlib_root` already
+      // works around: a slash-less relative segment (e.g. `"src"`)
+      // hands back itself unchanged, not `"."` - without retrying
+      // `"."` once, the walk stops one level short of ever checking
+      // the working directory itself, and never reaches any real
+      // ancestor above it either (a `fun.toml` one level above a
+      // nested package's own directory, in a monorepo-style layout,
+      // would silently never be found).
+      free(parent);
+      if equals(dir, ".") {
+        break;
+      }
+      free(dir);
+      dir = substr(".", 0, 1);
+      depth = depth + 1;
+      continue;
     }
     free(dir);
     dir = parent;
@@ -1703,6 +1721,17 @@ test "stdlib_root finds the real stdlib walking up from a deep relative path wit
   assert ends_with(root, "stdlib"), "expected the real stdlib root to be found walking up, not the bare literal fallback";
   str probe = path_join(root, "std");
   assert is_dir(probe), "expected a real stdlib/std directory at the resolved root";
+}
+
+test "deps_project_root finds the real fun.toml walking up from a deep relative path with no slash left to strip" {
+  // Same `dirname("src")` bare-segment shape as `stdlib_root`'s own
+  // regression test above, now exercised through `deps_project_root`'s
+  // own, separate walk-up loop: before this fix it stopped one level
+  // short of ever retrying "." (this repo's own root, where `fun.toml`
+  // genuinely lives), falling through to the same bare-literal
+  // fallback by coincidence rather than by actually finding it.
+  let root = deps_project_root("src/parser/import_resolver.fn");
+  assert equals(root, "."), "expected the real project root to be found walking up to this repo's own fun.toml";
 }
 
 sequential test "stdlib_root honors an explicit FUN_STDLIB_DIR override before walking up at all" {
