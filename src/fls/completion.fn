@@ -1669,7 +1669,7 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     defer free_params_vec(&params);
     if arg_index < params.len {
       free(text);
-      ret bare_type_from_detail(params.get(arg_index));
+      ret _param_type_from_piece(params.get(arg_index));
     }
     free(text);
   }

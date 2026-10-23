@@ -11,8 +11,7 @@ use std.string;
 use std.vec;
 use std.time;
 use std.fs;
-
-use std.fs;
+use std.c.mem;
 
 // Log severity levels with explicit ordered values, so filtering is a stable
 // integer comparison and there's room to insert levels between the existing ones.
@@ -355,6 +354,13 @@ impl LogRecord {
     _ = dest.write(line);
     if self.level >= LogLevel.Fatal {
       _ = dest.flush();
+      // Every path to a Fatal-level record ends here - the plain
+      // `fatal(msg)` convenience method and the `fatal_r(msg)...`
+      // builder both go through `record()` then `emit()`, so this is
+      // the one place that needs to terminate for both to behave
+      // alike. The sink is flushed first, so the message is never
+      // lost to a buffered write the exit cuts short.
+      exit(1);
     }
   }
 }
@@ -439,7 +445,9 @@ impl Logger {
   pub error_r(str msg) LogRecord {
     ret self.record(.Error, msg);
   }
-  // Open a Fatal-level builder record for `msg`.
+  // Open a Fatal-level builder record for `msg`. `emit()` terminates
+  // the process once called, same as `fatal` - attach whatever fields
+  // are needed first, since there is no later chance to.
   pub fatal_r(str msg) LogRecord {
     ret self.record(.Fatal, msg);
   }
@@ -470,7 +478,8 @@ impl Logger {
   pub error(str msg) {
     self.log(.Error, msg);
   }
-  // Logs a fatal-level message. The emitter flushes its sink afterward.
+  // Logs a fatal-level message, then terminates the process with
+  // exit code 1 (see `emit()`'s own note).
   pub fatal(str msg) {
     self.log(.Fatal, msg);
   }
@@ -625,17 +634,24 @@ test "every level has its uppercase name" {
 }
 
 test "field constructors and the builder attach typed fields" {
+  // `fatal_r`/`fatal` excluded: `emit()` terminates the process on a
+  // Fatal-level record (see its own note), which would kill this
+  // whole test binary rather than just this one test. `error_r`
+  // stands in for the fifth builder level instead - verified
+  // manually that `fatal_r(...).emit()` really does exit, the same
+  // way `fatal`'s own removal from "the one-off helpers" test below
+  // documents.
   str path = "fun-out/log_fields_test.txt";
   Logger l = _test_logger(path, .Trace, .Text);
   l.trace_r("t").with(fstr("a", "x")).with(fnum("b", 2)).with(fdec("c", 1.5)).with(fflag("d", true)).emit();
   l.debug_r("d").emit();
   l.warn_r("w").emit();
-  l.fatal_r("f").emit();
+  l.error_r("e").emit();
   str out = _test_output(l, path);
   assert contains(out, "[TRACE] [app] t a=x b=2 c=1.5"), "expected the four field kinds in order";
   assert contains(out, "d=true"), "expected the flag field";
   assert contains(out, "[DEBUG] [app] d\n") && contains(out, "[WARN] [app] w\n") &&
-    contains(out, "[FATAL] [app] f\n"), "expected each builder level";
+    contains(out, "[ERROR] [app] e\n"), "expected each builder level";
   }
 
 test "log_tag, log_num, log_dec and log_flag write a labelled field" {
@@ -663,12 +679,18 @@ test "the fluent setters change format, sink and name" {
 }
 
 test "the one-off helpers log through a default logger" {
+  // `log_fatal`/`Logger.fatal` deliberately excluded: both terminate
+  // the process (`exit(1)`, after flushing), which would kill this
+  // whole test binary rather than just this one test. Not covered by
+  // an automated test here for the same reason - verified manually
+  // instead, by compiling and running a one-line fixture outside the
+  // test suite and confirming both the printed message and the real
+  // exit code.
   log_trace("one-off trace");
   log_debug("one-off debug");
   log_info("one-off info");
   log_warn("one-off warn");
   log_error("one-off error");
-  log_fatal("one-off fatal");
   log(.Info, "one-off generic");
   allow assert_constant, "documents that reaching this line means every helper returned";
   assert true, "expected every helper to return";

@@ -1549,7 +1549,7 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
   if arg_index >= params.len {
     ret "";
   }
-  ret bare_type_from_detail(params.get(arg_index));
+  ret _param_type_from_piece(params.get(arg_index));
 }
 
 fun _hover_result(str markdown, Span s) str {
