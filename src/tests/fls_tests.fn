@@ -8956,3 +8956,46 @@ test "a variant constructor whose argument does not fit its payload is diagnosed
   found.free();
   assert saw, "expected a diagnostic on the ret line naming the mismatched payload argument";
 }
+
+test "hover and goto-definition resolve a bare variant shorthand passed as a chained call's own argument" {
+  // User-reported: `l.debug_r("msg").field("some", .Str("value"))` -
+  // hover (and goto-definition) on `.Str` itself came back empty.
+  // Two separate bugs, both inside `_call_arg_expected_type`'s own
+  // resolution of the enclosing call's callee:
+  //
+  // 1. `_is_dot_shorthand(tokens, callee)` (`callee` = `field`) only
+  // ever excluded a receiver that's a plain identifier
+  // (`x.field`), never one ending a longer chain
+  // (`debug_r("msg").field`, a call's own closing `)`) - so
+  // `field` itself was misread as if it were a bare `.Variant`
+  // shorthand name needing an enum context, took the wrong branch
+  // entirely, and never reached the real method lookup below it.
+  // 2. Once that was fixed, the method branch's own receiver-type
+  // resolution used `chain_ending_type` with a manually-found
+  // boundary token (the token right before the connecting dot),
+  // which only works for a single-hop receiver - `chain_receiver_type`
+  // (the same call every other hover/completion site in this file
+  // already uses) takes the member name itself and walks its own
+  // receiver back correctly for a chain of any length.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Text, .Stdout, true, "Logger v1", true);
+  `  l.debug_r("msg").field("some", .Str("value"));
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chained_arg_shorthand.fn";
+  doc.path = "chained_arg_shorthand.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // `.Str` sits at line 4 (0-indexed), columns 34-36.
+  str hovered = hover(&reads, doc, 4, 35);
+  assert contains(hovered, "A string value"), "expected the variant's own doc comment";
+  assert contains(hovered, "Str(str) = 0"), "expected the variant's own signature";
+
+  str def = definition(&reads, doc, 4, 35);
+  assert contains(def, "stdlib/std/log.fn"), "expected goto-definition to land in log.fn";
+}
