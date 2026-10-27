@@ -17121,6 +17121,13 @@ impl Codegen {
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
       self.state.write("static _Thread_local jmp_buf __fun_test_jmp;\n");
+      // Unset by default: a test that crashes outright (a panic, a real
+      // signal) never gets to print its own "... PASS"/"... FAIL" line, so
+      // a captured log only ever shows the tests that finished before it,
+      // not which one was actually running when it happened. Set
+      // FUN_TEST_TRACE=1 to print each test's name right before dispatch,
+      // flushed immediately, so that one is identifiable too.
+      self.state.write("static int __fun_test_trace = 0;\n");
       // Windows defaults to a 1 MB thread stack, which the parser's recursive
       // descent exhausts before its own depth guard fires on deeply-nested
       // expressions.  Linux/macOS both default to 8 MB, which is enough for a
@@ -19724,6 +19731,7 @@ impl Codegen {
     self.state.write("        pthread_mutex_unlock(&ctx->mu);\n");
     self.state.write("        if (__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("        char* name = __fun_test_name(i);\n");
+    self.state.write("        if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n");
     self.state.write("        int ok;\n");
     self.state.write("        clock_t __fun_t0 = clock();\n");
     self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
@@ -19753,6 +19761,7 @@ impl Codegen {
     self.state.write("    int argc = __fun_test_a->argc;\n");
     self.state.write("    char** argv = __fun_test_a->argv;\n");
     self.state.write("    const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
+    self.state.write("    { const char* __fun_tt = getenv(\"FUN_TEST_TRACE\"); __fun_test_trace = (__fun_tt && __fun_tt[0] && strcmp(__fun_tt, \"0\") != 0); }\n");
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
@@ -19792,6 +19801,7 @@ impl Codegen {
     self.state.write("        for (int64_t i = 0; i < total; i++) {\n");
     self.state.write("            if (!__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("            char* name = __fun_test_name(i);\n");
+    self.state.write("            if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n");
     self.state.write("            ran++;\n");
     self.state.write("            clock_t __fun_t0 = clock();\n");
     self.state.write("            if (setjmp(__fun_test_jmp) == 0) {\n");
