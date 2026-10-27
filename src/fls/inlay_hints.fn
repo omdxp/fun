@@ -24,9 +24,14 @@ use std.option;
 use std.ctype;
 use std.c.mem;
 
-// Every `let name = value;` local within lines `start_line` through
-// `end_line` (both 0-indexed, inclusive) of `doc`, each as a type
-// hint positioned right after its own name.
+// Every `let name = value;`/`const name = value;` local with no
+// explicit type within lines `start_line` through `end_line` (both
+// 0-indexed, inclusive) of `doc`, each as a type hint positioned
+// right after its own name. `const` infers its type the same way
+// `let` does whenever it's written bare (`const name = ...;`, not
+// `const Type name = ...;`) - the sentinel and every inference shape
+// below are identical either way, so both keywords need the hint
+// equally; only `let` used to get one.
 pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_line) str {
   Analyzed read = cache.of(doc);
   if !read.parsed || !read.lexed {
@@ -42,7 +47,8 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != .Keyword || !equals(token_word(t), "let") {
+    if t.type != .Keyword ||
+      !(equals(token_word(t), "let") || equals(token_word(t), "const")) {
       continue;
     }
     num src_line = t.pos.line;

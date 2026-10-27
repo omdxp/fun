@@ -455,6 +455,64 @@ test "a method's own default does not collide with its receiver" {
 // assert contains(out, "show__num((&n), false)"), "expected the default filled at the monomorphized call";
 // }
 
+test "a method chain's own second-innermost call is not evaluated twice" {
+  // User-reported, from a real std.log sample: `l.debug_r(...).field(...)
+  // .str_field(...).emit();` emitted `debug_r(...)` TWICE - once into a
+  // temp nothing ever referenced (a real `-Wunused-variable`), once into
+  // the temp `field(...)` actually used. Root cause: `_resolve_call_rtype`
+  // (asked only for a call's own return TYPE) resolved a call-shaped
+  // receiver through `resolve_field_chain`, which renders and hoists a
+  // real temp for ANY call-shaped receiver unconditionally, as a side
+  // effect of answering "what type does this produce" - then the real
+  // emission right after resolved (and hoisted) that same receiver again.
+  // Reproduced here self-contained, crossing two types the same way
+  // (`Box` to `Result2`, mirroring `Logger` to `LogRecord`) - staying on
+  // one type throughout does not trigger it.
+  str src = `use std.c.io;
+  `compound Box { num n; }
+  `compound Result2 { num v; }
+  `impl Box {
+  `  pub start() Result2 { Result2 r; r.v = self.n; ret r; }
+  `}
+  `impl Result2 {
+  `  pub bump() Result2 { Result2 r2; r2.v = self.v + 1; ret r2; }
+  `  pub value() num { ret self.v; }
+  `}
+  `fun make_box() Box { Box b; b.n = 5; ret b; }
+  `fun main() num {
+  `  printf("%lld\n", make_box().start().bump().value());
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a method chain's own second-innermost call is not evaluated twice");
+  num make_box_calls = count(out, "= make_box()");
+  assert make_box_calls == 1, format("expected make_box()'s own call emitted exactly once, found {num}", make_box_calls);
+}
+
+test "a const local's own compound value never gets a conflicting C const qualifier" {
+  // User-reported: `const l = logger_init(...);` emitted `const Logger
+  // l = ...;` in C, then `l.debug_r(...)` passed `&l` (a `const
+  // Logger*`) to a method declared `Logger* self` (never const - Fun
+  // has no notion of a non-mutating method) - a real
+  // `-Wincompatible-pointer-types-discards-qualifiers` warning. Fun's
+  // own typechecker already rejects reassigning a const binding
+  // regardless of what C says, so the C qualifier was always
+  // redundant for a compound value, and actively wrong once any
+  // method is called on it. Reproduced self-contained here.
+  str src = `use std.c.io;
+  `compound Box { num n; }
+  `impl Box {
+  `  pub show() { printf("%lld\n", self.n); }
+  `}
+  `fun make_box() Box { Box b; b.n = 5; ret b; }
+  `fun main() num {
+  `  const x = make_box();
+  `  x.show();
+  `  ret 0;
+  `}`;
+  let out = emit_c(src, "a const local's own compound value never gets a conflicting C const qualifier");
+  assert !contains(out, "const Box x"), "expected no C const qualifier on a const-bound compound local";
+}
+
 test "shape-impl method call chains onto a call-expression receiver" {
   str src = `use std.c.io;
   `shape Sized { len() num; is_empty() flag; }

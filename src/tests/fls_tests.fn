@@ -239,6 +239,32 @@ test "hover and inlay hints show a let-inferred local's own concrete generic typ
   assert contains(hints, `": Option<num>"`), "expected the same concrete generic arg in the inlay hint";
 }
 
+test "a const local gets the same inferred-type inlay hint a let local already does" {
+  // User-reported: `const l = logger_init(...);` showed no inlay hint
+  // at all, unlike the identical `let l = logger_init(...);` - the
+  // hint scanner only ever looked for the literal `let` keyword token,
+  // never `const`, even though both infer their own type the exact
+  // same way (same `__let_infer__` sentinel, same codegen-time
+  // inference).
+  str src = `fun make() num {
+  `  ret 5;
+  `}
+  `fun caller() num {
+  `  const n = make();
+  `  ret n;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///const_hint_probe.fn";
+  doc.path = "const_hint_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `": num"`), "expected a const-inferred local to get the same inlay hint a let-inferred one does";
+}
+
 test "hover shows a ternary-bound local's own branch type, not the condition's" {
   str src = `fun pick(flag cond) num {
   `  let parsed = cond ? 1 : 2;
@@ -1155,6 +1181,39 @@ test "dot-completion resolves a method chain three calls deep, not just the firs
   str out = completion(&reads, doc, 4, 37, false);
   assert contains(out, `"label":"emit"`) && contains(out, `"label":"with"`),
   "expected LogRecord's own members two calls deep in the chain, not just one";
+}
+
+test "dot-completion on a bare-dot argument resolves a method call's own parameter, not just a plain function's" {
+  // User-reported: `l.debug_r("x").field("some", .)` offered nothing
+  // relevant for the bare-dot `FieldVal` argument - `_call_arg_type_
+  // from_tokens` only ever resolved a plain top-level call's own
+  // parameter type, explicitly giving up the moment the callee turned
+  // out to be a method (`recv.method(.`), since resolving the
+  // receiver needed more than this token-only tier reached at the
+  // time. Now resolves the receiver through the same whole-chain
+  // resolver regular dot-completion already uses, then looks the
+  // method up on it.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Json);
+  `  l.debug_r("x").field("some", .;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///method_arg_dot_probe.fn";
+  doc.path = "method_arg_dot_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the bare dot, the second argument of `field(...)`,
+  // whose own receiver (`debug_r("x")`'s result) is itself a call.
+  str out = completion(&reads, doc, 4, 32, false);
+  assert contains(out, `"label":"Str"`) && contains(out, `"label":"Num"`) &&
+    contains(out, `"label":"Dec"`) && contains(out, `"label":"Flag"`),
+    "expected FieldVal's own variants for field()'s second parameter";
+  assert !contains(out, `"label":"debug_r"`), "expected a real method resolution, not every declared name";
 }
 
 test "dot-completion on a defaulted parameter resolves the real enum, not every name in scope" {
