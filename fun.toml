@@ -1,6 +1,6 @@
 [package]
 name = "fun"
-version = "0.72.0"
+version = "0.72.1"
 description = "A statically typed programming language that transpiles to C, built for predictable performance, straightforward tooling, and portable deployment."
 license = "MIT"
 authors = ["omdxp <omar@omdxp.com>"]
