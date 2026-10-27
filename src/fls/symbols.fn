@@ -6227,7 +6227,7 @@ fun _fls_is_known_concrete_type_name(Vec<Node>* program, str name) flag {
   ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
     equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
     equals(name, "void");
-  }
+}
 
 fun _fls_is_generic_compound(Vec<Node>* program, str name) flag {
   num i = 0;

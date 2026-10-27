@@ -422,6 +422,65 @@ test "a boolean chain nested inside a call's own parens defers to the call's own
   assert !contains(got, "\n\n"), "expected no blank line introduced by the nested chain";
 }
 
+test "wraps an over-long method chain, one call per line rather than filling" {
+  // User-reported: a long chained call (`l.debug_r(...).field(...)
+  // .str_field(...).emit();`, from std.log's own real usage) stayed on
+  // one line regardless of width, unlike a boolean chain, which
+  // already wrapped. Method chains read one call per line once
+  // over-long (the conventional style elsewhere too, e.g. Prettier/
+  // rustfmt), not packed the way a boolean chain's own operands are.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Text, .Stdout, true, "Logger v1", true);
+  `  l.debug_r("This is a debug message").field("some", .Str("value")).str_field("str", "value").emit();
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(
+    got,
+    "  l.debug_r(\"This is a debug message\")\n    .field(\"some\", .Str(\"value\"))\n    .str_field(\"str\", \"value\")\n    .emit();\n"
+  ), "expected one chained call per line, each indented one level under the statement";
+  num i = 0;
+  flag over_width = false;
+  Vec<str> lines = split(got, '\n');
+  defer lines.free();
+  for i < lines.len {
+    if len(lines.get(i)) > 100 {
+      over_width = true;
+    }
+    i = i + 1;
+  }
+  assert !over_width, "expected every wrapped line to stay within the width budget";
+}
+
+test "a method chain that already fits stays on one line" {
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Text, .Stdout, true, "Logger v1", true);
+  `  l.debug_r("hi").emit();
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, `l.debug_r("hi").emit();`), "expected a short chain to stay exactly as written, unwrapped";
+}
+
+test "a wrapped method chain's own continuation indent doesn't leak into the next statement" {
+  // Regression caught alongside the method-chain wrap feature itself:
+  // `continuation` (the flag that indents a wrapped chain's own
+  // follow-on lines) was only ever recomputed at the start of a new
+  // physical line, which a block's own closing `}` never is from the
+  // formatter's point of view - so it kept whatever value the chain
+  // left it at, pushing the closing brace one level too deep.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Text, .Stdout, true, "Logger v1", true);
+  `  l.debug_r("This is a debug message").field("some", .Str("value")).str_field("str", "value").emit();
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n    .emit();\n}"), "expected the function's own closing brace back at column 0, not indented under the wrapped chain";
+}
+
 test "a wrapped chain followed by an already-multi-line nested call keeps the call's own closer at base indent" {
   // Regression: `bool_chain_wrap` staying set for the rest of the
   // statement once leaked into a LATER, unrelated nested call whose

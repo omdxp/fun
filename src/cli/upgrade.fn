@@ -555,7 +555,7 @@ test "_under_program_files is always false off Windows" {
   // can't be faked to exercise its other branch from here.
   assert !_under_program_files("C:\\Program Files\\fun\\bin\\fun.exe") ||
     runtime_backend_is_windows(), "expected false off Windows regardless of the path";
-  }
+}
 
 test "_release_target names the three published platforms" {
   assert equals(_release_target("linux", "x86_64"), "x86_64-linux-gnu"), "expected the linux target";

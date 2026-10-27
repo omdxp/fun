@@ -152,7 +152,7 @@ impl Analysis {
     ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
       equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
       equals(name, "void");
-    }
+  }
 
   // Mirrors `Checker._auto_resolve_bare_generic_shape_target`: a bare
   // generic compound name (`Box(b)`, no `<Args>`) resolves to its one

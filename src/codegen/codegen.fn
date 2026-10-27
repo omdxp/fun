@@ -10884,7 +10884,7 @@ impl Codegen {
         ret self._contains_nested_dotted_call(t.cond) ||
           self._contains_nested_dotted_call(t.then_val) ||
           self._contains_nested_dotted_call(t.else_val);
-        }
+      }
       .Bracket(inner) -> { ret self._contains_nested_dotted_call(inner); }
       .CompoundInit(c) -> {
         for f : c.fields {
@@ -10917,20 +10917,20 @@ impl Codegen {
       .StatementIf(s) -> {
         ret self._contains_nested_dotted_call(s.condition) ||
           self._contains_nested_dotted_call(s.body);
-        }
+      }
       .StatementFor(kind) -> {
         fit kind {
           .Cond(c) -> {
             ret (c.has_condition && self._contains_nested_dotted_call(c.condition)) ||
               self._contains_nested_dotted_call(c.body);
-            }
+          }
           _ -> { ret false; }
         }
       }
       .StatementAssert(a) -> {
         ret self._contains_nested_dotted_call(a.condition) ||
           (a.has_message && self._contains_nested_dotted_call(a.message));
-        }
+      }
       _ -> { ret false; }
     }
   }
@@ -12349,7 +12349,7 @@ impl Codegen {
     ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
       equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
       equals(name, "void");
-    }
+  }
 
   // Mirrors `Checker._auto_resolve_bare_generic_shape_target` (each
   // layer keeps its own copy, same as every other piece of this
@@ -12845,7 +12845,8 @@ impl Codegen {
             }
             // The receiver may be a chained field access rather than a
             // bare local, so it resolves via `resolve_field_chain`.
-            let owner_type_name = self.resolve_field_chain(recv_e.left)?!(.UnsupportedNode).type_name;
+            let owner_type_name = self.resolve_field_chain(recv_e.left)?!(.UnsupportedNode)
+              .type_name;
             str method_name = "";
             fit recv_e.right.kind {
               .Identifier(n) -> { method_name = n; }
@@ -13771,7 +13772,7 @@ impl Codegen {
     }
     ret contains(node.pos.filename, "/std/c/") ||
       contains(node.pos.filename, "\\std\\c\\");
-    }
+  }
 
   // Emits the wrapper C functions an `async` function or method needs
   // around its ordinary body: a payload struct holding its args and

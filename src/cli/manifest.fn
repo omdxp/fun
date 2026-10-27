@@ -996,7 +996,7 @@ test "[coverage] reads a minimum and a list of excluded paths" {
   assert m.cover_exclude.len == 2, "expected both exclusions";
   assert equals(m.cover_exclude.get(0), "examples") &&
     equals(m.cover_exclude.get(1), "scripts/tools"), "expected the paths without quotes";
-  }
+}
 
 test "[coverage] min accepts one decimal and rejects out-of-range values" {
   let frac = parse_manifest("[package]\nname = \"demo\"\n\n[coverage]\nmin = 87.5\n");

@@ -502,7 +502,7 @@ pub fun compiler_is_emscripten(str cc) flag {
   let name = basename(cc);
   ret equals(name, "emcc") || equals(name, "em++") || equals(name, "emcc.bat") ||
     equals(name, "em++.bat");
-  }
+}
 
 // Lowers `input` to C at `out_path`, with `defines` available to the
 // program as constants. The error text names the stage that rejected the
