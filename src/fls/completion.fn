@@ -2331,7 +2331,7 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
       paren_depth = 1;
       continue;
     }
-    if token_is_operator(t, ".") {
+    if token_is_dot_like(t) {
       last_was_dot = true;
       continue;
     }
@@ -2387,7 +2387,7 @@ fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num characte
       paren_depth = 1;
       continue;
     }
-    if token_is_operator(t, ".") {
+    if token_is_dot_like(t) {
       last_was_dot = true;
       continue;
     }
@@ -2475,7 +2475,7 @@ fun chain_tail_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache*
   let after = token_after(tokens, idx + 1);
   flag is_call = after.is_some() && token_is_operator(after.unwrap(), "(");
   let before = token_before(tokens, idx);
-  flag has_dot_prefix = before.is_some() && token_is_operator(before.unwrap(), ".");
+  flag has_dot_prefix = before.is_some() && token_is_dot_like(before.unwrap());
 
   if !has_dot_prefix {
     if !is_call {
@@ -2543,7 +2543,7 @@ fun chain_tail_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache*
   Token prev_tok = tokens.get(prev_idx);
   let prev_before = token_before(tokens, prev_idx);
   flag prev_has_dot = prev_before.is_some() &&
-    token_is_operator(prev_before.unwrap(), ".");
+  token_is_dot_like(prev_before.unwrap());
   let prev_after = token_after(tokens, prev_idx + 1);
   flag prev_is_call = prev_after.is_some() && token_is_operator(prev_after.unwrap(), "(");
   // `_receiver_type_from_tokens`'s own result is borrowed (a `token_
@@ -2616,15 +2616,17 @@ fun _current_word(Vec<Token>* tokens, num line, num character) str {
 }
 
 // The token the receiver before `line`/`character` was written as,
-// mirroring `_receiver_before`'s own scan, but keeping the token
-// itself rather than just its word: what `chain_receiver_type` needs
-// to walk a whole dotted chain (`a.b.` offering `b`'s own fields, not
-// failing because `b` was never declared as a local).
+// mirroring `_receiver_before`'s own scan (including its own paren
+// skip, for a receiver ending in a chained call), but keeping the
+// token itself rather than just its word: what `chain_receiver_type`
+// needs to walk a whole dotted chain (`a.b.` offering `b`'s own
+// fields, not failing because `b` was never declared as a local).
 fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<Token> {
   num source_line = line + 1;
   num source_col = character + 1;
   Option<Token> receiver = .None;
   flag last_was_dot = false;
+  num paren_depth = 0;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -2635,7 +2637,19 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
     if t.pos.line != source_line || t.pos.end_col > source_col {
       continue;
     }
-    if token_is_operator(t, ".") {
+    if paren_depth > 0 {
+      if token_is_operator(t, "(") {
+        paren_depth = paren_depth + 1;
+      } elif token_is_symbol(t, ')') {
+        paren_depth = paren_depth - 1;
+      }
+      continue;
+    }
+    if token_is_operator(t, "(") {
+      paren_depth = 1;
+      continue;
+    }
+    if token_is_dot_like(t) {
       last_was_dot = true;
       continue;
     }
@@ -2678,6 +2692,21 @@ fun _receiver_own_type(
     // Not a value at all: `Color.Green` names the enum itself as its
     // own receiver, the same way an alias names a module.
     ret _bare_type_name(program, token_word(receiver_tok));
+  }
+  // `receiver_tok` may itself be a method call, not a field read
+  // (`l.debug_r("msg").` - `debug_r` is `receiver_tok` here, `(` right
+  // after it) - the one shape `chain_receiver_type` alone can't tell
+  // apart, since it only ever resolves the chain *before*
+  // `receiver_tok`, never what `receiver_tok` itself is doing.
+  let receiver_after = token_after(tokens, index_of_token(tokens, receiver_tok) + 1);
+  if receiver_after.is_some() && token_is_operator(receiver_after.unwrap(), "(") {
+    Vec<str> no_method_args;
+    no_method_args.init(0);
+    let method = lookup_method(program, prefix_type, token_word(receiver_tok), no_method_args);
+    if method.is_none() {
+      ret "";
+    }
+    ret return_type_from_detail(method.unwrap().detail);
   }
   Vec<str> no_field_args;
   no_field_args.init(0);

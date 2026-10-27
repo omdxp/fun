@@ -265,6 +265,40 @@ test "a const local gets the same inferred-type inlay hint a let local already d
   assert contains(hints, `": num"`), "expected a const-inferred local to get the same inlay hint a let-inferred one does";
 }
 
+test "hover on an inferred const local resolves its real type, not the raw sentinel" {
+  // Same user report, a separate leak of the exact same underlying
+  // gap: a `const`'s own rendered detail is `"const " + <type> +
+  // " " + name`, so its unresolved form is literally `"const
+  // __let_infer__ l"` - a bare `starts_with(detail, "__let_infer__")`
+  // check (what hover, `type_name_of_local`, `local_generic_args`,
+  // and a `let`-declared-iterable's own for-loop type all used)
+  // matches a `let` local's `"__let_infer__ l"` directly, but never a
+  // `const` one's, since the sentinel no longer starts the string.
+  // Confirmed directly: hovering an inferred `const` showed `const
+  // __let_infer__ l` verbatim, `let` resolving to the real type at
+  // the same spot the whole time. `detail_is_unresolved_let_infer`
+  // (symbols.fn) now checks for either prefix.
+  str src = `fun make() num {
+  `  ret 5;
+  `}
+  `fun caller() num {
+  `  const n = make();
+  `  ret n;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///const_hover_probe.fn";
+  doc.path = "const_hover_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Hover on `n` at its own binding (line 4, "  const n = make();").
+  str hovered = hover(&reads, doc, 4, 8);
+  assert contains(hovered, "num n"), "expected the real inferred type, not the raw __let_infer__ sentinel";
+  assert !contains(hovered, "__let_infer__"), "expected the sentinel never to leak into a const's own hover";
+}
+
 test "hover shows a ternary-bound local's own branch type, not the condition's" {
   str src = `fun pick(flag cond) num {
   `  let parsed = cond ? 1 : 2;
@@ -1125,6 +1159,66 @@ test "a method completion item's own labelDetails excludes the implicit self" {
   // Right after `b.re`.
   str out = completion(&reads, doc, 7, 10, true);
   assert contains(out, `"labelDetails":{"detail":"(num n)","description":"flag"}`), "expected self excluded from the method's own labelDetails, matching its snippet";
+}
+
+test "dot-completion resolves a chained method call on an already-parsed document too" {
+  // Same chain-completion fix, but through a document that parses
+  // cleanly as-is (every earlier chain-completion test used a bare
+  // trailing dot to force the token-only fallback tier, never
+  // exercising this one) - `_receiver_token_before` had the identical
+  // paren-skip gap `_receiver_before` already got fixed for, and
+  // `_receiver_own_type` always assumed its own receiver token named
+  // a field, never a method, so `debug_r` here resolved to nothing
+  // even once the receiver was found.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Json);
+  `  l.debug_r("x").emit();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chain_completion_parsed_probe.fn";
+  doc.path = "chain_completion_parsed_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot following `debug_r("x")`'s own closing paren -
+  // the document parses fine either side of this request.
+  str out = completion(&reads, doc, 4, 17, false);
+  assert contains(out, `"label":"emit"`) && contains(out, `"label":"with"`),
+  "expected LogRecord's own members on a fully-parsed document too";
+}
+
+test "dot-completion still works through a typo'd extra dot" {
+  // User-reported: typing an accidental extra dot mid-chain
+  // (`recv.method()..next`) broke completion right after it. The
+  // lexer greedily merges two dots typed next to each other into one
+  // `..` (range) token - needed for a real `a..b`, but it reads as
+  // "no dot was typed at all" to anything checking for a bare `.`
+  // specifically. `token_is_dot_like` (positions.fn) now covers `..`
+  // everywhere the receiver-resolution family already checks for a
+  // dot.
+  str src = `use std.log;
+  `
+  `fun main() {
+  `  let l = logger_init(.Debug, .Json);
+  `  l.debug_r("x")..;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///double_dot_probe.fn";
+  doc.path = "double_dot_probe.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after both dots - the realistic trigger-character position
+  // once a reader has actually typed the accidental extra one.
+  str out = completion(&reads, doc, 4, 18, false);
+  assert contains(out, `"label":"emit"`) && contains(out, `"label":"with"`),
+  "expected LogRecord's own members despite the typo'd extra dot";
 }
 
 test "dot-completion resolves a chained method call's own return type, not every name in scope" {

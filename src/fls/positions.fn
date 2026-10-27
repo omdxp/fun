@@ -42,6 +42,22 @@ pub fun token_at(Vec<Token>* tokens, num line, num character) Option<Token> {
   ret .None;
 }
 
+// `t` is a dot the way a dot-completion scanner cares about: a plain
+// `.`, or `..` - the lexer greedily merges two dots typed right next
+// to each other into one range-operator token (needed for a real
+// `a..b`), which reads as "no dot was typed at all" to anything
+// checking for a bare `.` specifically. A reader who fat-fingers an
+// extra dot mid-chain (`recv.method()..next`) still means to trigger
+// completion right there, same as a single dot would - confirmed as
+// a real user report, not a hypothetical. Only the handful of
+// scanners in the dot-completion/receiver-resolution family check
+// this; an unrelated dot check (struct-literal disambiguation,
+// semantic-token coloring, ...) has no reason to tolerate a typo'd
+// range operator and is left alone.
+pub fun token_is_dot_like(Token t) flag {
+  ret token_is_operator(t, ".") || token_is_operator(t, "..");
+}
+
 // The token immediately before the one at `index`, skipping what carries
 // no meaning. Used to tell a bare name from one reached through a dot.
 pub fun token_before(Vec<Token>* tokens, num index) Option<Token> {
