@@ -680,6 +680,14 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   background: var(--code-surface);
   overflow: hidden;
   min-height: 480px;
+  /* Without this, nothing bounds the shell's own height outside full
+     screen (where `inset: 0` below does it for free) - `.cm-editor`'s
+     `height: 100%` then resolves against whatever its content's own
+     natural size is, so opening a long file (a stdlib reference one,
+     say) grew the whole shell - and the page around it - to fit every
+     line instead of scrolling internally, confirmed directly as a
+     real, visible break, not a theoretical one. */
+  max-height: 70vh;
   margin: 16px 0;
 }
 
@@ -693,6 +701,10 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   margin: 0;
   border-radius: 0;
   min-height: 100vh;
+  /* The non-fullscreen `max-height: 70vh` above would otherwise still
+     apply here too, clamping this to 70vh instead of the full
+     viewport `inset: 0` is meant to give back. */
+  max-height: 100vh;
 }
 
 .pg-sidebar {
@@ -805,7 +817,7 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .pg-toolbar-left { display: flex; align-items: center; gap: 10px; }
 .pg-active-file { font: 500 13px var(--mono); color: var(--muted); }
-.pg-back-button { padding: 3px 10px; font-size: 0.78rem; }
+.pg-back-button { padding: 3px 10px; font-size: 0.78rem; cursor: pointer; }
 .pg-loading-badge {
   margin-left: 10px;
   padding: 2px 8px;
