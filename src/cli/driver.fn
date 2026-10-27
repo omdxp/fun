@@ -585,7 +585,7 @@ pub fun compile_to_c_cover(
     compiler_is_msvc(cc),
     compiler_is_emscripten(cc),
     host_arch_name(),
-    true,
+    false,
     false,
     memcheck,
     memcheck_leaks
