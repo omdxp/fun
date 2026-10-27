@@ -39,15 +39,17 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   // index by one keeps it pointing at the actual argument the cursor
   // sits on rather than at `self`.
   num active_param = c.active_param;
-  if !equals(c.receiver, "") {
-    str type_name = type_name_of_local(&tokens, &program.nodes, c.receiver, doc.path, source_line);
-    if !equals(type_name, "") {
-      found = lookup_method(
-        &program.nodes,
-        type_name,
-        c.callee,
-        local_generic_args(&tokens, &program.nodes, c.receiver, doc.path, source_line)
-      );
+  if c.has_receiver {
+    // `chain_receiver`, not `type_name_of_local`: the latter only
+    // resolves a receiver that's a bare local name, failing silently
+    // for a method called on a chain of any length
+    // (`l.debug_r("msg").field(...)`'s own `field` has no plain local
+    // receiver at all - its receiver is itself a call) - the same gap
+    // `_call_arg_expected_type` had (see navigation.fn), just here for
+    // signature help instead of hover/goto-definition.
+    let recv = chain_receiver(&tokens, c.callee_token, &program.nodes, doc.path, source_line, 0);
+    if !equals(recv.type_name, "") {
+      found = lookup_method(&program.nodes, recv.type_name, c.callee, recv.generic_args);
       active_param = active_param + 1;
     }
   } else {
@@ -64,13 +66,14 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   ret _signature_result(d.detail, active_param);
 }
 
-// One call the cursor sits inside: the callee's own bare name, its
-// receiver when reached through a dot (empty for a plain function
-// call), and which positional argument (0-based) the cursor currently
-// sits on.
+// One call the cursor sits inside: the callee's own bare name, the
+// callee's own token (so its receiver, if any, can be resolved
+// through a chain of any length rather than just a plain local), and
+// which positional argument (0-based) the cursor currently sits on.
 compound CallSite {
   str callee;
-  str receiver;
+  Token callee_token;
+  flag has_receiver;
   num active_param;
 }
 
@@ -105,23 +108,13 @@ fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite
     .Identifier -> {}
     _ -> { ret .None; }
   }
-  str callee = token_word(ct);
-  str receiver = "";
   num callee_index = index_of_token(tokens, ct);
   let dot = token_before(tokens, callee_index);
-  if dot.is_some() && token_is_operator(dot.unwrap(), ".") {
-    num dot_index = index_of_token(tokens, dot.unwrap());
-    let recv_tok = token_before(tokens, dot_index);
-    if recv_tok.is_some() {
-      fit recv_tok.unwrap().type {
-        .Identifier -> { receiver = token_word(recv_tok.unwrap()); }
-        _ -> {}
-      }
-    }
-  }
+  flag has_receiver = dot.is_some() && token_is_operator(dot.unwrap(), ".");
   CallSite c;
-  c.callee = callee;
-  c.receiver = receiver;
+  c.callee = token_word(ct);
+  c.callee_token = ct;
+  c.has_receiver = has_receiver;
   c.active_param = commas;
   ret .Some(c);
 }
