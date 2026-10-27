@@ -1828,7 +1828,11 @@ test "a compound field whose type was never imported is reported by name" {
   str out_path = "src/parser/import_resolver_fixtures/missing_map_import.test.c";
   let lowered = compile_to_c("src/parser/import_resolver_fixtures/missing_map_import.fn", out_path, &defines, false);
   remove_file(out_path);
-  assert lowered.is_err(), "expected the missing import to fail the compile";
+  if !lowered.is_err() {
+    allow assert_constant, "reports when the missing import unexpectedly compiles";
+    assert false, "expected the missing import to fail the compile";
+    ret;
+  }
   str message = lowered.unwrap_err();
   assert contains(message, "the type 'Map' of field 'hints' in 'Holder' is not declared"), "expected the message to name the type, the field and the compound";
 }
@@ -4094,7 +4098,11 @@ test "lint reports a warning per finding across a tree and counts the files it l
   defer remove_file(clean);
 
   let linted = lint_paths("fun-out/_lint_scan");
-  assert linted.is_ok(), "expected the tree to lint";
+  if !linted.is_ok() {
+    allow assert_constant, "reports when the tree fails to lint";
+    assert false, "expected the tree to lint";
+    ret;
+  }
   LintOutcome outcome = linted.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
@@ -4116,7 +4124,11 @@ test "lint reports a file that does not parse instead of stopping" {
   defer remove_file(fine);
 
   let linted = lint_paths("fun-out/_lint_bad");
-  assert linted.is_ok(), "expected the tree to lint";
+  if !linted.is_ok() {
+    allow assert_constant, "reports when the tree fails to lint";
+    assert false, "expected the tree to lint";
+    ret;
+  }
   LintOutcome outcome = linted.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
@@ -4132,7 +4144,11 @@ test "lint of a single file reports just that file, and a missing path is an err
   defer remove_file(only);
 
   let linted = lint_paths(only);
-  assert linted.is_ok(), "expected a single file to lint";
+  if !linted.is_ok() {
+    allow assert_constant, "reports when a single file fails to lint";
+    assert false, "expected a single file to lint";
+    ret;
+  }
   LintOutcome outcome = linted.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
@@ -4190,14 +4206,22 @@ test "lint leaves out fixtures directories when scanning, but lints a fixture na
   defer remove_file(c);
 
   let scanned = lint_paths("fun-out/_lint_fx");
-  assert scanned.is_ok(), "expected the tree to lint";
+  if !scanned.is_ok() {
+    allow assert_constant, "reports when the tree fails to lint";
+    assert false, "expected the tree to lint";
+    ret;
+  }
   LintOutcome outcome = scanned.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
   assert outcome.files == 1, "expected only the file outside every fixtures directory";
 
   let direct = lint_paths(b);
-  assert direct.is_ok(), "expected a fixture named directly to lint";
+  if !direct.is_ok() {
+    allow assert_constant, "reports when a fixture named directly fails to lint";
+    assert false, "expected a fixture named directly to lint";
+    ret;
+  }
   LintOutcome named = direct.unwrap();
   defer named.findings.free();
   defer named.failures.free();
@@ -4211,14 +4235,25 @@ test "lint leaves out fixtures directories when scanning, but lints a fixture na
 
 // A directory of `.fn` files made for one test, emptied of anything left from
 // an earlier run. Lives under fun-out, which a scan of the project skips.
+//
+// `list_dir` right after `make_dir_all` isn't infallible: many of these run
+// concurrently (the test binary's own intra-file worker pool), and under
+// Windows' heavier per-call filesystem latency a just-created directory can
+// transiently fail to list before its own metadata is visible. This is
+// opportunistic cleanup of a directory this call itself just created -
+// nothing to clean is the right read of a failed listing, not a reason to
+// take the whole test binary down.
 fun _scratch_project(str name) str {
   str dir = format("fun-out/driver_test_{str}", name);
   make_dir_all(dir);
-  Vec<str> old = list_dir(dir).unwrap();
-  for entry : old {
-    remove_file(path_join(dir, entry));
+  let listed = list_dir(dir);
+  if listed.is_ok() {
+    Vec<str> old = listed.unwrap();
+    for entry : old {
+      remove_file(path_join(dir, entry));
+    }
+    old.free();
   }
-  old.free();
   ret dir;
 }
 
