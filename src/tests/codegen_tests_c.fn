@@ -455,6 +455,75 @@ test "a method's own default does not collide with its receiver" {
 // assert contains(out, "show__num((&n), false)"), "expected the default filled at the monomorphized call";
 // }
 
+test "ret panic(...) compiles and aborts for a struct, an enum, and a pointer return" {
+  // User-reported indirectly: `Option<T>.unwrap()`/`Result<T, E>.unwrap()`
+  // moving from a silent zero-value fallback to `ret panic(...)` on
+  // None/Err broke real compilation the instant `T` monomorphized to an
+  // actual compound anywhere in this compiler's own source (confirmed
+  // directly - every one of ~20 real call sites failed the C build).
+  // Root cause: `panic(...)`'s own codegen trailed off with a bare `0`,
+  // which only ever worked by accident for a plain number - a real
+  // pointer return hits `-Wint-conversion` (an error, not a warning,
+  // under this project's own CC flags), and a real struct-by-value
+  // return doesn't accept an `int` at all. Reproduced self-contained
+  // here, one `ret panic(...)` for each of the three shapes that
+  // actually broke: a plain compound, an enum (a tagged union in C,
+  // same need), and a pointer.
+  str compound_src = `use std.c.io;
+  `compound Box { num n; }
+  `fun make() Box {
+  `  ret panic("no box");
+  `}
+  `fun main() num {
+  `  Box b = make();
+  `  printf("%lld\n", b.n);
+  `  ret 0;
+  `}`;
+  ProcessResult cr = run_source_result(
+    compound_src,
+    "panic_compound_rtype",
+    "ret panic(...) for a struct return type"
+  );
+  assert contains(cr.stderr_text, "panic: no box"), "expected the panic message for a struct return";
+  assert cr.exit_code != 0, "expected the struct-returning panic to abort, not return a zero value";
+
+  str enum_src = `use std.c.io;
+  `enum Shape { Circle(num), Square(num) }
+  `fun make() Shape {
+  `  ret panic("no shape");
+  `}
+  `fun main() num {
+  `  fit make() {
+  `    .Circle(r) -> { printf("circle %lld\n", r); }
+  `    .Square(s) -> { printf("square %lld\n", s); }
+  `  }
+  `  ret 0;
+  `}`;
+  ProcessResult er = run_source_result(
+    enum_src,
+    "panic_enum_rtype",
+    "ret panic(...) for an enum return type"
+  );
+  assert contains(er.stderr_text, "panic: no shape"), "expected the panic message for an enum return";
+  assert er.exit_code != 0, "expected the enum-returning panic to abort, not return a zero value";
+
+  str ptr_src = `use std.c.io;
+  `fun make() str {
+  `  ret panic("no string");
+  `}
+  `fun main() num {
+  `  printf("%s\n", make());
+  `  ret 0;
+  `}`;
+  ProcessResult pr = run_source_result(
+    ptr_src,
+    "panic_ptr_rtype",
+    "ret panic(...) for a pointer (str) return type"
+  );
+  assert contains(pr.stderr_text, "panic: no string"), "expected the panic message for a pointer return";
+  assert pr.exit_code != 0, "expected the pointer-returning panic to abort, not return a zero value";
+}
+
 test "a method chain's own second-innermost call is not evaluated twice" {
   // User-reported, from a real std.log sample: `l.debug_r(...).field(...)
   // .str_field(...).emit();` emitted `debug_r(...)` TWICE - once into a

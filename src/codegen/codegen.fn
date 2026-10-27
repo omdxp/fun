@@ -1368,6 +1368,37 @@ impl Codegen {
     ret .Some(resolved_name);
   }
 
+  // `write_type`'s own C spelling (name plus pointer stars), built as
+  // a fresh string instead of written directly - for a caller
+  // assembling it into a larger piece of text being built up itself
+  // (see `.Panic`'s own cast/compound-literal trailing value), where
+  // writing straight to `self.state` would land it in the wrong
+  // place. "" on the same unresolvable-generic-instantiation case
+  // `write_type` itself returns `.None` for.
+  write_type_text(DataType dt) str {
+    let name_opt = self.resolve_type_name(dt);
+    if name_opt.is_none() {
+      ret "";
+    }
+    str resolved_name = name_opt.unwrap();
+    StringBuilder wtb = string_builder_init(16);
+    fit parse_dynamic_int_datatype(resolved_name) {
+      .Some(dyn) -> { wtb.append(dynamic_int_type_to_c(dyn)); }
+      .None -> { wtb.append(map_type_to_c(resolved_name)); }
+    }
+    let rdt = self.resolve_type_subst(dt);
+    num ptr_depth = rdt.pointer_depth;
+    if ptr_depth == 0 && rdt.flags.is_pointer {
+      ptr_depth = 1;
+    }
+    num i = 0;
+    for i < ptr_depth {
+      wtb.append("*");
+      i = i + 1;
+    }
+    ret wtb.build();
+  }
+
   // Strips a declared type name's leading `<alias>__` segment back to the
   // bare name, since an alias's declarations are merged in unqualified.
   // Only a known alias is stripped; a generic instantiation's mangled
@@ -5844,25 +5875,108 @@ impl Codegen {
         ret .None;
       }
       .Panic(msg) -> {
-        // Prints the message and aborts. Trails off with a plain `0` so
-        // it type-checks in almost any scalar/pointer context.
+        // Prints the message and aborts, then trails off with a value
+        // well-typed for whatever this panic's own use site expects,
+        // so it unifies with any return type - not just a scalar: a
+        // bare trailing `0` only ever worked for a plain number
+        // (`-Wint-conversion` rejects it outright for a pointer/`str`
+        // return, and a real struct-by-value return doesn't accept an
+        // `int` at all - confirmed directly, `ret panic(...)` as the
+        // sole value for a generic `T` instantiated to a real
+        // compound broke every one of `Option<T>`/`Result<T,E>`'s own
+        // real call sites in this compiler's own source the moment
+        // `unwrap()` started using it). The enclosing function's own
+        // declared return type, when known, picks the right trailing
+        // shape: a by-value compound or tuple zero-initializes via a
+        // C99 `(Type){0}` compound literal (valid for any aggregate,
+        // regardless of its own field types); anything else - a
+        // scalar or a real pointer (`str` included) - casts the
+        // literal `0` to that exact type, which `-Wint-conversion`
+        // never objects to. Falls back to the original bare `0`
+        // (abort() makes it unreachable either way) when the
+        // enclosing return type isn't tracked at this point - a
+        // `panic(...)` used somewhere other than a function's own
+        // sole or final return value, where only a scalar/pointer
+        // context realistically occurs anyway.
+        str panic_trailing = "0";
+        flag panic_trailing_owned = false;
+        // `"void"` (no return value at all - a bare `panic(...)`
+        // statement inside a function that returns nothing) is its
+        // own case, neither scalar nor aggregate: there's nothing to
+        // cast or zero-initialize *to*, and the plain literal `0`
+        // this whole mechanism exists to move past was already fine
+        // here, since nothing ever reads this expression's own value.
+        // Excluded before the scalar-or-aggregate split below ever
+        // runs, since `map_type_to_c("void")` has no entry of its own
+        // and would otherwise read as "unrecognized" the same way a
+        // real aggregate does.
+        if self.current_fn_rtype_dt.is_some() &&
+          !equals(self.current_fn_rtype_dt.unwrap().type_str, "void") {
+          let panic_rtype = self.current_fn_rtype_dt.unwrap();
+          flag panic_is_ptr = dtype_is_pointer(panic_rtype);
+          // Every fixed-width scalar `map_type_to_c` knows by name
+          // renders to a *different* C spelling (`"num"` ->
+          // `"int64_t"`, ...), the same way `write_type_name` already
+          // checks it; an arbitrary-width dynamic int (`i17`, rare but
+          // syntactically valid) isn't in that table at all, so it is
+          // checked the same second way `write_type_name` does too.
+          // Anything neither covers - a compound, an enum (a tagged
+          // union in C, same zero-init need), a shape (ditto), or a
+          // generic instantiation's own mangled name (`"Vec__Token"`,
+          // never itself in `self.compound_names`, which only ever
+          // tracks bare template names) - is an aggregate. `is_tuple`
+          // is checked first since a tuple's own `type_str` is always
+          // "", which `map_type_to_c` would otherwise call
+          // "unrecognized" by the same accident, not by the reasoning
+          // this relies on.
+          flag panic_is_aggregate = !panic_is_ptr &&
+            (panic_rtype.is_tuple ||
+            (equals(map_type_to_c(panic_rtype.type_str), panic_rtype.type_str) &&
+            parse_dynamic_int_datatype(panic_rtype.type_str).is_none()));
+          StringBuilder ptb = string_builder_init(16);
+          ptb.append("(");
+          let panic_wt = self.write_type_text(panic_rtype);
+          ptb.append(panic_wt);
+          free(panic_wt);
+          if panic_is_aggregate {
+            ptb.append("){0}");
+          } else {
+            ptb.append(")0");
+          }
+          panic_trailing = ptb.build();
+          panic_trailing_owned = true;
+        }
         // MSVC does not support GNU statement expressions `({…})`, so
-        // use the comma operator instead; the `(int64_t)0` is unreachable
-        // (abort() is noreturn) but makes the expression well-typed.
+        // use the comma operator instead; everything after `abort()`
+        // is unreachable (it is `noreturn`) but still needs to be
+        // well-typed C.
         if self.msvc_mode {
           self.state.write("(fprintf(stderr_stream(), \"panic: %s\\n\", ");
           let merr = self.emit_expr(*msg);
           if merr.is_some() {
+            if panic_trailing_owned {
+              free(panic_trailing);
+            }
             ret merr;
           }
-          self.state.write("), abort(), (int64_t)0)");
+          self.state.write("), abort(), ");
+          self.state.write(panic_trailing);
+          self.state.write(")");
         } else {
           self.state.write("({ fprintf(stderr_stream(), \"panic: %s\\n\", ");
           let merr2 = self.emit_expr(*msg);
           if merr2.is_some() {
+            if panic_trailing_owned {
+              free(panic_trailing);
+            }
             ret merr2;
           }
-          self.state.write("); abort(); 0; })");
+          self.state.write("); abort(); ");
+          self.state.write(panic_trailing);
+          self.state.write("; })");
+        }
+        if panic_trailing_owned {
+          free(panic_trailing);
         }
         ret .None;
       }
