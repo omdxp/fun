@@ -66,6 +66,15 @@ pub compound FmtState {
   // arm's conditions or an enum's variants). Reset at the next
   // statement boundary.
   flag bool_chain_wrap;
+  // The same idea as `bool_chain_wrap`, for an over-long method chain
+  // (`a.b().c().d()`): decided once, at the chain's own first
+  // continuation dot (one right after a call's or index's own closing
+  // `)`/`]`, not an ordinary field/method access straight off a
+  // plain receiver), by measuring the whole remaining chain rather
+  // than packing operands the way a bool chain fills each line -
+  // every call in an over-long chain gets its own line, not as many
+  // as fit. Reset at the next statement boundary.
+  flag method_chain_wrap;
   // True when the token just written was a prefix operator.
   flag prev_unary;
   // A space owed to the previous token, written only if the line
@@ -106,6 +115,7 @@ pub fun fmt_state_new() FmtState {
   s.fit_body_depth_at_start.init(4);
   s.fit_arm_wrap = false;
   s.bool_chain_wrap = false;
+  s.method_chain_wrap = false;
   s.prev_unary = false;
   s.pending_space = false;
   s.stmt_first = "";
@@ -300,7 +310,7 @@ fun _is_closing(str text) flag {
 fun _is_postfix_unary_op(str text) flag {
   ret equals(text, "++") || equals(text, "--") || equals(text, "?") || equals(text, "!") ||
     equals(text, "?!") || equals(text, "!?");
-  }
+}
 
 // True when `prev` reads as a complete value a postfix operator could
 // attach to directly: a literal/identifier, or a closing `)`/`]` ending
@@ -587,7 +597,7 @@ fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, flag in_decl_only)
     str at = token_text(tokens.get(after_idx));
     ret equals(at, ";") || equals(at, ",") || equals(at, ")") || equals(at, "]") ||
       equals(at, "=");
-    }
+  }
   ret false;
 }
 
@@ -700,7 +710,7 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
       "enum"
     ) || equals(bt, "shape") || equals(bt, "as") || equals(bt, "ret") ||
       equals(bt, "als");
-    }
+  }
   ret equals(bt, "{") || equals(bt, "}") || equals(bt, ";") || equals(bt, ",") ||
     equals(bt, "(") || equals(
     bt,
@@ -1246,6 +1256,29 @@ fun _bool_chain_operand_end(Vec<Token>* tokens, num from) num {
     i = i + 1;
   }
   ret i;
+}
+
+// True when `tokens.get(i)` is a `.` that continues a method/index
+// chain off a call's or index's own result (`f().g`, `a[0].g`) rather
+// than an ordinary field/method access straight off a plain receiver
+// or an earlier numeric hop of a positional-tuple chain (`t.0.g`) -
+// the same distinction `_preceded_by_dot` in src/fls/navigation.fn
+// draws for hover/goto-definition, independently reimplemented here
+// since this formatter works over raw tokens with no AST to walk.
+fun _is_chain_continuation_dot(Vec<Token>* tokens, num i) flag {
+  if !equals(token_text(tokens.get(i)), ".") {
+    ret false;
+  }
+  num j = i - 1;
+  for j >= 0 &&
+    (tokens.get(j).type == .NewLine || tokens.get(j).type == .Comment) {
+    j = j - 1;
+  }
+  if j < 0 {
+    ret false;
+  }
+  str before = token_text(tokens.get(j));
+  ret equals(before, ")") || equals(before, "]");
 }
 
 // Whether the arm whose own conditions start at `from` needs each of
@@ -1981,7 +2014,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     if s.at_line_start {
       s.continuation = s.open_delims - _leading_closers(&tokens, i) > 0 ||
         (
-        s.bool_chain_wrap && s.open_delims == 0
+        (s.bool_chain_wrap || s.method_chain_wrap) && s.open_delims == 0
       );
     }
 
@@ -2008,6 +2041,29 @@ pub fun format_source(str src, str filename) Result<str, str> {
 
     if equals(text, "(") || equals(text, "[") {
       s.open_delims = s.open_delims + 1;
+    }
+    // A call's or index's own closing `)`/`]`, at the top level of its
+    // own expression (one nested inside an outer call's or index's
+    // own parens defers to whatever wrapping that construct already
+    // does), decides whether the chain it just ended needs to keep
+    // going on its own line: once decided for a chain (every call
+    // after the first over-long one), or newly measured here against
+    // the chain's own remaining width if not decided yet.
+    if (equals(text, ")") || equals(text, "]")) && s.open_delims == 0 {
+      num next_idx = _next_significant(&tokens, i + 1);
+      if next_idx >= 0 && _is_chain_continuation_dot(&tokens, next_idx) {
+        flag chain_fill_break = s.method_chain_wrap;
+        if !chain_fill_break {
+          num chain_end = _bool_chain_operand_end(&tokens, next_idx);
+          num chain_width = _inline_width(&tokens, next_idx, chain_end);
+          chain_fill_break = s.col + chain_width > MAX_LINE_WIDTH;
+        }
+        if chain_fill_break {
+          s.method_chain_wrap = true;
+          s.force_break = true;
+          s.pending_newlines = 0;
+        }
+      }
     }
     // A separator carries its own spacing: one space after it, except
     // between enum variants, which take a line each, and between an
@@ -2155,6 +2211,8 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.stmt_first = "";
       s.at_stmt_start = true;
       s.bool_chain_wrap = false;
+      s.method_chain_wrap = false;
+      s.continuation = false;
     } elif t.type != .Comment && equals(s.stmt_first, "") && !equals(text, "pub") {
       // `pub` only marks visibility, so the word after it is what says
       // what the statement declares.

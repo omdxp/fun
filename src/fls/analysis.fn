@@ -132,7 +132,7 @@ fun _decl_identity_ptr(Node* n) DeclIdentity {
 fun _decl_identity_eq(DeclIdentity a, DeclIdentity b) flag {
   ret a.valid && b.valid && equals(a.kind_tag, b.kind_tag) && equals(a.name, b.name) &&
     equals(a.extra, b.extra);
-  }
+}
 
 // The entry in `entry_nodes` whose own leading line is the latest one
 // at or before `start1` (1-indexed) - i.e. whichever declaration

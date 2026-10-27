@@ -1954,7 +1954,7 @@ fun _format_fmt_arg_index(str name) num {
 fun _is_c_style_format(str name) flag {
   ret equals(name, "printf") || equals(name, "fprintf") || equals(name, "sprintf") ||
     equals(name, "snprintf");
-  }
+}
 
 // The `{type}` placeholders in `fmt` (Fun's own `format()` syntax),
 // in order: `""` for an untyped `{}`, or one of the 7 recognized
@@ -4101,7 +4101,7 @@ impl Checker {
     ret equals(name, "num") || equals(name, "str") || equals(name, "dec") ||
       equals(name, "flag") || equals(name, "chr") || equals(name, "raw") ||
       equals(name, "void");
-    }
+  }
 
   // A bare generic compound name (`Box(b)`, no `<Args>`) auto-resolves
   // to its one concrete implementation of `shape_name` when exactly one

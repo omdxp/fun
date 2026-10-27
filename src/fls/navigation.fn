@@ -1267,9 +1267,20 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) flag {
 }
 
 // True when `t` is a bare `.Name` fit-pattern shorthand: directly
-// preceded by a `.` that is not itself preceded by an identifier (an
-// ordinary field or method access, which `_receiver_of` resolves
-// instead).
+// preceded by a `.` that is not itself preceded by anything a real
+// chain continues from - a plain identifier receiver (`x.field`), an
+// earlier numeric hop of a positional-tuple chain (`t.0.field`), or a
+// call/index/propagation ending in `)`/`]`/`?`/`!`/`!?` (`f().field`,
+// `a[0].field`, `x?.field`) - the same shape `_preceded_by_dot` checks
+// for the opposite question, reused here rather than re-listed, so a
+// method/field reached through a longer chain is never mistaken for a
+// bare shorthand variant name (previously only excluded the plain-
+// identifier case, misreading `debug_r("msg").field(...)`'s own
+// `field` as if it were itself a `.Variant` shorthand name needing an
+// enum context, and failing silently from there - including inside
+// `_call_arg_expected_type`, which is why a shorthand variant passed
+// as an argument to a chained call, like `.field("k", .Str("v"))`,
+// never resolved a hover for `.Str`).
 fun _is_dot_shorthand(Vec<Token>* tokens, Token t) flag {
   num index = index_of_token(tokens, t);
   if index <= 0 {
@@ -1282,19 +1293,7 @@ fun _is_dot_shorthand(Vec<Token>* tokens, Token t) flag {
   if !token_is_operator(dot.unwrap(), ".") {
     ret false;
   }
-  num dot_index = index_of_token(tokens, dot.unwrap());
-  if dot_index <= 0 {
-    ret true;
-  }
-  let before = token_before(tokens, dot_index);
-  if before.is_none() {
-    ret true;
-  }
-  fit before.unwrap().type {
-    .Identifier -> { ret false; }
-    _ -> {}
-  }
-  ret true;
+  ret !_preceded_by_dot(tokens, t);
 }
 
 // True when the nearest preceding token that could start a new
@@ -1521,11 +1520,15 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
     // A method call: written arguments never include `self`, but the
     // callee's own rendered signature does - shift the index to match.
     arg_index = arg_index + 1;
-    let recv = token_before(tokens, callee_idx - 1);
-    if recv.is_none() {
-      ret "";
-    }
-    str receiver_type = chain_ending_type(tokens, recv.unwrap(), token_is_symbol(recv.unwrap(), ')'), program, file, line);
+    // `chain_receiver_type`, not `chain_ending_type`: the latter needs
+    // the receiver chain's own last token handed in already correctly
+    // isolated, which this call site got wrong for anything beyond a
+    // single hop (passing the token right before the connecting dot,
+    // rather than the connecting dot's own far side) - `chain_receiver_type`
+    // takes the member name itself and walks its own receiver back,
+    // the same way every other hover/completion call site in this file
+    // already does.
+    str receiver_type = chain_receiver_type(tokens, callee, program, file, line);
     if equals(receiver_type, "") {
       ret "";
     }

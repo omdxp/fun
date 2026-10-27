@@ -184,7 +184,7 @@ pub fun is_indirection_operator(str op) flag {
 pub fun is_left_operanded_unary_operator(str op) flag {
   ret equals(op, "++") || equals(op, "--") || equals(op, "?") || equals(op, "!") ||
     equals(op, "?!") || equals(op, "!?");
-  }
+}
 
 // True if `t` is an `Operator` token that, appearing after a complete
 // primary expression, is a binary/infix operator, i.e. it would combine

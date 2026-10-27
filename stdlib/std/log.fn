@@ -584,7 +584,11 @@ test "a text logger writes level, name, message and fields on one line" {
   str path = "fun-out/log_text_test.txt";
   Logger l = _test_logger(path, .Info, .Text);
   l.info("started");
-  l.info_r("request").str_field("path", "/x").num_field("n", 3).flag_field("ok", true).emit();
+  l.info_r("request")
+    .str_field("path", "/x")
+    .num_field("n", 3)
+    .flag_field("ok", true)
+    .emit();
   str out = _test_output(l, path);
   assert contains(out, "[INFO] [app] started\n"), "expected the plain message line";
   assert contains(out, "[INFO] [app] request path=/x n=3 ok=true\n"), "expected the fields after the message";
@@ -610,7 +614,12 @@ test "records below the level are dropped and enabled says so" {
 test "a json logger writes one object per line with escaped text and ordered fields" {
   str path = "fun-out/log_json_test.txt";
   Logger l = _test_logger(path, .Debug, .Json);
-  l.error_r("bad \"input\"\nline2").str_field("who", "me").num_field("code", 7).dec_field("ratio", 0.5).flag_field("retry", false).emit();
+  l.error_r("bad \"input\"\nline2")
+    .str_field("who", "me")
+    .num_field("code", 7)
+    .dec_field("ratio", 0.5)
+    .flag_field("retry", false)
+    .emit();
   str out = _test_output(l, path);
   assert contains(out, "{\"level\":\"ERROR\",\"logger\":\"app\",\"msg\":\"bad \\\"input\\\"\\nline2\",\"who\":\"me\",\"code\":7,"), "expected the JSON prefix with the escaped message";
   assert contains(out, "\"retry\":false}\n"), "expected the last field and a newline";
@@ -643,7 +652,12 @@ test "field constructors and the builder attach typed fields" {
   // documents.
   str path = "fun-out/log_fields_test.txt";
   Logger l = _test_logger(path, .Trace, .Text);
-  l.trace_r("t").with(fstr("a", "x")).with(fnum("b", 2)).with(fdec("c", 1.5)).with(fflag("d", true)).emit();
+  l.trace_r("t")
+    .with(fstr("a", "x"))
+    .with(fnum("b", 2))
+    .with(fdec("c", 1.5))
+    .with(fflag("d", true))
+    .emit();
   l.debug_r("d").emit();
   l.warn_r("w").emit();
   l.error_r("e").emit();
@@ -652,7 +666,7 @@ test "field constructors and the builder attach typed fields" {
   assert contains(out, "d=true"), "expected the flag field";
   assert contains(out, "[DEBUG] [app] d\n") && contains(out, "[WARN] [app] w\n") &&
     contains(out, "[ERROR] [app] e\n"), "expected each builder level";
-  }
+}
 
 test "log_tag, log_num, log_dec and log_flag write a labelled field" {
   str path = "fun-out/log_labels_test.txt";
@@ -672,7 +686,11 @@ test "the fluent setters change format, sink and name" {
   str path = "fun-out/log_fluent_test.txt";
   Logger base = logger_init(.Info);
   File f = open_write(path);
-  Logger l = base.as_format(.Json).to_sink(Sink.File(f)).named("svc").with_timestamps(false).route_errors(false);
+  Logger l = base.as_format(.Json)
+    .to_sink(Sink.File(f))
+    .named("svc")
+    .with_timestamps(false)
+    .route_errors(false);
   l.info("hello");
   str out = _test_output(l, path);
   assert equals(out, "{\"level\":\"INFO\",\"logger\":\"svc\",\"msg\":\"hello\"}\n"), "expected the reconfigured logger's exact output";
