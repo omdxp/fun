@@ -9132,3 +9132,44 @@ test "dot-completion on a call to a generic function resolves its own return typ
   assert contains(out, `"label":"v","kind":5,"detail":"field"`), "expected Box's own field";
   assert !contains(out, `"label":"compound","kind":14`), "expected a real resolution, not the keyword-dump fallback";
 }
+
+test "signature help still answers while a call's own parens aren't balanced yet, mid-argument" {
+  // User-reported: signature help (the "which parameter am I on"
+  // popup) only ever appeared once a whole statement had already
+  // been finished and the cursor moved back onto an argument - never
+  // live, while actually typing one, the C++/Visual-Studio-style
+  // experience asked for. Root cause: `signature_help()` required a
+  // full, successful parse of the WHOLE document unconditionally,
+  // but an open call's own unbalanced parens (the ordinary state
+  // while typing an argument) is exactly what makes a document fail
+  // to parse - so it had nothing to answer with for the entire
+  // window a reader is actually typing inside one, only recovering
+  // once the statement closed. Fixed with a token-only fallback
+  // (`local_fn_signature_from_tokens`), the same shape hover/
+  // completion/goto-definition already have for this exact
+  // situation - scoped to a plain top-level call for now (every real
+  // report was one), a method on a receiver still needs a real parse.
+  str src = `use std.result;
+  `fun divide(num a, num b) Result<num, str> {
+  `  if b == 0 {
+  `    ret .Err("division by zero");
+  `  }
+  `  ret .Ok(a / b);
+  `}
+  `fun main() {
+  `  num r = divide(10,
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelp_unclosed.fn";
+  doc.path = "sighelp_unclosed.fn";
+  doc.text = src;
+  doc.version = 1;
+  // Cursor right after "divide(10," on its own line - the 2nd
+  // argument, not yet typed, the call's own closing `)` nowhere in
+  // the document at all.
+  str out = signature_help(&reads, doc, 8, 20);
+  assert contains(out, `"label":"divide(num a, num b) Result"`), "expected divide's own signature, bare return type";
+  assert contains(out, `"activeParameter":1`), "expected the second argument (past num a) active";
+}

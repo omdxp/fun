@@ -21,7 +21,7 @@ const str NO_SIGNATURE = "null";
 // the result a client is sent.
 pub fun signature_help(AnalysisCache* cache, Document doc, num line, num character) str {
   Analyzed read = cache.of(doc);
-  if !read.lexed || !read.parsed {
+  if !read.lexed {
     ret NO_SIGNATURE;
   }
   Vec<Token> tokens = read.tokens;
@@ -30,9 +30,30 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
     ret NO_SIGNATURE;
   }
   CallSite c = call.unwrap();
-  ProgramMergeResult program = read.program;
   num source_line = line + 1;
 
+  // A reader asks for this exactly while still typing an argument,
+  // which is exactly when the enclosing call's own parens aren't
+  // balanced yet and the document doesn't parse - the ordinary case,
+  // not an edge one, so it needs its own answer rather than nothing
+  // (`!read.parsed` used to mean no signature at all here, the one
+  // place in this file that never got the token-only fallback hover/
+  // completion/goto-definition already have). Scoped to a plain
+  // top-level call for now, the shape every bug report against this
+  // actually used - a method called on a receiver still needs a real
+  // parse, same as before.
+  if !read.parsed {
+    if c.has_receiver {
+      ret NO_SIGNATURE;
+    }
+    str sig = local_fn_signature_from_tokens(&tokens, doc.text, c.callee);
+    if equals(sig, "") {
+      ret NO_SIGNATURE;
+    }
+    ret _signature_result(sig, c.active_param);
+  }
+
+  ProgramMergeResult program = read.program;
   Option<Declaration> found = .None;
   // A method's own rendered signature includes its implicit `self` as
   // parameter 0, which the reader never types; shifting the active
