@@ -2892,7 +2892,13 @@ impl Checker {
 
   // Checks a call written through a receiver, which resolves to a
   // method the receiver's type declares.
-  check_method_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env, flag awaited) CheckedType {
+  check_method_call(
+    Node* node,
+    ExprNode e,
+    Vec<Node*>* args,
+    TypeEnv* env,
+    flag awaited
+  ) CheckedType {
     if !e.has_left {
       ret checked_unknown();
     }
@@ -2950,7 +2956,15 @@ impl Checker {
         receiver_type_params.push(p);
       }
     }
-    self.check_arguments(node, method, sig, args, env, &receiver_type_params, &found.receiver.generic_args);
+    self.check_arguments(
+      node,
+      method,
+      sig,
+      args,
+      env,
+      &receiver_type_params,
+      &found.receiver.generic_args
+    );
     ret sig.rtype;
   }
 
@@ -3015,7 +3029,10 @@ impl Checker {
         // self-referential one like `T: Steppable<T>`) is handled by
         // `_bare_shape_bound_name` stripping the `<...>` suffix first.
         if equals(bound, supplied_name) ||
-          self.implements_shape(supplied, self.canonical_type_name(self._bare_shape_bound_name(bound))) {
+          self.implements_shape(
+          supplied,
+          self.canonical_type_name(self._bare_shape_bound_name(bound))
+        ) {
           listed = true;
         }
       }
@@ -3028,7 +3045,11 @@ impl Checker {
       // satisfy it no matter what concrete type it's eventually
       // instantiated with, without needing it resolved here first.
       if !listed {
-        listed = self.active_type_param_bound_entails(supplied_name, &holder.bounds, at_param);
+        listed = self.active_type_param_bound_entails(
+          supplied_name,
+          &holder.bounds,
+          at_param
+        );
       }
       if !listed {
         self.fail(
@@ -3135,7 +3156,10 @@ impl Checker {
           // with any generic-arg suffix on the bound itself stripped
           // first.
           if equals(bound, supplied_name) ||
-            self.implements_shape(supplied, self.canonical_type_name(self._bare_shape_bound_name(bound))) {
+            self.implements_shape(
+            supplied,
+            self.canonical_type_name(self._bare_shape_bound_name(bound))
+          ) {
             listed = true;
           }
           a = a + 1;
@@ -3226,7 +3250,10 @@ impl Checker {
         if receiver.base == .Unknown && !self.knows_methods_of(receiver) {
           ret;
         }
-        self.fail(format("{str} has no method '{str}'", type_name(receiver), method), node);
+        self.fail(
+          format("{str} has no method '{str}'", type_name(receiver), method),
+          node
+        );
       }
       _ -> {}
     }
@@ -3242,13 +3269,22 @@ impl Checker {
   // (`Vec<T>.sort_by`'s `T`) with the receiver's real one (`Vec<num>`'s
   // `num`) before either side is compared, since `want` is written
   // against the unsubstituted template.
-  _fn_sig_matches(FnTypeSig* want, FnSig got, Vec<str>* type_params, Vec<CheckedType>* generic_args) flag {
+  _fn_sig_matches(
+    FnTypeSig* want,
+    FnSig got,
+    Vec<str>* type_params,
+    Vec<CheckedType>* generic_args
+  ) flag {
     if got.is_variadic || want.params.len != got.args.len {
       ret false;
     }
     num i = 0;
     for i < want.params.len {
-      let want_param = substitute(checked_from_dtype(want.params.get(i)), type_params, generic_args);
+      let want_param = substitute(
+        checked_from_dtype(want.params.get(i)),
+        type_params,
+        generic_args
+      );
       if !self.assignable(want_param, got.args.get(i)) {
         ret false;
       }
@@ -3281,9 +3317,19 @@ impl Checker {
         .Identifier(fname) -> {
           let known = self.fns.at(fname);
           if known.is_some() &&
-            !self._fn_sig_matches(want.fn_sig, known.unwrap(), type_params, generic_args) {
+            !self._fn_sig_matches(
+            want.fn_sig,
+            known.unwrap(),
+            type_params,
+            generic_args
+          ) {
             self.fail(
-              format("argument {num} of '{str}': '{str}' does not match the expected signature", i, name, fname),
+              format(
+              "argument {num} of '{str}': '{str}' does not match the expected signature",
+              i,
+              name,
+              fname
+              ),
               args.get(i - 1)
             );
             ret true;
@@ -3371,7 +3417,14 @@ impl Checker {
   // usual convention every real printf-checker follows, since a
   // format built at runtime can't be reasoned about here - or when
   // the C-style parser meets a spec it doesn't confidently recognize.
-  check_format_args(Node* node, str name, Vec<Node*>* args, num fmt_index, flag c_style, TypeEnv* env) {
+  check_format_args(
+    Node* node,
+    str name,
+    Vec<Node*>* args,
+    num fmt_index,
+    flag c_style,
+    TypeEnv* env
+  ) {
     Node* fmt_node = args.get(fmt_index);
     str fmt_text = "";
     flag is_literal = false;
@@ -3429,7 +3482,12 @@ impl Checker {
       if equals(want_name, "ptr") || equals(want_name, "raw") {
         if got.pointer_depth == 0 && got.base != .Raw {
           self.fail(
-            format("argument {num} of '{str}' expects a pointer, found {str}", arg_position, name, type_name(got)),
+            format(
+            "argument {num} of '{str}' expects a pointer, found {str}",
+            arg_position,
+            name,
+            type_name(got)
+            ),
             arg_node
           );
           ret;
@@ -3581,7 +3639,12 @@ impl Checker {
       let fsig = callee.fn_sig;
       if args.len != fsig.params.len {
         self.fail(
-          format("'{str}' expects {num} arguments, got {num}", name, fsig.params.len, args.len),
+          format(
+          "'{str}' expects {num} arguments, got {num}",
+          name,
+          fsig.params.len,
+          args.len
+          ),
           node
         );
         ret checked_unknown();
@@ -3626,7 +3689,15 @@ impl Checker {
     }
     Vec<CheckedType> no_generic_args;
     no_generic_args.init(0);
-    self.check_arguments(node, name, sig, &args, env, &sig.type_params, &no_generic_args);
+    self.check_arguments(
+      node,
+      name,
+      sig,
+      &args,
+      env,
+      &sig.type_params,
+      &no_generic_args
+    );
     ret sig.rtype;
   }
 }
@@ -4476,7 +4547,10 @@ impl Checker {
     if equals(declared_in, self.current_file) {
       ret;
     }
-    self.fail(format("{str} '{str}' is not public in the file that declares it", what, name), at);
+    self.fail(
+      format("{str} '{str}' is not public in the file that declares it", what, name),
+      at
+    );
   }
 
   // Rejects an assignment to a name declared const, and checks that the
@@ -4701,7 +4775,11 @@ impl Checker {
         // stored as, so it cannot be what a `let` infers.
         if self.shapes.has(value.name) {
           self.fail(
-            format("cannot infer a type for '{str}': '{str}' is a shape", v.name, value.name),
+            format(
+            "cannot infer a type for '{str}': '{str}' is a shape",
+            v.name,
+            value.name
+            ),
             stmt
           );
           ret;
@@ -4914,7 +4992,10 @@ impl Checker {
         str variant_name = "";
         _qualified_variant_names(e.left, &enum_name, &variant_name);
         if equals(enum_name, "") || env.lookup(enum_name).is_some() ||
-          !equals(self.canonical_type_name(enum_name), self.canonical_type_name(want.name)) {
+          !equals(
+          self.canonical_type_name(enum_name),
+          self.canonical_type_name(want.name)
+        ) {
           ret;
         }
         Vec<Node*> written;
@@ -4923,7 +5004,14 @@ impl Checker {
         if e.has_right {
           _call_args(e.right, &written);
         }
-        self.check_variant_args(val, self.canonical_type_name(enum_name), variant_name, &written, want, env);
+        self.check_variant_args(
+          val,
+          self.canonical_type_name(enum_name),
+          variant_name,
+          &written,
+          want,
+          env
+        );
       }
       _ -> {}
     }
@@ -4934,7 +5022,14 @@ impl Checker {
   // enum's own type parameters replaced by what `want` instantiated them as
   // (a parameter `want` does not resolve stands for anything). A shorthand
   // nested in an argument is held to that slot's own enum.
-  check_variant_args(Node* at, str enum_name, str variant_name, Vec<Node*>* written, CheckedType want, TypeEnv* env) {
+  check_variant_args(
+    Node* at,
+    str enum_name,
+    str variant_name,
+    Vec<Node*>* written,
+    CheckedType want,
+    TypeEnv* env
+  ) {
     if self.failed {
       ret;
     }
@@ -4967,7 +5062,11 @@ impl Checker {
     }
     num i = 0;
     for i < written.len {
-      CheckedType slot = substitute(payload_types.get(i), &type_params, &want.generic_args);
+      CheckedType slot = substitute(
+        payload_types.get(i),
+        &type_params,
+        &want.generic_args
+      );
       CheckedType got = self.infer(written.get(i), env);
       if self.failed {
         ret;
@@ -5103,7 +5202,10 @@ impl Checker {
           if pv.has_val {
             seen_default_param = true;
           } elif seen_default_param {
-            self.fail("a parameter without a default cannot follow a parameter with a default", pa);
+            self.fail(
+              "a parameter without a default cannot follow a parameter with a default",
+              pa
+            );
             ret;
           }
         }
@@ -5336,7 +5438,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         // No variants lowers to an empty C `enum`, which is invalid;
         // rejected here rather than left for the C compiler to explain.
         if e.variants.len == 0 {
-          checker.fail(format("enum '{str}' must declare at least one variant", e.name), node);
+          checker.fail(
+            format("enum '{str}' must declare at least one variant", e.name),
+            node
+          );
           ret .Err(checker.error);
         }
         flag carries_data = false;
@@ -5365,7 +5470,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
               payload_types.push(checked_from_dtype(pd));
             }
           }
-          checker.variant_payloads.put(format("{str}.{str}", e.name, v.name), payload_types);
+          checker.variant_payloads.put(
+            format("{str}.{str}", e.name, v.name),
+            payload_types
+          );
         }
         for v : e.variants {
           str owner = substr(e.name, 0, len(e.name));

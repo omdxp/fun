@@ -45,7 +45,14 @@ pub fun print_warning(Warning w) {
   line.append("] ");
   line.append(w.message);
   if w.has_pos {
-    line.append(format("\nLocation: {str}:{num}:{num}", w.pos.filename, w.pos.line, w.pos.col));
+    line.append(
+      format(
+      "\nLocation: {str}:{num}:{num}",
+      w.pos.filename,
+      w.pos.line,
+      w.pos.col
+      )
+    );
   }
   writeln_to(.Stderr, line.build());
 }
@@ -287,13 +294,15 @@ pub fun lower_to_c(
       if equals(where, "") {
         where = input;
       }
-      ret .Err(format(
+      ret .Err(
+        format(
         "{str}\nLocation: {str}:{num}:{num}",
         e.message,
         where,
         e.pos.line,
         e.pos.col
-      ));
+        )
+      );
     }
     ret .Err(e.message);
   }
@@ -310,13 +319,15 @@ pub fun lower_to_c(
       if equals(where, "") {
         where = input;
       }
-      ret .Err(format(
+      ret .Err(
+        format(
         "{str}\nLocation: {str}:{num}:{num}",
         ue.message,
         where,
         ue.pos.line,
         ue.pos.col
-      ));
+        )
+      );
     }
     ret .Err(ue.message);
   }
@@ -359,12 +370,14 @@ pub fun lower_to_c(
       }
       if !equals(cg.error_note, "") {
         if !equals(cg.last_where, "") {
-          ret .Err(format(
+          ret .Err(
+            format(
             "codegen failed: {str}: {str}, near {str}",
             what,
             cg.error_note,
             cg.last_where
-          ));
+            )
+          );
         }
         ret .Err(format("codegen failed: {str}: {str}", what, cg.error_note));
       }

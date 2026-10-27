@@ -693,10 +693,12 @@ impl ParseState {
         out_defaults.push(default_dt);
       } else {
         if _has_earlier_default(out_defaults) {
-          self.err(format(
+          self.err(
+            format(
             "type parameter '{str}' needs a default because an earlier parameter has one",
             name
-          ));
+            )
+          );
           ret .Some(.InvalidIdentifier);
         }
         out_defaults.push(nil);
@@ -815,10 +817,12 @@ impl ParseState {
         out_defaults.push(default_dt);
       } else {
         if _has_earlier_default(out_defaults) {
-          self.err(format(
+          self.err(
+            format(
             "type parameter '{str}' needs a default because an earlier parameter has one",
             name
-          ));
+            )
+          );
           ret .Some(.InvalidIdentifier);
         }
         out_defaults.push(nil);
@@ -2007,7 +2011,13 @@ impl Parser {
   // argument becomes a `Blank`), `ch <- v` -> `ch.send(v)` (`has_arg =
   // true`). Builds `(recv.method)(arg)`, a `.` dot-expression wrapped in a
   // `()` call, the same AST shape a method call already has.
-  _push_channel_method_call(Node* recv, str method_name, Node* arg, flag has_arg, Pos op_pos) {
+  _push_channel_method_call(
+    Node* recv,
+    str method_name,
+    Node* arg,
+    flag has_arg,
+    Pos op_pos
+  ) {
     Node method_ident = node_new(.Identifier(method_name));
     method_ident.pos = op_pos;
     method_ident.has_pos = true;
@@ -3813,7 +3823,11 @@ impl Parser {
     for true {
       let nt = self.state.token_next();
       if nt.is_none() || nt.unwrap().type != .Identifier {
-        report_expected_identifier(self.state, nt, "expected a bound name in a destructuring pattern");
+        report_expected_identifier(
+          self.state,
+          nt,
+          "expected a bound name in a destructuring pattern"
+        );
         ret .Some(.InvalidIdentifier);
       }
       str nname = "";
@@ -4928,7 +4942,11 @@ impl Parser {
     for true {
       let nt = self.state.token_next();
       if nt.is_none() || nt.unwrap().type != .Identifier {
-        report_expected_identifier(self.state, nt, "expected a bound name in 'for' destructuring pattern");
+        report_expected_identifier(
+          self.state,
+          nt,
+          "expected a bound name in 'for' destructuring pattern"
+        );
         ret .Some(.InvalidIdentifier);
       }
       str nname = "";
@@ -5375,7 +5393,11 @@ impl Parser {
     for !self.state.next_token_is_symbol(')') {
       let sbt = self.state.token_next();
       if sbt.is_none() || sbt.unwrap().type != .Identifier {
-        report_expected_identifier(self.state, sbt, "expected binding name in shape destructuring pattern");
+        report_expected_identifier(
+          self.state,
+          sbt,
+          "expected binding name in shape destructuring pattern"
+        );
         ret .Some(.InvalidIdentifier);
       }
       str sbname = "";
@@ -5413,7 +5435,11 @@ impl Parser {
   // nothing and leaves `*out_matched` false. Detection requires the
   // trailing `(`, so a payload-less `Enum.Variant`/`.Variant` arm still
   // goes through the ordinary path.
-  _try_parse_fit_destructure(flag* out_matched, Node* out_condition, Vec<str>* out_bindings) Option<ParseErrorKind> {
+  _try_parse_fit_destructure(
+    flag* out_matched,
+    Node* out_condition,
+    Vec<str>* out_bindings
+  ) Option<ParseErrorKind> {
     *out_matched = false;
     let p0_opt = self.state.token_peek_n(0);
     let p1_opt = self.state.token_peek_n(1);
@@ -5496,7 +5522,11 @@ impl Parser {
     for !self.state.next_token_is_symbol(')') {
       let bt = self.state.token_next();
       if bt.is_none() || bt.unwrap().type != .Identifier {
-        report_expected_identifier(self.state, bt, "expected binding name in fit destructuring pattern");
+        report_expected_identifier(
+          self.state,
+          bt,
+          "expected binding name in fit destructuring pattern"
+        );
         ret .Some(.InvalidIdentifier);
       }
       str bname = "";
@@ -6285,8 +6315,16 @@ impl Parser {
   // of a chained positional access's own raw digit text (`t.0.1` -> whole
   // 0, frac 1).
   _split_chained_tuple_index(Pos pos) Option<ChainedTupleIndexParts> {
-    let start_idx_opt = self._source_index_from_line_col(self.state.input_source, pos.line, pos.start_col);
-    let end_idx_opt = self._source_index_from_line_col(self.state.input_source, pos.end_line, pos.end_col);
+    let start_idx_opt = self._source_index_from_line_col(
+      self.state.input_source,
+      pos.line,
+      pos.start_col
+    );
+    let end_idx_opt = self._source_index_from_line_col(
+      self.state.input_source,
+      pos.end_line,
+      pos.end_col
+    );
     if start_idx_opt.is_none() || end_idx_opt.is_none() {
       ret .None;
     }
@@ -6655,7 +6693,9 @@ impl Parser {
     }
 
     if is_variadic || args.len != 2 {
-      self.state.err("'fuzz' requires exactly two explicitly-typed parameters: 'raw* data, num len'");
+      self.state.err(
+        "'fuzz' requires exactly two explicitly-typed parameters: 'raw* data, num len'"
+      );
       self.state.finish_scope();
       ret .Some(.InvalidStatement);
     }
@@ -6759,13 +6799,17 @@ impl Parser {
     // report - there is no corresponding event that could ever make
     // `expect` true, unlike every other id here.
     if warning_id == .NoCover && action == .Expect {
-      self.state.err("'no_cover' only makes sense with 'allow', not 'expect' - it has no corresponding warning that could ever fire");
+      self.state.err(
+        "'no_cover' only makes sense with 'allow', not 'expect' - it has no corresponding warning that could ever fire"
+      );
       ret .Some(.InvalidStatement);
     }
 
     if !self.has_current_function &&
       !self._warning_control_is_valid_in_module_scope(warning_id) {
-      self.state.err("this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, and no_cover may be controlled at module scope");
+      self.state.err(
+        "this warning id is only valid inside functions; only unused_variable, unused_import, unused_function, unused_compound, unused_type_alias, and no_cover may be controlled at module scope"
+      );
       ret .Some(.InvalidStatement);
     }
 
@@ -7336,7 +7380,9 @@ impl Parser {
         // array type, since cloning the size-expression AST per extra
         // name isn't supported.
         if field_count > 0 && dt.is_array {
-          self.state.err("array fields cannot be declared in a combined list; declare them separately");
+          self.state.err(
+            "array fields cannot be declared in a combined list; declare them separately"
+          );
           free(dt);
           ret .Some(.InvalidDataType);
         }
@@ -7632,7 +7678,9 @@ impl Parser {
     // explicitly there.
     if first.pointer_depth > 0 || first.flags.is_pointer {
       dtype_free(first);
-      self.state.err("a type alias's own body cannot be a pointer type; write the pointer explicitly at each use site instead");
+      self.state.err(
+        "a type alias's own body cannot be a pointer type; write the pointer explicitly at each use site instead"
+      );
       ret .Some(.InvalidDataType);
     }
 
@@ -7662,7 +7710,9 @@ impl Parser {
       num bi = 0;
       for bi < alternatives.len {
         if ends_with(alternatives.get(bi), "*") {
-          self.state.err("a type alias's own bound alternative cannot be a pointer type; write the pointer explicitly at each use site instead");
+          self.state.err(
+            "a type alias's own bound alternative cannot be a pointer type; write the pointer explicitly at each use site instead"
+          );
           ret .Some(.InvalidDataType);
         }
         bi = bi + 1;
@@ -7929,7 +7979,9 @@ impl Parser {
     impl_param_defaults.init(0);
     if self.state.next_token_is_angle_open() {
       if self.state.impl_angle_list_has_default() {
-        self.state.err("an impl's type parameters cannot have defaults: they come from the type it implements");
+        self.state.err(
+          "an impl's type parameters cannot have defaults: they come from the type it implements"
+        );
         ret .Some(.InvalidDataType);
       }
       if self.state.impl_generic_args_are_params() {
@@ -7966,7 +8018,9 @@ impl Parser {
       }
     }
     if _any_default(&impl_param_defaults) {
-      self.state.err("an impl's type parameters cannot have defaults: they come from the type it implements");
+      self.state.err(
+        "an impl's type parameters cannot have defaults: they come from the type it implements"
+      );
       ret .Some(.InvalidDataType);
     }
     impl_param_defaults.free();
@@ -11221,7 +11275,9 @@ test "parse_statement accepts a bare reference to an already-declared function u
   // bypass in `parse_single_token_to_node` (which only covers `foo(...)`)
   // doesn't apply. `parse_function` registers a function's own name as a
   // symbol as soon as it's parsed, which covers this case too.
-  ParseState st = _state_from("fun add_one(num x) num {\n  ret x + 1;\n}\nfun apply(fun(num) num cb, num x) num {\n  ret cb(x);\n}\nfun main() num {\n  ret apply(add_one, 5);\n}\n");
+  ParseState st = _state_from(
+    "fun add_one(num x) num {\n  ret x + 1;\n}\nfun apply(fun(num) num cb, num x) num {\n  ret cb(x);\n}\nfun main() num {\n  ret apply(add_one, 5);\n}\n"
+  );
   Parser p = parser_new(&st);
   assert p.parse().is_none(), "expected the whole program (including the bare 'add_one' argument) to parse";
 }
@@ -11576,7 +11632,9 @@ test "parse_function parses a bodyless variadic C-binding declaration" {
 }
 
 test "parse parses multiple top-level function declarations" {
-  ParseState st = _state_from("fun add(num a, num b) num { ret a + b; } fun main() num { ret 0; }");
+  ParseState st = _state_from(
+    "fun add(num a, num b) num { ret a + b; } fun main() num { ret 0; }"
+  );
   Parser p = parser_new(&st);
   assert p.parse().is_none(), "expected the whole file to parse";
   assert st.nodes.len == 2, "expected 2 top-level nodes";
@@ -12849,7 +12907,9 @@ test "parse_impl parses a plain (non-shape) impl with a method body" {
 }
 
 test "parse_impl parses a symbolic generic shape binding" {
-  ParseState st = _state_from("impl VecIter<T> as Iterator<T> { next() Option<T> { ret .None; } }");
+  ParseState st = _state_from(
+    "impl VecIter<T> as Iterator<T> { next() Option<T> { ret .None; } }"
+  );
   Parser p = parser_new(&st);
   assert p.parse_impl(false).is_none(), "expected the generic shape impl to parse";
   let top = st.nodes.get(st.nodes.len - 1);
@@ -13128,7 +13188,10 @@ test "parse_fit_statement's destructuring bindings don't leak into a sibling arm
   Vec<str> names;
   names.init(0);
   names.push("x");
-  ParseState st = _state_with_declared("fit x { .Circle(r) -> { r; } .Square -> { r; } }", names);
+  ParseState st = _state_with_declared(
+    "fit x { .Circle(r) -> { r; } .Square -> { r; } }",
+    names
+  );
   st.emit_stderr = false;
   Parser p = parser_new(&st);
   let err = p.parse_fit_statement();

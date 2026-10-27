@@ -9,7 +9,15 @@ fun main() {
 
   num out = 0;
   num idx = CHANNEL_SELECT_INDEX_DEFAULT;
-  num rc = a.select_recv_timeout_with_tuning_token(&b, &out, &idx, 100, -1, -1, &token);
+  num rc = a.select_recv_timeout_with_tuning_token(
+    &b,
+    &out,
+    &idx,
+    100,
+    -1,
+    -1,
+    &token
+  );
 
   num ok_rc = 0;
   if rc == CHANNEL_RC_CANCELLED {

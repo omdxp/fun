@@ -75,6 +75,18 @@ pub compound FmtState {
   // every call in an over-long chain gets its own line, not as many
   // as fit. Reset at the next statement boundary.
   flag method_chain_wrap;
+  // One entry per currently-open `(`/`[`, pushed in lockstep with
+  // `open_delims` so each nesting level can be asked for its own
+  // answer independently: true when that opener is a call's own `(`
+  // (not a grouping paren or an index's own `[`) whose argument list
+  // doesn't fit inline, decided once, at the opener itself, by
+  // measuring the whole argument list the same way `method_chain_
+  // wrap` measures a chain's own remaining calls. One argument per
+  // line, the same convention a hand-wrapped function declaration's
+  // own over-long parameter list already uses throughout this
+  // codebase - unlike a boolean chain or a fit arm's own conditions,
+  // which pack as many as fit.
+  Vec<flag> call_arg_wrap;
   // True when the token just written was a prefix operator.
   flag prev_unary;
   // A space owed to the previous token, written only if the line
@@ -116,6 +128,7 @@ pub fun fmt_state_new() FmtState {
   s.fit_arm_wrap = false;
   s.bool_chain_wrap = false;
   s.method_chain_wrap = false;
+  s.call_arg_wrap.init(4);
   s.prev_unary = false;
   s.pending_space = false;
   s.stmt_first = "";
@@ -867,7 +880,10 @@ fun _needs_space_at(
     ret false;
   }
   if equals(c, "<") &&
-    (angle_depth > 0 || _is_generic_open(tokens, idx, in_decl_only) || _looks_like_call_generic_open(tokens, idx)) {
+    (angle_depth > 0 || _is_generic_open(tokens, idx, in_decl_only) || _looks_like_call_generic_open(
+    tokens,
+    idx
+  )) {
     ret false;
   }
   if _is_close_run(c) > 0 && angle_depth > 0 {
@@ -1157,6 +1173,59 @@ fun _inline_width(Vec<Token>* tokens, num from, num to) num {
   ret width;
 }
 
+// The index of the `)` matching the `(` at `lparen_idx`, scanning
+// forward, depth-tracked. -1 if the source doesn't actually balance
+// (never true for anything that reached the formatter, which only
+// ever runs on an already-parsed program, but a plain `-1` is a
+// harmless, inert "don't wrap" answer rather than an assumption worth
+// asserting).
+fun _matching_rparen_forward(Vec<Token>* tokens, num lparen_idx) num {
+  num depth = 0;
+  num i = lparen_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if equals(token_text(t), "(") {
+      depth = depth + 1;
+    } elif equals(token_text(t), ")") {
+      depth = depth - 1;
+      if depth == 0 {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// Whether the `(` at `lparen_idx` opens a call's own argument list
+// (immediately preceded by the name being called, rather than a
+// grouping paren or an index's own `[`) that doesn't fit on the
+// current line, measured the same way `method_chain_wrap` measures
+// a chain's own remaining calls: from right after this `(` (`start_col`,
+// the column its own first argument would start at) to its matching
+// `)`, inclusive.
+fun _call_arg_wrap_decision(
+  Vec<Token>* tokens,
+  num lparen_idx,
+  flag prev_is_identifier,
+  num start_col
+) flag {
+  if !prev_is_identifier {
+    ret false;
+  }
+  num rparen_idx = _matching_rparen_forward(tokens, lparen_idx);
+  if rparen_idx < 0 {
+    ret false;
+  }
+  // An empty argument list (`f()`) has nothing to wrap onto its own
+  // line regardless of width.
+  if rparen_idx == lparen_idx + 1 {
+    ret false;
+  }
+  num width = _inline_width(tokens, lparen_idx + 1, rparen_idx - 1);
+  ret start_col + width + 1 > MAX_LINE_WIDTH;
+}
+
 // The index of the `->` ending the arm whose own conditions start at
 // `from` (the arm's own first token, right after the fit's own `{`
 // or a previous arm's own closing `}`), tracking paren depth so a
@@ -1250,7 +1319,10 @@ fun _bool_chain_operand_end(Vec<Token>* tokens, num from) num {
         ret i;
       }
     } elif depth == 0 &&
-      (_is_bool_chain_op(text) || equals(text, ";") || equals(text, ",") || equals(text, "->") || equals(text, "{")) {
+      (_is_bool_chain_op(text) || equals(text, ";") || equals(text, ",") || equals(text, "->") || equals(
+      text,
+      "{"
+    )) {
       ret i;
     }
     i = i + 1;
@@ -2022,6 +2094,20 @@ pub fun format_source(str src, str filename) Result<str, str> {
       if s.open_delims > 0 {
         s.open_delims = s.open_delims - 1;
       }
+      // Popped in lockstep with the push below, regardless of which
+      // closer this is - only a wrapped call's own `)` (never `]`,
+      // never an un-wrapped call's `)`) actually forces the break: its
+      // own closing paren reads as a fresh top-level statement would,
+      // not as a continuation of the line its last argument ended on,
+      // the same way a closing `}` already un-indents before writing
+      // itself rather than reusing the block's own last line.
+      if s.call_arg_wrap.len > 0 {
+        flag closing_call_wrap = s.call_arg_wrap.pop();
+        if closing_call_wrap && equals(text, ")") && !s.at_line_start {
+          s.continuation = false;
+          s.newline();
+        }
+      }
     }
 
     if !s.at_line_start && s.has_prev {
@@ -2040,7 +2126,17 @@ pub fun format_source(str src, str filename) Result<str, str> {
     s.write(text);
 
     if equals(text, "(") || equals(text, "[") {
+      flag opens_call = equals(text, "(") && s.has_prev && s.prev.type == .Identifier;
+      flag wraps = _call_arg_wrap_decision(&tokens, i, opens_call, s.col);
+      s.call_arg_wrap.push(wraps);
       s.open_delims = s.open_delims + 1;
+      if wraps {
+        // The first argument gets its own line too, the same as every
+        // one after an interior comma (below) - without this, only
+        // arguments after the first would ever break.
+        s.force_break = true;
+        s.pending_newlines = 0;
+      }
     }
     // A call's or index's own closing `)`/`]`, at the top level of its
     // own expression (one nested inside an outer call's or index's
@@ -2075,6 +2171,13 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.function_body_depth == s.fit_body_depth_at_start.get(
       s.fit_body_depth_at_start.len - 1
     );
+    // True right as a wrapped call's own comma is written - the top
+    // of `call_arg_wrap` always names the innermost still-open `(`/
+    // `[`, so this is the call's own argument list, never a nested
+    // call's or index's own (each pushed its own entry, becoming the
+    // top in its turn).
+    flag call_arg_comma = s.call_arg_wrap.len > 0 &&
+      s.call_arg_wrap.get(s.call_arg_wrap.len - 1);
     if equals(text, ",") {
       flag fit_fill_break = false;
       if fit_condition_comma && s.fit_arm_wrap {
@@ -2083,11 +2186,12 @@ pub fun format_source(str src, str filename) Result<str, str> {
         fit_fill_break = s.col + 1 + next_width > MAX_LINE_WIDTH;
       }
       if (s.enum_block_depth > 0 && s.function_body_depth == 0 && s.open_delims == 0) ||
-        fit_fill_break {
+        fit_fill_break || call_arg_comma {
         // Each variant takes a line; an over-long fit arm's own
         // conditions break only once the next one would not fit,
-        // packing as many per line as the width allows. A comment
-        // written after either stays with it.
+        // packing as many per line as the width allows; a wrapped
+        // call's own arguments break after every one, one per line.
+        // A comment written after any of these stays with it.
         s.force_break = true;
         s.pending_newlines = 0;
       } else {
@@ -2175,7 +2279,10 @@ pub fun format_source(str src, str filename) Result<str, str> {
     }
 
     if equals(text, "<") &&
-      (_is_generic_open(&tokens, i, _in_decl_only(&s)) || _looks_like_call_generic_open(&tokens, i)) {
+      (_is_generic_open(&tokens, i, _in_decl_only(&s)) || _looks_like_call_generic_open(
+      &tokens,
+      i
+    )) {
       s.angle_depth = s.angle_depth + 1;
     }
     let closes = _is_close_run(text);

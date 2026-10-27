@@ -7,7 +7,12 @@
 
 // Thread lifecycle
 // Creates a new thread running start_routine(arg), writing its handle to `thread`.
-pub fun pthread_create(pthread_t* thread, pthread_attr_t* attr, raw* start_routine, raw* arg) num;
+pub fun pthread_create(
+  pthread_t* thread,
+  pthread_attr_t* attr,
+  raw* start_routine,
+  raw* arg
+) num;
 
 // Waits for a thread to terminate, optionally writing its return value to `retval`.
 pub fun pthread_join(pthread_t thread, raw* retval) num;

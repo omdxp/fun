@@ -238,7 +238,10 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     // free as-is - see this function's own earlier note on why every
     // `Diagnostic` it builds needs to be uniformly freeable.
     str alias_msg = alias_err.unwrap();
-    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, substr(alias_msg, 0, len(alias_msg)));
+    type_error_diag = _at_start(
+      DIAG_SEVERITY_ERROR,
+      substr(alias_msg, 0, len(alias_msg))
+    );
   }
   let checked = typecheck_program(&alias_checked_nodes);
   // The clone above is the only tree expansion ever touched, so it is
@@ -255,7 +258,10 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
     // `Checker.fail`'s own call sites in typecheck.fn, never safe to
     // free as-is - every `Diagnostic` this function builds needs to
     // be uniformly freeable (see `report()`'s own note).
-    type_error_diag = _at_start(DIAG_SEVERITY_ERROR, substr(e.message, 0, len(e.message)));
+    type_error_diag = _at_start(
+      DIAG_SEVERITY_ERROR,
+      substr(e.message, 0, len(e.message))
+    );
     if e.has_pos && equals(e.pos.filename, path) {
       type_error_diag.line = e.pos.line - 1;
       type_error_diag.col = e.pos.col - 1;

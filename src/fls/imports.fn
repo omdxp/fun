@@ -273,7 +273,11 @@ pub fun document_links(AnalysisCache* cache, Document doc) str {
       if !equals(resolved, "") && !is_dir(resolved) {
         num start_line = first.pos.line - 1;
         num end_line = last.pos.line - 1;
-        num start_char = byte_col_to_utf16_char(doc_text, start_line, first.pos.start_col - 1);
+        num start_char = byte_col_to_utf16_char(
+          doc_text,
+          start_line,
+          first.pos.start_col - 1
+        );
         num end_char = byte_col_to_utf16_char(doc_text, end_line, last.pos.end_col - 1);
         if any {
           b.append(",");

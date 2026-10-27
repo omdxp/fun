@@ -901,13 +901,15 @@ test "a shape-bounded generic parameter rejects a non-implementor" {
   // coarser any-pointer-satisfies-any-shape approximation used for
   // ordinary shape-typed parameters - a bound is held to real membership.
   assert contains(
-    check(`shape Renderable { render() str; }
+    check(
+    `shape Renderable { render() str; }
     `compound Other { num v; }
     `fun show<T: Renderable>(T x) str { ret x.render(); }
     `fun main() str {
     `  Other o;
     `  ret show(&o);
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a non-implementor rejected";
 }
@@ -927,12 +929,14 @@ test "a generic-instantiation bound alternative accepts a matching instantiation
 
 test "a generic-instantiation bound alternative rejects a mismatching instantiation" {
   assert contains(
-    check(`compound Box<T> { T value; }
+    check(
+    `compound Box<T> { T value; }
     `fun identity<T: num | Box<num>>(T x) T { ret x; }
     `fun main() str {
     `  let out = identity("nope");
     `  ret out;
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a type outside the bound list rejected";
 }
@@ -985,7 +989,8 @@ test "a bound naming a generic shape's own self-referential instantiation accept
 
 test "a bound naming a generic shape's own instantiation still rejects a non-implementor" {
   assert contains(
-    check(`shape Steppable<T> { succ() T; }
+    check(
+    `shape Steppable<T> { succ() T; }
     `compound Other { num v; }
     `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
     `fun main() num {
@@ -993,7 +998,8 @@ test "a bound naming a generic shape's own instantiation still rejects a non-imp
     `  o.v = 1;
     `  let b = bump(o);
     `  ret b.v;
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a non-implementor still rejected, not accidentally accepted by the suffix-stripping fix";
 }
@@ -1042,11 +1048,13 @@ test "a bound-list type alias is usable as a generic constraint" {
     "expected the bound-list alias spliced into the constraint"
   );
   assert contains(
-    check(`als Numeric = num | dec;
+    check(
+    `als Numeric = num | dec;
     `fun identity<T: Numeric>(T x) T { ret x; }
     `fun main() str {
     `  ret identity("nope");
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a type outside the bound-list alias rejected";
 }
@@ -1102,12 +1110,14 @@ test "a bound-list type alias is usable as a generic constraint on a compound" {
     "expected the bound-list alias spliced into a compound's own constraint"
   );
   assert contains(
-    check(`als Numeric = num | dec;
+    check(
+    `als Numeric = num | dec;
     `compound Box<T: Numeric> { T value; }
     `fun main() str {
     `  Box<str> b = Box<str>{value = "nope"};
     `  ret b.value;
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a type outside a compound's bound-list alias rejected";
 }
@@ -1194,14 +1204,16 @@ test "a matching instantiation, and one still standing for a parameter, are acce
 test "two different enums are not compared by ordinal" {
   // Both lower to a number, so nothing stopped the comparison; it asks
   // whether two unrelated ordinals coincide, which is never the point.
-  str found = check(`enum A { X }
+  str found = check(
+    `enum A { X }
   `enum B { P }
   `fun main() num {
   `  A a = .X;
   `  B b = .P;
   `  if a == b { ret 1; }
   `  ret 0;
-  `}`);
+  `}`
+  );
   assert contains(found, "share no variants"), "expected the cross-enum comparison rejected";
 }
 
@@ -2100,7 +2112,10 @@ test "a macro or type the always-included C headers declare is rejected as a nam
   rejects(`fun main() { num NULL = 1; }`, "expected NULL to be rejected as a variable name");
   rejects(`fun main() { num EOF = 1; }`, "expected EOF to be rejected as a variable name");
   rejects(`fun main() { num bool = 1; }`, "expected bool to be rejected as a variable name");
-  rejects(`fun main() { num INT_MAX = 1; }`, "expected INT_MAX to be rejected as a variable name");
+  rejects(
+    `fun main() { num INT_MAX = 1; }`,
+    "expected INT_MAX to be rejected as a variable name"
+  );
   rejects(`fun NULL() num { ret 1; }`, "expected NULL to be rejected as a function name");
   rejects(`compound FILE { num v; }`, "expected FILE to be rejected as a compound name");
   rejects(`compound size_t { num v; }`, "expected size_t to be rejected as a compound name");
@@ -2133,8 +2148,14 @@ test "a function cannot be defined under the name of a C library function the ge
 
 test "a similar name, a generic function, or a name from a header included only on demand is accepted" {
   accepts(`fun divide(num a, num b) num { ret a / b; }`, "expected divide to be fine");
-  accepts(`fun abs<T>(T x) T { ret x; }`, "expected a generic function, mangled per instantiation, to be fine");
-  accepts(`fun log(num x) num { ret x; }`, "expected a math.h name to be fine when math.h is not pulled in");
+  accepts(
+    `fun abs<T>(T x) T { ret x; }`,
+    "expected a generic function, mangled per instantiation, to be fine"
+  );
+  accepts(
+    `fun log(num x) num { ret x; }`,
+    "expected a math.h name to be fine when math.h is not pulled in"
+  );
   accepts(`fun main() {}`, "expected an ordinary program to be fine");
 }
 
@@ -2718,23 +2739,30 @@ test "an enum whose variants carry data cannot be compared with == or !=, but a 
   str msg = check(tagged);
   assert contains(msg, "'==' cannot compare 'Outcome'"), "expected == on a data-carrying enum to be rejected by name";
   assert contains(msg, "use `fit`"), "expected the message to point at fit";
-  rejects(`enum Outcome {
+  rejects(
+    `enum Outcome {
   `  Done(num),
   `  Failed,
   `}
   `fun main() {
   `  Outcome a = Outcome.Failed;
   `  flag differs = a != Outcome.Failed;
-  `}`, "expected != to be rejected too");
-  accepts(`enum Color {
+  `}`,
+    "expected != to be rejected too"
+  );
+  accepts(
+    `enum Color {
   `  Red,
   `  Green,
   `}
   `fun main() {
   `  Color c = Color.Red;
   `  flag same = c == Color.Green;
-  `}`, "expected a plain enum to compare fine");
-  accepts(`enum Outcome {
+  `}`,
+    "expected a plain enum to compare fine"
+  );
+  accepts(
+    `enum Outcome {
   `  Done(num),
   `  Failed,
   `}
@@ -2742,7 +2770,9 @@ test "an enum whose variants carry data cannot be compared with == or !=, but a 
   `  Outcome a = Outcome.Failed;
   `  Outcome* p = &a;
   `  flag same = p == nil;
-  `}`, "expected a pointer to a data-carrying enum to compare against nil");
+  `}`,
+    "expected a pointer to a data-carrying enum to compare against nil"
+  );
 }
 
 test "a shape-downcast fit accepts a real implementor and rejects everything else" {

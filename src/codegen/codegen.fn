@@ -1670,7 +1670,13 @@ impl Codegen {
     self.state = saved_state;
     self.emit_hoisted(tuple_scratch.out.build());
 
-    self.record_compound_typed(mangled_name, field_names, member_names, member_is_ptr, member_dtypes);
+    self.record_compound_typed(
+      mangled_name,
+      field_names,
+      member_names,
+      member_is_ptr,
+      member_dtypes
+    );
     ret .Some(mangled_name);
   }
 
@@ -2673,7 +2679,10 @@ impl Codegen {
   emit_function_prototype(Node n) Option<CodegenErrorKind> {
     fit n.kind {
       .Function(f) -> {
-        ret self.emit_generic_impl_method_prototype(n, self.effective_function_name(f.name));
+        ret self.emit_generic_impl_method_prototype(
+          n,
+          self.effective_function_name(f.name)
+        );
       }
       _ -> { ret .Some(.InvalidNode); }
     }
@@ -3182,7 +3191,9 @@ impl Codegen {
             fit m.kind {
               .Function(proto_fnv) -> {
                 if proto_fnv.has_rtype {
-                  let proto_rt_name = self.resolve_type_name(self.resolve_type_subst(*proto_fnv.rtype));
+                  let proto_rt_name = self.resolve_type_name(
+                    self.resolve_type_subst(*proto_fnv.rtype)
+                  );
                   if proto_rt_name.is_some() {
                     proto_type_names.push(proto_rt_name.unwrap());
                   }
@@ -3192,7 +3203,9 @@ impl Codegen {
                     fit proto_arg.kind {
                       .Variable(proto_v) -> {
                         if !proto_v.var_type.has_fn_sig {
-                          let proto_pt_name = self.resolve_type_name(self.resolve_type_subst(*proto_v.var_type));
+                          let proto_pt_name = self.resolve_type_name(
+                            self.resolve_type_subst(*proto_v.var_type)
+                          );
                           if proto_pt_name.is_some() {
                             proto_type_names.push(proto_pt_name.unwrap());
                           }
@@ -4045,7 +4058,11 @@ impl Codegen {
   //
   // A plain impl contributes no substitution of its own, so the combined
   // one reduces to the method's own params.
-  maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<OwnParamCallResolution> {
+  maybe_instantiate_generic_impl_method_own_params(
+    str owner_type,
+    str bare_name,
+    Vec<Node*> args
+  ) Option<OwnParamCallResolution> {
     num ii = 0;
     flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -4145,7 +4162,9 @@ impl Codegen {
                   // resolved names stand in as plain types.
                   if !found && own_idx < fnv.type_param_defaults.len &&
                     fnv.type_param_defaults.get(own_idx) != nil {
-                    DataType* default_dt = dtype_clone(fnv.type_param_defaults.get(own_idx));
+                    DataType* default_dt = dtype_clone(
+                      fnv.type_param_defaults.get(own_idx)
+                    );
                     Vec<DataType*> earlier;
                     earlier.init(0);
                     for en : own_arg_type_names {
@@ -5343,7 +5362,12 @@ impl Codegen {
         format_num(node.pos.col)
       );
     }
-    self.error_note = format("{str} ({str}){str}", node_kind_name(node.kind), stage, where);
+    self.error_note = format(
+      "{str} ({str}){str}",
+      node_kind_name(node.kind),
+      stage,
+      where
+    );
   }
 
   // Emits `cond` as an `if`/`while` condition, without the one redundant
@@ -6225,11 +6249,21 @@ impl Codegen {
           }
           let recv_r0_opt = self.resolve_operator_operand(u.operand);
           if recv_r0_opt.is_some() {
-            let mangled_opt = self.lookup_impl_method(recv_r0_opt.unwrap().type_name, op_method);
+            let mangled_opt = self.lookup_impl_method(
+              recv_r0_opt.unwrap().type_name,
+              op_method
+            );
             if mangled_opt.is_some() {
-              let recv_r_opt = self.materialize_operator_operand(recv_r0_opt.unwrap(), u.operand);
+              let recv_r_opt = self.materialize_operator_operand(
+                recv_r0_opt.unwrap(),
+                u.operand
+              );
               if recv_r_opt.is_some() {
-                ret self.emit_operator_call(recv_r_opt.unwrap(), mangled_opt.unwrap(), .None);
+                ret self.emit_operator_call(
+                  recv_r_opt.unwrap(),
+                  mangled_opt.unwrap(),
+                  .None
+                );
               }
             }
           }
@@ -6644,7 +6678,10 @@ impl Codegen {
                   shape_ok = true;
                 }
                 if shape_ok {
-                  let fn_name_opt2 = self.lookup_impl_method(type_name.unwrap(), "to_string");
+                  let fn_name_opt2 = self.lookup_impl_method(
+                    type_name.unwrap(),
+                    "to_string"
+                  );
                   if fn_name_opt2.is_some() {
                     // A Display impl reached only through this
                     // unary-wrapped dispatch needs a forward prototype,
@@ -6654,7 +6691,11 @@ impl Codegen {
                       type_name.unwrap(),
                       "to_string"
                     );
-                    self.ensure_generic_impl_method_emitted(type_name.unwrap(), "to_string", "");
+                    self.ensure_generic_impl_method_emitted(
+                      type_name.unwrap(),
+                      "to_string",
+                      ""
+                    );
                     DisplayResolution res2;
                     res2.fn_name = fn_name_opt2.unwrap();
                     // `*p` evaluates to a plain value, so a
@@ -6911,7 +6952,11 @@ impl Codegen {
                       }
                     }
                     if self.enum_has_variant(enum_name, variant_name) {
-                      ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
+                      ret self.emit_enum_variant_construction(
+                        enum_name,
+                        variant_name,
+                        e.right
+                      );
                     }
                   }
                   _ -> {}
@@ -7661,7 +7706,11 @@ impl Codegen {
     // name for the per-argument bare-shorthand lookup below, since
     // `lookup_function_param_type` only knows a template by its bare name.
     str template_callee_name = callee_name;
-    let generic_inst = self.maybe_instantiate_generic_function(callee_name, args, e.generic_args);
+    let generic_inst = self.maybe_instantiate_generic_function(
+      callee_name,
+      args,
+      e.generic_args
+    );
     if generic_inst.is_some() {
       callee_name = generic_inst.unwrap().mangled_name;
     } else {
@@ -7943,7 +7992,11 @@ impl Codegen {
       ret operand_err;
     }
     str operand_text = addr_scratch.out.build();
-    str tmp_name2 = self.hoist_call_result_operand(operand_text, self.expected_enum_type, false);
+    str tmp_name2 = self.hoist_call_result_operand(
+      operand_text,
+      self.expected_enum_type,
+      false
+    );
     self.state.write("&");
     self.state.write(tmp_name2);
     ret .None;
@@ -7983,7 +8036,12 @@ impl Codegen {
 
   // Shared by the two forms above. `declare_only` splices `T tmp;` and
   // leaves the assignment to the caller.
-  hoist_call_result_temp(str call_text, str recv_type_name, flag recv_is_pointer, flag declare_only) str {
+  hoist_call_result_temp(
+    str call_text,
+    str recv_type_name,
+    flag recv_is_pointer,
+    flag declare_only
+  ) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
     recv_tmp_name_sb.append("__fun_recv_tmp");
@@ -8107,7 +8165,11 @@ impl Codegen {
   emit_shape_dispatch_call(ChainResolution recv_r, str method_name, Node* args_node) Option<CodegenErrorKind> {
     str recv_text = recv_r.text;
     if recv_r.is_call_result {
-      recv_text = self.hoist_call_result_to_temp(recv_r.text, recv_r.type_name, recv_r.is_pointer);
+      recv_text = self.hoist_call_result_to_temp(
+        recv_r.text,
+        recv_r.type_name,
+        recv_r.is_pointer
+      );
     }
     str sep = ".";
     if recv_r.is_pointer {
@@ -8180,7 +8242,12 @@ impl Codegen {
           if equals(field_name, "") {
             ret .None;
           }
-          ret .Some(self.lookup_compound_field(self.resolve_field_chain(e.left)?.type_name, field_name)?.type_name);
+          ret .Some(
+            self.lookup_compound_field(
+            self.resolve_field_chain(e.left)?.type_name,
+            field_name
+            )?.type_name
+          );
         }
       }
       _ -> {}
@@ -8315,7 +8382,11 @@ impl Codegen {
       // A generic impl method such as `Vec<str>.sum()` gets its C
       // prototype and body emitted here, at the first call site for this
       // instantiation. A no-op for a plain type's method.
-      let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name, "");
+      let emit_err = self.ensure_generic_impl_method_emitted(
+        recv_r.type_name,
+        method_name,
+        ""
+      );
       if emit_err.is_some() {
         ret emit_err;
       }
@@ -8380,7 +8451,10 @@ impl Codegen {
     }
     // The same trailing-default fill-in `emit_call` does for a plain
     // function, keyed by (owner type, bare method name) instead.
-    let method_defaults = self.lookup_impl_method_default_values(recv_r.type_name, method_name);
+    let method_defaults = self.lookup_impl_method_default_values(
+      recv_r.type_name,
+      method_name
+    );
     if method_defaults.is_some() {
       let mdparam_types = self.lookup_impl_method_param_types(recv_r.type_name, method_name);
       // A method call has already written its receiver, so a default
@@ -9782,7 +9856,12 @@ impl Codegen {
           let elem_resolved = self.resolve_type_name(elem_dt);
           if elem_resolved.is_some() {
             let elem_subst = self.resolve_type_subst(elem_dt);
-            self.record_local_typed(name, elem_resolved.unwrap(), dtype_is_pointer(elem_subst), elem_subst);
+            self.record_local_typed(
+              name,
+              elem_resolved.unwrap(),
+              dtype_is_pointer(elem_subst),
+              elem_subst
+            );
           }
         }
       }
@@ -9964,7 +10043,9 @@ impl Codegen {
       }
       .StatementBreak -> {
         if self.loop_defer_marks.len > 0 {
-          let derr = self.emit_defers_from(self.loop_defer_marks.get(self.loop_defer_marks.len - 1));
+          let derr = self.emit_defers_from(
+            self.loop_defer_marks.get(self.loop_defer_marks.len - 1)
+          );
           if derr.is_some() {
             ret derr;
           }
@@ -9975,7 +10056,9 @@ impl Codegen {
       }
       .StatementContinue -> {
         if self.loop_defer_marks.len > 0 {
-          let derr = self.emit_defers_from(self.loop_defer_marks.get(self.loop_defer_marks.len - 1));
+          let derr = self.emit_defers_from(
+            self.loop_defer_marks.get(self.loop_defer_marks.len - 1)
+          );
           if derr.is_some() {
             ret derr;
           }
@@ -10222,7 +10305,10 @@ impl Codegen {
               if v.has_val {
                 fit v.val.kind {
                   .Bracket(_) -> {
-                    self.emit_multidim_inner_declarators(v.val, v.var_type.array_depth - 1);
+                    self.emit_multidim_inner_declarators(
+                      v.val,
+                      v.var_type.array_depth - 1
+                    );
                     wrote_inner_dims = true;
                   }
                   _ -> {}
@@ -10357,7 +10443,12 @@ impl Codegen {
         }
         if have_resolved {
           if resolved_dtype.is_some() {
-            self.record_local_typed(v.name, resolved_name, resolved_ptr, resolved_dtype.unwrap());
+            self.record_local_typed(
+              v.name,
+              resolved_name,
+              resolved_ptr,
+              resolved_dtype.unwrap()
+            );
           } else {
             self.record_local(v.name, resolved_name, resolved_ptr);
           }
@@ -11016,7 +11107,12 @@ impl Codegen {
           let fd_resolved = self.resolve_type_name(fd_elem);
           if fd_resolved.is_some() {
             let fd_subst = self.resolve_type_subst(fd_elem);
-            self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+            self.record_local_typed(
+              name,
+              fd_resolved.unwrap(),
+              dtype_is_pointer(fd_subst),
+              fd_subst
+            );
           }
         }
         fdi = fdi + 1;
@@ -11134,7 +11230,12 @@ impl Codegen {
           let fd_resolved = self.resolve_type_name(fd_elem);
           if fd_resolved.is_some() {
             let fd_subst = self.resolve_type_subst(fd_elem);
-            self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+            self.record_local_typed(
+              name,
+              fd_resolved.unwrap(),
+              dtype_is_pointer(fd_subst),
+              fd_subst
+            );
           }
         }
         fdi = fdi + 1;
@@ -11669,7 +11770,12 @@ impl Codegen {
     StringBuilder payload_sb = string_builder_init(32);
     payload_sb.append(opt_tmp);
     payload_sb.append(".payload.Some._0");
-    let bind_err = self.emit_inlined_next_bind_from_expr(fi, elem_dt, idx_counter_name, payload_sb.build());
+    let bind_err = self.emit_inlined_next_bind_from_expr(
+      fi,
+      elem_dt,
+      idx_counter_name,
+      payload_sb.build()
+    );
     if bind_err.is_some() {
       ret bind_err;
     }
@@ -12030,7 +12136,12 @@ impl Codegen {
             plain_err = .Some(.UnsupportedNode);
           } else {
             self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
-            plain_err = self.emit_called_iterator_next(fi, elem_dt2, cursor, next_mangled.unwrap());
+            plain_err = self.emit_called_iterator_next(
+              fi,
+              elem_dt2,
+              cursor,
+              next_mangled.unwrap()
+            );
           }
         }
         self.state.indent_level = self.state.indent_level - 1;
@@ -12697,7 +12808,9 @@ impl Codegen {
             }
             _ -> {}
           }
-          let resolved_await_rtype = self.resolve_type_name(*(await_rtype?!(.UnsupportedNode)));
+          let resolved_await_rtype = self.resolve_type_name(
+            *(await_rtype?!(.UnsupportedNode))
+          );
           if resolved_await_rtype.is_none() {
             ret .Some(.UnsupportedNode);
           }
@@ -13098,7 +13211,10 @@ impl Codegen {
             shape_downcast_type,
             subj_type.unwrap()
           );
-          self.ensure_specific_shape_impl_vtable_emitted(shape_downcast_type, subj_type.unwrap());
+          self.ensure_specific_shape_impl_vtable_emitted(
+            shape_downcast_type,
+            subj_type.unwrap()
+          );
           let sherr = self.emit_fit_shape_branch(
             subj_name,
             subj_is_pointer,
@@ -13565,7 +13681,13 @@ impl Codegen {
     if !self.coverage || !coverage_counts_statement(stmt) {
       ret;
     }
-    if in_test_range(stmt.pos.filename, stmt.pos.line, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to) {
+    if in_test_range(
+      stmt.pos.filename,
+      stmt.pos.line,
+      &self.cover_skip_files,
+      &self.cover_skip_from,
+      &self.cover_skip_to
+    ) {
       ret;
     }
     str path = cover_display_path(stmt.pos.filename, self.cover_pwd);
@@ -13623,14 +13745,18 @@ impl Codegen {
     sb.append("};\n");
     sb.append("static void __fun_cov_startup(void) {\n    __fun_cov_n = ");
     sb.append_num(n);
-    sb.append(";\n    __fun_cov_counts = (long long*)calloc((size_t)(__fun_cov_n > 0 ? __fun_cov_n : 1), sizeof(long long));\n}\n");
+    sb.append(
+      ";\n    __fun_cov_counts = (long long*)calloc((size_t)(__fun_cov_n > 0 ? __fun_cov_n : 1), sizeof(long long));\n}\n"
+    );
     sb.append("static void __fun_cov_dump(void) {\n");
     sb.append("    FILE* __fun_cov_f = fopen(\"");
     sb.append(c_string_escape(self.cover_out));
     sb.append("\", \"w\");\n");
     sb.append("    if (!__fun_cov_f) { return; }\n");
     sb.append("    for (int __fun_cov_i = 0; __fun_cov_i < __fun_cov_n; __fun_cov_i++) {\n");
-    sb.append("        fprintf(__fun_cov_f, \"%s\\t%d\\t%lld\\n\", __fun_cov_file_tab[__fun_cov_i], __fun_cov_line_tab[__fun_cov_i], __fun_cov_counts[__fun_cov_i]);\n");
+    sb.append(
+      "        fprintf(__fun_cov_f, \"%s\\t%d\\t%lld\\n\", __fun_cov_file_tab[__fun_cov_i], __fun_cov_line_tab[__fun_cov_i], __fun_cov_counts[__fun_cov_i]);\n"
+    );
     sb.append("    }\n    fclose(__fun_cov_f);\n}\n");
     self.state.write(sb.build());
   }
@@ -14360,11 +14486,15 @@ impl Codegen {
           self.state.write("if (__fun_vtags) {\n");
           self.state.indent_level = self.state.indent_level + 1;
           self.state.write_indent_pinned(node.pos);
-          self.state.write("size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n");
+          self.state.write(
+            "size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n"
+          );
           self.state.write_indent_pinned(node.pos);
           self.state.write("vargs.len = (int64_t)__fun_vc; vargs.cap = (int64_t)__fun_vc;\n");
           self.state.write_indent_pinned(node.pos);
-          self.state.write("if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n");
+          self.state.write(
+            "if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n"
+          );
           self.state.write_indent_pinned(node.pos);
           self.state.write("va_list __fun_ap; va_start(__fun_ap, __fun_vtags);\n");
           self.state.write_indent_pinned(node.pos);
@@ -14392,17 +14522,29 @@ impl Codegen {
             "case 's': { const char* __fun_s_src = va_arg(__fun_ap, const char*); if (__fun_s_src) { size_t __fun_s_len = strlen(__fun_s_src); char* __fun_s_copy = (char*)malloc(__fun_s_len + 1); if (__fun_s_copy) { memcpy(__fun_s_copy, __fun_s_src, __fun_s_len + 1); } vargs.data[__fun_vi] = __fun_s_copy; } else { vargs.data[__fun_vi] = NULL; } break; }\n"
           );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'n': vargs.data[__fun_vi] = fmt_num((int64_t)va_arg(__fun_ap, long long)); break;\n");
+          self.state.write(
+            "case 'n': vargs.data[__fun_vi] = fmt_num((int64_t)va_arg(__fun_ap, long long)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n");
+          self.state.write(
+            "case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n");
+          self.state.write(
+            "case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n");
+          self.state.write(
+            "case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+          self.state.write(
+            "case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+          self.state.write(
+            "default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n"
+          );
           self.state.indent_level = self.state.indent_level - 1;
           self.state.write_indent_pinned(node.pos);
           self.state.write("}\n");
@@ -14884,7 +15026,9 @@ impl Codegen {
           for f : c.fields {
             field_names.push(f.name);
             field_type_names.push(f.dtype.type_str);
-            field_is_pointer.push(dtype_is_pointer(*f.dtype) || dtype_is_array_as_pointer(*f.dtype));
+            field_is_pointer.push(
+              dtype_is_pointer(*f.dtype) || dtype_is_array_as_pointer(*f.dtype)
+            );
             field_template_dtypes.push(f.dtype);
           }
           self.generic_compound_names.push(c.name);
@@ -15898,7 +16042,9 @@ impl Codegen {
               }
               ret .None;
             }
-            ret .Some(*(self.lookup_impl_method_rtype(recv_r.type_name, method_name)?));
+            ret .Some(
+              *(self.lookup_impl_method_rtype(recv_r.type_name, method_name)?)
+            );
           }
           _ -> { ret .None; }
         }
@@ -16877,7 +17023,8 @@ impl Codegen {
   // nodes never survive flattening, so there is no way to see which
   // `std.c.*` modules a program used, and an unused header is harmless.
   pub write_prelude() {
-    self.state.write(`#ifndef _WIN32
+    self.state.write(
+      `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
     `#endif
@@ -16894,8 +17041,11 @@ impl Codegen {
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
-    ``);
-    self.state.write("static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n");
+    ``
+    );
+    self.state.write(
+      "static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n"
+    );
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
     if program_uses_std_c_header(self.all_nodes, "math.fn") {
@@ -16918,7 +17068,8 @@ impl Codegen {
       // known (see `emit_cover_tables`), hence the pointer and the
       // prototypes for what is defined at the end of the file. An atomic
       // add keeps counts right when tests run on several threads.
-      self.state.write(`static long long* __fun_cov_counts = 0;
+      self.state.write(
+        `static long long* __fun_cov_counts = 0;
       `static int __fun_cov_n = 0;
       `static void __fun_cov_startup(void);
       `static void __fun_cov_dump(void);
@@ -16928,7 +17079,8 @@ impl Codegen {
       `#else
       `static void __fun_cov_hit(int id) { __atomic_fetch_add(&__fun_cov_counts[id], 1, __ATOMIC_RELAXED); }
       `#endif
-      ``);
+      ``
+      );
     }
     // `-memcheck`'s own runtime hooks: `std.memcheck`'s Fun-level logic
     // tracks every live allocation and page-guards it, but needs a
@@ -16941,7 +17093,8 @@ impl Codegen {
     // shape as `__fun_cpu_count`/`__fun_thread_start` elsewhere in this
     // preamble - `std.memcheck` itself never branches on platform.
     if self.memcheck {
-      self.state.write(`#ifdef _WIN32
+      self.state.write(
+        `#ifdef _WIN32
       `#ifndef WIN32_LEAN_AND_MEAN
       `#define WIN32_LEAN_AND_MEAN
       `#endif
@@ -17169,7 +17322,8 @@ impl Codegen {
       `#define calloc(n, sz) __fun_memcheck_calloc((n), (sz), __FILE__, __LINE__)
       `#define realloc(p, sz) __fun_memcheck_realloc((p), (sz), __FILE__, __LINE__)
       `#define free(p) __fun_memcheck_free((p), __FILE__, __LINE__)
-      ``);
+      ``
+      );
     }
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
@@ -17198,12 +17352,15 @@ impl Codegen {
       // explicit large stack instead (see `emit_test_runner`), since
       // POSIX has no equivalent of the Windows linker pragma for growing
       // the *main* thread's stack after the process has already started.
-      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#else\n#include <pthread.h>\n#endif\n");
+      self.state.write(
+        "#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#else\n#include <pthread.h>\n#endif\n"
+      );
     }
     // Spawning has no counterpart on Windows, so the bindings are backed
     // there by a compatibility layer over the platform's own process API.
     if program_uses_std_c_header(self.all_nodes, "process.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `#if defined(_WIN32)
       `#ifndef WIN32_LEAN_AND_MEAN
       `#define WIN32_LEAN_AND_MEAN
@@ -17466,7 +17623,8 @@ impl Codegen {
       `extern char** environ;
       `static char** environ_ptr(void){ return environ; }
       `#endif
-      ``);
+      ``
+      );
     }
     // TLS and crypto need real native support (OpenSSL on POSIX, the
     // platform's own SChannel/CNG on Windows), not something every
@@ -17481,13 +17639,15 @@ impl Codegen {
     // Ws2_32.lib already does.
     if program_uses_std_c_header(self.all_nodes, "tls.fn") ||
       program_uses_std_c_header(self.all_nodes, "crypto.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `#if defined(_WIN32)
       `#pragma comment(lib, "secur32.lib")
       `#pragma comment(lib, "bcrypt.lib")
       `#pragma comment(lib, "crypt32.lib")
       `#else
-      ``);
+      ``
+      );
       // Built from pieces, not one literal: self-hosting means codegen.fn
       // itself compiles this very function, and a single contiguous
       // string literal here would show up verbatim in THAT compile's own
@@ -17497,14 +17657,16 @@ impl Codegen {
       // that imports std.c.tls/std.c.crypto - never as one compile-time
       // literal in codegen.fn's own generated C.
       self.state.write(format("/* __fun_link: -l{str} -l{str} */\n", "ssl", "crypto"));
-      self.state.write(`#include <openssl/ssl.h>
+      self.state.write(
+        `#include <openssl/ssl.h>
       `#include <openssl/err.h>
       `#include <openssl/evp.h>
       `#include <openssl/rand.h>
       `#include <openssl/hmac.h>
       `#include <pthread.h>
       `#endif
-      ``);
+      ``
+      );
     }
     // `__fun_tls_connect`/`read`/`write`/`close` (see `std.c.tls`): a
     // full client TLS handshake and record layer, OpenSSL on POSIX,
@@ -17513,7 +17675,8 @@ impl Codegen {
     // unlike `__fun_socket_set_timeout` this is a real multi-step
     // protocol implementation per platform, not a one-line shim.
     if program_uses_std_c_header(self.all_nodes, "tls.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `#if defined(_WIN32)
       `#ifndef WIN32_LEAN_AND_MEAN
       `#define WIN32_LEAN_AND_MEAN
@@ -17890,7 +18053,8 @@ impl Codegen {
       `  free(sess);
       `}
       `#endif
-      ``);
+      ``
+      );
     }
     // `__fun_hash_*`/`__fun_hmac_sha256`/`__fun_random_bytes`/
     // `__fun_aes256gcm_*`/`__fun_ed25519_*` (see `std.c.crypto`):
@@ -17901,7 +18065,8 @@ impl Codegen {
     // functions return `NULL`, and `std.crypto`'s own `ed25519_generate`
     // turns that into a real `Err` rather than silently wrong key material.
     if program_uses_std_c_header(self.all_nodes, "crypto.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `static char __fun_hex_chars[] = "0123456789abcdef";
       `
       `static char* __fun_bytes_to_hex(const unsigned char* buf, size_t n) {
@@ -18102,8 +18267,10 @@ impl Codegen {
       `static char* __fun_ed25519_sign(const char* priv_hex, const char* message, long long msg_len) { (void)priv_hex; (void)message; (void)msg_len; return NULL; }
       `static long long __fun_ed25519_verify(const char* pub_hex, const char* message, long long msg_len, const char* signature_hex) { (void)pub_hex; (void)message; (void)msg_len; (void)signature_hex; return 0; }
       `#else
-      ``);
-      self.state.write(`static void* __fun_hash_new(long long algo) {
+      ``
+      );
+      self.state.write(
+        `static void* __fun_hash_new(long long algo) {
       `  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
       `  if (ctx == NULL) return NULL;
       `  const EVP_MD* md = (algo == 1) ? EVP_sha512() : EVP_sha256();
@@ -18318,15 +18485,18 @@ impl Codegen {
       `  return result;
       `}
       `#endif
-      ``);
+      ``
+      );
     }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
     // differ per libc, so a `static` wrapper each lets `std.c.io`'s
     // bodyless stream bindings resolve portably.
-    self.state.write(`static FILE* stdout_stream(void){ return stdout; }
+    self.state.write(
+      `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
-    ``);
+    ``
+    );
     // Suspends the calling thread for whole seconds, used by
     // std.time's sleep_seconds. Not a direct libc binding since POSIX's
     // nanosleep has no Windows equivalent under the same name; Windows
@@ -18335,7 +18505,8 @@ impl Codegen {
     // clock_gettime at all, so std.c.time's binding (used directly by
     // std.channel's own deadline math) needs a real Windows definition
     // rather than relying on a header to provide one.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18414,27 +18585,35 @@ impl Codegen {
     `  return (long long)__fun_clen;
     `}
     `#endif
-    ``);
+    ``
+    );
     // FNV-1a-style hashes backing the `__fun_key_hash` intrinsic. Always
     // emitted, harmless when unused.
-    self.state.write(`static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
+    self.state.write(
+      `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
-    ``);
+    ``
+    );
     // `__fun_tag(x)` maps a vararg's C type to the one-character tag
     // `emit_call` embeds in `__fun_vtags`, which the callee-side
     // unpacking in `emit_function_named` reads back.
-    self.state.write("#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n");
+    self.state.write(
+      "#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n"
+    );
     // Frees a variadic function's own `vargs` unpacking: `data` itself
     // (the backing array `emit_function_named` mallocs above), plus
     // every element `tags[i] != 's'` marks as an owned `fmt_*` string
     // rather than an argument borrowed straight through.
-    self.state.write("static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }\n");
+    self.state.write(
+      "static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }\n"
+    );
     // Directory helpers for `std.c.dirent`, backing `std.fs`'s
     // `list_dir`/`walk_dir`/`is_dir`/`make_dir`. Platform directory APIs
     // differ too much (POSIX `opendir`/`readdir` versus Win32
     // `FindFirstFile`) for direct bindings, so each wrapper's signature
     // is matched exactly to its Fun type.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18459,7 +18638,8 @@ impl Codegen {
     `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
-    ``);
+    ``
+    );
     // The private thread primitive, always emitted regardless of whether
     // the program uses `fork`, `async`, or channels. `await` and `fork`
     // build directly on `__fun_thread_start`/`__fun_thread_join`, and the
@@ -18480,7 +18660,8 @@ impl Codegen {
     // no single one of its threads accumulates a run's worth of history
     // the way the test runner's own one persistent thread does, and 8 MB
     // has been enough for real `fork`/`await` bodies in practice.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18539,14 +18720,16 @@ impl Codegen {
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, stack_bytes); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.atomic`'s operations need a real implementation on every
     // platform - GCC/Clang's `__atomic_*` builtins can't be forward-
     // declared at all (a hard compile error, "cannot redeclare builtin
     // function"), and MSVC has no equivalent builtin name, so both sides
     // get a small wrapper here instead of a `std.c.*` binding calling
     // straight through the way most of this module works.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#include <intrin.h>
     `static inline int64_t __fun_atomic_load(int64_t* ptr) { return _InterlockedExchangeAdd64(ptr, 0); }
     `static inline void __fun_atomic_store(int64_t* ptr, int64_t val) { _InterlockedExchange64(ptr, val); }
@@ -18560,7 +18743,8 @@ impl Codegen {
     `static inline int64_t __fun_atomic_exchange(int64_t* ptr, int64_t val) { return __atomic_exchange_n(ptr, val, __ATOMIC_SEQ_CST); }
     `static inline int64_t __fun_atomic_cas(int64_t* ptr, int64_t expected, int64_t desired) { int64_t __fun_ac_exp = expected; int64_t __fun_ac_ok = __atomic_compare_exchange_n(ptr, &__fun_ac_exp, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return __fun_ac_ok ? 1 : 0; }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.sys`'s `__fun_cpu_count` binding (behind `std.sys.cpu_count`),
     // always emitted like the atomic wrappers above rather than gated on
     // program contents, since worker-pool sizing (`fun test`'s parallel
@@ -18569,25 +18753,29 @@ impl Codegen {
     // scheduler. `emit_scheduler_runtime` reuses this same symbol instead
     // of defining its own, rather than every gated feature that wants a
     // CPU count carrying a private copy.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `static int __fun_cpu_count(void) { SYSTEM_INFO si; GetSystemInfo(&si); int n = (int)si.dwNumberOfProcessors; return n > 0 ? n : 1; }
     `#else
     `#include <unistd.h>
     `static int __fun_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.sys`'s `__fun_process_id` binding (behind `std.sys.process_id`),
     // always emitted for the same reason as `__fun_cpu_count` above - a
     // process-unique value is a reasonable general thing to want (e.g. a
     // caller building a scratch file name that must never collide with
     // another concurrently-running copy of the same program), not
     // specific to any one gated feature.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `static long __fun_process_id(void) { return (long)GetCurrentProcessId(); }
     `#else
     `static long __fun_process_id(void) { return (long)getpid(); }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.net`'s socket bindings need these headers, in both their
     // Windows and POSIX forms, and are emitted unconditionally like every
     // other prelude header. Winsock additionally needs `WSAStartup` called
@@ -18607,7 +18795,8 @@ impl Codegen {
     // just fails normally. Every close from `std.net` is a socket, so
     // trying `closesocket` first means the common case never risks
     // touching `_close` at all.
-    self.state.write(`#if defined(_WIN32)
+    self.state.write(
+      `#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18683,7 +18872,8 @@ impl Codegen {
     `  freeaddrinfo(res);
     `  return out;
     `}
-    ``);
+    ``
+    );
     // A non-fork program can still deadlock on a channel wait, and
     // `std/channel.fn` calls `__fun_wd_enter_wait`/`__fun_wd_leave_wait`
     // around every blocking wait, so these three symbols must always
@@ -18695,7 +18885,8 @@ impl Codegen {
     if self.uses_fork {
       self.emit_scheduler_runtime();
     } else {
-      self.state.write(`typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+      self.state.write(
+        `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
       `static __fun_wd_state __fun_g_wd;
       `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
       `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
@@ -18733,7 +18924,8 @@ impl Codegen {
       `  __fun_g_wd.blocked++;
       `}
       `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
-      ``);
+      ``
+      );
     }
   }
 
@@ -18749,7 +18941,8 @@ impl Codegen {
   // a `WaitGroup` or channel. Cooperative, not preemptive: a blocked task
   // holds its worker, the blocking primitives being the yield points.
   emit_scheduler_runtime() {
-    self.state.write(` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
+    self.state.write(
+      ` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
     `typedef void (*__fun_task_fn)(void*);
     `typedef struct __fun_task { __fun_task_fn fn; void* arg; } __fun_task;
     `#ifdef _WIN32
@@ -18941,7 +19134,8 @@ impl Codegen {
     `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
     `}
     `
-    ``);
+    ``
+    );
   }
 
   // The prefix `register_impl_methods` mangles every one of `im`'s own
@@ -19213,12 +19407,22 @@ impl Codegen {
     self.uses_fork = uses_fork_in(nodes, self.test_mode, self.fuzz_mode);
     self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
     if self.coverage {
-      collect_test_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+      collect_test_ranges(
+        &nodes,
+        &self.cover_skip_files,
+        &self.cover_skip_from,
+        &self.cover_skip_to
+      );
       // Shares the same skip list `in_test_range` already checks for
       // every statement about to be instrumented - an `allow no_cover`
       // function's own statements are excluded from the counters the
       // exact same way a test/fuzz body's own are.
-      collect_no_cover_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+      collect_no_cover_ranges(
+        &nodes,
+        &self.cover_skip_files,
+        &self.cover_skip_from,
+        &self.cover_skip_to
+      );
     }
     self.write_prelude();
     self.register_function_signatures(nodes);
@@ -19578,7 +19782,8 @@ impl Codegen {
       );
       ret .None;
     }
-    self.state.write(format(
+    self.state.write(
+      format(
       `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
       `static void* __fun_main_run(void* __fun_main_p) {
       `  __fun_main_run_args* __fun_main_a = (__fun_main_run_args*)__fun_main_p;
@@ -19614,7 +19819,8 @@ impl Codegen {
       ``,
       real_name,
       mc_leak_suppress
-    ));
+      )
+    );
     ret .None;
   }
 
@@ -19662,7 +19868,9 @@ impl Codegen {
           if owns_test_fn_body_start_pos {
             self.current_fn_body_start_pos = .Some(self.state.out.len());
           }
-          self.state.write(format("static void __fun_test_{str}(void) {\n", format_num(index)));
+          self.state.write(
+            format("static void __fun_test_{str}(void) {\n", format_num(index))
+          );
           self.state.indent_level = self.state.indent_level + 1;
           let berr = self.emit_body(*t.body);
           if berr.is_some() {
@@ -19692,11 +19900,13 @@ impl Codegen {
     self.state.write("    switch (i) {\n");
     num di = 0;
     for di < names.len {
-      self.state.write(format(
+      self.state.write(
+        format(
         "        case {str}: __fun_test_{str}(); break;\n",
         format_num(di),
         format_num(di)
-      ));
+        )
+      );
       di = di + 1;
     }
     self.state.write("    }\n");
@@ -19754,7 +19964,9 @@ impl Codegen {
     // fact, unlike the Windows linker pragma). `argc`out parameters travel
     // through a small struct since a pthread start function takes a
     // single `void*`.
-    self.state.write("typedef struct { int argc; char** argv; int result; } __fun_test_main_args;\n\n");
+    self.state.write(
+      "typedef struct { int argc; char** argv; int result; } __fun_test_main_args;\n\n"
+    );
 
     // Shared state for the parallel worker pool below: `next` is the
     // shared cursor every worker claims-and-increments under `mu`, which
@@ -19784,7 +19996,9 @@ impl Codegen {
     self.state.write("        pthread_mutex_unlock(&ctx->mu);\n");
     self.state.write("        if (__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("        char* name = __fun_test_name(i);\n");
-    self.state.write("        if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n");
+    self.state.write(
+      "        if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n"
+    );
     self.state.write("        int ok;\n");
     self.state.write("        clock_t __fun_t0 = clock();\n");
     self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
@@ -19793,10 +20007,14 @@ impl Codegen {
     self.state.write("        } else {\n");
     self.state.write("            ok = 0;\n");
     self.state.write("        }\n");
-    self.state.write("        ctx->elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
+    self.state.write(
+      "        ctx->elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n"
+    );
     self.state.write("        pthread_mutex_lock(&ctx->mu);\n");
     self.state.write("        ctx->ran++;\n");
-    self.state.write("        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n");
+    self.state.write(
+      "        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n"
+    );
     self.state.write("        else { printf(\"test: %s ... FAIL\\n\", name); }\n");
     // A pipe makes stdout fully (not line-) buffered, and `abort()` never
     // flushes it; without this, a crash anywhere in the run loses or
@@ -19810,19 +20028,27 @@ impl Codegen {
     self.state.write("}\n\n");
 
     self.state.write("static void* __fun_test_main_worker(void* __fun_test_argp) {\n");
-    self.state.write("    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n");
+    self.state.write(
+      "    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n"
+    );
     self.state.write("    int argc = __fun_test_a->argc;\n");
     self.state.write("    char** argv = __fun_test_a->argv;\n");
     self.state.write("    const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
-    self.state.write("    { const char* __fun_tt = getenv(\"FUN_TEST_TRACE\"); __fun_test_trace = (__fun_tt && __fun_tt[0] && strcmp(__fun_tt, \"0\") != 0); }\n");
+    self.state.write(
+      "    { const char* __fun_tt = getenv(\"FUN_TEST_TRACE\"); __fun_test_trace = (__fun_tt && __fun_tt[0] && strcmp(__fun_tt, \"0\") != 0); }\n"
+    );
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
     if self.coverage {
       self.state.write("    __fun_cov_startup();\n");
     }
-    self.state.write("    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n");
-    self.state.write("    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n");
+    self.state.write(
+      "    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n"
+    );
+    self.state.write(
+      "    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n"
+    );
     self.state.write("    if (filter) {\n");
     // A single named test runs alone regardless of `sequential`: with at
     // most one test selected, there's no sibling to isolate from, and
@@ -19854,7 +20080,9 @@ impl Codegen {
     self.state.write("        for (int64_t i = 0; i < total; i++) {\n");
     self.state.write("            if (!__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("            char* name = __fun_test_name(i);\n");
-    self.state.write("            if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n");
+    self.state.write(
+      "            if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n"
+    );
     self.state.write("            ran++;\n");
     self.state.write("            clock_t __fun_t0 = clock();\n");
     self.state.write("            if (setjmp(__fun_test_jmp) == 0) {\n");
@@ -19865,7 +20093,9 @@ impl Codegen {
     self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
     self.state.write("            }\n");
     self.state.write("            fflush(stdout);\n");
-    self.state.write("            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
+    self.state.write(
+      "            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n"
+    );
     self.state.write("        }\n");
     self.state.write("        __fun_test_par_ctx ctx;\n");
     self.state.write("        ctx.total = total;\n");
@@ -19900,14 +20130,20 @@ impl Codegen {
     self.state.write("        int nworkers;\n");
     self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
     if self.memcheck {
-      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count() / 2; }\n");
+      self.state.write(
+        "        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count() / 2; }\n"
+      );
     } else {
-      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+      self.state.write(
+        "        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n"
+      );
     }
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
     self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
-    self.state.write("        __fun_thread_t* threads = (__fun_thread_t*)malloc(sizeof(__fun_thread_t) * (size_t)nworkers);\n");
+    self.state.write(
+      "        __fun_thread_t* threads = (__fun_thread_t*)malloc(sizeof(__fun_thread_t) * (size_t)nworkers);\n"
+    );
     self.state.write("        int started = 0;\n");
     self.state.write("        for (int wi = 0; wi < nworkers; wi++) {\n");
     // `__fun_thread_start_sized`, not the plain 8 MB `__fun_thread_start`:
@@ -19922,7 +20158,9 @@ impl Codegen {
     // start drains the queue, and if none did, this thread (already
     // given the large stack) runs the whole queue itself, so a resource
     // failure slows the run down instead of silently skipping tests.
-    self.state.write("            if (__fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728) != 0) { break; }\n");
+    self.state.write(
+      "            if (__fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728) != 0) { break; }\n"
+    );
     self.state.write("            started++;\n");
     self.state.write("        }\n");
     self.state.write("        if (started == 0) { __fun_test_par_worker(&ctx); }\n");
@@ -19942,14 +20180,24 @@ impl Codegen {
     // that visible instead of requiring a manual binary search over
     // FUN_TEST_INTRA_JOBS to find out.
     self.state.write("    if (!filter && total > 0) {\n");
-    self.state.write("        __fun_test_timing* __fun_tt = (__fun_test_timing*)malloc(sizeof(__fun_test_timing) * (size_t)total);\n");
-    self.state.write("        for (int64_t __fun_ti = 0; __fun_ti < total; __fun_ti++) { __fun_tt[__fun_ti].idx = __fun_ti; __fun_tt[__fun_ti].ms = elapsed_ms[__fun_ti]; }\n");
-    self.state.write("        qsort(__fun_tt, (size_t)total, sizeof(__fun_test_timing), __fun_test_timing_cmp);\n");
+    self.state.write(
+      "        __fun_test_timing* __fun_tt = (__fun_test_timing*)malloc(sizeof(__fun_test_timing) * (size_t)total);\n"
+    );
+    self.state.write(
+      "        for (int64_t __fun_ti = 0; __fun_ti < total; __fun_ti++) { __fun_tt[__fun_ti].idx = __fun_ti; __fun_tt[__fun_ti].ms = elapsed_ms[__fun_ti]; }\n"
+    );
+    self.state.write(
+      "        qsort(__fun_tt, (size_t)total, sizeof(__fun_test_timing), __fun_test_timing_cmp);\n"
+    );
     self.state.write("        int64_t __fun_slow_n = total < 5 ? total : 5;\n");
     self.state.write("        if (__fun_slow_n > 0 && __fun_tt[0].ms >= 1.0) {\n");
     self.state.write("            printf(\"\\nSlowest tests:\\n\");\n");
-    self.state.write("            for (int64_t __fun_si = 0; __fun_si < __fun_slow_n; __fun_si++) {\n");
-    self.state.write("                printf(\"  %8.1fms  %s\\n\", __fun_tt[__fun_si].ms, __fun_test_name(__fun_tt[__fun_si].idx));\n");
+    self.state.write(
+      "            for (int64_t __fun_si = 0; __fun_si < __fun_slow_n; __fun_si++) {\n"
+    );
+    self.state.write(
+      "                printf(\"  %8.1fms  %s\\n\", __fun_tt[__fun_si].ms, __fun_test_name(__fun_tt[__fun_si].idx));\n"
+    );
     self.state.write("            }\n");
     self.state.write("        }\n");
     self.state.write("        free(__fun_tt);\n");
@@ -19958,7 +20206,9 @@ impl Codegen {
     if self.coverage {
       self.state.write("    __fun_cov_dump();\n");
     }
-    self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
+    self.state.write(
+      "    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n"
+    );
     self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
     self.state.write("    return 0;\n");
     self.state.write("}\n\n");
@@ -19992,7 +20242,9 @@ impl Codegen {
       self.state.write("    pthread_attr_init(&__fun_test_attr);\n");
       self.state.write("    pthread_attr_setstacksize(&__fun_test_attr, 134217728);\n");
       self.state.write("    pthread_t __fun_test_thread;\n");
-      self.state.write("    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n");
+      self.state.write(
+        "    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n"
+      );
       self.state.write("    pthread_attr_destroy(&__fun_test_attr);\n");
       self.state.write("    pthread_join(__fun_test_thread, (void**)0);\n");
       self.state.write("#endif\n");
@@ -20086,7 +20338,9 @@ impl Codegen {
           _ -> {}
         }
 
-        self.state.write("int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n");
+        self.state.write(
+          "int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n"
+        );
         self.state.write(format("  void* {str} = (void*)__fun_fuzz_data;\n", data_name));
         self.state.write(format("  int64_t {str} = (int64_t)__fun_fuzz_size;\n", len_name));
         let berr = self.emit_body(*fd.body);
@@ -22693,7 +22947,10 @@ test "emit_expr emits a tagged-union payload construction as a compound literal"
   Node n = node_new(.Expression(call_e));
 
   assert g.emit_expr(n).is_none(), "expected the enum-variant construction to emit";
-  assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (5) } })"), "expected a tagged-union compound literal with the payload set";
+  assert equals(
+    st.out.build(),
+    "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (5) } })"
+  ), "expected a tagged-union compound literal with the payload set";
 }
 
 test "emit_expr emits a bare-shorthand payload construction resolved against expected_enum_type" {
@@ -22734,7 +22991,10 @@ test "emit_expr emits a bare-shorthand payload construction resolved against exp
   Node n = node_new(.Expression(call_e));
 
   assert g.emit_expr(n).is_none(), "expected the bare-shorthand construction to emit";
-  assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (9) } })"), "expected 'Option' resolved from expected_enum_type, not a qualifier";
+  assert equals(
+    st.out.build(),
+    "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (9) } })"
+  ), "expected 'Option' resolved from expected_enum_type, not a qualifier";
 }
 
 test "emit_expr resolves a bare-shorthand construction NESTED inside another variant's own construction" {
@@ -24419,7 +24679,10 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   str out = st.out.build();
   num typedef_pos = index_of_str(out, "typedef struct Box__num {");
   num proto_pos = index_of_str(out, "int64_t Box__num__get(Box__num* self);");
-  num def_pos = index_of_str(out, "int64_t Box__num__get(Box__num* self) {\n    return self->value;\n}");
+  num def_pos = index_of_str(
+    out,
+    "int64_t Box__num__get(Box__num* self) {\n    return self->value;\n}"
+  );
   num main_pos = index_of_str(out, "int __fun_shadow__main(int argc, char** argv) {");
   assert typedef_pos >= 0 && proto_pos >= 0 && def_pos >= 0 && main_pos >= 0, "expected every piece present in the output";
   assert typedef_pos < main_pos && proto_pos < main_pos && def_pos < main_pos, "expected the struct typedef, the monomorphized method's own prototype, and its DEFINITION (lazily triggered by the call inside main's own body) all BEFORE 'main', not nested inside its braces";
@@ -25428,7 +25691,10 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   str out = st.out.build();
   assert contains(out, "int64_t identity__num(int64_t value) {\n    return value;\n}"), "expected the monomorphized 'identity__num', not the unsubstituted template";
   assert !contains(out, "int64_t identity(int64_t value)"), "expected the unsubstituted 'identity' template itself to never be emitted";
-  assert contains(out, "int __fun_shadow__main(int argc, char** argv) {\n    return identity__num(5);\n}"), "expected 'main' forced to its real C entry-point signature, under its shadowed name";
+  assert contains(
+    out,
+    "int __fun_shadow__main(int argc, char** argv) {\n    return identity__num(5);\n}"
+  ), "expected 'main' forced to its real C entry-point signature, under its shadowed name";
 }
 
 test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
@@ -25584,7 +25850,10 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   nodes.push(main_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile without crashing";
-  assert contains(st.out.build(), "int __fun_shadow__main(int argc, char** argv) {\n    return 0;\n}"), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
+  assert contains(
+    st.out.build(),
+    "int __fun_shadow__main(int argc, char** argv) {\n    return 0;\n}"
+  ), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
   assert !contains(st.out.build(), "wrap__num"), "expected 'wrap', reachable ONLY through main's own discarded return, to never be monomorphized at all -- nothing else in this program calls it";
 }
 

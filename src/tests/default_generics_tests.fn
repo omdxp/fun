@@ -106,7 +106,11 @@ test "a function default may name an earlier type parameter" {
   `  printf("%lld\n", n);
   `  ret 0;
   `}`;
-  str out = run_source(src, "dg_function_earlier", "function default naming an earlier parameter");
+  str out = run_source(
+    src,
+    "dg_function_earlier",
+    "function default naming an earlier parameter"
+  );
   assert equals(out, "7\n"), "expected U to default to T's inferred num";
 }
 

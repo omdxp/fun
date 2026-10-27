@@ -284,7 +284,10 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
   `  }
   `  ret 0;
   `}`;
-  let out = emit_c(src, "generic data enum: Result<T, E> with two type params and mixed payloads");
+  let out = emit_c(
+    src,
+    "generic data enum: Result<T, E> with two type params and mixed payloads"
+  );
   assert contains(out, "Res__num__str"), "expected the two-parameter monomorphization";
 }
 
@@ -599,7 +602,10 @@ test "a method chain's own second-innermost call is not evaluated twice" {
   `}`;
   let out = emit_c(src, "a method chain's own second-innermost call is not evaluated twice");
   num make_box_calls = count(out, "= make_box()");
-  assert make_box_calls == 1, format("expected make_box()'s own call emitted exactly once, found {num}", make_box_calls);
+  assert make_box_calls == 1, format(
+    "expected make_box()'s own call emitted exactly once, found {num}",
+    make_box_calls
+  );
 }
 
 test "a const local's own compound value never gets a conflicting C const qualifier" {
@@ -623,7 +629,10 @@ test "a const local's own compound value never gets a conflicting C const qualif
   `  x.show();
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a const local's own compound value never gets a conflicting C const qualifier");
+  let out = emit_c(
+    src,
+    "a const local's own compound value never gets a conflicting C const qualifier"
+  );
   assert !contains(out, "const Box x"), "expected no C const qualifier on a const-bound compound local";
 }
 
@@ -1344,7 +1353,10 @@ test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
   `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "sizeof accepts a user-defined type name with a trailing pointer suffix");
+  let out = emit_c(
+    src,
+    "sizeof accepts a user-defined type name with a trailing pointer suffix"
+  );
   assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
 }
 
@@ -1614,7 +1626,10 @@ test "a generic function-type alias emits the real callback signature, not the a
   `  printf("%lld\n", apply(square, 4));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a generic function-type alias emits the real callback signature, not the alias name");
+  let out = emit_c(
+    src,
+    "a generic function-type alias emits the real callback signature, not the alias name"
+  );
   assert !contains(out, "Callback"), "expected the alias name to never reach emitted C";
 }
 
@@ -1638,7 +1653,10 @@ test "a type alias naming a shape still dispatches dynamically through the alias
   `  printf("%lld\n", describe(d));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a type alias naming a shape still dispatches dynamically through the alias");
+  let out = emit_c(
+    src,
+    "a type alias naming a shape still dispatches dynamically through the alias"
+  );
   assert !contains(out, "Drawable"), "expected the alias name to never reach emitted C";
   assert contains(out, "Shape"), "expected the real shape type to reach emitted C";
 }
@@ -1712,7 +1730,11 @@ test "a shape-bounded generic impl monomorphizes for a real implementor" {
   `  printf("%s\n", w.describe());
   `  ret 0;
   `}`;
-  assert_emits(src, "Wrapper__Point__describe", "expected the shape-implementor instantiation to monomorphize");
+  assert_emits(
+    src,
+    "Wrapper__Point__describe",
+    "expected the shape-implementor instantiation to monomorphize"
+  );
 }
 
 test "a shape-bounded generic impl does not monomorphize for a non-implementor" {
@@ -1810,7 +1832,11 @@ test "a self-referential generic-shape bound (T: Shape<T>) monomorphizes for a r
   `  printf("%lld\n", n.v);
   `  ret 0;
   `}`;
-  let out = run_source(src, "self_ref_shape_bound", "a self-referential shape bound monomorphizes for a real implementor");
+  let out = run_source(
+    src,
+    "self_ref_shape_bound",
+    "a self-referential shape bound monomorphizes for a real implementor"
+  );
   assert equals(out, "2\n"), "expected Box<Counter>.advance() to call Counter's own Steppable succ() and return the incremented value";
 }
 
@@ -1855,7 +1881,11 @@ test "a generic user type implementing Iterator<T> directly on itself works in a
   `  printf("%lld\n", total);
   `  ret 0;
   `}`;
-  let out = run_source(src, "generic_user_type_iterator", "a generic user type's own Iterator<T> impl works in a for loop");
+  let out = run_source(
+    src,
+    "generic_user_type_iterator",
+    "a generic user type's own Iterator<T> impl works in a for loop"
+  );
   assert equals(out, "6\n"), "expected 1+2+3 over [1, 4) through the user's own generic Iterator<T> impl";
 }
 

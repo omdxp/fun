@@ -60,7 +60,11 @@ test "a shape-downcast fit dispatch is order-independent, not accidental" {
   `  printf("%s %s\n", describe(hc), describe(hs));
   `  ret 0;
   `}`;
-  str out = run_source(src, "shape_fit_dispatch_swapped", "shape-downcast fit dispatch, arms swapped");
+  str out = run_source(
+    src,
+    "shape_fit_dispatch_swapped",
+    "shape-downcast fit dispatch, arms swapped"
+  );
   assert equals(out, "circle square\n"), "expected dispatch by runtime type, not by arm order";
 }
 
@@ -147,7 +151,11 @@ test "a shape-downcast fit dispatches to a concrete generic instantiation (scala
   `  printf("%s %s\n", describe(sc), describe(sb));
   `  ret 0;
   `}`;
-  str out = run_source(src, "shape_fit_generic_scalar", "shape-downcast fit, concrete scalar generic instantiation");
+  str out = run_source(
+    src,
+    "shape_fit_generic_scalar",
+    "shape-downcast fit, concrete scalar generic instantiation"
+  );
   assert equals(out, "circle box\n"), "expected dispatch to the concrete Box<num> implementor";
 }
 

@@ -101,19 +101,37 @@ test "map_type_to_c passes an unrecognized name through unchanged" {
 
 test "dynamic_int_type_to_c maps the four standard widths" {
   assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 8}), "int8_t"), "expected i8 -> int8_t";
-  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 32}), "uint32_t"), "expected u32 -> uint32_t";
-  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 64}), "int64_t"), "expected i64 -> int64_t";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 32}),
+    "uint32_t"
+  ), "expected u32 -> uint32_t";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 64}),
+    "int64_t"
+  ), "expected i64 -> int64_t";
 }
 
 test "dynamic_int_type_to_c rounds a non-standard width up to the next standard container" {
-  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 24}), "int32_t"), "expected i24 -> int32_t";
-  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 24}), "uint32_t"), "expected u24 -> uint32_t";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 24}),
+    "int32_t"
+  ), "expected i24 -> int32_t";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 24}),
+    "uint32_t"
+  ), "expected u24 -> uint32_t";
   assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 6}), "int8_t"), "expected i6 -> int8_t";
-  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 2}), "uint8_t"), "expected u2 -> uint8_t";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 2}),
+    "uint8_t"
+  ), "expected u2 -> uint8_t";
 }
 
 test "dynamic_int_type_to_c uses __int128 up to 128 bits, both signednesses" {
-  assert equals(dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 128}), "__int128"), "expected i128 -> __int128";
+  assert equals(
+    dynamic_int_type_to_c(DynamicIntType{is_signed = true, bits = 128}),
+    "__int128"
+  ), "expected i128 -> __int128";
   assert equals(
     dynamic_int_type_to_c(DynamicIntType{is_signed = false, bits = 128}),
     "unsigned __int128"

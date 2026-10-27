@@ -132,7 +132,11 @@ pub fun read_lock(str root) Vec<ResolvedDep> {
     if equals(d.path, "") {
       d.local_root = dep_cache_dir(d.git, d.resolved_rev);
     } else {
-      d.local_root = format("{str}/{str}", dep_cache_dir(d.git, d.resolved_rev), d.path);
+      d.local_root = format(
+        "{str}/{str}",
+        dep_cache_dir(d.git, d.resolved_rev),
+        d.path
+      );
     }
     out.push(d);
     i = i + 1;

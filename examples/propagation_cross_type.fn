@@ -61,9 +61,17 @@ fun main() num {
     .Err(e) -> { printf("combine: err=%s\n", e); }
   }
 
-  printf("combine_default: %lld %lld\n", combine_default(5).unwrap(), combine_default(-5).unwrap());
+  printf(
+    "combine_default: %lld %lld\n",
+    combine_default(5).unwrap(),
+    combine_default(-5).unwrap()
+  );
 
-  printf("safe_parse: %lld none=%d\n", safe_parse(5).unwrap(), safe_parse(-5).is_none());
+  printf(
+    "safe_parse: %lld none=%d\n",
+    safe_parse(5).unwrap(),
+    safe_parse(-5).is_none()
+  );
 
   ret 0;
 }
