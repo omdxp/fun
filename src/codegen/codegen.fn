@@ -10441,10 +10441,62 @@ impl Codegen {
         self.state.write(")) { ");
         if a.has_message {
           self.state.write("fprintf(stderr_stream(), \"Assertion failed: %s\\n\", ");
+          // MSVC-mode's own variadic call-site hoisting (see
+          // `write_hoisted`'s callers) splices a vararg's temp
+          // declaration BEFORE the enclosing statement - which, for a
+          // call hoisted out of here, is this whole `if`, not the block
+          // it would otherwise only run inside. That makes a vararg
+          // call (`format("...", x.unwrap_err())`, say) execute
+          // unconditionally even when the assert passes, defeating the
+          // entire point of a message only evaluated on failure - and,
+          // since `panic()`, silent no longer: `unwrap_err()` on a
+          // value that IS `Ok` here aborts the whole process regardless
+          // of this assert ever actually failing. Capturing the message
+          // into its own scratch buffer (the same shape every other
+          // scratch-swap site in this file uses, e.g. `emit_propagation`)
+          // with the hoist position cleared forces MSVC's own
+          // self-contained inline fallback instead of hoisting, keeping
+          // the call properly scoped inside this block; generic-impl-
+          // method draining is suppressed for the same reason a
+          // propagation receiver suppresses it - a method defined for
+          // the first time here would otherwise try to write its own
+          // top-level function body into the middle of this `if`, same
+          // as any other instance of a definition needing file scope,
+          // not the position of whatever expression first needed it -
+          // drained separately below once back in a safe, top-level
+          // position.
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          CodegenState assert_msg_scratch = self.new_scratch_state();
+          CodegenState* saved_assert_state = self.state;
+          let saved_assert_hoist_pos = self.hoist_insert_pos;
+          let saved_assert_stmt_start_pos = self.current_stmt_start_pos;
+          let prev_assert_suppress = self.suppress_generic_impl_method_draining;
+          self.state = &assert_msg_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          self.suppress_generic_impl_method_draining = true;
           let merr = self.emit_expr(*a.message);
+          self.state = saved_assert_state;
+          self.hoist_insert_pos = saved_assert_hoist_pos;
+          self.current_stmt_start_pos = saved_assert_stmt_start_pos;
+          self.suppress_generic_impl_method_draining = prev_assert_suppress;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+            self.hoist_insert_pos = self.root_hoist_pos;
+          }
+          if !prev_assert_suppress && !self.draining_generic_impl_methods {
+            self.drain_pending_generic_impl_methods();
+          }
           if merr.is_some() {
             ret merr;
           }
+          self.state.write(assert_msg_scratch.out.build());
           self.state.write("); ");
         }
         if self.test_mode {

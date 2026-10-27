@@ -142,10 +142,10 @@ jobs:
           FUN_CC=emcc ./fun-out/bin/fun -in src/fls/wasm_fls_main.fn -out /tmp/wasm_fls_main.c -no-exec
       - name: Run the test suite on ${{ matrix.lane }}
         if: matrix.os != 'ubuntu-24.04'
-        timeout-minutes: 40
+        timeout-minutes: 20
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            FUN_CC=cl FUN_TEST_INTRA_JOBS=1 FUN_TEST_JOBS=1 FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" ./fun-out/bin/fun.exe test .
+            FUN_CC=cl FUN_STDLIB_DIR="${{ github.workspace }}/stdlib" ./fun-out/bin/fun.exe test .
           else
             export FUN_STDLIB_DIR="$PWD/stdlib"
             ./fun-out/bin/fun test .

@@ -524,6 +524,51 @@ test "ret panic(...) compiles and aborts for a struct, an enum, and a pointer re
   assert pr.exit_code != 0, "expected the pointer-returning panic to abort, not return a zero value";
 }
 
+test "an assert's own message is still only evaluated on failure under MSVC" {
+  // Found investigating a real, persistent Windows CI failure:
+  // `assert cond, format("...", x.unwrap_err())` crashed even though
+  // `cond` was true, because `x.unwrap_err()` panicked unconditionally.
+  // Root cause: MSVC-mode's variadic call-site codegen hoists a vararg's
+  // own temp declaration to right before the statement it's hoisted
+  // out of - for a call used inside an assert's message, that statement
+  // is the assert's own `if`, not the block it's meant to guard, so the
+  // vararg (here, `unwrap_err()`) ran unconditionally, every time,
+  // regardless of whether the assert ever actually failed. Harmless
+  // while `unwrap_err()` was a silent no-op on `Ok`; fatal the moment it
+  // started panicking there instead. Reproduced here the same way the
+  // real failure was finally confirmed: a strict, non-GNU MSVC-shaped
+  // compile (no real Windows host needed, see `run_source_forcing_msvc`'s
+  // own doc comment) of an assert whose condition passes and whose
+  // message calls `unwrap_err()` on a value that is `Ok`.
+  str src = `use std.io;
+  `use std.result;
+  `fun maybe_fail(flag ok) Result<num, str> {
+  `  if ok {
+  `    ret .Ok(1);
+  `  }
+  `  ret .Err("boom");
+  `}
+  `fun main() num {
+  `  let r = maybe_fail(true);
+  `  assert r.is_ok(), format("should not fail: {str}", r.unwrap_err());
+  `  println("reached end");
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "assert_message_hoist_msvc",
+    "an assert's own message calling unwrap_err() on an Ok value, under a strict MSVC-shaped compile"
+  );
+  assert contains(out_msvc, "reached end"), "expected the passing assert to never evaluate its own message, reaching the end of main instead of panicking";
+
+  str out = run_source(
+    src,
+    "assert_message_hoist",
+    "an assert's own message calling unwrap_err() on an Ok value"
+  );
+  assert contains(out, "reached end"), "expected the same result under the ordinary (GNU) codegen path";
+}
+
 test "a method chain's own second-innermost call is not evaluated twice" {
   // User-reported, from a real std.log sample: `l.debug_r(...).field(...)
   // .str_field(...).emit();` emitted `debug_r(...)` TWICE - once into a
