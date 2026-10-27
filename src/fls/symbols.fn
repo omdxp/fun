@@ -1541,7 +1541,7 @@ pub fun local_generic_args(Vec<Token>* tokens, Vec<Node>* program, str name, str
     ret empty;
   }
   Declaration d = found.unwrap();
-  if tokens != nil && starts_with(d.detail, "__let_infer__") {
+  if tokens != nil && detail_is_unresolved_let_infer(d.detail) {
     let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
     if name_tok.is_none() {
       Vec<str> empty2;
@@ -1805,6 +1805,24 @@ pub fun looks_like_type_name(str name) flag {
   ret i < n && is_upper(name[i]);
 }
 
+// True when `detail` is an unresolved `let`/`const`-inferred local's
+// own rendered text, still carrying the permanent `__let_infer__`
+// sentinel rather than a real type - what every caller below re-runs
+// inference for instead of showing or using verbatim. A `const`'s own
+// detail renders `"const " + <type> + " " + name`, the exact same
+// shape a `let`'s does minus that one prefix (see each one's own
+// building site, e.g. the local-declaration case right above
+// `_declaration` in this file) - a bare `starts_with(detail,
+// "__let_infer__")` check matches a `let` local's `"__let_infer__
+// name"` directly, but never a `const` one's `"const __let_infer__
+// name"`, since the sentinel no longer starts the string. Confirmed
+// directly: hover on an inferred `const` leaked the raw sentinel
+// verbatim (`const __let_infer__ l`) at every one of this function's
+// own four call sites, `let` working at all of them the whole time.
+pub fun detail_is_unresolved_let_infer(str detail) flag {
+  ret starts_with(detail, "__let_infer__") || starts_with(detail, "const __let_infer__");
+}
+
 // The type a local or parameter named `name` was declared with, as
 // written. Used to resolve what a field is reached through. `tokens`
 // is nil where a caller has no token stream to offer (a `fit`
@@ -1819,7 +1837,7 @@ pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str
     ret "";
   }
   Declaration d = found.unwrap();
-  if tokens != nil && starts_with(d.detail, "__let_infer__") {
+  if tokens != nil && detail_is_unresolved_let_infer(d.detail) {
     let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
     if name_tok.is_none() {
       ret "";
@@ -5086,7 +5104,7 @@ fun _for_iter_declared_detail(
       // like `type_name_of_local`'s own return: `_for_iter_item_type`/
       // `_for_iter_map_kv` read the element/key/value type back out of
       // it with `bare_type_from_detail`/`generic_args_of_detail`.
-      if tokens != nil && starts_with(d.detail, "__let_infer__") {
+      if tokens != nil && detail_is_unresolved_let_infer(d.detail) {
         let name_tok = token_at(tokens, d.pos.line - 1, d.pos.col - 1);
         if name_tok.is_none() {
           ret "";
