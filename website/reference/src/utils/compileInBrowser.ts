@@ -618,6 +618,39 @@ export async function getDiagnostics(
   }
 }
 
+// A stdlib file's own real source, read-only reference material for a
+// goto-definition/doc-link jump that lands outside the person's own
+// project (`stdlib/std/io.fn`, say) - `wasm_fls_main.js` already has
+// the whole stdlib tree mounted inside its own sandboxed filesystem
+// (`prebake-wasm-fls.mjs`'s own `--preload-file`), which is how a
+// `std.*` import resolves at all, but that content never reaches back
+// out to this module; `prebake-stdlib-src.mjs` ships the same tree a
+// second time, as plain static files, just for this. `relPath` is the
+// target path with its leading `stdlib/` stripped (`std/io.fn`).
+// Cached per path for the page session; `null` for anything that
+// isn't actually there (a target outside `stdlib/` entirely, or a
+// fetch failure).
+const stdlibSourceCache = new Map<string, Promise<string | null>>();
+export function fetchStdlibSource(relPath: string): Promise<string | null> {
+  let p = stdlibSourceCache.get(relPath);
+  if (!p) {
+    p = (async () => {
+      const base = import.meta.env.BASE_URL || "/";
+      const hash = await manifestHash("stdlib-src");
+      const versioned = hash ? `?v=${hash}` : "";
+      try {
+        const res = await fetch(`${base}stdlib-src/${relPath}${versioned}`);
+        if (!res.ok) return null;
+        return await res.text();
+      } catch {
+        return null;
+      }
+    })();
+    stdlibSourceCache.set(relPath, p);
+  }
+  return p;
+}
+
 // The full pipeline for a Playground project - every file the person's
 // file tree holds, plus which one is the entry point. Throws a plain
 // `Error` only for an infrastructure failure (a module failed to load,

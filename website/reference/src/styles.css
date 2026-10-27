@@ -814,6 +814,16 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   font-family: var(--sans, inherit);
   vertical-align: middle;
 }
+.pg-readonly-badge {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-family: var(--sans, inherit);
+  vertical-align: middle;
+}
 .pg-static-actions { position: static; opacity: 1; }
 
 .pg-hint {
