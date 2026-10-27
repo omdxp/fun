@@ -2004,7 +2004,28 @@ pub fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
         Token nt = name_tok.unwrap();
         if nt.type == .Identifier && equals(token_word(nt), callee) {
           num name_idx = index_of_token(tokens, nt);
-          let lparen = token_after(tokens, name_idx + 1);
+          // A generic function's own `<T>` (`fun make<T>(...)`) sits
+          // between its name and its real param list - skipped over
+          // here, balanced, the same way a generic return type's own
+          // `<...>` already is further down, so `lparen` below lands
+          // on the actual `(`, not the `<` a non-generic function
+          // would never have in this position at all.
+          let after_name = token_after(tokens, name_idx + 1);
+          num lparen_search_from = name_idx + 1;
+          if after_name.is_some() && token_is_operator(after_name.unwrap(), "<") {
+            num angle_depth = 1;
+            num k = index_of_token(tokens, after_name.unwrap()) + 1;
+            for k < tokens.len && angle_depth > 0 {
+              if token_is_operator(tokens.get(k), "<") {
+                angle_depth = angle_depth + 1;
+              } elif token_is_operator(tokens.get(k), ">") {
+                angle_depth = angle_depth - 1;
+              }
+              k = k + 1;
+            }
+            lparen_search_from = k;
+          }
+          let lparen = token_after(tokens, lparen_search_from);
           if lparen.is_some() && token_is_operator(lparen.unwrap(), "(") {
             num lparen_idx = index_of_token(tokens, lparen.unwrap());
             num depth = 1;
@@ -2018,26 +2039,28 @@ pub fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
               j = j + 1;
             }
             if depth == 0 {
-              StringBuilder b = string_builder_init(16);
+              // The bare type name only, same as `_function_header_
+              // return_type`'s own established convention for this
+              // exact purpose (feeding a member-lookup, which is keyed
+              // by a type's own bare registered name) - joining every
+              // token with a space instead, including `<`/`,`/`>`,
+              // used to produce "Result < num , str >" for any generic
+              // return type (a bare, non-generic one like "Box" has no
+              // such tokens to mangle, which is why this only ever
+              // broke for a generic return type specifically).
               num k = j;
-              flag any = false;
-              for k < tokens.len {
-                Token rt = tokens.get(k);
-                if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
-                  break;
-                }
-                if rt.type == .NewLine || rt.type == .Comment {
-                  k = k + 1;
-                  continue;
-                }
-                if any {
-                  b.append(" ");
-                }
-                any = true;
-                b.append(token_word(rt));
+              for k < tokens.len &&
+                (tokens.get(k).type == .NewLine || tokens.get(k).type == .Comment) {
                 k = k + 1;
               }
-              ret b.build();
+              if k >= tokens.len {
+                ret "";
+              }
+              Token rt = tokens.get(k);
+              if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                ret "";
+              }
+              ret token_word(rt);
             }
           }
         }
