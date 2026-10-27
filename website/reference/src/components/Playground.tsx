@@ -513,7 +513,15 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   ) => {
     if (targetPath === currentPath) {
       const off = offsetFor(view.state.doc, targetLine, targetCharacter);
-      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      // `scrollIntoView: true` only scrolls the minimum distance needed -
+      // a jump landing just past the bottom edge of the viewport stays
+      // pinned there instead of settling in view the way a real editor's
+      // goto-definition does. Centering it is what `EditorView.
+      // scrollIntoView`'s own `y: "center"` effect is for.
+      view.dispatch({
+        selection: { anchor: off },
+        effects: EditorView.scrollIntoView(off, { y: "center" }),
+      });
       view.focus();
       return;
     }
@@ -796,7 +804,13 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     if (jump) {
       pendingJumpRef.current = null;
       const off = offsetFor(view.state.doc, jump.line, jump.character);
-      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      // Same centering as the same-file jump above (`jumpTo`) - this is
+      // the cross-file half, applied once the target file's own state
+      // is live.
+      view.dispatch({
+        selection: { anchor: off },
+        effects: EditorView.scrollIntoView(off, { y: "center" }),
+      });
       view.focus();
     }
     // A freshly created/restored state has no inlay hints of its own
