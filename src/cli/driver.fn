@@ -27,6 +27,7 @@ use std.option;
 use std.result;
 use std.io;
 use std.fs;
+use std.c.io;
 use std.sys;
 use std.cli;
 use std.process;
@@ -1616,6 +1617,7 @@ test "the msvc compiler is recognized by name" {
 }
 
 test "compile_to_c prunes an unreferenced function by default, but keeps it for a library build" {
+  println("DEBUG: prune test start"); fflush(stdout_stream());
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
@@ -1627,24 +1629,35 @@ test "compile_to_c prunes an unreferenced function by default, but keeps it for 
   `  ret 0;
   `}`;
   str path = "src/cli/driver_prune_default.test.fn";
+  println("DEBUG: before write_string"); fflush(stdout_stream());
   assert write_string(path, src), "could not stage the prune-default fixture";
+  println("DEBUG: after write_string"); fflush(stdout_stream());
   defer remove_file(path);
 
   str c_whole_program = "src/cli/driver_prune_default_exe.test.c";
+  println("DEBUG: before first compile_to_c"); fflush(stdout_stream());
   let exe_lowered = compile_to_c(path, c_whole_program, &defines, false);
+  println("DEBUG: after first compile_to_c"); fflush(stdout_stream());
   assert exe_lowered.is_ok(), format("expected the fixture to lower to C for a whole-program build: {str}", exe_lowered.unwrap_err());
   defer remove_file(c_whole_program);
+  println("DEBUG: before first read_to_string"); fflush(stdout_stream());
   str exe_c = read_to_string(c_whole_program);
+  println("DEBUG: after first read_to_string"); fflush(stdout_stream());
   // A one-line forward declaration still exists regardless (only body
   // emission is gated), so this checks for the body specifically.
   assert !contains(exe_c, "return 7;"), "expected the default whole-program build to prune an unreferenced public function's body";
 
   str c_library = "src/cli/driver_prune_default_lib.test.c";
+  println("DEBUG: before second compile_to_c"); fflush(stdout_stream());
   let lib_lowered = compile_to_c(path, c_library, &defines, false, false);
+  println("DEBUG: after second compile_to_c"); fflush(stdout_stream());
   assert lib_lowered.is_ok(), format("expected the fixture to lower to C for a library build: {str}", lib_lowered.unwrap_err());
   defer remove_file(c_library);
+  println("DEBUG: before second read_to_string"); fflush(stdout_stream());
   str lib_c = read_to_string(c_library);
+  println("DEBUG: after second read_to_string"); fflush(stdout_stream());
   assert contains(lib_c, "return 7;"), "expected a library build (prune_unreachable=false) to keep a public function nothing in this compilation calls";
+  println("DEBUG: prune test end"); fflush(stdout_stream());
 }
 
 test "the emscripten compiler is recognized by name" {
