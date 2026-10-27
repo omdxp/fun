@@ -1930,7 +1930,10 @@ fun _signature_params_close(str signature) num {
 // recovers just the one piece that lookup needs - which function was
 // called - so `let_call_return_type_from_tokens` can resolve the rest.
 // Shared by completion.fn and navigation.fn, both of which hit this
-// exact gap in their own token-only fallback tier.
+// exact gap in their own token-only fallback tier. `const name =
+// callee(...);` infers its own type exactly the same way `let` does
+// (same sentinel, same codegen-time inference), so it matches here
+// too - only `let` used to.
 pub fun let_call_callee_from_tokens(Vec<Token>* tokens, str name) str {
   num i = 0;
   for i < tokens.len {
@@ -1939,7 +1942,7 @@ pub fun let_call_callee_from_tokens(Vec<Token>* tokens, str name) str {
     // handed in (the token "at or after"/"at or before" it) - every
     // call below passes the previous token's own index + 1, matching
     // the convention every other caller of these two already uses.
-    if token_is_keyword(t, "let") {
+    if token_is_keyword(t, "let") || token_is_keyword(t, "const") {
       let name_tok = token_after(tokens, i + 1);
       if name_tok.is_some() {
         Token nt = name_tok.unwrap();

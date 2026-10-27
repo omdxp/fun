@@ -8881,21 +8881,59 @@ impl Codegen {
               call_rtype = .Some(*alias_rt.unwrap());
             }
           } elif !equals(method_name, "") {
-            let recv_r_opt = self.resolve_field_chain(recv_e.left);
-            if recv_r_opt.is_some() {
-              let recv_r2 = recv_r_opt.unwrap();
+            // Only the receiver's own TYPE NAME is needed below, never
+            // its rendered text or an addressable temp - but
+            // `resolve_field_chain` doesn't know that distinction: for
+            // a call-shaped receiver, it unconditionally renders the
+            // call (`emit_expr` into a scratch buffer) and hoists a
+            // real temp for it as a side effect, purely to be able to
+            // answer "what type does this produce". The real emission
+            // right after resolves (and hoists) that exact same
+            // receiver again, doubling every multi-call chain's own
+            // second-innermost link - a real, confirmed C warning
+            // (`-Wunused-variable` on the first, discarded hoist).
+            // Same shape `_resolve_propagation_field_rtype` already
+            // works around for `?.`/`!.`: a call-shaped receiver's own
+            // type comes from `_resolve_call_rtype` directly,
+            // recursing one level without ever rendering or hoisting
+            // anything; only a non-call receiver (a plain local, or a
+            // `.field` chain) still needs the heavier
+            // `resolve_field_chain`, which has no such side effect for
+            // either of those shapes.
+            str recv_type_name = "";
+            fit recv_e.left.kind {
+              .Expression(nested_call_e) -> {
+                if equals(nested_call_e.op, "()") && nested_call_e.has_left {
+                  let nested_rdt = self._resolve_call_rtype(nested_call_e);
+                  if nested_rdt.is_some() {
+                    let nested_name = self.resolve_type_name(nested_rdt.unwrap());
+                    if nested_name.is_some() {
+                      recv_type_name = nested_name.unwrap();
+                    }
+                  }
+                }
+              }
+              _ -> {}
+            }
+            if equals(recv_type_name, "") {
+              let recv_r_opt = self.resolve_field_chain(recv_e.left);
+              if recv_r_opt.is_some() {
+                recv_type_name = recv_r_opt.unwrap().type_name;
+              }
+            }
+            if !equals(recv_type_name, "") {
               // A method declaring its own generic type param needs
               // the combined substitution
               // `maybe_instantiate_generic_impl_method_own_params`
               // builds; `lookup_impl_method_rtype` below only knows
               // the raw unsubstituted template return type.
               if inner_e.has_right &&
-                self.impl_method_has_own_type_params(recv_r2.type_name, method_name) {
+                self.impl_method_has_own_type_params(recv_type_name, method_name) {
                 Vec<Node*> own_args;
                 own_args.init(0);
                 self.flatten_call_args(inner_e.right, &own_args);
                 let own_res = self.maybe_instantiate_generic_impl_method_own_params(
-                  recv_r2.type_name,
+                  recv_type_name,
                   method_name,
                   own_args
                 );
@@ -8904,7 +8942,7 @@ impl Codegen {
                 }
               }
               if call_rtype.is_none() {
-                let rt = self.lookup_impl_method_rtype(recv_r2.type_name, method_name);
+                let rt = self.lookup_impl_method_rtype(recv_type_name, method_name);
                 if rt.is_some() {
                   call_rtype = .Some(*rt.unwrap());
                 }
@@ -8912,8 +8950,8 @@ impl Codegen {
               // A shape-typed receiver dispatches dynamically, so no
               // concrete impl owns the call; the return type comes
               // from what the shape itself declares instead.
-              if call_rtype.is_none() && self.shape_names.contains(recv_r2.type_name) {
-                let qrt = self.lookup_shape_method_rtype(recv_r2.type_name, method_name);
+              if call_rtype.is_none() && self.shape_names.contains(recv_type_name) {
+                let qrt = self.lookup_shape_method_rtype(recv_type_name, method_name);
                 if qrt.is_some() {
                   call_rtype = .Some(*qrt.unwrap());
                 }
@@ -9870,7 +9908,33 @@ impl Codegen {
           v.var_type.type_str,
           "str"
         ));
-        if v.is_const && !const_is_ptr_binding && !fn_sig_local {
+        // A `const`-bound compound value skips the C qualifier
+        // entirely, not just its placement: Fun's own typechecker
+        // already rejects reassigning a const binding regardless of
+        // what C says (`typecheck.fn`'s own "cannot assign to ...,
+        // which is const"), so this was always belt-and-suspenders,
+        // never load-bearing - but every method call takes `self` as
+        // a plain, non-const pointer (Fun has no notion of a
+        // non-mutating method), so a real `const Compound x` makes
+        // `&x` for *any* method call on it a genuine
+        // `-Wincompatible-pointer-types-discards-qualifiers` warning,
+        // confirmed directly (`const l = logger_init(...); l.debug_r(...)`).
+        // An untyped (`is_let`) const's own `var_type.type_str` is
+        // still the `__let_infer__` sentinel at this point - the real
+        // inference runs further below, after this prefix is already
+        // written in C's own "const, then type" order - so it needs
+        // its own early peek here, same inference call, just run
+        // once more than strictly necessary (no emission side effect
+        // to double, unlike a method call's own return-type probe).
+        str const_check_type_name = v.var_type.type_str;
+        if is_let && v.is_const && v.has_val {
+          let const_idt_opt = self.infer_let_expr_type(v.val);
+          if const_idt_opt.is_some() {
+            const_check_type_name = const_idt_opt.unwrap().type_str;
+          }
+        }
+        flag const_is_compound = self.compound_names.contains(const_check_type_name);
+        if v.is_const && !const_is_ptr_binding && !const_is_compound && !fn_sig_local {
           self.state.write("const ");
         }
 
@@ -14763,7 +14827,22 @@ impl Codegen {
           v.var_type.type_str,
           "str"
         ));
-        if v.is_const && !const_is_ptr_binding {
+        // Same compound exclusion as the local-variable site: a real C
+        // `const` on the value conflicts with every method's plain,
+        // non-const `self` pointer, and Fun's own typechecker already
+        // rejects reassigning a const binding regardless of what C
+        // emits. An untyped (`is_let`) const needs the same early
+        // inference peek the local site does - its own `var_type`
+        // is still the `__let_infer__` sentinel here.
+        str const_check_type_name = v.var_type.type_str;
+        if is_let && v.is_const && v.has_val {
+          let const_gdt_opt = self.infer_let_expr_type(v.val);
+          if const_gdt_opt.is_some() {
+            const_check_type_name = const_gdt_opt.unwrap().type_str;
+          }
+        }
+        flag const_is_compound = self.compound_names.contains(const_check_type_name);
+        if v.is_const && !const_is_ptr_binding && !const_is_compound {
           self.state.write("const ");
         }
         if is_let {

@@ -1549,12 +1549,41 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
     // A nested bare `.Variant(...)` constructor call (`?!(.Wrapped(.`):
     // its own enum is whatever the outer shorthand reads against, and
     // the argument's type is that variant's own payload at this
-    // position. A real method call (`recv.method(.`) needs the receiver
-    // resolved first, which this token-only path does not reach.
+    // position.
     num outer_before = _prev_real_index(tokens, before_callee);
+    if outer_before >= 0 && token_is_symbol(tokens.get(outer_before), ']') {
+      // An index expression ending the receiver (`arr[0].method(.`)
+      // stays an unresolved boundary, same as the chain resolver
+      // right below this treats it.
+      ret "";
+    }
     if outer_before >= 0 &&
-      (tokens.get(outer_before).type == .Identifier ||
-      token_is_symbol(tokens.get(outer_before), ')') || token_is_symbol(tokens.get(outer_before), ']')) {
+      (tokens.get(outer_before).type == .Identifier || token_is_symbol(tokens.get(outer_before), ')')) {
+      // A real method call (`recv.method(.`, `recv.a().method(.`):
+      // the receiver is resolved through the same whole-chain
+      // resolver dot-completion already uses, then `callee_name` is
+      // looked up as a method on whatever that resolves to - not a
+      // field, which is what the existing non-call lookup below
+      // would otherwise assume.
+      num recv_idx = _skip_back_over_call(tokens, outer_before);
+      if recv_idx >= 0 {
+        str recv_type = chain_tail_type_from_tokens(tokens, current_file, cache, recv_idx);
+        if !equals(recv_type, "") {
+          let method_decl = member_declaration_from_tokens(tokens, current_file, cache, recv_type, callee_name);
+          free(recv_type);
+          if method_decl.is_some() {
+            Vec<str> method_params = split_signature_params(method_decl.unwrap().detail);
+            defer free_params_vec(&method_params);
+            // Written arguments never include `self`, but the
+            // method's own rendered signature does.
+            num self_shifted_idx = arg_index + 1;
+            if self_shifted_idx < method_params.len {
+              ret _param_type_from_piece(method_params.get(self_shifted_idx));
+            }
+          }
+          ret "";
+        }
+      }
       ret "";
     }
     str owner = _dot_shorthand_enum_type_from_tokens(tokens, before_callee, current_file, cache);
@@ -2450,9 +2479,22 @@ fun chain_tail_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache*
 
   if !has_dot_prefix {
     if !is_call {
-      // A plain local/param base - not this function's own job (the
-      // ordinary, already-working receiver fallback chain handles it).
-      ret "";
+      // A plain local/param base, nothing chained onto it at all - the
+      // same explicit-type-then-let/const-inferred order every other
+      // base-case lookup in this tier already uses. Lets a caller
+      // resolving a whole receiver expression (which may or may not
+      // itself involve any chaining) always go through this one
+      // function rather than needing to also special-case "what if
+      // there's no chain at all" itself.
+      str plain_type = _receiver_type_from_tokens(tokens, name);
+      if !equals(plain_type, "") {
+        // Every other `ret` in this function hands back a fresh
+        // allocation (callers free it uniformly) - `_receiver_type_
+        // from_tokens`'s own result is borrowed straight out of
+        // `tokens`, so a plain copy keeps that contract true here too.
+        ret substr(plain_type, 0, len(plain_type));
+      }
+      ret let_call_return_type_from_tokens(tokens, doc_path, cache, name);
     }
     // A bare top-level call used directly, no receiver of its own
     // (`make_logger().debug(...)`): same local-then-imports order
