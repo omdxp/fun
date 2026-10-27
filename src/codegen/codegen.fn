@@ -19737,6 +19737,12 @@ impl Codegen {
     self.state.write("        ctx->ran++;\n");
     self.state.write("        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n");
     self.state.write("        else { printf(\"test: %s ... FAIL\\n\", name); }\n");
+    // A pipe makes stdout fully (not line-) buffered, and `abort()` never
+    // flushes it; without this, a crash anywhere in the run loses or
+    // scrambles the order of every already-printed result still sitting
+    // in the buffer, making the real last-completed test unrecoverable
+    // from a captured log.
+    self.state.write("        fflush(stdout);\n");
     self.state.write("        pthread_mutex_unlock(&ctx->mu);\n");
     self.state.write("    }\n");
     self.state.write("    return 0;\n");
@@ -19771,6 +19777,7 @@ impl Codegen {
     self.state.write("            } else {\n");
     self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
     self.state.write("            }\n");
+    self.state.write("            fflush(stdout);\n");
     self.state.write("        }\n");
     self.state.write("        if (ran == 0) {\n");
     self.state.write("            printf(\"no test named \\\"%s\\\" found\\n\", filter);\n");
@@ -19794,6 +19801,7 @@ impl Codegen {
     self.state.write("            } else {\n");
     self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
     self.state.write("            }\n");
+    self.state.write("            fflush(stdout);\n");
     self.state.write("            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
     self.state.write("        }\n");
     self.state.write("        __fun_test_par_ctx ctx;\n");
