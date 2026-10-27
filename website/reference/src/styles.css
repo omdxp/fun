@@ -803,7 +803,9 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
+.pg-toolbar-left { display: flex; align-items: center; gap: 10px; }
 .pg-active-file { font: 500 13px var(--mono); color: var(--muted); }
+.pg-back-button { padding: 3px 10px; font-size: 0.78rem; }
 .pg-loading-badge {
   margin-left: 10px;
   padding: 2px 8px;

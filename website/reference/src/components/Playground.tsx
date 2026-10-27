@@ -462,6 +462,19 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const textFor = (path: string): string =>
     filesRef.current[path] ?? externalFilesRef.current[path] ?? "";
 
+  // Every position a jump left behind, most recent last - what "Go
+  // back" (`goBack` below) pops from. User-reported: jumping from one
+  // stdlib reference file to another had no way back at all, since an
+  // external file never appears in the project tree to click back to
+  // (deliberately - see `externalFiles`' own comment) and there was no
+  // navigation stack of any kind, for project files either. A plain
+  // ref, not state: the stack's own contents never need to drive a
+  // render, only `hasBack` (below) does, kept in sync on every push/
+  // pop for the toolbar button's own enabled state.
+  const navHistoryRef = useRef<{ path: string; line: number; character: number }[]>([]);
+  const NAV_HISTORY_LIMIT = 50;
+  const [hasBack, setHasBack] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     warmPlaygroundRuntime().flsReady.then(() => {
@@ -520,7 +533,20 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     targetLine: number,
     targetCharacter: number,
   ) => {
+    // Pushed only once the jump is actually about to happen - an
+    // unrecognized target below returns before this, and a dead entry
+    // that just bounces back to the same spot isn't worth leaving on
+    // the stack.
+    const pushHistory = () => {
+      const from = posFor(view.state.doc, view.state.selection.main.head);
+      navHistoryRef.current.push({ path: currentPath, line: from.line, character: from.character });
+      if (navHistoryRef.current.length > NAV_HISTORY_LIMIT) {
+        navHistoryRef.current.shift();
+      }
+      setHasBack(true);
+    };
     if (targetPath === currentPath) {
+      pushHistory();
       const off = offsetFor(view.state.doc, targetLine, targetCharacter);
       // `scrollIntoView: true` only scrolls the minimum distance needed -
       // a jump landing just past the bottom edge of the viewport stays
@@ -540,8 +566,39 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       if (content == null) return;
       setExternalFiles((prev) => (prev[targetPath] !== undefined ? prev : { ...prev, [targetPath]: content }));
     }
+    pushHistory();
     pendingJumpRef.current = { line: targetLine, character: targetCharacter };
     setActiveFile(targetPath);
+  };
+
+  // Pops the most recent position a jump left behind (`navHistoryRef`,
+  // pushed by `jumpTo`) and returns there - "Go back", the standard
+  // mental model for undoing a goto-definition chain every mainstream
+  // editor has, which this Playground had none of at all: a stdlib
+  // reference file especially has nowhere else to return to, since it
+  // never appears in the project tree (see `externalFiles`' own
+  // comment) - the only way back to one is this stack.
+  const goBack = (view: EditorView, currentPath: string) => {
+    const prev = navHistoryRef.current.pop();
+    setHasBack(navHistoryRef.current.length > 0);
+    if (!prev) return;
+    if (prev.path === currentPath) {
+      const off = offsetFor(view.state.doc, prev.line, prev.character);
+      view.dispatch({
+        selection: { anchor: off },
+        effects: EditorView.scrollIntoView(off, { y: "center" }),
+      });
+      view.focus();
+      return;
+    }
+    if (filesRef.current[prev.path] === undefined && externalFilesRef.current[prev.path] === undefined) {
+      // Gone - a project file the person deleted since. Nothing to
+      // return to; try the entry before it instead.
+      goBack(view, currentPath);
+      return;
+    }
+    pendingJumpRef.current = { line: prev.line, character: prev.character };
+    setActiveFile(prev.path);
   };
 
   const gotoDefinition = async (view: EditorView, path: string, atPos?: number) => {
@@ -664,6 +721,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         keymap.of([
           { key: "F12", run: (view) => { gotoDefinition(view, path); return true; } },
           { key: "Alt-d", run: (view) => { gotoDefinition(view, path); return true; } },
+          { key: "Alt-ArrowLeft", run: (view) => { goBack(view, path); return true; } },
           ...defaultKeymap,
           ...historyKeymap,
           indentWithTab,
@@ -915,6 +973,8 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setEntry(sampleEntry);
     setActiveFile(sampleEntry);
     setExternalFiles({});
+    navHistoryRef.current = [];
+    setHasBack(false);
     statesRef.current.clear();
     setGeneration((g) => g + 1);
     setHasRun(false);
@@ -927,6 +987,8 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setEntry("main.fn");
     setActiveFile("main.fn");
     setExternalFiles({});
+    navHistoryRef.current = [];
+    setHasBack(false);
     statesRef.current.clear();
     setGeneration((g) => g + 1);
     setHasRun(false);
@@ -1027,16 +1089,30 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       </div>
       <div className="pg-main">
         <div className="pg-toolbar">
-          <span className="pg-active-file">
-            {activeFile}
-            {externalFiles[activeFile] !== undefined && (
-              <span className="pg-readonly-badge">read-only</span>
+          <span className="pg-toolbar-left">
+            {hasBack && (
+              <button
+                type="button"
+                className="ghost pg-back-button"
+                onClick={() => {
+                  if (viewRef.current) goBack(viewRef.current, activeFile);
+                }}
+                title="Go back (Alt+Left)"
+              >
+                ← Back
+              </button>
             )}
-            {!flsReady && (
-              <span className="pg-loading-badge" title="Diagnostics, hover, completion, and signature help become available once this finishes loading">
-                loading language features...
-              </span>
-            )}
+            <span className="pg-active-file">
+              {activeFile}
+              {externalFiles[activeFile] !== undefined && (
+                <span className="pg-readonly-badge">read-only</span>
+              )}
+              {!flsReady && (
+                <span className="pg-loading-badge" title="Diagnostics, hover, completion, and signature help become available once this finishes loading">
+                  loading language features...
+                </span>
+              )}
+            </span>
           </span>
           <div className="run-actions pg-static-actions">
             <button
@@ -1056,7 +1132,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           </div>
         </div>
         <div className="pg-hint">
-          Cmd/Ctrl+click or F12 to jump to a definition &middot; hover a symbol for its docs &middot; start typing for completions
+          Cmd/Ctrl+click or F12 to jump to a definition, Alt+Left to go back &middot; hover a symbol for its docs &middot; start typing for completions
         </div>
         <div ref={editorHostRef} className="pg-editor-host" />
         {hasRun && (
