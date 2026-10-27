@@ -868,6 +868,9 @@ fun _ensure_msvc_env() {
   if !equals(env_or("INCLUDE", ""), "") {
     ret;
   }
+  if !_msvc_env_claimed.compare_exchange(false, true) {
+    ret;
+  }
   str vcvarsall = _find_vcvarsall();
   if equals(vcvarsall, "") {
     ret;
@@ -1006,6 +1009,12 @@ pub fun resolve_c_compiler() str {
 // explicit constructor needed.
 Atomic<flag> _cc_claimed;
 Atomic<flag> _cc_ready;
+
+// Guards `_ensure_msvc_env`'s own one-time environment probe the same way:
+// `run_test_suite` (its only caller) can itself run concurrently on more
+// than one thread, and the probe's own `set_env` calls race on the
+// process's environment block if two of them ever overlap.
+Atomic<flag> _msvc_env_claimed;
 
 // `resolve_c_compiler`, memoized for this process's lifetime, but only
 // for the expensive PATH search its own fallback runs when `FUN_CC` is
@@ -1754,6 +1763,73 @@ sequential test "wasm target real end to end, through the actual emscripten tool
   );
 }
 
+sequential test "wasm target: numeric varargs read back at their real width, not merged with their neighbors" {
+  // User-reported: `println_fmt`'s plain numeric varargs (`1`, `2`,
+  // `add(1, 2)`) came back as garbage under wasm while the same source
+  // ran correctly natively. Root cause: the GNU-mode call-site codegen
+  // bound each vararg with bare `__auto_type`, which infers plain `int`
+  // (32 bits) for an integer literal, while the callee always reads it
+  // back via `va_arg(ap, long long)` (64 bits) for the `'n'` tag - a
+  // width mismatch that's undefined behavior in C. x86-64's variadic ABI
+  // happens to read it back correctly anyway (a full 8-byte register
+  // slot per arg regardless of promoted width), masking the bug
+  // natively; wasm32 packs each vararg only as wide as its real type, so
+  // the extra 4 bytes `va_arg` reads come from the *next* vararg's own
+  // slot, corrupting it and every value after. Skipped (not failed) when
+  // emscripten isn't installed locally, same as its sibling above.
+  Vec<str> probe_args;
+  probe_args.init(2);
+  probe_args.push("emcc");
+  probe_args.push("--version");
+  let probe = run(argv_from(&probe_args));
+  probe_args.free();
+  if probe.is_err() {
+    ret;
+  }
+
+  str src = `use std.io;
+  `fun add(num a, num b) num {
+  `  ret a + b;
+  `}
+  `fun main() {
+  `  println_fmt("sum={} + {} = {num}", 1, 2, add(1, 2));
+  `}`;
+  str source_path = "src/cli/driver_wasm_vararg_width_fixture.test.fn";
+  assert write_string(source_path, src), "could not stage the wasm vararg-width fixture";
+  defer remove_file(source_path);
+
+  str c_path = "src/cli/driver_wasm_vararg_width_fixture.test.c";
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  let lowered = compile_to_c(source_path, c_path, &defines, false);
+  assert lowered.is_ok(), format("expected the wasm vararg-width fixture to lower to C: {str}", lowered.unwrap_err());
+  defer remove_file(c_path);
+
+  set_env("FUN_CC", "emcc");
+  str exe_path = format("src/cli/driver_wasm_vararg_width_fixture.test{str}", exe_suffix());
+  num cc_code = compile_c_to_exe_mode(c_path, exe_path, false, false);
+  set_env("FUN_CC", "");
+  assert cc_code == 0, "expected emcc to accept the generated C";
+  defer remove_file(exe_path);
+  str wasm_path = "src/cli/driver_wasm_vararg_width_fixture.test.wasm";
+  defer remove_file(wasm_path);
+
+  Vec<str> run_args;
+  run_args.init(2);
+  run_args.push("node");
+  run_args.push(exe_path);
+  let ran = run(argv_from(&run_args));
+  run_args.free();
+  assert ran.is_ok(), "expected node to run the compiled wasm program";
+  ProcessResult r = ran.unwrap();
+  assert contains(r.stdout_text, "sum=1 + 2 = 3"), format(
+    "expected every numeric vararg at its real value, not merged with a neighbor, got stdout={str} stderr={str}",
+    r.stdout_text,
+    r.stderr_text
+  );
+}
+
 test "a compound field whose type was never imported is reported by name" {
   Vec<Define> defines;
   defines.init(0);
@@ -1761,7 +1837,11 @@ test "a compound field whose type was never imported is reported by name" {
   str out_path = "src/parser/import_resolver_fixtures/missing_map_import.test.c";
   let lowered = compile_to_c("src/parser/import_resolver_fixtures/missing_map_import.fn", out_path, &defines, false);
   remove_file(out_path);
-  assert lowered.is_err(), "expected the missing import to fail the compile";
+  if !lowered.is_err() {
+    allow assert_constant, "reports when the missing import unexpectedly compiles";
+    assert false, "expected the missing import to fail the compile";
+    ret;
+  }
   str message = lowered.unwrap_err();
   assert contains(message, "the type 'Map' of field 'hints' in 'Holder' is not declared"), "expected the message to name the type, the field and the compound";
 }
@@ -3169,11 +3249,14 @@ pub fun run_test_suite(
   // that stacks on top of this process's own (already lower, see
   // _test_suite_worker_count) worker count and, under `cl.exe`'s heavier
   // spawn cost, was observed causing real slowdowns under CI-sized
-  // resource limits. Capped here, but only if the caller hasn't already
-  // set an explicit preference.
-  if runtime_backend_is_windows() && equals(env_or("FUN_TEST_INTRA_JOBS", ""), "") {
-    set_env("FUN_TEST_INTRA_JOBS", "2");
-  }
+  // resource limits. NOT capped here anymore: `set_env`/`getenv` race on
+  // the process's shared environment block, and serializing the writers
+  // (an earlier version of this fix) still isn't enough - the write
+  // itself races every OTHER concurrently-running test's own ordinary
+  // `getenv` reads (FUN_CC resolution and the like), which happen
+  // constantly once the worker pool below is running. `fun test .`'s own
+  // top-level entry point is the only caller that could ever set this
+  // safely (nothing else is running yet), and it already does.
 
   ThreadPool pool = thread_pool_new(workers);
   defer pool.destroy();
@@ -4027,7 +4110,11 @@ test "lint reports a warning per finding across a tree and counts the files it l
   defer remove_file(clean);
 
   let linted = lint_paths("fun-out/_lint_scan");
-  assert linted.is_ok(), "expected the tree to lint";
+  if !linted.is_ok() {
+    allow assert_constant, "reports when the tree fails to lint";
+    assert false, "expected the tree to lint";
+    ret;
+  }
   LintOutcome outcome = linted.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
@@ -4049,7 +4136,11 @@ test "lint reports a file that does not parse instead of stopping" {
   defer remove_file(fine);
 
   let linted = lint_paths("fun-out/_lint_bad");
-  assert linted.is_ok(), "expected the tree to lint";
+  if !linted.is_ok() {
+    allow assert_constant, "reports when the tree fails to lint";
+    assert false, "expected the tree to lint";
+    ret;
+  }
   LintOutcome outcome = linted.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
@@ -4065,7 +4156,11 @@ test "lint of a single file reports just that file, and a missing path is an err
   defer remove_file(only);
 
   let linted = lint_paths(only);
-  assert linted.is_ok(), "expected a single file to lint";
+  if !linted.is_ok() {
+    allow assert_constant, "reports when a single file fails to lint";
+    assert false, "expected a single file to lint";
+    ret;
+  }
   LintOutcome outcome = linted.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
@@ -4123,14 +4218,22 @@ test "lint leaves out fixtures directories when scanning, but lints a fixture na
   defer remove_file(c);
 
   let scanned = lint_paths("fun-out/_lint_fx");
-  assert scanned.is_ok(), "expected the tree to lint";
+  if !scanned.is_ok() {
+    allow assert_constant, "reports when the tree fails to lint";
+    assert false, "expected the tree to lint";
+    ret;
+  }
   LintOutcome outcome = scanned.unwrap();
   defer outcome.findings.free();
   defer outcome.failures.free();
   assert outcome.files == 1, "expected only the file outside every fixtures directory";
 
   let direct = lint_paths(b);
-  assert direct.is_ok(), "expected a fixture named directly to lint";
+  if !direct.is_ok() {
+    allow assert_constant, "reports when a fixture named directly fails to lint";
+    assert false, "expected a fixture named directly to lint";
+    ret;
+  }
   LintOutcome named = direct.unwrap();
   defer named.findings.free();
   defer named.failures.free();
@@ -4144,14 +4247,25 @@ test "lint leaves out fixtures directories when scanning, but lints a fixture na
 
 // A directory of `.fn` files made for one test, emptied of anything left from
 // an earlier run. Lives under fun-out, which a scan of the project skips.
+//
+// `list_dir` right after `make_dir_all` isn't infallible: many of these run
+// concurrently (the test binary's own intra-file worker pool), and under
+// Windows' heavier per-call filesystem latency a just-created directory can
+// transiently fail to list before its own metadata is visible. This is
+// opportunistic cleanup of a directory this call itself just created -
+// nothing to clean is the right read of a failed listing, not a reason to
+// take the whole test binary down.
 fun _scratch_project(str name) str {
   str dir = format("fun-out/driver_test_{str}", name);
   make_dir_all(dir);
-  Vec<str> old = list_dir(dir).unwrap();
-  for entry : old {
-    remove_file(path_join(dir, entry));
+  let listed = list_dir(dir);
+  if listed.is_ok() {
+    Vec<str> old = listed.unwrap();
+    for entry : old {
+      remove_file(path_join(dir, entry));
+    }
+    old.free();
   }
-  old.free();
   ret dir;
 }
 

@@ -25,7 +25,6 @@
 
 use std.result;
 use std.error;
-use std.c.string;
 
 // An optional value: `Some(v)` holds a `T`; `None` holds nothing.
 pub enum Option<T> {
@@ -63,22 +62,17 @@ impl Option<T> {
     ret fallback;
   }
 
-  // The contained value. Prefer `unwrap_or`: on None this returns a zero value
-  // (there is no panic mechanism), so only use it when you have already checked
-  // `is_some()` or matched the variant.
+  // The contained value, or a panic (message printed, process aborted)
+  // on None. Prefer `unwrap_or` when None is a real possibility you
+  // want to handle; reach for this once you've already checked
+  // `is_some()` or matched the variant, or want a loud, immediate
+  // failure right at the real mistake instead of a zero value
+  // silently propagating further through the program.
   pub unwrap() T {
     fit *self {
       .Some(v) -> { ret v; }
-      .None -> { ret self.zero(); }
+      .None -> { ret panic("called unwrap() on a None value"); }
     }
-    ret self.zero();
-  }
-
-  // A zero-initialized T, used as the empty fallback for `unwrap`.
-  zero() T {
-    T out;
-    memset(&out, 0, sizeof(T));
-    ret out;
   }
 
   // This option if it is Some, otherwise `other`.
