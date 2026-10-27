@@ -1645,7 +1645,7 @@ test "compile_to_c prunes an unreferenced function by default, but keeps it for 
   fflush(stdout_stream());
   println(format("DEBUG: exe_lowered.is_ok() = {flag}", exe_lowered.is_ok()));
   fflush(stdout_stream());
-  assert exe_lowered.is_ok(), format("expected the fixture to lower to C for a whole-program build: {str}", exe_lowered.unwrap_err());
+  assert exe_lowered.is_ok(), "expected the fixture to lower to C for a whole-program build";
   println("DEBUG: after assert");
   fflush(stdout_stream());
   defer remove_file(c_whole_program);
@@ -1666,7 +1666,7 @@ test "compile_to_c prunes an unreferenced function by default, but keeps it for 
   let lib_lowered = compile_to_c(path, c_library, &defines, false, false);
   println("DEBUG: after second compile_to_c");
   fflush(stdout_stream());
-  assert lib_lowered.is_ok(), format("expected the fixture to lower to C for a library build: {str}", lib_lowered.unwrap_err());
+  assert lib_lowered.is_ok(), "expected the fixture to lower to C for a library build";
   defer remove_file(c_library);
   println("DEBUG: before second read_to_string");
   fflush(stdout_stream());
