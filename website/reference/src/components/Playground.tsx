@@ -453,6 +453,15 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const filesRef = useRef(files);
   filesRef.current = files;
 
+  // `path`'s own current text regardless of which store it lives in -
+  // a project file (`files`) or a stdlib reference one (`externalFiles`,
+  // never mounted; see that state's own comment). What every fls call
+  // below sends as `textOverride` so a reference file's own hover/
+  // goto-definition/signature-help/inlay-hints still have real content
+  // to analyze, without ever mounting it at the path that collides.
+  const textFor = (path: string): string =>
+    filesRef.current[path] ?? externalFilesRef.current[path] ?? "";
+
   useEffect(() => {
     let cancelled = false;
     warmPlaygroundRuntime().flsReady.then(() => {
@@ -536,13 +545,9 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   };
 
   const gotoDefinition = async (view: EditorView, path: string, atPos?: number) => {
-    // fls has no mounted content for an external stdlib reference
-    // file (see `externalFiles`' own comment) - nothing to resolve
-    // a jump from.
-    if (externalFilesRef.current[path] !== undefined) return;
     const pos = atPos ?? view.state.selection.main.head;
     const { line, character } = posFor(view.state.doc, pos);
-    const result = await getDefinition(filesRef.current, path, line, character);
+    const result = await getDefinition(filesRef.current, path, line, character, textFor(path));
     const loc = Array.isArray(result) ? result[0] : result;
     if (!loc?.uri || !loc?.range?.start) return;
     const targetPath = String(loc.uri).replace(/^file:\/\/\//, "").replace(/^\/+/, "");
@@ -573,10 +578,10 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   // switch (no update event of its own to hook) can call the same
   // function instead of duplicating it.
   const refreshInlayHints = async (view: EditorView, path: string) => {
-    if (!flsReadyRef.current || externalFilesRef.current[path] !== undefined) return;
+    if (!flsReadyRef.current) return;
     const firstLine = view.state.doc.lineAt(view.viewport.from).number - 1;
     const lastLine = view.state.doc.lineAt(view.viewport.to).number - 1;
-    const hints = await getInlayHints(filesRef.current, path, firstLine, lastLine);
+    const hints = await getInlayHints(filesRef.current, path, firstLine, lastLine, textFor(path));
     if (!Array.isArray(hints) || hints.length === 0) {
       view.dispatch({ effects: setInlayHints.of(Decoration.none) });
       return;
@@ -680,9 +685,9 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           { delay: 600 },
         ),
         hoverTooltip(async (view, pos) => {
-          if (!flsReadyRef.current || isExternal) return null;
+          if (!flsReadyRef.current) return null;
           const { line, character } = posFor(view.state.doc, pos);
-          const result = await getHover(filesRef.current, path, line, character);
+          const result = await getHover(filesRef.current, path, line, character, textFor(path));
           const text = contentsToText(result?.contents);
           if (!text) return null;
           const range = result?.range;
@@ -739,11 +744,11 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           if (update.docChanged || update.selectionSet) {
             window.clearTimeout(signatureTimer);
             signatureTimer = window.setTimeout(async () => {
-              if (!flsReadyRef.current || isExternal) return;
+              if (!flsReadyRef.current) return;
               const view = update.view;
               const pos = view.state.selection.main.head;
               const { line, character } = posFor(view.state.doc, pos);
-              const result = await getSignatureHelp(filesRef.current, path, line, character);
+              const result = await getSignatureHelp(filesRef.current, path, line, character, textFor(path));
               const sig = result?.signatures?.[result.activeSignature ?? 0];
               if (!sig) {
                 view.dispatch({ effects: setSignatureTooltip.of(null) });

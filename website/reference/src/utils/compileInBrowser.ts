@@ -503,16 +503,27 @@ async function runFlsSessionQueued(
 // all - a module that failed to load, a timeout, a malformed or empty
 // response - every one of these features is a nice-to-have overlay on
 // top of the editor, never something that should visibly break it.
+//
+// `textOverride`, when given, is what `activePath`'s own `didOpen` is
+// sent with instead of `files[activePath]` - what a stdlib reference
+// file (never part of `files` at all; see `Playground.tsx`'s own
+// `externalFiles`) needs: the document's own content reaches fls
+// directly through this message, with no need for it to also exist on
+// the mounted filesystem (that's only for resolving what this
+// document itself imports, already covered by the sandbox's own
+// preloaded stdlib tree) - the exact mount that collides and hangs
+// the whole session if this file were added to `files` instead.
 async function flsPositionRequest(
   files: Record<string, string>,
   activePath: string,
   method: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
   try {
     const uri = uriFor(activePath);
-    const text = files[activePath] ?? "";
+    const text = textOverride ?? files[activePath] ?? "";
     const id = "1";
     const messages = [
       didOpenMessage(uri, text),
@@ -531,8 +542,9 @@ export async function getHover(
   activePath: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
-  return flsPositionRequest(files, activePath, "textDocument/hover", line, character);
+  return flsPositionRequest(files, activePath, "textDocument/hover", line, character, textOverride);
 }
 
 export async function getDefinition(
@@ -540,8 +552,9 @@ export async function getDefinition(
   activePath: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
-  return flsPositionRequest(files, activePath, "textDocument/definition", line, character);
+  return flsPositionRequest(files, activePath, "textDocument/definition", line, character, textOverride);
 }
 
 export async function getSignatureHelp(
@@ -549,8 +562,9 @@ export async function getSignatureHelp(
   activePath: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
-  return flsPositionRequest(files, activePath, "textDocument/signatureHelp", line, character);
+  return flsPositionRequest(files, activePath, "textDocument/signatureHelp", line, character, textOverride);
 }
 
 export async function getCompletions(
@@ -566,15 +580,17 @@ export async function getCompletions(
 // with a list rather than one result - its own shape, not
 // `flsPositionRequest`'s. `[]` on any failure, same reasoning as every
 // other fls feature here: an overlay the editor works fine without.
+// `textOverride` - see `flsPositionRequest`'s own comment.
 export async function getInlayHints(
   files: Record<string, string>,
   activePath: string,
   startLine: number,
   endLine: number,
+  textOverride?: string,
 ): Promise<any[]> {
   try {
     const uri = uriFor(activePath);
-    const text = files[activePath] ?? "";
+    const text = textOverride ?? files[activePath] ?? "";
     const id = "1";
     const messages = [
       didOpenMessage(uri, text),
