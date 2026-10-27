@@ -8,6 +8,7 @@ use documents;
 use analysis;
 use positions;
 use symbols;
+use completion;
 use ..lexer.token;
 use std.string;
 use std.vec;
@@ -38,13 +39,49 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   // not an edge one, so it needs its own answer rather than nothing
   // (`!read.parsed` used to mean no signature at all here, the one
   // place in this file that never got the token-only fallback hover/
-  // completion/goto-definition already have). Scoped to a plain
-  // top-level call for now, the shape every bug report against this
-  // actually used - a method called on a receiver still needs a real
-  // parse, same as before.
+  // completion/goto-definition already have).
   if !read.parsed {
     if c.has_receiver {
-      ret NO_SIGNATURE;
+      // A method on a chain (`l.debug_r("msg").dec_field(|`) - the
+      // other real-world shape every bug report against this used,
+      // once a plain top-level call's own gap (right above) was
+      // fixed. `chain_receiver_identifier_index_from_tokens` finds the
+      // receiver segment's own identifier token-only (walking back
+      // through a call-ending chain of any length, not just a plain
+      // local), `chain_tail_type_from_tokens` resolves its type the
+      // same way, and `member_declaration_from_tokens` is the same
+      // lookup hover/goto-definition already use for a member once
+      // the document stops parsing.
+      num recv_idx = chain_receiver_identifier_index_from_tokens(
+        &tokens,
+        index_of_token(&tokens, c.callee_token)
+      );
+      if recv_idx < 0 {
+        ret NO_SIGNATURE;
+      }
+      str recv_type = chain_tail_type_from_tokens(&tokens, doc.path, cache, recv_idx);
+      if equals(recv_type, "") {
+        ret NO_SIGNATURE;
+      }
+      let member = member_declaration_from_tokens(
+        &tokens,
+        doc.path,
+        cache,
+        recv_type,
+        c.callee
+      );
+      free(recv_type);
+      if member.is_none() {
+        ret NO_SIGNATURE;
+      }
+      Declaration d = member.unwrap();
+      fit d.kind {
+        .Function -> {}
+        _ -> { ret NO_SIGNATURE; }
+      }
+      // Same implicit-`self`-as-parameter-0 shift the parsed-tree
+      // branch below already applies for a method.
+      ret _signature_result(d.detail, c.active_param + 1);
     }
     str sig = local_fn_signature_from_tokens(&tokens, doc.text, c.callee);
     if equals(sig, "") {
@@ -68,9 +105,21 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
     // receiver at all - its receiver is itself a call) - the same gap
     // `_call_arg_expected_type` had (see navigation.fn), just here for
     // signature help instead of hover/goto-definition.
-    let recv = chain_receiver(&tokens, c.callee_token, &program.nodes, doc.path, source_line, 0);
+    let recv = chain_receiver(
+      &tokens,
+      c.callee_token,
+      &program.nodes,
+      doc.path,
+      source_line,
+      0
+    );
     if !equals(recv.type_name, "") {
-      found = lookup_method(&program.nodes, recv.type_name, c.callee, recv.generic_args);
+      found = lookup_method(
+        &program.nodes,
+        recv.type_name,
+        c.callee,
+        recv.generic_args
+      );
       active_param = active_param + 1;
     }
   } else {

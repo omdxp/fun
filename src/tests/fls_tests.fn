@@ -1436,9 +1436,15 @@ test "go-to-definition through an import alias picks the right module when both 
   // `two__pick` for mod2 by the merge - see `import_resolver.fn`'s own
   // `alias_rename_keys` note - so a bare-name lookup always finds
   // mod1's copy).
-  write_string("src/tests/fixtures/_alias_collision_mod1.fn", "pub fun pick() num {\n  ret 10;\n}\n");
+  write_string(
+    "src/tests/fixtures/_alias_collision_mod1.fn",
+    "pub fun pick() num {\n  ret 10;\n}\n"
+  );
   defer remove_file("src/tests/fixtures/_alias_collision_mod1.fn");
-  write_string("src/tests/fixtures/_alias_collision_mod2.fn", "pub fun pick() num {\n  ret 32;\n}\n");
+  write_string(
+    "src/tests/fixtures/_alias_collision_mod2.fn",
+    "pub fun pick() num {\n  ret 32;\n}\n"
+  );
   defer remove_file("src/tests/fixtures/_alias_collision_mod2.fn");
 
   AnalysisCache reads = analysis_cache_new();
@@ -3050,7 +3056,10 @@ test "workspace symbol search matches by name, case-insensitively, across every 
   assert contains(matches, `"uri":"file:///a.fn"`), "expected a.fn's own location";
   assert contains(matches, `"uri":"file:///b.fn"`), "expected b.fn's own location";
 
-  assert equals(workspace_symbols(&docs, &reads, &symbols, "nope_no_such_symbol"), "[]"), "expected no matches";
+  assert equals(
+    workspace_symbols(&docs, &reads, &symbols, "nope_no_such_symbol"),
+    "[]"
+  ), "expected no matches";
   assert !equals(workspace_symbols(&docs, &reads, &symbols, ""), "[]"), "expected an empty query to match everything";
 }
 
@@ -3259,7 +3268,10 @@ test "definition_workspace_wide falls back to a type in a document never importe
   let main_doc = docs.at("file:///main.fn").unwrap();
 
   // Not yet indexed anywhere: no fallback match.
-  assert equals(definition_workspace_wide(&reads, &docs, &symbols, main_doc, 1, 2), "[]"), "expected no match before any document declaring OrphanType is known";
+  assert equals(
+    definition_workspace_wide(&reads, &docs, &symbols, main_doc, 1, 2),
+    "[]"
+  ), "expected no match before any document declaring OrphanType is known";
 
   // Indexed now (standing in for an earlier references/workspace-
   // symbol call having already scanned the workspace). Also exercises
@@ -3550,7 +3562,10 @@ sequential test "hover on a 'deps.<name>' segment resolves to the locked depende
   flag target_exists = exists(target);
   assert target_is_dir, format(
     "expected 'mylib' to resolve to a real directory - resolve_import_path directly: {str} | import_target (tokenizer path): {str} | is_dir: {flag} | exists: {flag}",
-    direct_resolved, target, target_is_dir, target_exists
+    direct_resolved,
+    target,
+    target_is_dir,
+    target_exists
   );
 
   AnalysisCache reads = analysis_cache_new();
@@ -3564,7 +3579,10 @@ sequential test "hover on a 'deps.<name>' segment resolves to the locked depende
   // On `mylib`: the dependency's own resolved root (no README there, so
   // a bare directory result rather than "null").
   str name_hover = hover(&reads, doc, 0, 11);
-  assert !equals(name_hover, "null"), format("expected 'mylib' to resolve to the locked dependency's own root, got: {str}", name_hover);
+  assert !equals(name_hover, "null"), format(
+    "expected 'mylib' to resolve to the locked dependency's own root, got: {str}",
+    name_hover
+  );
 }
 
 sequential test "hover on a 'deps.<name>.<module>' segment shows the fetched module's own doc comment" {
@@ -3581,7 +3599,10 @@ sequential test "hover on a 'deps.<name>.<module>' segment shows the fetched mod
 
   // On `some`: the fetched module file itself.
   str module_hover = hover(&reads, doc, 0, 17);
-  assert !equals(module_hover, "null"), format("expected 'some' to resolve to the dependency's own fetched module, got: {str}", module_hover);
+  assert !equals(module_hover, "null"), format(
+    "expected 'some' to resolve to the dependency's own fetched module, got: {str}",
+    module_hover
+  );
 }
 
 sequential test "go-to-definition on a 'deps.<name>.<module>' segment jumps to the fetched module file" {
@@ -3597,7 +3618,10 @@ sequential test "go-to-definition on a 'deps.<name>.<module>' segment jumps to t
   doc.version = 1;
 
   str module_def = definition(&reads, doc, 0, 17);
-  assert contains(module_def, "some.fn"), format("expected a jump straight to the dependency's fetched module file, got: {str}", module_def);
+  assert contains(module_def, "some.fn"), format(
+    "expected a jump straight to the dependency's fetched module file, got: {str}",
+    module_def
+  );
 }
 
 test "completion lists a project's own resolved dependency names for 'use deps.'" {
@@ -4287,9 +4311,15 @@ test "hover resolves a let bound to calling through a plain function-typed param
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 1, 7);
-  assert contains(hovered, "num res"), format("expected 'res' to resolve to the function-typed parameter's own declared return type, got: {str}", hovered);
+  assert contains(hovered, "num res"), format(
+    "expected 'res' to resolve to the function-typed parameter's own declared return type, got: {str}",
+    hovered
+  );
   str hints = inlay_hints(&reads, doc, 0, 5);
-  assert contains(hints, `"label":": num"`), format("expected an inlay hint on 'res' too, got: {str}", hints);
+  assert contains(hints, `"label":": num"`), format(
+    "expected an inlay hint on 'res' too, got: {str}",
+    hints
+  );
 }
 
 test "hover resolves a let bound to calling through an alias-bound function-typed parameter" {
@@ -4313,9 +4343,15 @@ test "hover resolves a let bound to calling through an alias-bound function-type
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 2, 7);
-  assert contains(hovered, "num res"), format("expected 'res' to resolve through the alias to its own real return type, got: {str}", hovered);
+  assert contains(hovered, "num res"), format(
+    "expected 'res' to resolve through the alias to its own real return type, got: {str}",
+    hovered
+  );
   str hints = inlay_hints(&reads, doc, 0, 5);
-  assert contains(hints, `"label":": num"`), format("expected an inlay hint on 'res' too, got: {str}", hints);
+  assert contains(hints, `"label":": num"`), format(
+    "expected an inlay hint on 'res' too, got: {str}",
+    hints
+  );
 }
 
 test "hover and signature help specialize a generic method against its receiver's own concrete type" {
@@ -5527,9 +5563,18 @@ test "hover on a tuple's own positional access shows the real element type, not 
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 2, 8);
-  assert contains(hovered, "num"), format("expected 't.0' to hover as its own real element type 'num', got: {str}", hovered);
-  assert contains(hovered, "Positional element 0"), format("expected the hover to say which positional element this is, got: {str}", hovered);
-  assert !contains(hovered, "decimal:"), format("expected this to no longer fall through to the plain-integer-literal doc, got: {str}", hovered);
+  assert contains(hovered, "num"), format(
+    "expected 't.0' to hover as its own real element type 'num', got: {str}",
+    hovered
+  );
+  assert contains(hovered, "Positional element 0"), format(
+    "expected the hover to say which positional element this is, got: {str}",
+    hovered
+  );
+  assert !contains(hovered, "decimal:"), format(
+    "expected this to no longer fall through to the plain-integer-literal doc, got: {str}",
+    hovered
+  );
 }
 
 test "hover on a chained positional access resolves the inner element's own real type" {
@@ -5552,8 +5597,14 @@ test "hover on a chained positional access resolves the inner element's own real
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 2, 9);
-  assert contains(hovered, "num"), format("expected 't.0.0' to hover as its own real inner element type 'num', got: {str}", hovered);
-  assert !contains(hovered, "floating-point literal"), format("expected this to no longer fall through to the plain-decimal-literal doc, got: {str}", hovered);
+  assert contains(hovered, "num"), format(
+    "expected 't.0.0' to hover as its own real inner element type 'num', got: {str}",
+    hovered
+  );
+  assert !contains(hovered, "floating-point literal"), format(
+    "expected this to no longer fall through to the plain-decimal-literal doc, got: {str}",
+    hovered
+  );
 }
 
 test "hover on a THREE-level chained positional access resolves the final element's own real type" {
@@ -5579,10 +5630,19 @@ test "hover on a THREE-level chained positional access resolves the final elemen
   doc.version = 1;
 
   str hovered_mid = hover(&reads, doc, 2, 9);
-  assert contains(hovered_mid, "(num, str)"), format("expected 't.0.0' (the middle hop) to hover as its own real element type '(num, str)', got: {str}", hovered_mid);
+  assert contains(hovered_mid, "(num, str)"), format(
+    "expected 't.0.0' (the middle hop) to hover as its own real element type '(num, str)', got: {str}",
+    hovered_mid
+  );
   str hovered_final = hover(&reads, doc, 2, 12);
-  assert contains(hovered_final, "str"), format("expected 't.0.0.1' (the final hop) to hover as its own real element type 'str', got: {str}", hovered_final);
-  assert !contains(hovered_final, "decimal literal"), format("expected this to no longer fall through to the plain-number-literal doc, got: {str}", hovered_final);
+  assert contains(hovered_final, "str"), format(
+    "expected 't.0.0.1' (the final hop) to hover as its own real element type 'str', got: {str}",
+    hovered_final
+  );
+  assert !contains(hovered_final, "decimal literal"), format(
+    "expected this to no longer fall through to the plain-number-literal doc, got: {str}",
+    hovered_final
+  );
 }
 
 test "inlay hints cover a destructuring let, one hint per name at its own position" {
@@ -8025,11 +8085,20 @@ test "hover on a declared-type destructuring binding name shows its own real ele
   doc.version = 1;
 
   str hovered_a = hover(&reads, doc, 1, 14);
-  assert contains(hovered_a, "dec"), format("expected the first destructured name's own hover to show its real declared element type 'dec', got: {str}", hovered_a);
+  assert contains(hovered_a, "dec"), format(
+    "expected the first destructured name's own hover to show its real declared element type 'dec', got: {str}",
+    hovered_a
+  );
   str hovered_b = hover(&reads, doc, 1, 17);
-  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its real declared element type 'str', got: {str}", hovered_b);
+  assert contains(hovered_b, "str"), format(
+    "expected the second destructured name's own hover to show its real declared element type 'str', got: {str}",
+    hovered_b
+  );
   str hovered_ref = hover(&reads, doc, 2, 8);
-  assert contains(hovered_ref, "dec"), format("expected a later reference to a destructured name to resolve too, not just its own binding site, got: {str}", hovered_ref);
+  assert contains(hovered_ref, "dec"), format(
+    "expected a later reference to a destructured name to resolve too, not just its own binding site, got: {str}",
+    hovered_ref
+  );
 }
 
 test "hover on a let-inferred destructuring binding name shows its initializer's own real element type" {
@@ -8054,9 +8123,15 @@ test "hover on a let-inferred destructuring binding name shows its initializer's
   doc.version = 1;
 
   str hovered_a = hover(&reads, doc, 4, 7);
-  assert contains(hovered_a, "num"), format("expected the first destructured name's own hover to infer 'num' from its call initializer, got: {str}", hovered_a);
+  assert contains(hovered_a, "num"), format(
+    "expected the first destructured name's own hover to infer 'num' from its call initializer, got: {str}",
+    hovered_a
+  );
   str hovered_b = hover(&reads, doc, 4, 10);
-  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to infer 'str' from its call initializer, got: {str}", hovered_b);
+  assert contains(hovered_b, "str"), format(
+    "expected the second destructured name's own hover to infer 'str' from its call initializer, got: {str}",
+    hovered_b
+  );
 }
 
 test "hover on a for-loop destructuring binding name shows its own real element type" {
@@ -8079,11 +8154,20 @@ test "hover on a for-loop destructuring binding name shows its own real element 
   doc.version = 1;
 
   str hovered_k = hover(&reads, doc, 2, 7);
-  assert contains(hovered_k, "num"), format("expected 'k's own hover to show its real tuple element type 'num', got: {str}", hovered_k);
+  assert contains(hovered_k, "num"), format(
+    "expected 'k's own hover to show its real tuple element type 'num', got: {str}",
+    hovered_k
+  );
   str hovered_v = hover(&reads, doc, 2, 10);
-  assert contains(hovered_v, "str"), format("expected 'v's own hover to show its real tuple element type 'str', got: {str}", hovered_v);
+  assert contains(hovered_v, "str"), format(
+    "expected 'v's own hover to show its real tuple element type 'str', got: {str}",
+    hovered_v
+  );
   str hovered_k_ref = hover(&reads, doc, 3, 10);
-  assert contains(hovered_k_ref, "num"), format("expected a later reference to 'k' to resolve too, not just its own binding site, got: {str}", hovered_k_ref);
+  assert contains(hovered_k_ref, "num"), format(
+    "expected a later reference to 'k' to resolve too, not just its own binding site, got: {str}",
+    hovered_k_ref
+  );
 }
 
 test "inlay hints offer a for-loop destructuring binding as a known local for completion" {
@@ -8132,9 +8216,15 @@ test "hover on a plain let bound to a tuple-returning call shows its own real tu
   doc.version = 1;
 
   str hovered_decl = hover(&reads, doc, 4, 6);
-  assert contains(hovered_decl, "(num, str) p"), format("expected 'p's own declaration to show its real tuple return type, got: {str}", hovered_decl);
+  assert contains(hovered_decl, "(num, str) p"), format(
+    "expected 'p's own declaration to show its real tuple return type, got: {str}",
+    hovered_decl
+  );
   str hovered_ref = hover(&reads, doc, 5, 8);
-  assert contains(hovered_ref, "(num, str) p"), format("expected a later reference to 'p' to resolve the same way, got: {str}", hovered_ref);
+  assert contains(hovered_ref, "(num, str) p"), format(
+    "expected a later reference to 'p' to resolve the same way, got: {str}",
+    hovered_ref
+  );
 }
 
 test "signature help on a call passing a tuple-typed argument shows the real parameter type" {
@@ -8156,8 +8246,14 @@ test "signature help on a call passing a tuple-typed argument shows the real par
   doc.version = 1;
 
   str help = signature_help(&reads, doc, 4, 13);
-  assert contains(help, `"label":"(num, str) t"`), format("expected the tuple-typed second parameter to render its own real type, got: {str}", help);
-  assert contains(help, `"activeParameter":1`), format("expected the cursor's own position (right after the first argument's comma) to mark parameter 1 active, got: {str}", help);
+  assert contains(help, `"label":"(num, str) t"`), format(
+    "expected the tuple-typed second parameter to render its own real type, got: {str}",
+    help
+  );
+  assert contains(help, `"activeParameter":1`), format(
+    "expected the cursor's own position (right after the first argument's comma) to mark parameter 1 active, got: {str}",
+    help
+  );
 }
 
 test "dot-completion offers positional indices for a tuple-typed local, still mid-typing (unparsed document)" {
@@ -8183,9 +8279,18 @@ test "dot-completion offers positional indices for a tuple-typed local, still mi
   doc.version = 1;
 
   str items = completion(&reads, doc, 2, 4, false);
-  assert contains(items, `"label":"0"`), format("expected positional index '0' offered for the tuple local, got: {str}", items);
-  assert contains(items, `"label":"1"`), format("expected positional index '1' offered too, got: {str}", items);
-  assert !contains(items, `"label":"use"`), format("expected the tuple match to replace the unfiltered keyword dump, not add to it, got: {str}", items);
+  assert contains(items, `"label":"0"`), format(
+    "expected positional index '0' offered for the tuple local, got: {str}",
+    items
+  );
+  assert contains(items, `"label":"1"`), format(
+    "expected positional index '1' offered too, got: {str}",
+    items
+  );
+  assert !contains(items, `"label":"use"`), format(
+    "expected the tuple match to replace the unfiltered keyword dump, not add to it, got: {str}",
+    items
+  );
 }
 
 test "dot-completion offers positional indices for a tuple-typed compound field, still mid-typing (unparsed document)" {
@@ -8202,8 +8307,14 @@ test "dot-completion offers positional indices for a tuple-typed compound field,
   doc.version = 1;
 
   str items = completion(&reads, doc, 3, 9, false);
-  assert contains(items, `"label":"0"`), format("expected positional index '0' offered for the tuple-typed field, got: {str}", items);
-  assert contains(items, `"label":"1"`), format("expected positional index '1' offered too, got: {str}", items);
+  assert contains(items, `"label":"0"`), format(
+    "expected positional index '0' offered for the tuple-typed field, got: {str}",
+    items
+  );
+  assert contains(items, `"label":"1"`), format(
+    "expected positional index '1' offered too, got: {str}",
+    items
+  );
 }
 
 test "hover on an inferred-form destructuring binding name shows a best-effort literal type" {
@@ -8224,9 +8335,15 @@ test "hover on an inferred-form destructuring binding name shows a best-effort l
   doc.version = 1;
 
   str hovered_a = hover(&reads, doc, 1, 7);
-  assert contains(hovered_a, "num"), format("expected the first destructured name's own hover to show its best-effort literal type 'num', got: {str}", hovered_a);
+  assert contains(hovered_a, "num"), format(
+    "expected the first destructured name's own hover to show its best-effort literal type 'num', got: {str}",
+    hovered_a
+  );
   str hovered_b = hover(&reads, doc, 1, 10);
-  assert contains(hovered_b, "str"), format("expected the second destructured name's own hover to show its best-effort literal type 'str', got: {str}", hovered_b);
+  assert contains(hovered_b, "str"), format(
+    "expected the second destructured name's own hover to show its best-effort literal type 'str', got: {str}",
+    hovered_b
+  );
 }
 
 test "hover on a fit destructuring binding resolves through a propagated field-access subject" {
@@ -8474,9 +8591,15 @@ test "hover on a fit tuple pattern's binding position shows its own element type
   doc.version = 1;
 
   str hovered_decl = hover(&reads, doc, 3, 8);
-  assert contains(hovered_decl, "str"), format("expected the binding 's' at its own tuple pattern position to show its real element type 'str', got: {str}", hovered_decl);
+  assert contains(hovered_decl, "str"), format(
+    "expected the binding 's' at its own tuple pattern position to show its real element type 'str', got: {str}",
+    hovered_decl
+  );
   str hovered_ref = hover(&reads, doc, 4, 12);
-  assert contains(hovered_ref, "str"), format("expected a later reference to 's' to resolve too, not just its own binding site, got: {str}", hovered_ref);
+  assert contains(hovered_ref, "str"), format(
+    "expected a later reference to 's' to resolve too, not just its own binding site, got: {str}",
+    hovered_ref
+  );
 }
 
 test "completion offers a fit tuple pattern's binding names as known locals" {
@@ -9000,6 +9123,39 @@ test "hover and goto-definition resolve a bare variant shorthand passed as a cha
   assert contains(def, "stdlib/std/log.fn"), "expected goto-definition to land in log.fn";
 }
 
+test "goto-definition on a bare 'ret'-value variant shorthand lands on the variant, not the whole enum" {
+  // User-reported: goto-definition on `.Ok` in `ret .Ok(a + b);`
+  // (a function declared to return `Result<num, str>`) landed on
+  // `Result`'s own declaration line, never on `Ok`'s own line a few
+  // rows below it, no matter which variant was actually clicked.
+  // Root cause: `enum_variant_declaration_typed` (symbols.fn) - the
+  // one path `resolve_at` uses for a bare `.Variant` shorthand used
+  // as a `ret` value, substituting the enclosing function's own
+  // declared return type - built its `Declaration` from the
+  // enclosing enum NODE's own `n.pos` unconditionally, never the
+  // variant's own `pos`. Its sibling, `enum_variant_declaration`
+  // (every other bare/qualified shorthand shape goes through that
+  // one instead), already had the correct fallback (`variant.pos`
+  // when set, the enum's own `n.pos` only when it isn't) - this fix
+  // is that exact fallback, copied in.
+  str src = `use std.result;
+  `fun compute(num a, num b) Result<num, str> {
+  `  ret .Ok(a + b);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///ret_variant_shorthand.fn";
+  doc.path = "ret_variant_shorthand.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // `.Ok` sits at line 2 (0-indexed), right after the dot.
+  str def = definition(&reads, doc, 2, 8);
+  assert contains(def, "stdlib/std/result.fn"), "expected goto-definition to land in result.fn";
+  assert !contains(def, `"line":29`), "expected the variant's own line, not Result's own enum declaration line";
+}
+
 test "signature help resolves a method called on a chained receiver, not just a plain local" {
   // User-reported: typing inside `l.debug_r("msg").field(` showed no
   // parameter hints at all, while `l.debug_r(` (a direct method call
@@ -9075,6 +9231,40 @@ test "dot-completion on a direct function call's own result resolves a generic b
   assert contains(out, `"label":"unwrap"`) && contains(out, `"label":"is_ok"`), "expected Result's own methods";
 }
 
+test "dot-completion keeps narrowing to the receiver's own members once a second character is typed after the dot" {
+  // User-reported: typing `.` after a call's own result showed the
+  // right member list, but continuing to type a partial member name
+  // (`.un`) showed "irrelevant random results" instead of narrowing.
+  // Root cause, shared by `_receiver_before`/
+  // `_receiver_identifier_index_before`/`_receiver_token_before`
+  // (completion.fn): each scans forward tracking "the receiver
+  // immediately before the cursor, only valid right after a dot" -
+  // but the partial word still being typed is itself a token that
+  // touches the cursor the same way a real, separate identifier
+  // would, so it overwrote the real receiver and cleared the
+  // "preceded by a dot" flag. A second keystroke after *any* dot
+  // therefore read back as "no receiver at all", falling through to
+  // the generic top-level dump (keywords, builtins, every name in
+  // scope) instead of the receiver's own actual members.
+  str src = `use std.result;
+  `fun compute(num a, num b) Result<num, str> {
+  `  ret .Ok(a + b);
+  `}
+  `fun main() {
+  `  compute(10, 2).un
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///direct_call_partial_word.fn";
+  doc.path = "direct_call_partial_word.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 5, 19, false);
+  assert contains(out, `"label":"unwrap"`) && contains(out, `"label":"unwrap_or"`), "expected Result's own methods";
+  assert !contains(out, `"label":"compound","kind":14`), "expected a real resolution, not the keyword-dump fallback";
+}
+
 test "dot-completion on a call-inferred local resolves a generic builtin return type" {
   // Same root cause as the test just above, reached through a `let`
   // binding instead of directly on the call.
@@ -9096,6 +9286,43 @@ test "dot-completion on a call-inferred local resolves a generic builtin return 
   str out = completion(&reads, doc, 6, 6, false);
   assert contains(out, `"label":"Some"`) && contains(out, `"label":"None"`), "expected Option's own variants";
   assert contains(out, `"label":"unwrap"`) && contains(out, `"label":"is_some"`), "expected Option's own methods";
+}
+
+test "dot-completion on a chained call's own method narrows correctly while the rest of the file still parses" {
+  // Same root cause as the test above, hit through the *parsed-tree*
+  // path instead of the token-only one: `_receiver_before` (which
+  // gates whether completion even looks for a receiver at all) and
+  // `_receiver_token_before` (which resolves the actual token for
+  // `chain_receiver` to walk) share the identical partial-word bug.
+  // This fixture is a real edit mid-identifier in otherwise complete,
+  // fully-terminated code (`make(10).ge();`, cursor right after "ge")
+  // rather than an unterminated statement at the end of the buffer, so
+  // the document still parses - the one case the token-only tests
+  // above never exercise.
+  str src = `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> {
+  `  pub get() T { ret self.v; }
+  `}
+  `fun make<T>(T v) Box<T> {
+  `  Box<T> b;
+  `  b.v = v;
+  `  ret b;
+  `}
+  `fun main() {
+  `  make(10).ge();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chain_partial_word.fn";
+  doc.path = "chain_partial_word.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 12, 13, false);
+  assert contains(out, `"label":"get"`), "expected Box's own method";
+  assert !contains(out, `"label":"compound","kind":14`), "expected a real resolution, not the keyword-dump fallback";
 }
 
 test "dot-completion on a call to a generic function resolves its own return type, not every name in scope" {
@@ -9147,8 +9374,8 @@ test "signature help still answers while a call's own parens aren't balanced yet
   // once the statement closed. Fixed with a token-only fallback
   // (`local_fn_signature_from_tokens`), the same shape hover/
   // completion/goto-definition already have for this exact
-  // situation - scoped to a plain top-level call for now (every real
-  // report was one), a method on a receiver still needs a real parse.
+  // situation. A method called on a receiver is the sibling case,
+  // covered by the test right below this one.
   str src = `use std.result;
   `fun divide(num a, num b) Result<num, str> {
   `  if b == 0 {
@@ -9172,4 +9399,36 @@ test "signature help still answers while a call's own parens aren't balanced yet
   str out = signature_help(&reads, doc, 8, 20);
   assert contains(out, `"label":"divide(num a, num b) Result"`), "expected divide's own signature, bare return type";
   assert contains(out, `"activeParameter":1`), "expected the second argument (past num a) active";
+}
+
+test "signature help answers for a method called on a chained receiver, mid-argument, before the statement is finished" {
+  // User-reported, the exact real-world shape the fix above never
+  // covered: `l.debug_r("msg").dec_field("this is", 2.3` (no closing
+  // `)`, no `;` yet) - a METHOD on a chain, not a plain top-level
+  // call. `signature_help()`'s own `!read.parsed` branch bailed to
+  // `NO_SIGNATURE` outright for any `c.has_receiver` call, deferred
+  // at the time as "still needs a real parse" since every bug report
+  // against this file so far happened to use a plain function. Fixed
+  // with `chain_receiver_identifier_index_from_tokens` (symbols.fn) +
+  // `chain_tail_type_from_tokens` (completion.fn, promoted to `pub`)
+  // + `member_declaration_from_tokens` - the same token-only chain
+  // resolution hover/completion already use for this exact shape,
+  // reused here instead of duplicated.
+  str src = `use std.log;
+  `fun main() {
+  `  Logger l = logger_init("app", .Info, true);
+  `  l.debug_r("this is a message").dec_field("this is", 2.3
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelp_chain_unclosed.fn";
+  doc.path = "sighelp_chain_unclosed.fn";
+  doc.text = src;
+  doc.version = 1;
+  // Cursor right after "2.3" - `dec_field`'s own second argument
+  // (`v`), past its implicit `self` and `k`.
+  str out = signature_help(&reads, doc, 3, 57);
+  assert contains(out, `"label":"dec_field(LogRecord* self, str k, dec v) LogRecord"`), "expected dec_field's own signature, self included";
+  assert contains(out, `"activeParameter":2`), "expected the value argument (past self and k) active";
 }
