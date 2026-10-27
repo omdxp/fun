@@ -25,7 +25,6 @@
 // generic helper over an unconstrained `E` has nothing to infer it from.
 
 use std.error;
-use std.c.string;
 
 // A fallible result: `Ok(value)` on success, `Err(error)` on failure.
 pub enum Result<T, E = Error> {
@@ -63,38 +62,24 @@ impl Result<T, E> {
     ret fallback;
   }
 
-  // Return the Ok value. Prefer `unwrap_or()` when you need a fallback: on
-  // Err this returns a zero value (there is no panic mechanism), so only
-  // use it after checking `is_ok()` or matching the variant.
+  // Return the Ok value, or a panic (message printed, process aborted)
+  // on Err. Prefer `unwrap_or()` when Err is a real possibility you
+  // want to handle; reach for this once you've already checked
+  // `is_ok()` or matched the variant.
   pub unwrap() T {
     fit *self {
       .Ok(v) -> { ret v; }
-      .Err(e) -> { ret self.zero(); }
+      .Err(e) -> { ret panic("called unwrap() on an Err value"); }
     }
-    ret self.zero();
   }
 
-  // Return the Err value, or a zero-initialized `E` when the result is Ok.
+  // Return the Err value, or a panic (message printed, process
+  // aborted) on Ok - the mirror of `unwrap()`.
   pub unwrap_err() E {
     fit *self {
-      .Ok(v) -> { ret self.zero_e(); }
+      .Ok(v) -> { ret panic("called unwrap_err() on an Ok value"); }
       .Err(e) -> { ret e; }
     }
-    ret self.zero_e();
-  }
-
-  // A zero-initialized T, used as the empty fallback for `unwrap`.
-  zero() T {
-    T out;
-    memset(&out, 0, sizeof(T));
-    ret out;
-  }
-
-  // A zero-initialized E, used as the empty fallback for `unwrap_err`.
-  zero_e() E {
-    E out;
-    memset(&out, 0, sizeof(E));
-    ret out;
   }
 
   // Return `other` when this result is Ok; otherwise keep this Err.
