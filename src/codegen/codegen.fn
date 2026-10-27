@@ -7322,20 +7322,53 @@ impl Codegen {
                 va_is_flag = true;
               }
             }
+            // Beyond char/flag, every other vararg still needs an explicit
+            // cast: `__auto_type` on a bare numeric literal like `1` infers
+            // plain `int` (32 bits), but the callee always reads it back via
+            // `va_arg(ap, long long)` (64 bits) for the `'n'` tag - a width
+            // mismatch that's undefined behavior in C. It happens to read
+            // back correctly on x86-64 (variadic integer args occupy a full
+            // 8-byte register slot there regardless of their promoted
+            // width), which is why this went unnoticed, but wasm32's
+            // variadic ABI packs each arg only as wide as its actual type,
+            // so the extra 4 bytes `va_arg` reads come from the *next*
+            // vararg's own slot, corrupting every value from that point on.
+            // Casting to the same C type `infer_arg_type_name` already
+            // resolves (defaulting to `int64_t`, matching the hoisted path's
+            // own default) makes the binding's real width always match what
+            // the callee reads, a no-op for anything already that width.
+            flag va_needs_cast = !va_is_chr_literal && !va_is_flag &&
+              !va_is_display.get(va_i);
+            str va_c_type = "int64_t";
+            if va_needs_cast {
+              let va_type_opt = self.infer_arg_type_name(va_arg);
+              if va_type_opt.is_some() {
+                va_c_type = map_type_to_c(va_type_opt.unwrap());
+              }
+              if equals(va_c_type, "void") {
+                va_c_type = "void*";
+              }
+              if va_is_force_raw.get(va_i) {
+                va_c_type = "void*";
+              }
+            }
             self.state.write("__auto_type __fun_va_");
             self.state.write(format_num(va_i));
             self.state.write(" = ");
             if va_is_chr_literal {
               self.state.write("(char)");
-            }
-            if va_is_flag {
+            } elif va_is_flag {
               self.state.write("(_Bool)(");
+            } elif va_needs_cast {
+              self.state.write("(");
+              self.state.write(va_c_type);
+              self.state.write(")(");
             }
             let va_err = self.emit_expr(*va_arg);
             if va_err.is_some() {
               ret va_err;
             }
-            if va_is_flag {
+            if va_is_flag || va_needs_cast {
               self.state.write(")");
             }
             self.state.write("; ");
