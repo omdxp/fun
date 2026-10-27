@@ -3195,3 +3195,115 @@ test "operator overloading: a field-access operand (self.pos + other.pos) resolv
     "expected self.pos + other.pos to type-check through op_add on the field's own type"
   );
 }
+
+test "a generic enum method's own return type substitutes before a fit matches it against variant patterns" {
+  // User-reported: `fit compute(10, 2).unwrap() { .Ok(v) -> ... .Err(e)
+  // -> ... }` reached codegen with no real diagnostic at all and
+  // crashed there ("unsupported node: function") - `unwrap`'s own
+  // declared return type (`T`, belonging to the enclosing `impl
+  // MyResult<T, E>`, not to `unwrap` itself) was never substituted
+  // against the receiver's own concrete generic arguments at all:
+  // `check_method_call`'s own `receiver_type_params` lookup only ever
+  // checked `self.compounds`, which never holds an enum, so it came
+  // back empty for every enum method, and the substitution it was
+  // meant to feed silently did nothing. Fixed two ways: looking
+  // `enum_type_params` up too, and (separately) recording the return
+  // type's own pre-erasure form (`rtype_template`) at all, since
+  // `_erase_signature` had already wiped the type param's own name by
+  // the time a caller could substitute anything back into it.
+  rejects(
+    `enum MyResult<T, E> {
+    `  Ok(T),
+    `  Err(E),
+    `}
+    `impl MyResult<T, E> {
+    `  pub unwrap() T {
+    `    fit *self {
+    `      .Ok(v) -> { ret v; }
+    `      .Err(e) -> { ret panic("err"); }
+    `    }
+    `  }
+    `}
+    `fun compute() MyResult<num, str> {
+    `  ret .Ok(5);
+    `}
+    `fun main() {
+    `  fit compute().unwrap() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected a real diagnostic naming the mismatch, not nothing"
+  );
+}
+
+test "a generic enum method's own correctly-typed result still fits a matching fit statement" {
+  // Companion to the test above: the exact same generic method call
+  // chain, but used the way it was actually meant to be - matching the
+  // enum ITSELF, not something already unwrapped out of it - must stay
+  // accepted, not newly rejected by the fix above.
+  accepts(
+    `enum MyResult<T, E> {
+    `  Ok(T),
+    `  Err(E),
+    `}
+    `fun compute() MyResult<num, str> {
+    `  ret .Ok(5);
+    `}
+    `fun main() {
+    `  fit compute() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected fitting the enum itself, unwrapped or not, to still type-check"
+  );
+}
+
+test "a generic method's own pointer-typed return substitutes without losing its own pointer depth" {
+  // Regression caught alongside the fix above: `rtype_template`'s own
+  // first version recorded just the erased type param's own NAME, but
+  // `_erase_signature` had already reset the rest of the type (its own
+  // `pointer_depth` included) to a fresh Unknown before that name was
+  // ever read - so a method declared to return `T*` substituted back
+  // to a bare, non-pointer concrete type instead, confirmed directly
+  // against `examples/stdlib/guarded_basic.fn`'s own real `Guarded<T>.
+  // lock() T*`. Fixed by recording the WHOLE pre-erasure type, pointer
+  // depth and all, rather than just its name.
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_ptr() T* {
+    `    ret &self.v;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b;
+    `  num* p = b.get_ptr();
+    `}`,
+    "expected a generic method's own pointer return type to stay a pointer after substitution"
+  );
+  // The same call, assigned to the type it would ALSO have fit as an
+  // unsubstituted, leniently-accepted Unknown (missing the `*`) - a
+  // plain `accepts` above can't tell "correctly substituted" apart
+  // from "never substituted, Unknown accepts anything", so this one
+  // specifically needs the substituted type to be held to strictly,
+  // the only way to confirm the pointer depth genuinely survived.
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_ptr() T* {
+    `    ret &self.v;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b;
+    `  num p = b.get_ptr();
+    `}`,
+    "expected assigning a T* result to a non-pointer num to be rejected, not leniently accepted as Unknown"
+  );
+}

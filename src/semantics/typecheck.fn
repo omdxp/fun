@@ -348,6 +348,22 @@ pub compound FnSig {
   Vec<str> type_params;
   Vec<Vec<str>> bounds;
   Vec<str> arg_params;
+  // `rtype` exactly as written, before any erasure - `unwrap(Result<T,
+  // E>* self) T*`'s own `T*`, pointer/array wrapping and all, kept
+  // alongside `rtype` itself rather than instead of it: `rtype` gets
+  // erased to a nameless Unknown the moment the method belongs to a
+  // generic impl (`_erase_signature`), which is right for every OTHER
+  // use of a generic method's signature (nothing but the instantiation
+  // knows what it really is) but leaves no way for a method CALL to
+  // substitute the receiver's own concrete type back into it - this is
+  // that original, always `substitute`-ready regardless of whether
+  // erasure ever touched anything (a non-generic method's own copy is
+  // just `rtype` again, so substituting it is always safe to do
+  // unconditionally). Confirmed directly as the reason `Result<num,
+  // str>.unwrap()`'s own return type reached a `fit` statement (or
+  // anything else needing the REAL type, not just "something") still
+  // Unknown, indistinguishable from a genuinely unresolved expression.
+  CheckedType rtype_template;
 }
 
 // A method call's own resolved signature, alongside the receiver's own
@@ -1128,8 +1144,14 @@ fun _signature_of_shape_method(ShapeMethodSig m) FnSig {
   FnSig sig;
   sig.args.init(m.args.len);
   sig.rtype = checked_unknown();
+  sig.rtype_template = checked_unknown();
   if m.rtype != nil {
+    // Two independent conversions, same reasoning as `_signature_of`'s
+    // own identical pair - no erasure happens here (a shape method
+    // names no type params of its own), but each still needs to own
+    // its own heap content rather than share one value's.
     sig.rtype = checked_from_dtype(m.rtype);
+    sig.rtype_template = checked_from_dtype(m.rtype);
   }
   sig.is_variadic = false;
   sig.is_async = m.is_async;
@@ -1813,6 +1835,12 @@ fun _erase_signature(FnSig sig, Vec<str>* names) FnSig {
     ret sig;
   }
   FnSig out = sig;
+  // `rtype_template` is deliberately left alone here: it already holds
+  // `rtype` exactly as `_signature_of` first declared it, from before
+  // ANY erasure pass (this one, an impl's own type params, or that
+  // one's own, a free function's own) ever touched anything - that is
+  // the whole point of keeping it (see its own field comment), so
+  // there is nothing for this impl-level pass to add to it.
   out.rtype = _erase_named(sig.rtype, names);
   // Same aliasing shape as `_without_self`'s own `out = sig;`: `out.args`
   // is about to point at a fresh backing array, abandoning the one it
@@ -1834,7 +1862,15 @@ fun _signature_of(FunctionNode f) FnSig {
   FnSig sig;
   sig.args.init(f.args.len);
   sig.rtype = checked_unknown();
+  sig.rtype_template = checked_unknown();
   if f.has_rtype {
+    // Two independent conversions, not one shared value and a copy:
+    // `CheckedType` owns heap content of its own (`generic_args`,
+    // `tuple_members`), and `_erase_type_params` below may free `sig.
+    // rtype`'s own copy wholesale the moment it matches - `rtype_
+    // template` needs its own, untouched by whatever happens to the
+    // other one.
+    sig.rtype_template = checked_from_dtype(f.rtype);
     sig.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
   }
   sig.is_variadic = f.is_variadic;
@@ -2945,15 +2981,33 @@ impl Checker {
     // A function-typed parameter naming the enclosing compound's own
     // type param (`Vec<T>.sort_by`'s `T`), not the method's own -
     // `sig.type_params` is empty for a non-generic method like this one.
+    // A generic ENUM's own receiver (`Result<T, E>.unwrap`) needs the
+    // same lookup against `enum_type_params` instead - `self.compounds`
+    // only ever holds compounds, so this used to come back empty for
+    // every enum method, silently skipping substitution below for all
+    // of them (confirmed directly: `Result<num, str>.unwrap()`'s own
+    // return type came back as the literal, unsubstituted `T` with no
+    // way to tell it apart from a genuinely unresolved type - the
+    // reason a `fit` matching its result against `.Ok`/`.Err` reached
+    // codegen instead of getting a real diagnostic).
     Vec<str> receiver_type_params;
     receiver_type_params.init(0);
     // Shallow only: every pushed name below is borrowed straight from
-    // the compound's own declared `type_params`, not a copy of its own.
+    // the compound's or enum's own declared `type_params`, not a copy
+    // of its own.
     defer receiver_type_params.free();
-    let compound_info = self.compounds.at(self.canonical_type_name(found.receiver.name));
+    str receiver_canonical = self.canonical_type_name(found.receiver.name);
+    let compound_info = self.compounds.at(receiver_canonical);
     if compound_info.is_some() {
       for p : compound_info.unwrap().type_params {
         receiver_type_params.push(p);
+      }
+    } else {
+      let enum_params = self.enum_type_params.at(receiver_canonical);
+      if enum_params.is_some() {
+        for p : enum_params.unwrap() {
+          receiver_type_params.push(p);
+        }
       }
     }
     self.check_arguments(
@@ -2965,7 +3019,26 @@ impl Checker {
       &receiver_type_params,
       &found.receiver.generic_args
     );
-    ret sig.rtype;
+    // The method's own declared return type, substituted against the
+    // receiver's own concrete generic arguments the same way an
+    // argument's own type already is just above. `sig.rtype` itself
+    // has nothing left to substitute by the time it gets here - `sig.
+    // rtype_template` (the same return type, as declared, from before
+    // any erasure ever touched it - see its own field comment) stands
+    // in for it. Unconditional, not just for a generic receiver: an
+    // ordinary method's own `rtype_template` is already identical to
+    // `rtype`, and `substitute` itself is a no-op when there is
+    // nothing in `receiver_type_params` to match, so this is exactly
+    // `sig.rtype` again in that case. Without this, a generic method's
+    // return type reached every caller still erased to Unknown (never
+    // even template form), the one case `is_unknown()`'s own "stands
+    // for any type" leniency can't tell apart from a genuinely
+    // unresolved expression.
+    ret substitute(
+      sig.rtype_template,
+      &receiver_type_params,
+      &found.receiver.generic_args
+    );
   }
 
   // A shape-bound alternative's own bare name, with any generic-arg
@@ -4913,11 +4986,62 @@ impl Checker {
       self.check_qualified_variant_against(val, want, env);
       ret;
     }
-    str enum_name = self.canonical_type_name(want.name);
-    if equals(enum_name, "") || !self.enum_names.has(enum_name) {
+    str variant_name = variant.unwrap();
+    // Genuinely nothing to check yet - an unresolved reference (already
+    // reported elsewhere) or a `let` with no declared type, still
+    // carrying its own placeholder (`is_unknown`'s own "a `let` carries
+    // a placeholder until its value is known" case) while a SEPARATE,
+    // dedicated pass resolves a bare shorthand against every enum the
+    // whole program declares, not just this one `want`. Checked first,
+    // ahead of the real-type checks below: without it, that placeholder
+    // read as "a named type that isn't a registered enum" there too,
+    // wrongly failing a `let`-inferred shorthand this file never
+    // intended to flag at all.
+    if is_unknown(want) {
       ret;
     }
-    str variant_name = variant.unwrap();
+    // A resolved builtin scalar (`num`, `flag`, ...) carries its own
+    // kind through `want.base` directly, never through `want.name` -
+    // "the written name of a user-defined type, empty for a builtin"
+    // (see `CheckedType`'s own comment) - so `want.name` being empty
+    // does NOT mean "unresolved" here, the way it does above; `is_
+    // unknown` already ruled that reading out. A bare `.Variant`
+    // shorthand names an enum's own variant by definition, so matching
+    // it against any resolved builtin scalar is unambiguously wrong:
+    // left unchecked before this, it reached codegen with no enum tag
+    // to switch on at all, crashing there with an opaque "unsupported
+    // node" instead of a real diagnostic at the actual mistake (most
+    // commonly `fit`-ing the result of a stray `.unwrap()` that already
+    // turned the value into its own payload type).
+    if want.base != .Unknown {
+      self.fail(
+        format(
+        "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+        variant_name,
+        type_name(want)
+        ),
+        val
+      );
+      ret;
+    }
+    str enum_name = self.canonical_type_name(want.name);
+    if equals(enum_name, "") {
+      ret;
+    }
+    if !self.enum_names.has(enum_name) {
+      // A resolved, named type (a compound, say) that still isn't a
+      // registered enum - the same contradiction as above, just for
+      // the other half of what `want.base == .Unknown` can mean.
+      self.fail(
+        format(
+        "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+        variant_name,
+        type_name(want)
+        ),
+        val
+      );
+      ret;
+    }
     flag declared = false;
     let owners = self.variant_owners.at(variant_name);
     if owners.is_some() {
