@@ -1010,15 +1010,6 @@ pub fun resolve_c_compiler() str {
 Atomic<flag> _cc_claimed;
 Atomic<flag> _cc_ready;
 
-// Guards `run_test_suite`'s own `FUN_TEST_INTRA_JOBS` priming the same way:
-// `setenv`/`getenv` race on the process's shared environment block when
-// called concurrently, which `run_test_suite` itself can be - every test in
-// this file that calls it runs on the intra-file worker pool, not pinned to
-// one thread. Only the thread whose `compare_exchange` wins ever calls
-// `set_env` here; every other caller, including every later call from any
-// thread, just skips it.
-Atomic<flag> _test_intra_jobs_primed;
-
 // Guards `_ensure_msvc_env`'s own one-time environment probe the same way:
 // `run_test_suite` (its only caller) can itself run concurrently on more
 // than one thread, and the probe's own `set_env` calls race on the
@@ -3258,14 +3249,14 @@ pub fun run_test_suite(
   // that stacks on top of this process's own (already lower, see
   // _test_suite_worker_count) worker count and, under `cl.exe`'s heavier
   // spawn cost, was observed causing real slowdowns under CI-sized
-  // resource limits. Capped here, but only if the caller hasn't already
-  // set an explicit preference - and only by whichever thread claims
-  // `_test_intra_jobs_primed` first, since this function itself can run
-  // concurrently on more than one thread (see the guard's own comment).
-  if runtime_backend_is_windows() && _test_intra_jobs_primed.compare_exchange(false, true) &&
-    equals(env_or("FUN_TEST_INTRA_JOBS", ""), "") {
-    set_env("FUN_TEST_INTRA_JOBS", "2");
-  }
+  // resource limits. NOT capped here anymore: `set_env`/`getenv` race on
+  // the process's shared environment block, and serializing the writers
+  // (an earlier version of this fix) still isn't enough - the write
+  // itself races every OTHER concurrently-running test's own ordinary
+  // `getenv` reads (FUN_CC resolution and the like), which happen
+  // constantly once the worker pool below is running. `fun test .`'s own
+  // top-level entry point is the only caller that could ever set this
+  // safely (nothing else is running yet), and it already does.
 
   ThreadPool pool = thread_pool_new(workers);
   defer pool.destroy();

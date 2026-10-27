@@ -8,6 +8,8 @@ use std.string;
 use std.io;
 use std.fs;
 use std.vec;
+use std.sys;
+use std.runtime_backend;
 
 fun _fail(str msg) num {
   writeln_to(Sink.Stderr, format(`[Error]
@@ -99,6 +101,18 @@ fun main(str[] args) num {
       str root = opts.input;
       if equals(root, "") {
         root = ".";
+      }
+      // Each spawned file's own compiled test binary sizes its OWN intra-
+      // file pool to the full CPU count by default (see emit_test_runner);
+      // on Windows that stacks on top of run_test_suite's own (already
+      // lower) worker count and, under cl.exe's heavier spawn cost, causes
+      // real slowdowns under CI-sized resource limits. Safe to prime here,
+      // only if the caller hasn't already set a preference: this is the
+      // one guaranteed-single-threaded point before run_test_suite's own
+      // worker pool (or any of its own tests calling it recursively) ever
+      // starts, so there's no concurrent `getenv` to race.
+      if runtime_backend_is_windows() && equals(env_or("FUN_TEST_INTRA_JOBS", ""), "") {
+        set_env("FUN_TEST_INTRA_JOBS", "2");
       }
       ret run_test_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
     }
