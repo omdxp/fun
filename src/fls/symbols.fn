@@ -2004,7 +2004,28 @@ pub fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
         Token nt = name_tok.unwrap();
         if nt.type == .Identifier && equals(token_word(nt), callee) {
           num name_idx = index_of_token(tokens, nt);
-          let lparen = token_after(tokens, name_idx + 1);
+          // A generic function's own `<T>` (`fun make<T>(...)`) sits
+          // between its name and its real param list - skipped over
+          // here, balanced, the same way a generic return type's own
+          // `<...>` already is further down, so `lparen` below lands
+          // on the actual `(`, not the `<` a non-generic function
+          // would never have in this position at all.
+          let after_name = token_after(tokens, name_idx + 1);
+          num lparen_search_from = name_idx + 1;
+          if after_name.is_some() && token_is_operator(after_name.unwrap(), "<") {
+            num angle_depth = 1;
+            num k = index_of_token(tokens, after_name.unwrap()) + 1;
+            for k < tokens.len && angle_depth > 0 {
+              if token_is_operator(tokens.get(k), "<") {
+                angle_depth = angle_depth + 1;
+              } elif token_is_operator(tokens.get(k), ">") {
+                angle_depth = angle_depth - 1;
+              }
+              k = k + 1;
+            }
+            lparen_search_from = k;
+          }
+          let lparen = token_after(tokens, lparen_search_from);
           if lparen.is_some() && token_is_operator(lparen.unwrap(), "(") {
             num lparen_idx = index_of_token(tokens, lparen.unwrap());
             num depth = 1;
@@ -2018,26 +2039,148 @@ pub fun _local_fn_return_type_from_tokens(Vec<Token>* tokens, str callee) str {
               j = j + 1;
             }
             if depth == 0 {
-              StringBuilder b = string_builder_init(16);
+              // The bare type name only, same as `_function_header_
+              // return_type`'s own established convention for this
+              // exact purpose (feeding a member-lookup, which is keyed
+              // by a type's own bare registered name) - joining every
+              // token with a space instead, including `<`/`,`/`>`,
+              // used to produce "Result < num , str >" for any generic
+              // return type (a bare, non-generic one like "Box" has no
+              // such tokens to mangle, which is why this only ever
+              // broke for a generic return type specifically).
               num k = j;
-              flag any = false;
-              for k < tokens.len {
-                Token rt = tokens.get(k);
-                if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
-                  break;
-                }
-                if rt.type == .NewLine || rt.type == .Comment {
-                  k = k + 1;
-                  continue;
-                }
-                if any {
-                  b.append(" ");
-                }
-                any = true;
-                b.append(token_word(rt));
+              for k < tokens.len &&
+                (tokens.get(k).type == .NewLine || tokens.get(k).type == .Comment) {
                 k = k + 1;
               }
-              ret b.build();
+              if k >= tokens.len {
+                ret "";
+              }
+              Token rt = tokens.get(k);
+              if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                ret "";
+              }
+              ret token_word(rt);
+            }
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
+// The byte offset into `text` that `line`/`col` (both 1-indexed, the
+// lexer's own convention) names, or -1 past the end of `text` or a
+// line it doesn't have. Shared by anything that needs to slice the
+// original source between two token positions, preserving whatever
+// spacing the reader actually wrote rather than reconstructing it
+// token by token (which, for a type expression with its own generic
+// args, is its own easy way to get the spacing wrong - see
+// `_local_fn_return_type_from_tokens`'s own fixed bug just above).
+pub fun byte_offset_of_pos(str text, num line, num col) num {
+  if line == 0 || col == 0 {
+    ret -1;
+  }
+  num n = len(text);
+  num current_line = 1;
+  num line_start = 0;
+  num i = 0;
+  for i < n && current_line < line {
+    if text[i] == '\n' {
+      current_line = current_line + 1;
+      line_start = i + 1;
+    }
+    i = i + 1;
+  }
+  if current_line != line {
+    ret -1;
+  }
+  num idx = line_start + (col - 1);
+  if idx > n {
+    ret -1;
+  }
+  ret idx;
+}
+
+// A plain top-level function's own rendered signature
+// (`"name(Type param, ...) ReturnType"`, the same shape
+// `Declaration.detail` carries after a real parse), built directly
+// from tokens - for signature help while the document doesn't parse
+// yet (mid-typing an argument, the ordinary reason it wouldn't),
+// which otherwise has nothing to answer with at all. The param list
+// is a literal slice of `text` between the two parens, not a token-
+// by-token rebuild, so its own generic args/pointers keep whatever
+// spacing the reader actually wrote; the return type is the bare
+// name only (`_local_fn_return_type_from_tokens`'s own convention),
+// not the full generic instantiation - a reasonable simplification
+// for a label shown while still typing, not a lookup key.
+pub fun local_fn_signature_from_tokens(Vec<Token>* tokens, str text, str callee) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_keyword(t, "fun") {
+      let name_tok = token_after(tokens, i + 1);
+      if name_tok.is_some() {
+        Token nt = name_tok.unwrap();
+        if nt.type == .Identifier && equals(token_word(nt), callee) {
+          num name_idx = index_of_token(tokens, nt);
+          let after_name = token_after(tokens, name_idx + 1);
+          num lparen_search_from = name_idx + 1;
+          if after_name.is_some() && token_is_operator(after_name.unwrap(), "<") {
+            num angle_depth = 1;
+            num k = index_of_token(tokens, after_name.unwrap()) + 1;
+            for k < tokens.len && angle_depth > 0 {
+              if token_is_operator(tokens.get(k), "<") {
+                angle_depth = angle_depth + 1;
+              } elif token_is_operator(tokens.get(k), ">") {
+                angle_depth = angle_depth - 1;
+              }
+              k = k + 1;
+            }
+            lparen_search_from = k;
+          }
+          let lparen = token_after(tokens, lparen_search_from);
+          if lparen.is_some() && token_is_operator(lparen.unwrap(), "(") {
+            Token lp = lparen.unwrap();
+            num lparen_idx = index_of_token(tokens, lp);
+            num depth = 1;
+            num j = lparen_idx + 1;
+            for j < tokens.len && depth > 0 {
+              if token_is_operator(tokens.get(j), "(") {
+                depth = depth + 1;
+              } elif token_is_symbol(tokens.get(j), ')') {
+                depth = depth - 1;
+              }
+              j = j + 1;
+            }
+            if depth == 0 {
+              Token rp = tokens.get(j - 1);
+              num start = byte_offset_of_pos(text, lp.pos.line, lp.pos.start_col);
+              num end = byte_offset_of_pos(text, rp.pos.line, rp.pos.end_col);
+              if start < 0 || end < 0 || end < start {
+                ret "";
+              }
+              str params_text = substr(text, start, end - start);
+              num k2 = j;
+              for k2 < tokens.len &&
+                (tokens.get(k2).type == .NewLine || tokens.get(k2).type == .Comment) {
+                k2 = k2 + 1;
+              }
+              if k2 >= tokens.len {
+                free(params_text);
+                ret "";
+              }
+              Token rt = tokens.get(k2);
+              if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                str out0 = format("{str}{str}", callee, params_text);
+                free(params_text);
+                ret out0;
+              }
+              str out = format("{str}{str} {str}", callee, params_text, token_word(rt));
+              free(params_text);
+              ret out;
             }
           }
         }

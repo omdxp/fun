@@ -9039,3 +9039,137 @@ test "signature help resolves a method called on a chained receiver, not just a 
   assert contains(sig2, `"label":"field(LogRecord* self, str key, FieldVal v) LogRecord"`), "expected field's own signature, resolved through debug_r's own return type";
   assert contains(sig2, `"activeParameter":1`), "expected the cursor's own argument (key, past the implicit self) active";
 }
+
+test "dot-completion on a direct function call's own result resolves a generic builtin return type" {
+  // User-reported: `compute(10, 2).` (completion right on a bare
+  // function call's own result, no receiver/let binding involved)
+  // showed nothing when `compute`'s declared return type was a
+  // generic builtin enum (`Result<num, str>`), token-only (the
+  // document doesn't parse yet, mid-typing). Root cause:
+  // `_local_fn_return_type_from_tokens` built the return type by
+  // joining every token from the param list's own closing `)` up to
+  // `{`/`;` with a plain space - `Result`, `<`, `num`, `,`, `str`,
+  // `>` became the literal text "Result < num , str >", which no
+  // downstream member lookup recognizes as "Result". A non-generic
+  // return type (`Box`, one token) had nothing to mangle this way,
+  // which is why only a generic return type ever broke. Fixed to
+  // return just the bare type name, the same established convention
+  // `_function_header_return_type` already uses for this exact
+  // purpose (feeding a member lookup keyed by a bare registered name).
+  str src = `use std.result;
+  `fun compute(num a, num b) Result<num, str> {
+  `  ret .Ok(a + b);
+  `}
+  `fun main() {
+  `  compute(10, 2).
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///direct_call_generic.fn";
+  doc.path = "direct_call_generic.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 5, 17, false);
+  assert contains(out, `"label":"Ok"`) && contains(out, `"label":"Err"`), "expected Result's own variants";
+  assert contains(out, `"label":"unwrap"`) && contains(out, `"label":"is_ok"`), "expected Result's own methods";
+}
+
+test "dot-completion on a call-inferred local resolves a generic builtin return type" {
+  // Same root cause as the test just above, reached through a `let`
+  // binding instead of directly on the call.
+  str src = `use std.option;
+  `fun maybe(num a) Option<num> {
+  `  ret .Some(a);
+  `}
+  `fun main() {
+  `  let res = maybe(10);
+  `  res.
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///call_inferred_generic.fn";
+  doc.path = "call_inferred_generic.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 6, 6, false);
+  assert contains(out, `"label":"Some"`) && contains(out, `"label":"None"`), "expected Option's own variants";
+  assert contains(out, `"label":"unwrap"`) && contains(out, `"label":"is_some"`), "expected Option's own methods";
+}
+
+test "dot-completion on a call to a generic function resolves its own return type, not every name in scope" {
+  // A sibling gap to the two above, in the same function
+  // (`_local_fn_return_type_from_tokens`): a generic FUNCTION's own
+  // `<T>`, between its name and its real param list (`fun make<T>
+  // (T v) Box<T>`), was never skipped - the lookup for `(` landed on
+  // `<` instead, found no param list at all, and fell all the way
+  // back to "every name in scope" (the same unhelpful dump a bare,
+  // receiver-less trigger gives) instead of `Box`'s own members.
+  str src = `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> {
+  `  pub get() T { ret self.v; }
+  `}
+  `fun make<T>(T v) Box<T> {
+  `  Box<T> b;
+  `  b.v = v;
+  `  ret b;
+  `}
+  `fun main() {
+  `  make(10).
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generic_fn_call.fn";
+  doc.path = "generic_fn_call.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 12, 11, false);
+  assert contains(out, `"label":"get"`), "expected Box's own method";
+  assert contains(out, `"label":"v","kind":5,"detail":"field"`), "expected Box's own field";
+  assert !contains(out, `"label":"compound","kind":14`), "expected a real resolution, not the keyword-dump fallback";
+}
+
+test "signature help still answers while a call's own parens aren't balanced yet, mid-argument" {
+  // User-reported: signature help (the "which parameter am I on"
+  // popup) only ever appeared once a whole statement had already
+  // been finished and the cursor moved back onto an argument - never
+  // live, while actually typing one, the C++/Visual-Studio-style
+  // experience asked for. Root cause: `signature_help()` required a
+  // full, successful parse of the WHOLE document unconditionally,
+  // but an open call's own unbalanced parens (the ordinary state
+  // while typing an argument) is exactly what makes a document fail
+  // to parse - so it had nothing to answer with for the entire
+  // window a reader is actually typing inside one, only recovering
+  // once the statement closed. Fixed with a token-only fallback
+  // (`local_fn_signature_from_tokens`), the same shape hover/
+  // completion/goto-definition already have for this exact
+  // situation - scoped to a plain top-level call for now (every real
+  // report was one), a method on a receiver still needs a real parse.
+  str src = `use std.result;
+  `fun divide(num a, num b) Result<num, str> {
+  `  if b == 0 {
+  `    ret .Err("division by zero");
+  `  }
+  `  ret .Ok(a / b);
+  `}
+  `fun main() {
+  `  num r = divide(10,
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelp_unclosed.fn";
+  doc.path = "sighelp_unclosed.fn";
+  doc.text = src;
+  doc.version = 1;
+  // Cursor right after "divide(10," on its own line - the 2nd
+  // argument, not yet typed, the call's own closing `)` nowhere in
+  // the document at all.
+  str out = signature_help(&reads, doc, 8, 20);
+  assert contains(out, `"label":"divide(num a, num b) Result"`), "expected divide's own signature, bare return type";
+  assert contains(out, `"activeParameter":1`), "expected the second argument (past num a) active";
+}
