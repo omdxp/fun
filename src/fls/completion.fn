@@ -2898,6 +2898,25 @@ fun _receiver_own_type(
 ) str {
   str prefix_type = chain_receiver_type(tokens, receiver_tok, program, file, line);
   if equals(prefix_type, "") {
+    // A bare top-level call with no receiver of its own
+    // (`compute(10, 2).`) needs the FUNCTION's own declared return
+    // type, not whatever `type_name_of_local`/`_bare_type_name` would
+    // say about `receiver_tok` read as a plain value - mirrors
+    // `chain_tail_type_from_tokens`'s own identical `is_call` check
+    // for this exact shape, token-only. Checked first: a call is
+    // unambiguous (nothing here is both a local and parenthesized),
+    // but a local sharing this name would otherwise be read as plain
+    // data, never as whatever calling it returns.
+    let after_name = token_after(tokens, index_of_token(tokens, receiver_tok) + 1);
+    if after_name.is_some() && token_is_operator(after_name.unwrap(), "(") {
+      let top_level_fn = lookup_top_level(program, token_word(receiver_tok));
+      if top_level_fn.is_some() {
+        str rtype = return_type_from_detail(top_level_fn.unwrap().detail);
+        if !equals(rtype, "") {
+          ret rtype;
+        }
+      }
+    }
     str local_type = type_name_of_local(
       tokens,
       program,

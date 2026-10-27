@@ -9265,6 +9265,47 @@ test "dot-completion keeps narrowing to the receiver's own members once a second
   assert !contains(out, `"label":"compound","kind":14`), "expected a real resolution, not the keyword-dump fallback";
 }
 
+test "dot-completion on a call's own result narrows correctly inside a fit statement's own subject" {
+  // User-reported: `compute(10, 2).un` resolved correctly as a bare
+  // statement, but the exact same partial member access inside a
+  // `fit compute(10, 2).un { .Ok(v) -> {...} .Err(e) -> {...} }`
+  // statement's own SUBJECT fell back to the generic top-level dump
+  // again. Different root cause from the sibling test above, even
+  // though the symptom looks identical: a `fit` statement with real,
+  // already-complete arms is itself fully valid syntax regardless of
+  // what its own subject expression resolves to, so this document
+  // parses successfully - the PARSED-tree half of completion(), not
+  // the token-only half the sibling test exercises. `_receiver_own_
+  // type` (completion.fn), the parsed-tree equivalent of `chain_tail_
+  // type_from_tokens`, had no case at all for "the receiver segment
+  // is itself a bare top-level call with no receiver of its own"
+  // (`compute(10, 2).`) - it only ever checked whether that segment
+  // was a local or a bare type name, never whether calling it was
+  // what mattered. Fixed by checking for the trailing `(` first and
+  // looking the callee up as a top-level function, mirroring `chain_
+  // tail_type_from_tokens`'s own identical `is_call` check.
+  str src = `use std.result;
+  `fun compute(num a, num b) Result<num, str> {
+  `  ret .Ok(a + b);
+  `}
+  `fun main() {
+  `  fit compute(10, 2).un {
+  `    .Ok(v) -> { ret; }
+  `    .Err(e) -> { ret; }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fit_subject_partial_word.fn";
+  doc.path = "fit_subject_partial_word.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 5, 23, false);
+  assert contains(out, `"label":"unwrap"`) && contains(out, `"label":"unwrap_or"`), "expected Result's own methods";
+  assert !contains(out, `"label":"compound","kind":14`), "expected a real resolution, not the keyword-dump fallback";
+}
+
 test "dot-completion on a call-inferred local resolves a generic builtin return type" {
   // Same root cause as the test just above, reached through a `let`
   // binding instead of directly on the call.
