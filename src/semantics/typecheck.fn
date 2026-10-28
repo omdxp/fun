@@ -1331,6 +1331,14 @@ compound Checker {
   // known to allow also appears in the bound being checked) instead of
   // requiring the bare name to match an alternative by spelling.
   Vec<Vec<str>> active_type_param_bounds;
+  // Every name a `use X as name;` import actually declared. Checked
+  // by `check_alias_qualified_call` before treating a receiver as an
+  // alias-qualified call (`alias.fn(...)`) at all - without this, any
+  // bare name that happened to collide with no local/type, followed
+  // by a dot and a bare function name that exists anywhere in the
+  // whole merged program, read as a valid alias-qualified call
+  // regardless of whether that name was ever declared as one.
+  Set<str> declared_import_aliases;
   flag failed;
   TypeError error;
 }
@@ -1353,6 +1361,7 @@ fun _checker_new() Checker {
   c.enum_type_params.init(16);
   c.compounds.init(16);
   c.methods.init(16);
+  c.declared_import_aliases = set_init("", 8);
   c.current_file = "";
   c.rtype = checked_unknown();
   c.in_async = false;
@@ -3407,6 +3416,18 @@ impl Checker {
     // alias at all.
     if env.lookup(alias).is_some() || self.compounds.at(alias).is_some() ||
       self.shapes.has(alias) || self.plain_enums.has(alias) {
+      ret false;
+    }
+    // `alias` must have actually been declared with `use X as alias;`
+    // - without this, any bare name that collides with no local/type
+    // read as a valid module qualifier the instant a method of that
+    // exact name existed anywhere in the whole merged program, even
+    // for a module imported with no alias at all (`use lib2;`, whose
+    // own exports reach this file under their bare names directly,
+    // never through a `lib2.` qualifier - confirmed directly:
+    // `lib2.twice(5)` crashed codegen with no real diagnostic, since
+    // typecheck wrongly accepted it as alias-qualified here).
+    if !self.declared_import_aliases.has(alias) {
       ret false;
     }
     let known = self.fns.at(method);
@@ -5852,6 +5873,29 @@ fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node)
 
 // Checks a whole program, reporting the first type error it finds.
 pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
+  Vec<str> no_aliases;
+  no_aliases.init(0);
+  defer no_aliases.free();
+  ret typecheck_program_with_aliases(nodes, &no_aliases);
+}
+
+// `typecheck_program`, told which names `use X as name;` actually
+// declared across the whole merged program - needed by
+// `check_alias_qualified_call` to tell a real module alias apart from
+// any other bare name that happens to collide with no local/type (see
+// its own doc comment for why). The import merger already tracks this
+// (`ProgramMergeResult.aliases`); the plain `.Import` node it came
+// from does not survive the merge into `nodes` itself (confirmed
+// directly: a scan over `nodes` for `.Import` found none at all, even
+// for a program `use`ing several aliased files), so it has to be
+// threaded in from there rather than rediscovered here. A caller with
+// no merge to draw one from (a single, unimported file, as every test
+// in this file's own suite is) passes an empty list through the
+// plain `typecheck_program` above instead.
+pub fun typecheck_program_with_aliases(
+  Vec<Node>* nodes,
+  Vec<str>* aliases
+) Result<flag, TypeError> {
   Checker checker = _checker_new();
   defer _free_fn_sig_map_borrowed_keys(&checker.fns);
   defer checker.declared_at.free();
@@ -5868,6 +5912,13 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer _free_compound_info_map(&checker.compounds);
   defer _free_method_tables(&checker.methods);
   defer checker.active_type_params.free();
+  defer checker.declared_import_aliases.free();
+
+  num ai = 0;
+  for ai < aliases.len {
+    checker.declared_import_aliases.add(aliases.get(ai));
+    ai = ai + 1;
+  }
 
   num i = 0;
   for i < nodes.len {

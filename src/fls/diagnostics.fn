@@ -243,7 +243,7 @@ fun _diagnose_uncached(AnalysisCache* cache, Document doc) Vec<Diagnostic> {
       substr(alias_msg, 0, len(alias_msg))
     );
   }
-  let checked = typecheck_program(&alias_checked_nodes);
+  let checked = typecheck_program_with_aliases(&alias_checked_nodes, &program.aliases);
   // The clone above is the only tree expansion ever touched, so it is
   // also the only place `was_used` (needed by the `unused_type_alias`
   // warning below) ever got set - propagate it onto both trees `analyze`

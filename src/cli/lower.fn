@@ -264,7 +264,7 @@ pub fun lower_to_c(
   // Type checking runs over the merged program, so a call into an
   // imported module is checked against the signature it was declared
   // with.
-  let checked = typecheck_program(&merged.nodes);
+  let checked = typecheck_program_with_aliases(&merged.nodes, &merged.aliases);
   if checked.is_err() {
     TypeError e = checked.unwrap_err();
     // Lenient mode's own promise (see Options.warn_unused_lenient's doc

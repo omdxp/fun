@@ -149,7 +149,7 @@ fun check_file(str path) str {
   if alias_err.is_some() {
     ret alias_err.unwrap();
   }
-  let checked = typecheck_program(&merged.nodes);
+  let checked = typecheck_program_with_aliases(&merged.nodes, &merged.aliases);
   if checked.is_err() {
     ret checked.unwrap_err().message;
   }
@@ -186,6 +186,20 @@ test "an alias-qualified read of a public global compiles" {
     "an alias-qualified read of a public global compiles"
   );
   assert contains(out, "shared_g"), "expected the public global to be emitted";
+}
+
+test "a module qualifier used without a declared alias is rejected, not left to leak into codegen" {
+  // `check_alias_qualified_call` treated any bare name that collided
+  // with no local/type as a valid module qualifier the instant a
+  // function of that exact name existed anywhere in the whole merged
+  // program - with no check that the name was ever actually declared
+  // with `use X as name;`. A module imported with no alias at all
+  // exports under its own bare names directly (`twice(5)`, never
+  // `noalias_qualified_lib.twice(5)`), so the qualified form crashed
+  // codegen with no real diagnostic instead of a clean rejection.
+  let found = check_file("src/tests/fixtures/noalias_qualified_main_bad.fn");
+  assert contains(found, "undeclared identifier"), "expected the undeclared qualifier rejected";
+  assert equals(check_file("src/tests/fixtures/noalias_qualified_main_ok.fn"), ""), "expected the same import's own bare name to still resolve";
 }
 
 test "a leading-underscore field is private to the file that declares it" {

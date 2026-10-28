@@ -1,0 +1,5 @@
+use noalias_qualified_lib;
+
+fun main() num {
+  ret noalias_qualified_lib.twice(5);
+}
