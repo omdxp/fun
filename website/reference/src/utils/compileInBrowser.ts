@@ -20,6 +20,8 @@
 // code, and cached as module-level singletons so a second run in the
 // same page session reuses them rather than reloading either.
 
+import type { Wasmer, Package } from "@wasmer/sdk";
+
 type RunOutcome = { stdout: string; stderr: string };
 
 export type Diagnostic = {
@@ -178,10 +180,10 @@ async function runFrontend(files: Record<string, string>, entryPath: string): Pr
 // run - `@wasmer/sdk`'s own client and the ~105 MB `clang/clang`
 // package are too expensive to load on every click, or before the
 // first one.
-let wasmerClientPromise: Promise<any> | null = null;
-let clangPackagePromise: Promise<any> | null = null;
+let wasmerClientPromise: Promise<Wasmer> | null = null;
+let clangPackagePromise: Promise<Package> | null = null;
 
-async function getClang() {
+async function getClang(): Promise<{ wasmer: Wasmer; clangPkg: Package }> {
   if (!wasmerClientPromise) {
     wasmerClientPromise = import("@wasmer/sdk").then(({ Wasmer }) => Wasmer.create());
   }
@@ -199,9 +201,7 @@ async function getClang() {
 // this feature's own research spike (a compile sandbox producing wasm
 // bytes, then a fresh sandbox loading and running those bytes as their
 // own package).
-async function compileAndRun(c: string): Promise<RunOutcome> {
-  const { wasmer, clangPkg } = await getClang();
-
+async function compileAndRunOnce(wasmer: Wasmer, clangPkg: Package, c: string): Promise<RunOutcome> {
   const compileSandbox = await wasmer.sandboxes.create({ packages: [clangPkg] });
   let wasmBytes: Uint8Array;
   try {
@@ -236,6 +236,31 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
     return { stdout: out.stdout.text(), stderr: out.stderr.text() };
   } finally {
     await runSandbox.close();
+  }
+}
+
+// User-reported: every run after some earlier one failed outright with
+// "command execution failed: unable to spawn the command: Initialization
+// function failed - the thread pool is shut down: Scheduler is dead" -
+// an `@wasmer/sdk`-internal runtime, not a Fun-level or C-level failure
+// (never a `FunCompileError`), surfacing only once the cached `wasmer`
+// client's own worker/scheduler infrastructure has gone bad, apparently
+// as a side effect of an earlier run's own sandboxes closing. Retried
+// once here, against a genuinely fresh client - `getClang`'s own cache
+// invalidated first, since reusing the same dead client would just
+// reproduce the identical failure.
+async function compileAndRun(c: string): Promise<RunOutcome> {
+  const { wasmer, clangPkg } = await getClang();
+  try {
+    return await compileAndRunOnce(wasmer, clangPkg, c);
+  } catch (err) {
+    if (err instanceof FunCompileError) {
+      throw err;
+    }
+    wasmerClientPromise = null;
+    clangPackagePromise = null;
+    const fresh = await getClang();
+    return await compileAndRunOnce(fresh.wasmer, fresh.clangPkg, c);
   }
 }
 
