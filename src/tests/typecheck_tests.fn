@@ -3260,7 +3260,7 @@ test "a generic enum method's own correctly-typed result still fits a matching f
   );
 }
 
-test "a generic enum method's result inside ANOTHER generic class's own body, still abstract, isn't flagged" {
+test "a generic enum method's result inside another generic class's own body, still abstract, isn't flagged" {
   // Regression caught alongside the fix above: compiling this very
   // compiler's own `src/cli/wasm_frontend_main.fn` (which pulls in
   // `warnings.fn`) started failing the moment the fix above landed,
@@ -3273,7 +3273,7 @@ test "a generic enum method's result inside ANOTHER generic class's own body, st
   // some genuinely-resolved, wrong, concrete type. The first version
   // of this fix flagged any name that wasn't a registered enum at all
   // - too broad, since a still-abstract type parameter's own name
-  // ALSO isn't registered anywhere; narrowed to only a name that IS a
+  // also isn't registered anywhere; narrowed to only a name that is a
   // registered compound, the one case actually unambiguous.
   accepts(
     `enum MyOption<V> {
@@ -3309,7 +3309,7 @@ test "a generic enum method's result inside ANOTHER generic class's own body, st
 
 test "a bare variant shorthand matched against a tuple is rejected, not left to crash codegen" {
   // Same gap as the primitive-scalar case above, found right alongside
-  // it: a tuple is ALSO resolved and ALSO carries no name of its own
+  // it: a tuple is also resolved and also carries no name of its own
   // (`is_tuple` says what it is instead - see `CheckedType`'s own
   // comment), so it fell through the exact same `want.name == ""`
   // path a genuinely unresolved expression does, reaching codegen
@@ -3344,15 +3344,114 @@ test "a bare variant shorthand matched against a function-typed value is rejecte
   );
 }
 
+test "a generic function's own call-site return type substitutes, not just a generic method's" {
+  // Different gap from the generic-method fix above, found right
+  // alongside it: `check_call` (a plain top-level function call,
+  // never a method) always returned the callee's own declared return
+  // type completely unsubstituted - `check_arguments`' own generic
+  // branch (`check_type_bounds`) only ever verifies a type param's
+  // bounds against what was supplied, never resolves what it
+  // concretely is for this call, so every generic function's own call
+  // result reached every caller still erased to Unknown, not even
+  // template form. Fixed by inferring each type param from the first
+  // argument written as it (the same convention `check_type_bounds`
+  // already uses) and substituting that into the declared return
+  // type's own pristine, pre-erasure form (`rtype_template`). A
+  // second, independent gap had to be fixed alongside it for this
+  // exact fixture to actually work: `substitute` only ever replaced
+  // its own argument directly when its name matched one of `params` -
+  // correct for a generic method's own bare `T` return (already
+  // substituted correctly before this session), but `wrap`'s own
+  // return is `MyOpt<T>`, where `T` is only nested inside an enum that
+  // isn't itself named `T` - the top-level check alone never looked
+  // inside, so the outer `MyOpt` substituted fine while its own
+  // generic argument stayed the literal, unresolved name `T`.
+  //
+  // Reached through a `let` here, not chained directly onto the call
+  // (`wrap(5).unwrap()`) - that shape still has a separate, open gap
+  // of its own (receiver resolution for a method called directly on a
+  // generic free function's result disagrees with resolution through
+  // a `let`), not something this fix covers; `is_unknown`'s own
+  // leniency means it fails silently rather than wrongly instead, so
+  // it is at least not a regression.
+  rejects(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `impl MyOpt<T> {
+    `  pub unwrap() T {
+    `    fit *self {
+    `      .Some(v) -> { ret v; }
+    `      .None -> { ret panic("none"); }
+    `    }
+    `  }
+    `}
+    `fun wrap<T>(T v) MyOpt<T> {
+    `  ret .Some(v);
+    `}
+    `fun main() {
+    `  let r = wrap(5);
+    `  fit r.unwrap() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected r.unwrap() to resolve to num (not an enum at all), rejecting the mismatched .Ok/.Err pattern"
+  );
+}
+
+test "a generic function called with different concrete types doesn't corrupt its own shared signature" {
+  // `substitute`'s own recursive fix builds fresh Vecs rather than
+  // mutating a type's own generic_args/tuple_members in place,
+  // specifically because `rtype_template` (what gets substituted) is
+  // the same shared value read on every call to this function, not a
+  // fresh copy per call site - mutating it in place for the first
+  // call would corrupt what every later call sees. Calling `wrap`
+  // with `num` first, then mismatching the second call's own result
+  // (a `str`) against `.Ok`/`.Err` is what would actually surface
+  // that: a corrupted shared template would leak the first call's own
+  // resolved `num` into the second instead of resolving its own `str`
+  // - checked by matching the real diagnostic's own wording, not just
+  // that there is one.
+  str msg = check(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `impl MyOpt<T> {
+    `  pub unwrap() T {
+    `    fit *self {
+    `      .Some(v) -> { ret v; }
+    `      .None -> { ret panic("none"); }
+    `    }
+    `  }
+    `}
+    `fun wrap<T>(T v) MyOpt<T> {
+    `  ret .Some(v);
+    `}
+    `fun main() {
+    `  let a = wrap(5);
+    `  num x = a.unwrap();
+    `  let b = wrap("hello");
+    `  fit b.unwrap() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`
+  );
+  assert contains(msg, "'str'"), "expected the second call's own real type (str), not the first call's num leaking into it";
+}
+
 test "a generic method's own pointer-typed return substitutes without losing its own pointer depth" {
   // Regression caught alongside the fix above: `rtype_template`'s own
-  // first version recorded just the erased type param's own NAME, but
+  // first version recorded just the erased type param's own name, but
   // `_erase_signature` had already reset the rest of the type (its own
   // `pointer_depth` included) to a fresh Unknown before that name was
   // ever read - so a method declared to return `T*` substituted back
   // to a bare, non-pointer concrete type instead, confirmed directly
   // against `examples/stdlib/guarded_basic.fn`'s own real `Guarded<T>.
-  // lock() T*`. Fixed by recording the WHOLE pre-erasure type, pointer
+  // lock() T*`. Fixed by recording the whole pre-erasure type, pointer
   // depth and all, rather than just its name.
   accepts(
     `compound Box<T> {
@@ -3369,7 +3468,7 @@ test "a generic method's own pointer-typed return substitutes without losing its
     `}`,
     "expected a generic method's own pointer return type to stay a pointer after substitution"
   );
-  // The same call, assigned to the type it would ALSO have fit as an
+  // The same call, assigned to the type it would also have fit as an
   // unsubstituted, leniently-accepted Unknown (missing the `*`) - a
   // plain `accepts` above can't tell "correctly substituted" apart
   // from "never substituted, Unknown accepts anything", so this one

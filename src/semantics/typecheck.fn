@@ -127,6 +127,43 @@ pub fun substitute(CheckedType t, Vec<str>* params, Vec<CheckedType>* args) Chec
     }
     i = i + 1;
   }
+  // `t` itself isn't a bare type param, but one can still be nested
+  // further in (`MyOpt<T>`'s own `T`, a tuple's own element type) -
+  // without this, a generic enum/compound's own return type
+  // substituted its outer name just fine but left every nested type-
+  // param argument exactly as written. Confirmed directly as the
+  // reason a generic function's own call-site return type (`wrap<T>(T
+  // v) MyOpt<T>`) never resolved to anything concrete: `MyOpt` isn't
+  // itself `T`, so the loop above never even looks inside its own
+  // generic args. Builds fresh `Vec`s rather than mutating `t`'s own
+  // in place: `t` is frequently a shared template read on every call
+  // to the same generic function (`sig.rtype_template`), never
+  // uniquely owned by this one substitution, so freeing its own
+  // backing arrays here - even to replace them - would corrupt every
+  // other call still holding the same template. The old ones are
+  // simply left unfreed (their own shell abandoned, not uniquely
+  // owned either), the same tradeoff every other CheckedType built
+  // this way already accepts for a short-lived compile process.
+  if t.generic_args.len > 0 {
+    Vec<CheckedType> substituted_args;
+    substituted_args.init(t.generic_args.len);
+    num g = 0;
+    for g < t.generic_args.len {
+      substituted_args.push(substitute(t.generic_args.get(g), params, args));
+      g = g + 1;
+    }
+    t.generic_args = substituted_args;
+  }
+  if t.tuple_members.len > 0 {
+    Vec<CheckedType> substituted_members;
+    substituted_members.init(t.tuple_members.len);
+    num m = 0;
+    for m < t.tuple_members.len {
+      substituted_members.push(substitute(t.tuple_members.get(m), params, args));
+      m = m + 1;
+    }
+    t.tuple_members = substituted_members;
+  }
   ret t;
 }
 
@@ -3249,6 +3286,39 @@ impl Checker {
     }
   }
 
+  // The concrete type each of `sig`'s own type params stands for at
+  // this call, inferred from the arguments the same way `check_type_
+  // bounds` already does for bound-checking: the first argument
+  // written as a given parameter is what it stands for. One entry per
+  // `sig.type_params`, in the same order - `substitute`'s own
+  // contract - `checked_unknown()` for any param no argument's own
+  // declared type ever named (an unconstrained, genuinely
+  // unresolvable position, the same ceiling every other best-effort
+  // inference in this file already accepts).
+  _infer_call_generic_args(FnSig sig, Vec<Node*>* args, TypeEnv* env) Vec<CheckedType> {
+    Vec<CheckedType> out;
+    out.init(sig.type_params.len);
+    num p = 0;
+    for p < sig.type_params.len {
+      str param = sig.type_params.get(p);
+      p = p + 1;
+      CheckedType resolved = checked_unknown();
+      num i = 0;
+      for i < args.len && i < sig.arg_params.len {
+        str written = sig.arg_params.get(i);
+        num at = i;
+        i = i + 1;
+        if !equals(written, param) {
+          continue;
+        }
+        resolved = self.infer(args.get(at), env);
+        break;
+      }
+      out.push(resolved);
+    }
+    ret out;
+  }
+
   // Judges `alias.name(...)`, where `alias` names an imported file
   // rather than a value. True when it was one, whether or not anything
   // was reported: either way it is not a method call.
@@ -3771,7 +3841,26 @@ impl Checker {
       &sig.type_params,
       &no_generic_args
     );
-    ret sig.rtype;
+    if !sig.is_generic {
+      ret sig.rtype;
+    }
+    // `sig.rtype` itself is `wrap<T>(T v) MyOpt<T>`'s own return type
+    // with `T` already erased to a nameless Unknown by `_signature_of`
+    // (every generic function's own type params are, regardless of
+    // whether this call even resolves them) - `check_arguments`'
+    // generic branch (`check_type_bounds`) only ever verifies a type
+    // param's own bounds against what was supplied, never substitutes
+    // anything back into the return type at all, so a generic
+    // function's own call-site result reached every caller still
+    // Unknown, confirmed directly as the reason `wrap(5).unwrap()`
+    // (chaining a method call onto a generic function's own result)
+    // reached codegen with no real type to work with. Inferred the
+    // same way `check_type_bounds` already does: the first argument
+    // written as a given type param is what it stands for at this
+    // call - no explicit `<...>` call-site syntax to prefer it over.
+    Vec<CheckedType> inferred_args = self._infer_call_generic_args(sig, &args, env);
+    defer inferred_args.free();
+    ret substitute(sig.rtype_template, &sig.type_params, &inferred_args);
   }
 }
 
