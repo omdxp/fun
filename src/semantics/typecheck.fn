@@ -2693,6 +2693,41 @@ impl Checker {
     if dispatched.is_some() {
       ret dispatched.unwrap();
     }
+    // Neither side owns this operator through an impl, so it falls to
+    // C's own built-in meaning: numeric/decimal/char arithmetic (`'0' -
+    // 'a'`, the lexer's own idiom, is as ordinary as `1 + 2`), or
+    // pointer arithmetic. A named type with no `op_add`/`op_sub`/... of
+    // its own has neither - left unchecked, `"a" + "b"` passed straight
+    // through as `char*` addition, which C itself then rejects with no
+    // real diagnostic at all.
+    flag left_ok = is_unknown(left) || left.pointer_depth > 0 || left.is_array ||
+      left.base == .Num || left.base == .Dec || left.base == .Chr;
+    flag right_ok = is_unknown(right) || right.pointer_depth > 0 || right.is_array ||
+      right.base == .Num || right.base == .Dec || right.base == .Chr;
+    // `str` is itself a pointer at the C level, so offsetting one by a
+    // whole number (`name + sep + 2`, this very file's own idiom) is
+    // ordinary pointer arithmetic - but pairing two of them, as in
+    // `"woof " + "rex"`, is never that: neither commutes to a real
+    // address, and it's almost always a beginner's attempt at the
+    // concatenation this operator never performs.
+    if left.base == .Str && left.pointer_depth == 0 && !left.is_array {
+      left_ok = right.base == .Num || is_unknown(right);
+    }
+    if right.base == .Str && right.pointer_depth == 0 && !right.is_array {
+      right_ok = left.base == .Num || is_unknown(left);
+    }
+    if !left_ok || !right_ok {
+      self.fail(
+        format(
+        "'{str}' is not defined between {str} and {str}",
+        e.op,
+        type_name(left),
+        type_name(right)
+        ),
+        node
+      );
+      ret checked_unknown();
+    }
     // Arithmetic on two numeric kinds widens to the wider one.
     if right.base == .Dec && left.base == .Num {
       ret right;

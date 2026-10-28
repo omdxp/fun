@@ -590,6 +590,41 @@ test "a method on a concretely-specialized generic impl mangles its primitive ar
   );
 }
 
+test "arithmetic between two strings is rejected, not left to leak into codegen" {
+  // `infer_expression`'s binary-operator fallthrough never validated
+  // its operands at all once no `op_add`/... impl applied - any named
+  // type reached the bottom `ret left;` untouched. `"woof " + "rex"`
+  // leaked straight through as `char*` addition, which C itself then
+  // rejected with no real diagnostic ("invalid operands to binary
+  // expression").
+  rejects(
+    `fun main() {
+    `  str a = "woof " + "rex";
+    `}`,
+    "expected '+' between two strings to be rejected"
+  );
+  // `str` is itself a pointer at the C level, so offsetting one by a
+  // number is ordinary, long-standing pointer arithmetic (this very
+  // file's own `canonical_type_name` does exactly this) - the fix
+  // above must not touch that.
+  accepts(
+    `fun main() {
+    `  str s = "hello";
+    `  str tail = s + 2;
+    `}`,
+    "expected 'str + num' pointer arithmetic to still be accepted"
+  );
+  // Char arithmetic (`'0' - 'a'`, the lexer's own idiom) must also
+  // still be accepted.
+  accepts(
+    `fun main() {
+    `  chr c = '5';
+    `  num digit = c - '0';
+    `}`,
+    "expected char arithmetic to still be accepted"
+  );
+}
+
 test "an ambiguous variant name with an explicit declared type is not flagged" {
   // The declared type on the left resolves it outright; the ambiguity
   // check only applies to a fully `let`-inferred initializer, which has
