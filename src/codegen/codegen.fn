@@ -202,6 +202,15 @@ pub compound Codegen {
   // type param from the enclosing function's own return type when it
   // can't be read off the call's arguments.
   Option<DataType> current_fn_rtype_dt;
+  // A `let`/declared-variable statement's own declared type, while its
+  // initializer is being emitted - the sibling context
+  // `maybe_instantiate_generic_function` falls back to when a type
+  // param appears in neither the call's arguments nor the enclosing
+  // function's own return type, but does in the declared local's: `Vec
+  // <num> v = make_empty();` has nothing else anywhere to infer `T`
+  // from. `.None` outside a declared (non-`__let_infer__`) `let`'s own
+  // initializer.
+  Option<DataType> expected_let_dt;
   // The enum a bare `.Variant`/`.Variant(x)` shorthand resolves against,
   // standing in for "the expected type from context." Empty when nothing
   // in the enclosing statement provides one; scoped to the statement's
@@ -743,6 +752,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.fit_subj_temp_counter = 0;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
+  g.expected_let_dt = .None;
   g.expected_enum_type = "";
   g.expected_compound_type = "";
   g.has_expected_tuple_type = false;
@@ -10532,7 +10542,20 @@ impl Codegen {
             self.has_expected_tuple_type = true;
             self.expected_tuple_type = *v.var_type;
           }
+          // `Vec<num> v = make_empty();`: a generic call's own type
+          // param this call's arguments never reveal (there may be
+          // none at all) still has this declaration's own concrete
+          // type to infer it from - the other context
+          // `maybe_instantiate_generic_function` falls back to,
+          // alongside the enclosing function's own return type.
+          let prev_expected_let_dt = self.expected_let_dt;
+          if !is_let && v.var_type.generic_args.len > 0 {
+            self.expected_let_dt = .Some(*v.var_type);
+          } else {
+            self.expected_let_dt = .None;
+          }
           let verr = self.emit_expr(*v.val);
+          self.expected_let_dt = prev_expected_let_dt;
           if did_shape_coerce {
             self.state.write(")");
           }
@@ -16374,6 +16397,33 @@ impl Codegen {
     ret .None;
   }
 
+  // `infer_generic_function_type_param_from_context`'s own sibling,
+  // against the declared local's own type (`Vec<num> v =
+  // make_empty();`) instead of the enclosing function's return type -
+  // the other real context a type param that appears in neither the
+  // call's own arguments nor the enclosing function's return type can
+  // still be pinned down by.
+  infer_generic_function_type_param_from_let_context(FunctionNode f, str tp) Option<str> {
+    if !f.has_rtype || self.expected_let_dt.is_none() {
+      ret .None;
+    }
+    let declared = self.expected_let_dt.unwrap();
+    if !equals(f.rtype.type_str, declared.type_str) ||
+      f.rtype.generic_args.len != declared.generic_args.len {
+      ret .None;
+    }
+    num pi = 0;
+    for pi < f.rtype.generic_args.len {
+      let templ_arg = f.rtype.generic_args.get(pi);
+      if equals(templ_arg.type_str, tp) && templ_arg.generic_args.len == 0 {
+        let declared_arg = declared.generic_args.get(pi);
+        ret self.resolve_type_name(*declared_arg);
+      }
+      pi = pi + 1;
+    }
+    ret .None;
+  }
+
   // Monomorphizes a call to a registered generic function template,
   // inferring each type param's binding from whichever positional
   // argument's declared param type is a bare occurrence of it, then
@@ -16481,6 +16531,16 @@ impl Codegen {
                 let ctx_inferred = self.infer_generic_function_type_param_from_context(f, tp);
                 if ctx_inferred.is_some() {
                   found_name = ctx_inferred.unwrap();
+                  found = true;
+                }
+              }
+              if !found {
+                let let_ctx_inferred = self.infer_generic_function_type_param_from_let_context(
+                  f,
+                  tp
+                );
+                if let_ctx_inferred.is_some() {
+                  found_name = let_ctx_inferred.unwrap();
                   found = true;
                 }
               }

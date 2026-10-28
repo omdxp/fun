@@ -2200,6 +2200,33 @@ test "a generic function's own type param infers from an argument that is itself
   assert contains(out, "wrap__num(identity__num(5))"), "expected wrap's own call site monomorphized on the inner generic call's inferred return type";
 }
 
+test "a generic function's own type param infers from the enclosing let's own declared type" {
+  // `maybe_instantiate_generic_function`'s own per-param inference
+  // already fell back to the enclosing function's own return type
+  // when a call's arguments reveal nothing - but a type param that
+  // appears in neither (`make_empty<T>()` takes no arguments at all)
+  // still has the enclosing let's own declared type to infer from
+  // (`Vec<num> v = make_empty();`), which nothing read before this
+  // fix: the call fell back to the bare, unmangled name instead of
+  // `make_empty__num`.
+  str src = `use std.io;
+  `compound Box2<T> {
+  `  T v;
+  `}
+  `fun make_zero_box<T>() Box2<T> {
+  `  ret .{ v = 0 };
+  `}
+  `fun main() {
+  `  Box2<num> b = make_zero_box();
+  `  println_fmt("{num}", b.v);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's own type param infers from the enclosing let's own declared type"
+  );
+  assert contains(out, "Box2__num b = make_zero_box__num();"), "expected make_zero_box's own call site monomorphized on the declared local's own type";
+}
+
 test "a generic impl's operator method monomorphizes through operator syntax, not just an explicit .method() call" {
   // `emit_operator_call`'s three callers (binary, unary, `[]`/`[]=`)
   // never triggered `ensure_generic_impl_method_emitted` the way an
