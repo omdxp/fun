@@ -214,7 +214,7 @@ async function compileAndRunOnce(wasmer: Wasmer, clangPkg: Package, c: string): 
         "/workspace/program.wasm",
         "--target=wasm32-wasi",
       ])
-      .run();
+      .run({ check: false });
     if (compile.exitCode !== 0) {
       // A real, substantive answer - the C compiler actually rejected
       // the generated program - not an infrastructure failure, so it's
@@ -232,7 +232,13 @@ async function compileAndRunOnce(wasmer: Wasmer, clangPkg: Package, c: string): 
   const programPkg = await wasmer.packages.load(wasmBytes);
   const runSandbox = await wasmer.sandboxes.create({ packages: [programPkg] });
   try {
-    const out = await runSandbox.command(programPkg).run();
+    // `check: false` - the compiled program's own exit code is not this
+    // function's business to judge. Left at the SDK's default (`true`),
+    // any nonzero exit (a deliberate `exit(1)`, a panic, ...) throws
+    // `ProcessExitError` instead of returning `Output`, discarding
+    // whatever stdout the program already produced and surfacing only a
+    // generic "process exited unsuccessfully" message to the user.
+    const out = await runSandbox.command(programPkg).run({ check: false });
     return { stdout: out.stdout.text(), stderr: out.stderr.text() };
   } finally {
     await runSandbox.close();
