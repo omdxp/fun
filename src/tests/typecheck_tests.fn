@@ -3307,6 +3307,43 @@ test "a generic enum method's result inside ANOTHER generic class's own body, st
   );
 }
 
+test "a bare variant shorthand matched against a tuple is rejected, not left to crash codegen" {
+  // Same gap as the primitive-scalar case above, found right alongside
+  // it: a tuple is ALSO resolved and ALSO carries no name of its own
+  // (`is_tuple` says what it is instead - see `CheckedType`'s own
+  // comment), so it fell through the exact same `want.name == ""`
+  // path a genuinely unresolved expression does, reaching codegen
+  // with no enum tag to switch on.
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "x");
+    `  fit t {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected a tuple subject to be rejected with a real diagnostic, not reach codegen"
+  );
+}
+
+test "a bare variant shorthand matched against a function-typed value is rejected, not left to crash codegen" {
+  // Same gap again, for the other resolved-but-nameless shape
+  // (`has_fn_sig`).
+  rejects(
+    `fun f() num {
+    `  ret 1;
+    `}
+    `fun main() {
+    `  fun() num cb = f;
+    `  fit cb {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected a function-typed subject to be rejected with a real diagnostic, not reach codegen"
+  );
+}
+
 test "a generic method's own pointer-typed return substitutes without losing its own pointer depth" {
   // Regression caught alongside the fix above: `rtype_template`'s own
   // first version recorded just the erased type param's own NAME, but

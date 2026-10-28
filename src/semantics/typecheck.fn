@@ -5005,15 +5005,20 @@ impl Checker {
     // "the written name of a user-defined type, empty for a builtin"
     // (see `CheckedType`'s own comment) - so `want.name` being empty
     // does NOT mean "unresolved" here, the way it does above; `is_
-    // unknown` already ruled that reading out. A bare `.Variant`
-    // shorthand names an enum's own variant by definition, so matching
-    // it against any resolved builtin scalar is unambiguously wrong:
+    // unknown` already ruled that reading out. A tuple or a function-
+    // typed value is the same story: resolved, with no name of its own
+    // either, `base == .Unknown` purely because neither has any other
+    // way to carry its own kind (`is_tuple`/`has_fn_sig` do that
+    // instead) - `is_unknown` already excludes both from its own
+    // "nothing to check" case for exactly this reason. A bare
+    // `.Variant` shorthand names an enum's own variant by definition,
+    // so matching it against any of these is unambiguously wrong:
     // left unchecked before this, it reached codegen with no enum tag
     // to switch on at all, crashing there with an opaque "unsupported
     // node" instead of a real diagnostic at the actual mistake (most
     // commonly `fit`-ing the result of a stray `.unwrap()` that already
     // turned the value into its own payload type).
-    if want.base != .Unknown {
+    if want.base != .Unknown || want.is_tuple || want.has_fn_sig {
       self.fail(
         format(
         "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
