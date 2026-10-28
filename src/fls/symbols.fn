@@ -2307,6 +2307,123 @@ pub fun local_fn_signature_from_tokens(Vec<Token>* tokens, str text, str callee)
   ret "";
 }
 
+// `local_fn_signature_from_tokens`'s own sibling for a method,
+// written directly as `[pub] name(args) RType` inside `impl TypeName
+// { ... }` (no leading `fun` the way a top-level function gets, so
+// the name match alone has to be scoped to the impl's own top level -
+// not any nested call or method body - by tracking brace depth).
+// `member_declaration_from_tokens` needs a real parse to find a
+// *local* method (an import gets one from its own, separately and
+// cleanly re-parsed source, which is why only the local lookup ever
+// needed this) - exactly the situation signature help hits while a
+// call elsewhere in the same document is still being typed, unclosed.
+// Renders with `self` injected as the first parameter, the same
+// convention a real parsed `Declaration.detail` already uses for a
+// method.
+pub fun local_method_signature_from_tokens(
+  Vec<Token>* tokens,
+  str text,
+  str type_name,
+  str method_name
+) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_keyword(t, "impl") {
+      let name_tok = token_after(tokens, i + 1);
+      if name_tok.is_some() && name_tok.unwrap().type == .Identifier &&
+        equals(token_word(name_tok.unwrap()), type_name) {
+        // Skip past any generic params/shape clause to the impl
+        // block's own opening brace.
+        num j = index_of_token(tokens, name_tok.unwrap()) + 1;
+        for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+          j = j + 1;
+        }
+        if j < tokens.len {
+          num depth = 1;
+          num k = j + 1;
+          for k < tokens.len && depth > 0 {
+            Token kt = tokens.get(k);
+            if token_is_symbol(kt, '{') {
+              depth = depth + 1;
+              k = k + 1;
+              continue;
+            }
+            if token_is_symbol(kt, '}') {
+              depth = depth - 1;
+              k = k + 1;
+              continue;
+            }
+            if depth == 1 && kt.type == .Identifier &&
+            equals(token_word(kt), method_name) {
+              let maybe_lparen = token_after(tokens, k + 1);
+              if maybe_lparen.is_some() &&
+              token_is_operator(maybe_lparen.unwrap(), "(") {
+                Token lp = maybe_lparen.unwrap();
+                num lparen_idx = index_of_token(tokens, lp);
+                num pdepth = 1;
+                num m = lparen_idx + 1;
+                for m < tokens.len && pdepth > 0 {
+                  if token_is_operator(tokens.get(m), "(") {
+                    pdepth = pdepth + 1;
+                  } elif token_is_symbol(tokens.get(m), ')') {
+                    pdepth = pdepth - 1;
+                  }
+                  m = m + 1;
+                }
+                if pdepth == 0 {
+                  Token rp = tokens.get(m - 1);
+                  num start = byte_offset_of_pos(text, lp.pos.line, lp.pos.start_col);
+                  num end = byte_offset_of_pos(text, rp.pos.line, rp.pos.end_col);
+                  if start >= 0 && end >= 0 && end >= start {
+                    str params_text = substr(text, start, end - start);
+                    str rest = substr(params_text, 1, len(params_text) - 1);
+                    free(params_text);
+                    str new_params;
+                    if equals(rest, ")") {
+                      new_params = format("({str}* self)", type_name);
+                      free(rest);
+                    } else {
+                      new_params = format("({str}* self, {str}", type_name, rest);
+                      free(rest);
+                    }
+                    num k2 = m;
+                    for k2 < tokens.len &&
+                      (tokens.get(k2).type == .NewLine || tokens.get(k2).type == .Comment) {
+                      k2 = k2 + 1;
+                    }
+                    if k2 >= tokens.len {
+                      free(new_params);
+                      ret "";
+                    }
+                    Token rt = tokens.get(k2);
+                    if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                      str out0 = format("{str}{str}", method_name, new_params);
+                      free(new_params);
+                      ret out0;
+                    }
+                    str out = format(
+                      "{str}{str} {str}",
+                      method_name,
+                      new_params,
+                      token_word(rt)
+                    );
+                    free(new_params);
+                    ret out;
+                  }
+                }
+              }
+            }
+            k = k + 1;
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
 // A call-inferred local's own type (`let l = logger_init(...)`),
 // resolved without a real parse of `doc_path`: finds which function
 // was called (`let_call_callee_from_tokens`), then that function's

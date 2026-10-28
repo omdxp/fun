@@ -70,18 +70,41 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
         recv_type,
         c.callee
       );
+      if member.is_some() {
+        Declaration d = member.unwrap();
+        fit d.kind {
+          .Function -> {
+            free(recv_type);
+            // Same implicit-`self`-as-parameter-0 shift the parsed-
+            // tree branch below already applies for a method.
+            ret _signature_result(d.detail, c.active_param + 1);
+          }
+          _ -> {}
+        }
+      }
+      // `member_declaration_from_tokens`'s own local lookup needs a
+      // real re-parse of this same document's tokens, which fails for
+      // exactly the same reason the whole document didn't parse - an
+      // unrelated call elsewhere is still being typed, unclosed. Its
+      // import-search fallback only ever finds a method declared in
+      // some other, cleanly-parsed file, so a method on a type the
+      // reader declared right here, in this same document, had
+      // nothing left to resolve through at all (confirmed directly:
+      // `b.scale(3,` on a plain local `Box` never answered, while the
+      // identical shape on an imported stdlib type already worked by
+      // accident, through that fallback). This is the token-only
+      // equivalent, scoped to this document's own `impl` blocks.
+      str local_sig = local_method_signature_from_tokens(
+        &tokens,
+        doc.text,
+        recv_type,
+        c.callee
+      );
       free(recv_type);
-      if member.is_none() {
+      if equals(local_sig, "") {
         ret NO_SIGNATURE;
       }
-      Declaration d = member.unwrap();
-      fit d.kind {
-        .Function -> {}
-        _ -> { ret NO_SIGNATURE; }
-      }
-      // Same implicit-`self`-as-parameter-0 shift the parsed-tree
-      // branch below already applies for a method.
-      ret _signature_result(d.detail, c.active_param + 1);
+      ret _signature_result(local_sig, c.active_param + 1);
     }
     str sig = local_fn_signature_from_tokens(&tokens, doc.text, c.callee);
     if equals(sig, "") {

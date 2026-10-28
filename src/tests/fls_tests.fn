@@ -9473,3 +9473,43 @@ test "signature help answers for a method called on a chained receiver, mid-argu
   assert contains(out, `"label":"dec_field(LogRecord* self, str k, dec v) LogRecord"`), "expected dec_field's own signature, self included";
   assert contains(out, `"activeParameter":2`), "expected the value argument (past self and k) active";
 }
+
+test "signature help answers for a method called on a plain local receiver, mid-argument, before the statement is finished" {
+  // User-reported, the simplest shape of all, yet the one still
+  // missing: a single-dot method call through a plain local variable
+  // whose own type is declared in the same document (`b.scale(3,` -
+  // no closing `)`, no chain at all). `member_declaration_from_tokens`
+  // needs a real re-parse of this document's own tokens to find a
+  // *local* method, which fails for the same reason the whole
+  // document doesn't parse; its import-search fallback only ever
+  // finds a method from some other, cleanly-parsed file, which is
+  // why the earlier chained-receiver test above (through `std.log`'s
+  // own `LogRecord`) happened to work while this one, on a type
+  // declared right here, never did. Fixed with
+  // `local_method_signature_from_tokens` (symbols.fn), the token-only
+  // sibling of `local_fn_signature_from_tokens` this file's own plain-
+  // function case already uses.
+  str src = `compound Box {
+  `  num factor;
+  `}
+  `impl Box {
+  `  pub scale(num factor, num offset) num {
+  `    ret self.factor * factor + offset;
+  `  }
+  `}
+  `fun main() num {
+  `  Box b;
+  `  b.scale(3,`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelp_plain_method_unclosed.fn";
+  doc.path = "sighelp_plain_method_unclosed.fn";
+  doc.text = src;
+  doc.version = 1;
+  // Cursor right after "3," - `scale`'s own second argument
+  // (`offset`), past its implicit `self` and `factor`.
+  str out = signature_help(&reads, doc, 10, 13);
+  assert contains(out, `"label":"scale(Box* self, num factor, num offset) num"`), "expected scale's own signature, self included";
+  assert contains(out, `"activeParameter":2`), "expected the second argument (past self and factor) active";
+}
