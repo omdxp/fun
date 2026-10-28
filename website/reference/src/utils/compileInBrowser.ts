@@ -216,13 +216,21 @@ async function compileAndRunOnce(wasmer: Wasmer, clangPkg: Package, c: string): 
       ])
       .run({ check: false });
     if (compile.exitCode !== 0) {
-      // A real, substantive answer - the C compiler actually rejected
-      // the generated program - not an infrastructure failure, so it's
-      // thrown as the same authoritative type as a Fun-level compile
-      // error rather than one the caller falls back to a backend for.
-      throw new FunCompileError(
-        compile.stderr.text() || "the C compiler rejected the generated program",
-      );
+      const stderr = compile.stderr.text();
+      if (stderr) {
+        // A real, substantive answer - the C compiler actually rejected
+        // the generated program - not an infrastructure failure, so
+        // it's thrown as the same authoritative type as a Fun-level
+        // compile error rather than one the caller falls back to a
+        // backend for.
+        throw new FunCompileError(stderr);
+      }
+      // A nonzero exit with nothing on stderr isn't a real compile
+      // answer - clang always explains an actual rejection - so it
+      // reads as the same infrastructure hiccup as a dead scheduler,
+      // thrown as a plain error the caller retries against a fresh
+      // client rather than showing the user an unexplained failure.
+      throw new Error(`clang exited with status ${compile.exitCode} and no diagnostic`);
     }
     wasmBytes = await compileSandbox.fs.readFile("/workspace/program.wasm");
   } finally {
