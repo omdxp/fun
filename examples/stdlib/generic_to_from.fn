@@ -54,7 +54,12 @@ fun main() num {
     Result.Ok(parsed) -> {
       Config back;
       back.from(parsed);
-      printf("back: name=%s version=%g stable=%d\n", back.name, back.version, back.stable);
+      printf(
+        "back: name=%s version=%g stable=%d\n",
+        back.name,
+        back.version,
+        back.stable
+      );
     }
     Result.Err(e) -> { printf("parse failed\n"); }
   }

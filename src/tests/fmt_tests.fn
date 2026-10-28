@@ -646,3 +646,85 @@ test "a bare chained positional access round-trips through formatting unchanged"
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "t.0.1;"), "expected a chained positional access to format unchanged, not split or re-spaced";
 }
+
+test "wraps an over-long call's own argument list, one argument per line rather than filling" {
+  // User-reported: a call with many arguments left on a single
+  // over-long line (`logger_init(.Debug, .Text, .Stdout, true,
+  // "Logger v1", true)`), unlike a method chain or a boolean chain,
+  // which already wrap. One argument per line, not packed - the
+  // same convention a hand-wrapped function DECLARATION's own
+  // over-long parameter list already uses throughout this codebase
+  // (`stdlib/std/log.fn`'s own `logger_init`, for one), deliberately
+  // unlike a boolean chain or a fit arm's own conditions, which pack
+  // as many as fit per line.
+  str src = `fun main() {
+  `  const l = logger_init(.Debug, .Text, .Stdout, true, "Logger version one point oh, built today", true);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "logger_init(\n    .Debug,\n    .Text,\n    .Stdout,\n    true,\n"), "expected one argument per line, not packed";
+  assert contains(got, "\n    true\n  );"), "expected the closing paren back at the call's own base indent, on its own line";
+  num i = 0;
+  flag over_width = false;
+  Vec<str> lines = split(got, '\n');
+  defer lines.free();
+  for i < lines.len {
+    if len(lines.get(i)) > 100 {
+      over_width = true;
+    }
+    i = i + 1;
+  }
+  assert !over_width, "expected every wrapped line to stay within the width budget";
+}
+
+test "a call's own argument list that already fits stays on one line" {
+  str src = `fun main() {
+  `  const l = logger_init(.Debug, .Text, .Stdout, true, "Logger v1", true);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(
+    got,
+    `logger_init(.Debug, .Text, .Stdout, true, "Logger v1", true);`
+  ), "expected a short argument list to stay exactly as written, unwrapped";
+}
+
+test "an over-long call nested inside another over-long call's own arguments wraps independently" {
+  // Each call's own wrap decision is measured and applied on its own,
+  // not inherited from (or forced onto) an enclosing or nested call -
+  // the inner call here fits once it's on its own indented line, so
+  // it must stay inline rather than also exploding one-per-line.
+  str src = `fun main() {
+  `  outer_call(inner_call(.Debug, .Text, .Stdout, true, "a really quite long string argument here"), other_arg);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(
+    got,
+    `inner_call(.Debug, .Text, .Stdout, true, "a really quite long string argument here"),`
+  ), "expected the already-short inner call to stay on one line once indented under the outer wrap";
+  assert contains(got, "\n    other_arg\n  );"), "expected the outer call's own last argument and closer wrapped";
+}
+
+test "a boolean chain used as a call's own over-long argument now wraps through the call, not silently left over-width" {
+  // Companion to the call-argument-wrap feature above: this exact
+  // fixture used to only assert "no blank line introduced" - the
+  // chain's own nested-defers-to-the-call behavior had nothing to
+  // defer TO before this feature existed, so the whole line stayed
+  // over 100 columns, silently. Now that the call wraps its own
+  // arguments one per line, the bool chain (the first argument) fits
+  // on its own line without needing any wrapping of its own.
+  str src = `fun f(flag a, flag b, flag c, flag d, flag e, flag g, flag h, flag j, flag k, flag l) flag {
+  `  ret takes(a == true && b == true && c == true && d == true && e == true && g == true && h == true, j, k, l);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert !contains(got, "\n\n"), "expected no blank line introduced by the nested chain";
+  num i = 0;
+  flag over_width = false;
+  Vec<str> lines = split(got, '\n');
+  defer lines.free();
+  for i < lines.len {
+    if len(lines.get(i)) > 100 {
+      over_width = true;
+    }
+    i = i + 1;
+  }
+  assert !over_width, "expected every wrapped line to stay within the width budget, the call's own arguments wrapped now";
+}

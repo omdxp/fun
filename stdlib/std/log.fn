@@ -621,7 +621,10 @@ test "a json logger writes one object per line with escaped text and ordered fie
     .flag_field("retry", false)
     .emit();
   str out = _test_output(l, path);
-  assert contains(out, "{\"level\":\"ERROR\",\"logger\":\"app\",\"msg\":\"bad \\\"input\\\"\\nline2\",\"who\":\"me\",\"code\":7,"), "expected the JSON prefix with the escaped message";
+  assert contains(
+    out,
+    "{\"level\":\"ERROR\",\"logger\":\"app\",\"msg\":\"bad \\\"input\\\"\\nline2\",\"who\":\"me\",\"code\":7,"
+  ), "expected the JSON prefix with the escaped message";
   assert contains(out, "\"retry\":false}\n"), "expected the last field and a newline";
 }
 

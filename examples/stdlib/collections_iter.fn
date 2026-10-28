@@ -25,7 +25,11 @@ fun main() num {
   printf("vec=%s sum=%lld\n", v.to_string(), total);
 
   // `at` returns Option<T>; `unwrap_or` supplies a fallback when out of range.
-  printf("v.at(1)=%lld v.at(9)=%lld\n", v.at(1).unwrap_or(-1), v.at(9).unwrap_or(-1));
+  printf(
+    "v.at(1)=%lld v.at(9)=%lld\n",
+    v.at(1).unwrap_or(-1),
+    v.at(9).unwrap_or(-1)
+  );
 
   // --- Set: union, then iterate the result ---
   Set<num> a = set_init(0, 8);

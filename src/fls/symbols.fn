@@ -338,7 +338,13 @@ pub fun render_function_named(FunctionNode f, str name, flag include_fun) str {
     b.append("fun ");
   }
   b.append(name);
-  _append_type_params(&b, f.has_type_params, &f.type_params, &f.type_param_constraints, &f.type_param_defaults);
+  _append_type_params(
+    &b,
+    f.has_type_params,
+    &f.type_params,
+    &f.type_param_constraints,
+    &f.type_param_defaults
+  );
   b.append("(");
   num i = 0;
   for i < f.args.len {
@@ -788,7 +794,15 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
     fit n.kind {
       .Function(f) -> {
         if equals(f.name, name) {
-          ret .Some(_declaration_vis(name, .Function, render_function(f), n.pos, n.flags.is_public));
+          ret .Some(
+            _declaration_vis(
+            name,
+            .Function,
+            render_function(f),
+            n.pos,
+            n.flags.is_public
+            )
+          );
         }
       }
       .Compound(c) -> {
@@ -796,8 +810,16 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           StringBuilder b = string_builder_init(32);
           b.append("compound ");
           b.append(c.name);
-          _append_type_params(&b, c.has_type_params, &c.type_params, &c.type_param_constraints, &c.type_param_defaults);
-          ret .Some(_declaration_vis(name, .Compound, b.build(), n.pos, n.flags.is_public));
+          _append_type_params(
+            &b,
+            c.has_type_params,
+            &c.type_params,
+            &c.type_param_constraints,
+            &c.type_param_defaults
+          );
+          ret .Some(
+            _declaration_vis(name, .Compound, b.build(), n.pos, n.flags.is_public)
+          );
         }
       }
       .Enum(e) -> {
@@ -805,8 +827,16 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           StringBuilder b = string_builder_init(32);
           b.append("enum ");
           b.append(e.name);
-          _append_type_params(&b, e.has_type_params, &e.type_params, nil, &e.type_param_defaults);
-          ret .Some(_declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public));
+          _append_type_params(
+            &b,
+            e.has_type_params,
+            &e.type_params,
+            nil,
+            &e.type_param_defaults
+          );
+          ret .Some(
+            _declaration_vis(name, .Enum, b.build(), n.pos, n.flags.is_public)
+          );
         }
       }
       .Shape(q) -> {
@@ -814,8 +844,16 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           StringBuilder b = string_builder_init(32);
           b.append("shape ");
           b.append(q.name);
-          _append_type_params(&b, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
-          ret .Some(_declaration_vis(name, .Shape, b.build(), n.pos, n.flags.is_public));
+          _append_type_params(
+            &b,
+            q.has_type_params,
+            &q.type_params,
+            nil,
+            &q.type_param_defaults
+          );
+          ret .Some(
+            _declaration_vis(name, .Shape, b.build(), n.pos, n.flags.is_public)
+          );
         }
       }
       .Variable(v) -> {
@@ -842,7 +880,9 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
             }
             free(literal);
           }
-          ret .Some(_declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public));
+          ret .Some(
+            _declaration_vis(name, .Global, b.build(), n.pos, n.flags.is_public)
+          );
         }
       }
       .TypeAlias(a) -> {
@@ -850,7 +890,13 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           StringBuilder b = string_builder_init(32);
           b.append("als ");
           b.append(a.name);
-          _append_type_params(&b, a.has_type_params, &a.type_params, nil, &a.type_param_defaults);
+          _append_type_params(
+            &b,
+            a.has_type_params,
+            &a.type_params,
+            nil,
+            &a.type_param_defaults
+          );
           b.append(" = ");
           if a.is_bound_list {
             num bi = 0;
@@ -871,7 +917,15 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
               b.append(resolved);
             }
           }
-          ret .Some(_declaration_vis(name, .TypeAlias, b.build(), n.pos, n.flags.is_public));
+          ret .Some(
+            _declaration_vis(
+            name,
+            .TypeAlias,
+            b.build(),
+            n.pos,
+            n.flags.is_public
+            )
+          );
         }
       }
       _ -> {}
@@ -888,7 +942,12 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
 // `lookup_method`'s own `concrete_args` handling for the same reason:
 // `box.v` on a `Box<AsyncCounter>` should read `AsyncCounter`, not the
 // bare `T` every field of every instantiation would otherwise share.
-pub fun lookup_field(Vec<Node>* program, str type_name, str field, Vec<str> concrete_args) Option<Declaration> {
+pub fun lookup_field(
+  Vec<Node>* program,
+  str type_name,
+  str field,
+  Vec<str> concrete_args
+) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -917,7 +976,11 @@ pub fun lookup_field(Vec<Node>* program, str type_name, str field, Vec<str> conc
           }
           str signature = b.build();
           if c.has_type_params {
-            Vec<str> filled_args = fill_default_args(&c.type_params, &c.type_param_defaults, concrete_args);
+            Vec<str> filled_args = fill_default_args(
+              &c.type_params,
+              &c.type_param_defaults,
+              concrete_args
+            );
             signature = specialize_signature(signature, c.type_params, filled_args);
             free_filled_args(filled_args, concrete_args.len);
           }
@@ -1049,7 +1112,15 @@ pub fun compound_literal_field_context(
       ret false;
     }
     Token last = operand.unwrap();
-    let receiver = chain_ending_receiver(tokens, last, token_is_symbol(last, ')'), program, file, line, 0);
+    let receiver = chain_ending_receiver(
+      tokens,
+      last,
+      token_is_symbol(last, ')'),
+      program,
+      file,
+      line,
+      0
+    );
     if equals(receiver.type_name, "") {
       ret false;
     }
@@ -1072,7 +1143,12 @@ pub fun compound_literal_field_context(
 // an `Option<num>` receiver), when known; pass an empty `Vec` when
 // they aren't (or the receiver isn't generic at all) to get the
 // signature exactly as declared, template params included.
-pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<str> concrete_args) Option<Declaration> {
+pub fun lookup_method(
+  Vec<Node>* program,
+  str type_name,
+  str method_name,
+  Vec<str> concrete_args
+) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1094,7 +1170,11 @@ pub fun lookup_method(Vec<Node>* program, str type_name, str method_name, Vec<st
               if equals(bare_method_name(f.name), method_name) {
                 str signature = render_function_named(f, method_name, false);
                 if im.has_type_params {
-                  Vec<str> filled_args = fill_default_args_for_type(program, type_name, concrete_args);
+                  Vec<str> filled_args = fill_default_args_for_type(
+                    program,
+                    type_name,
+                    concrete_args
+                  );
                   signature = specialize_signature(signature, im.type_params, filled_args);
                   free_filled_args(filled_args, concrete_args.len);
                 }
@@ -1145,7 +1225,12 @@ pub fun shape_method_declaration(Vec<Node>* program, str shape_name, str method_
           ShapeMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
-            Declaration d = _declaration(method_name, .Function, _render_shape_method(ms), ms.pos);
+            Declaration d = _declaration(
+              method_name,
+              .Function,
+              _render_shape_method(ms),
+              ms.pos
+            );
             d.container = shape_name;
             ret .Some(d);
           }
@@ -1196,7 +1281,11 @@ fun _render_shape_method(ShapeMethodSig m) str {
 // every argument, comes back as it was, and so does one a default cannot
 // complete. The added entries are fresh strings, so a caller that wants
 // them freed drops everything past `concrete_args.len`.
-pub fun fill_default_args(Vec<str>* type_params, Vec<DataType*>* defaults, Vec<str> concrete_args) Vec<str> {
+pub fun fill_default_args(
+  Vec<str>* type_params,
+  Vec<DataType*>* defaults,
+  Vec<str> concrete_args
+) Vec<str> {
   if concrete_args.len == 0 || concrete_args.len >= type_params.len {
     ret concrete_args;
   }
@@ -1258,7 +1347,11 @@ pub fun fill_default_args(Vec<str>* type_params, Vec<DataType*>* defaults, Vec<s
 // replaced by what was written for them. Every entry is a fresh clone, so
 // the caller frees them all. `written` alone (cloned) when a default is
 // missing for some omitted parameter.
-fun _complete_generic_args(Vec<str>* type_params, Vec<DataType*>* defaults, Vec<DataType*>* written) Vec<DataType*> {
+fun _complete_generic_args(
+  Vec<str>* type_params,
+  Vec<DataType*>* defaults,
+  Vec<DataType*>* written
+) Vec<DataType*> {
   Vec<DataType*> out;
   out.init(type_params.len);
   num i = 0;
@@ -1312,7 +1405,11 @@ fun _free_completed_args(Vec<DataType*> args, flag completed) {
 // compound in `program`), for a caller that only has the type's name: an
 // impl block's own parameters carry no defaults, the type it implements
 // does. `concrete_args` comes back unchanged when the type has none.
-pub fun fill_default_args_for_type(Vec<Node>* program, str type_name, Vec<str> concrete_args) Vec<str> {
+pub fun fill_default_args_for_type(
+  Vec<Node>* program,
+  str type_name,
+  Vec<str> concrete_args
+) Vec<str> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1533,7 +1630,13 @@ pub fun _param_type_from_piece(str piece) str {
 // generic args when `tokens` is available to re-run the same
 // best-effort inference `type_name_of_local` already falls back to
 // for the bare type name.
-pub fun local_generic_args(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Vec<str> {
+pub fun local_generic_args(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  str name,
+  str file,
+  num line
+) Vec<str> {
   let found = _lookup_local(tokens, program, name, file, line);
   if found.is_none() {
     Vec<str> empty;
@@ -1551,7 +1654,14 @@ pub fun local_generic_args(Vec<Token>* tokens, Vec<Node>* program, str name, str
     num name_idx = index_of_token(tokens, name_tok.unwrap());
     Vec<str> inferred_args;
     inferred_args.init(0);
-    infer_let_local_type_with_args(tokens, name_idx, program, file, d.pos.line, &inferred_args);
+    infer_let_local_type_with_args(
+      tokens,
+      name_idx,
+      program,
+      file,
+      d.pos.line,
+      &inferred_args
+    );
     ret inferred_args;
   }
   ret generic_args_of_detail(d.detail);
@@ -1831,7 +1941,13 @@ pub fun detail_is_unresolved_let_infer(str detail) flag {
 // `__let_infer__` sentinel forever, only resolves to its real type
 // when `tokens` is available to re-run the same best-effort inference
 // `inlay_hints.fn` uses to display it.
-pub fun type_name_of_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) str {
+pub fun type_name_of_local(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  str name,
+  str file,
+  num line
+) str {
   let found = _lookup_local(tokens, program, name, file, line);
   if found.is_none() {
     ret "";
@@ -2191,6 +2307,123 @@ pub fun local_fn_signature_from_tokens(Vec<Token>* tokens, str text, str callee)
   ret "";
 }
 
+// `local_fn_signature_from_tokens`'s own sibling for a method,
+// written directly as `[pub] name(args) RType` inside `impl TypeName
+// { ... }` (no leading `fun` the way a top-level function gets, so
+// the name match alone has to be scoped to the impl's own top level -
+// not any nested call or method body - by tracking brace depth).
+// `member_declaration_from_tokens` needs a real parse to find a
+// *local* method (an import gets one from its own, separately and
+// cleanly re-parsed source, which is why only the local lookup ever
+// needed this) - exactly the situation signature help hits while a
+// call elsewhere in the same document is still being typed, unclosed.
+// Renders with `self` injected as the first parameter, the same
+// convention a real parsed `Declaration.detail` already uses for a
+// method.
+pub fun local_method_signature_from_tokens(
+  Vec<Token>* tokens,
+  str text,
+  str type_name,
+  str method_name
+) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_keyword(t, "impl") {
+      let name_tok = token_after(tokens, i + 1);
+      if name_tok.is_some() && name_tok.unwrap().type == .Identifier &&
+        equals(token_word(name_tok.unwrap()), type_name) {
+        // Skip past any generic params/shape clause to the impl
+        // block's own opening brace.
+        num j = index_of_token(tokens, name_tok.unwrap()) + 1;
+        for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+          j = j + 1;
+        }
+        if j < tokens.len {
+          num depth = 1;
+          num k = j + 1;
+          for k < tokens.len && depth > 0 {
+            Token kt = tokens.get(k);
+            if token_is_symbol(kt, '{') {
+              depth = depth + 1;
+              k = k + 1;
+              continue;
+            }
+            if token_is_symbol(kt, '}') {
+              depth = depth - 1;
+              k = k + 1;
+              continue;
+            }
+            if depth == 1 && kt.type == .Identifier &&
+            equals(token_word(kt), method_name) {
+              let maybe_lparen = token_after(tokens, k + 1);
+              if maybe_lparen.is_some() &&
+              token_is_operator(maybe_lparen.unwrap(), "(") {
+                Token lp = maybe_lparen.unwrap();
+                num lparen_idx = index_of_token(tokens, lp);
+                num pdepth = 1;
+                num m = lparen_idx + 1;
+                for m < tokens.len && pdepth > 0 {
+                  if token_is_operator(tokens.get(m), "(") {
+                    pdepth = pdepth + 1;
+                  } elif token_is_symbol(tokens.get(m), ')') {
+                    pdepth = pdepth - 1;
+                  }
+                  m = m + 1;
+                }
+                if pdepth == 0 {
+                  Token rp = tokens.get(m - 1);
+                  num start = byte_offset_of_pos(text, lp.pos.line, lp.pos.start_col);
+                  num end = byte_offset_of_pos(text, rp.pos.line, rp.pos.end_col);
+                  if start >= 0 && end >= 0 && end >= start {
+                    str params_text = substr(text, start, end - start);
+                    str rest = substr(params_text, 1, len(params_text) - 1);
+                    free(params_text);
+                    str new_params;
+                    if equals(rest, ")") {
+                      new_params = format("({str}* self)", type_name);
+                      free(rest);
+                    } else {
+                      new_params = format("({str}* self, {str}", type_name, rest);
+                      free(rest);
+                    }
+                    num k2 = m;
+                    for k2 < tokens.len &&
+                      (tokens.get(k2).type == .NewLine || tokens.get(k2).type == .Comment) {
+                      k2 = k2 + 1;
+                    }
+                    if k2 >= tokens.len {
+                      free(new_params);
+                      ret "";
+                    }
+                    Token rt = tokens.get(k2);
+                    if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                      str out0 = format("{str}{str}", method_name, new_params);
+                      free(new_params);
+                      ret out0;
+                    }
+                    str out = format(
+                      "{str}{str} {str}",
+                      method_name,
+                      new_params,
+                      token_word(rt)
+                    );
+                    free(new_params);
+                    ret out;
+                  }
+                }
+              }
+            }
+            k = k + 1;
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
 // A call-inferred local's own type (`let l = logger_init(...)`),
 // resolved without a real parse of `doc_path`: finds which function
 // was called (`let_call_callee_from_tokens`), then that function's
@@ -2202,7 +2435,12 @@ pub fun local_fn_signature_from_tokens(Vec<Token>* tokens, str text, str callee)
 // done, same as any other `str`-returning function that actually
 // builds its own result rather than pointing into something that
 // already exists.
-pub fun let_call_return_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache* cache, str name) str {
+pub fun let_call_return_type_from_tokens(
+  Vec<Token>* tokens,
+  str doc_path,
+  AnalysisCache* cache,
+  str name
+) str {
   str callee = let_call_callee_from_tokens(tokens, name);
   if equals(callee, "") {
     ret "";
@@ -2230,7 +2468,12 @@ pub fun let_call_return_type_from_tokens(Vec<Token>* tokens, str doc_path, Analy
     // every degraded-parse fallback resolution, and a whole file's own
     // text leaking on every one of those calls was adding up to real
     // memory pressure.
-    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    let merged = parse_program_cached(
+      path,
+      text,
+      &cache.imports,
+      cache.imports.parallel_preload
+    );
     if merged.is_err() {
       free(merged.unwrap_err());
       free(text);
@@ -2314,7 +2557,12 @@ pub fun member_declaration_from_tokens(
     // cached internally, so it is this loop's own to free - `field`/
     // `method` alias into `target.nodes`' own AST (retained by the
     // caching layer, never freed here), never into `text` itself.
-    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    let merged = parse_program_cached(
+      path,
+      text,
+      &cache.imports,
+      cache.imports.parallel_preload
+    );
     if merged.is_err() {
       free(merged.unwrap_err());
       free(text);
@@ -2414,6 +2662,53 @@ fun _matching_lparen(Vec<Token>* tokens, num rparen_idx) Option<num> {
     i = i - 1;
   }
   ret .None;
+}
+
+// The identifier `member_idx`'s own receiver segment resolves to,
+// token-only: `member_idx` is a member access's own name token
+// (always preceded by a `.`, the caller's job to confirm), and its
+// receiver is either a plain identifier right before that dot
+// (`l.member`, the identifier itself), or - the shape neither
+// `_receiver_of`/`_receiver_before` resolves, since neither is a
+// plain identifier - a chained call's own closing `)` (`l.debug_r
+// ("msg").member`), walked back to the `(` that opens it and then to
+// the identifier naming that call (`debug_r`). `chain_tail_type_
+// from_tokens` (completion.fn) takes it from there, recursing on
+// that identifier's own preceding dot for a chain of any length.
+// -1 when the receiver segment is anything else this tier doesn't
+// chase (an index expression, a `?`/`!`-propagated operand, a
+// parenthesized group) - the same ceiling every other fallback here
+// already accepts.
+pub fun chain_receiver_identifier_index_from_tokens(Vec<Token>* tokens, num member_idx) num {
+  let dot = token_before(tokens, member_idx);
+  if dot.is_none() || !token_is_operator(dot.unwrap(), ".") {
+    ret -1;
+  }
+  num dot_idx = index_of_token(tokens, dot.unwrap());
+  let before_dot = token_before(tokens, dot_idx);
+  if before_dot.is_none() {
+    ret -1;
+  }
+  Token bd = before_dot.unwrap();
+  fit bd.type {
+    .Identifier -> { ret index_of_token(tokens, bd); }
+    _ -> {}
+  }
+  if !token_is_symbol(bd, ')') {
+    ret -1;
+  }
+  let lparen_idx = _matching_lparen(tokens, index_of_token(tokens, bd));
+  if lparen_idx.is_none() {
+    ret -1;
+  }
+  let callee = token_before(tokens, lparen_idx.unwrap());
+  if callee.is_none() {
+    ret -1;
+  }
+  fit callee.unwrap().type {
+    .Identifier -> { ret index_of_token(tokens, callee.unwrap()); }
+    _ -> { ret -1; }
+  }
 }
 
 // When `close_paren` is `?!`'s own error-argument closing paren
@@ -2539,7 +2834,10 @@ fun _walk_forward_chain(
       if m.is_none() {
         ret "";
       }
-      let rparen = matching_rparen(tokens, index_of_token(tokens, after_member.unwrap()));
+      let rparen = matching_rparen(
+        tokens,
+        index_of_token(tokens, after_member.unwrap())
+      );
       if rparen.is_none() {
         ret "";
       }
@@ -2780,7 +3078,10 @@ fun _call_return_type(
   for fi < resolved.len {
     if equals(resolved.get(fi), "") {
       free(resolved.get(fi));
-      resolved.set(fi, substr(type_params.get(fi), 0, len(type_params.get(fi))));
+      resolved.set(
+        fi,
+        substr(type_params.get(fi), 0, len(type_params.get(fi)))
+      );
     }
     fi = fi + 1;
   }
@@ -2994,7 +3295,13 @@ pub fun specialized_call_signature(
 // The type at the end of a dotted chain leading up to (but not
 // including) `t`: for `a.b.c`, `c`'s own receiver type is whatever
 // `b` resolves to on `a`'s declared type, not just `a`'s own type.
-pub fun chain_receiver_type(Vec<Token>* tokens, Token t, Vec<Node>* program, str file, num line) str {
+pub fun chain_receiver_type(
+  Vec<Token>* tokens,
+  Token t,
+  Vec<Node>* program,
+  str file,
+  num line
+) str {
   ret chain_receiver(tokens, t, program, file, line, 0).type_name;
 }
 
@@ -3270,7 +3577,12 @@ pub fun chain_receiver(
     if !variant_seg.is_call {
       Vec<str> no_args;
       no_args.init(0);
-      let variant_decl = enum_variant_declaration(program, first.name, variant_seg.name, no_args);
+      let variant_decl = enum_variant_declaration(
+        program,
+        first.name,
+        variant_seg.name,
+        no_args
+      );
       if variant_decl.is_some() {
         current_type = substr(first.name, 0, len(first.name));
         current_args.init(0);
@@ -3384,7 +3696,9 @@ pub fun chain_ending_receiver(
         if starts_with(local_fn_type, "fun(") {
           num close = _signature_params_close(local_fn_type);
           if close >= 0 {
-            str rtype_text = trim(substr(local_fn_type, close + 1, len(local_fn_type) - close - 1));
+            str rtype_text = trim(
+              substr(local_fn_type, close + 1, len(local_fn_type) - close - 1)
+            );
             if !equals(rtype_text, "") && !equals(rtype_text, "void") {
               empty.type_name = bare_type_expr(rtype_text);
               empty.full_type_name = rtype_text;
@@ -3746,7 +4060,15 @@ fun _infer_type(
     if then_tok_opt.is_none() {
       ret base_type;
     }
-    ret _infer_type(tokens, then_tok_opt.unwrap(), program, file, line, out_args, depth + 1);
+    ret _infer_type(
+      tokens,
+      then_tok_opt.unwrap(),
+      program,
+      file,
+      line,
+      out_args,
+      depth + 1
+    );
   }
   // `x?`/`x!`: the postfix mirror of the `await` prefix case above -
   // unwraps to the propagated value's own type (Option<T>/Result<T,E>'s
@@ -3768,7 +4090,10 @@ fun _infer_type(
     if token_is_operator(op_tok, "?!") {
       let arg_open = token_after(tokens, end_idx + 1);
       if arg_open.is_some() && token_is_operator(arg_open.unwrap(), "(") {
-        let arg_close = matching_rparen(tokens, index_of_token(tokens, arg_open.unwrap()));
+        let arg_close = matching_rparen(
+          tokens,
+          index_of_token(tokens, arg_open.unwrap())
+        );
         if arg_close.is_some() {
           end_idx = arg_close.unwrap();
         }
@@ -3804,7 +4129,15 @@ fun _infer_type(
   // (`inlay_hints.fn`'s own `type_part` is never freed either) rather
   // than introducing a stricter one this function alone can't
   // actually guarantee.
-  str rhs_type = _infer_type(tokens, rhs_tok_opt.unwrap(), program, file, line, nil, depth + 1);
+  str rhs_type = _infer_type(
+    tokens,
+    rhs_tok_opt.unwrap(),
+    program,
+    file,
+    line,
+    nil,
+    depth + 1
+  );
   if equals(rhs_type, "") {
     ret base_type;
   }
@@ -4024,7 +4357,15 @@ fun _infer_type_primary(
         if token_is_symbol(first_opt.unwrap(), ']') {
           ret "";
         }
-        str elem_type = _infer_type(tokens, first_opt.unwrap(), program, file, line, nil, depth + 1);
+        str elem_type = _infer_type(
+          tokens,
+          first_opt.unwrap(),
+          program,
+          file,
+          line,
+          nil,
+          depth + 1
+        );
         if equals(elem_type, "") {
           ret "";
         }
@@ -4072,7 +4413,10 @@ fun _infer_type_primary(
       // misinterpret `name` as a local read.
       let dot_after_name = token_after(tokens, idx + 1);
       if dot_after_name.is_some() && token_is_operator(dot_after_name.unwrap(), ".") {
-        let variant_tok_opt = token_after(tokens, index_of_token(tokens, dot_after_name.unwrap()) + 1);
+        let variant_tok_opt = token_after(
+          tokens,
+          index_of_token(tokens, dot_after_name.unwrap()) + 1
+        );
         if variant_tok_opt.is_some() {
           fit variant_tok_opt.unwrap().type {
             .Identifier -> {
@@ -4080,7 +4424,12 @@ fun _infer_type_primary(
               num variant_idx = index_of_token(tokens, variant_tok_opt.unwrap());
               Vec<str> no_args;
               no_args.init(0);
-              let variant_decl = enum_variant_declaration(program, name, variant_name, no_args);
+              let variant_decl = enum_variant_declaration(
+                program,
+                name,
+                variant_name,
+                no_args
+              );
               no_args.free();
               if variant_decl.is_some() {
                 num end_idx = variant_idx;
@@ -4141,7 +4490,10 @@ fun _infer_type_primary(
         let after_opt = token_after(tokens, cursor_idx + 1);
         if after_opt.is_some() && token_is_operator(after_opt.unwrap(), "(") {
           last_is_call = true;
-          let rparen = matching_rparen(tokens, index_of_token(tokens, after_opt.unwrap()));
+          let rparen = matching_rparen(
+            tokens,
+            index_of_token(tokens, after_opt.unwrap())
+          );
           if rparen.is_some() {
             cursor_idx = rparen.unwrap();
           }
@@ -4232,7 +4584,10 @@ fun _infer_type_primary(
           _free_str_vec_deep(&literal_args);
           ret "";
         }
-        let close_opt = matching_rbrace(tokens, index_of_token(tokens, brace_opt.unwrap()));
+        let close_opt = matching_rbrace(
+          tokens,
+          index_of_token(tokens, brace_opt.unwrap())
+        );
         if close_opt.is_none() {
           _free_str_vec_deep(&literal_args);
           ret "";
@@ -4279,7 +4634,10 @@ fun _infer_type_primary(
             if eq_opt.is_none() || !token_is_operator(eq_opt.unwrap(), "=") {
               continue;
             }
-            let val_opt = token_after(tokens, index_of_token(tokens, eq_opt.unwrap()) + 1);
+            let val_opt = token_after(
+              tokens,
+              index_of_token(tokens, eq_opt.unwrap()) + 1
+            );
             if val_opt.is_none() {
               continue;
             }
@@ -4332,7 +4690,10 @@ fun _infer_type_primary(
           for cfi < cresolved.len {
             if equals(cresolved.get(cfi), "") {
               free(cresolved.get(cfi));
-              cresolved.set(cfi, substr(ctype_params.get(cfi), 0, len(ctype_params.get(cfi))));
+              cresolved.set(
+                cfi,
+                substr(ctype_params.get(cfi), 0, len(ctype_params.get(cfi)))
+              );
             }
             cfi = cfi + 1;
           }
@@ -4407,7 +4768,11 @@ fun _infer_type_primary(
         ret existing_type;
       }
       free(existing_type);
-      let src_name_tok = token_at(tokens, existing_decl.pos.line - 1, existing_decl.pos.col - 1);
+      let src_name_tok = token_at(
+        tokens,
+        existing_decl.pos.line - 1,
+        existing_decl.pos.col - 1
+      );
       if src_name_tok.is_none() {
         ret "";
       }
@@ -4466,7 +4831,13 @@ fun _full_declared_type(Declaration d) str {
 }
 
 // A parameter or local of the function containing `line` in `file`.
-fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+fun _lookup_local(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  str name,
+  str file,
+  num line
+) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -4511,7 +4882,14 @@ fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, nu
         if found.is_some() {
           ret found;
         }
-        let found_binding = _lookup_fit_binding(tokens, td.body, name, program, file, line);
+        let found_binding = _lookup_fit_binding(
+          tokens,
+          td.body,
+          name,
+          program,
+          file,
+          line
+        );
         if found_binding.is_some() {
           ret found_binding;
         }
@@ -4528,7 +4906,14 @@ fun _lookup_local(Vec<Token>* tokens, Vec<Node>* program, str name, str file, nu
         if found.is_some() {
           ret found;
         }
-        let found_binding = _lookup_fit_binding(tokens, fz.body, name, program, file, line);
+        let found_binding = _lookup_fit_binding(
+          tokens,
+          fz.body,
+          name,
+          program,
+          file,
+          line
+        );
         if found_binding.is_some() {
           ret found_binding;
         }
@@ -4601,7 +4986,14 @@ fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
     fit fz.data_param.kind {
       .Variable(v) -> {
         if equals(v.name, name) {
-          ret .Some(_declaration(name, .Parameter, _render_param(fz.data_param), fz.data_param.pos));
+          ret .Some(
+            _declaration(
+            name,
+            .Parameter,
+            _render_param(fz.data_param),
+            fz.data_param.pos
+            )
+          );
         }
       }
       _ -> {}
@@ -4611,7 +5003,14 @@ fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
     fit fz.len_param.kind {
       .Variable(v) -> {
         if equals(v.name, name) {
-          ret .Some(_declaration(name, .Parameter, _render_param(fz.len_param), fz.len_param.pos));
+          ret .Some(
+            _declaration(
+            name,
+            .Parameter,
+            _render_param(fz.len_param),
+            fz.len_param.pos
+            )
+          );
         }
       }
       _ -> {}
@@ -5095,7 +5494,14 @@ fun _lookup_in_body(
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        let found = _lookup_in_body(tokens, block.statements.get(i), name, program, file, line);
+        let found = _lookup_in_body(
+          tokens,
+          block.statements.get(i),
+          name,
+          program,
+          file,
+          line
+        );
         if found.is_some() {
           ret found;
         }
@@ -5153,13 +5559,26 @@ fun _lookup_in_body(
             if is_map {
               index_type = map_key;
             }
-            ret .Some(_declaration(name, .Local, format("{str} {str}", index_type, name), body.pos));
+            ret .Some(
+              _declaration(
+              name,
+              .Local,
+              format("{str} {str}", index_type, name),
+              body.pos
+              )
+            );
           }
           if fi.item_is_destructure {
             num fdi = 0;
             for fdi < fi.item_destructure_names.len {
               if equals(fi.item_destructure_names.get(fdi), name) {
-                str tup_item_type = _for_iter_item_type(tokens, fi.iterable, program, file, line);
+                str tup_item_type = _for_iter_item_type(
+                  tokens,
+                  fi.iterable,
+                  program,
+                  file,
+                  line
+                );
                 str fd_detail = name;
                 if starts_with(tup_item_type, "(") {
                   Vec<str> fd_members = split_signature_params(tup_item_type);
@@ -5446,7 +5865,9 @@ fun _propagated_operand_type(
               if !equals(method_name2, "") {
                 let m2 = _method_call_target(tokens, program, callee, file, line);
                 if m2.is_some() {
-                  ret _first_generic_arg_of_detail(_return_type_text(m2.unwrap().detail));
+                  ret _first_generic_arg_of_detail(
+                    _return_type_text(m2.unwrap().detail)
+                  );
                 }
               }
             }
@@ -5465,7 +5886,13 @@ fun _propagated_operand_type(
 // field access's declared field type read against its base's args
 // (`self.map` inside `impl Set<T>` is `Map<T, flag>`). Empty for
 // anything else.
-fun _expr_generic_args(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file, num line) Vec<str> {
+fun _expr_generic_args(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* expr,
+  str file,
+  num line
+) Vec<str> {
   Vec<str> empty;
   empty.init(0);
   if expr == nil {
@@ -5542,7 +5969,13 @@ fun _method_call_target(
 // one dot long), narrower than `chain_ending_type`'s own token-based
 // walk on purpose, since this operates on the already-parsed AST a fit
 // statement carries, not a token stream.
-fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file, num line) str {
+fun _expr_type_name(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* expr,
+  str file,
+  num line
+) str {
   if expr == nil {
     ret "";
   }
@@ -5586,7 +6019,13 @@ fun _expr_type_name(Vec<Token>* tokens, Vec<Node>* program, Node* expr, str file
 // for `fit <- ch { ... }` (desugared at parse time to `ch.recv()`, a
 // call whose callee is `ch`'s own `.recv` method access), the
 // channel's element type. Anything else yields "".
-pub fun fit_subject_type(Vec<Token>* tokens, Vec<Node>* program, Node* subject, str file, num line) str {
+pub fun fit_subject_type(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  Node* subject,
+  str file,
+  num line
+) str {
   if subject == nil {
     ret "";
   }
@@ -5901,6 +6340,26 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
         FitBranch br = f.branches.get(bi);
         bi = bi + 1;
         num reach = _last_line(br.body);
+        // A container statement's own `pos` only covers its leading
+        // token, same as the fit itself - but a branch's own `{ }`
+        // body never gets one at all (`create_node` sets none for
+        // any `Body` node), so a truly empty arm (`.Variant(v) -> {
+        // }`, the ordinary shape while a reader is just starting to
+        // fill one in) has nothing `_last_line` can read and reports
+        // 0, understating how far the fit statement actually
+        // reaches. The branch's own condition is a real expression,
+        // which does get a position, and sits on the same line as an
+        // empty body always would - a reliable floor for this one
+        // branch's own reach when the body itself has none.
+        if br.has_condition && br.condition != nil && br.condition.has_pos {
+          num cond_reach = br.condition.pos.end_line;
+          if cond_reach == 0 {
+            cond_reach = br.condition.pos.line;
+          }
+          if cond_reach > reach {
+            reach = cond_reach;
+          }
+        }
         if reach > last {
           last = reach;
         }
@@ -6031,7 +6490,11 @@ pub fun enum_variant_declaration(
           // value's own declared type. A length mismatch (no concrete
           // args known) leaves it as declared, template params and
           // all, matching every existing caller's own behavior.
-          Vec<str> filled_args = fill_default_args(&e.type_params, &e.type_param_defaults, concrete_args);
+          Vec<str> filled_args = fill_default_args(
+            &e.type_params,
+            &e.type_param_defaults,
+            concrete_args
+          );
           str detail = specialize_signature(b.build(), e.type_params, filled_args);
           free_filled_args(filled_args, concrete_args.len);
           detail = format("{str} = {num}", detail, _variant_ordinal(e, v - 1));
@@ -6076,7 +6539,12 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
           StringBuilder b = string_builder_init(24);
           b.append(variant.name);
           flag args_completed = false;
-          Vec<DataType*> full_args = _args_with_defaults(&e.type_params, &e.type_param_defaults, &dt.generic_args, &args_completed);
+          Vec<DataType*> full_args = _args_with_defaults(
+            &e.type_params,
+            &e.type_param_defaults,
+            &dt.generic_args,
+            &args_completed
+          );
           if variant.has_payload && variant.payload.len > 0 {
             b.append("(");
             num p = 0;
@@ -6098,8 +6566,23 @@ pub fun enum_variant_declaration_typed(Vec<Node>* program, DataType* dt, str var
             b.append(")");
           }
           _free_completed_args(full_args, args_completed);
-          str typed_detail = format("{str} = {num}", b.build(), _variant_ordinal(e, v - 1));
-          Declaration d = _declaration(variant_name, .Variant, typed_detail, n.pos);
+          str typed_detail = format(
+            "{str} = {num}",
+            b.build(),
+            _variant_ordinal(e, v - 1)
+          );
+          // The variant's own position, same fallback-to-the-enum's-
+          // own `enum_variant_declaration` (its untyped sibling) already
+          // uses: without it, a goto-definition on a bare `.Variant`
+          // shorthand used as a `ret` value (the one shape that reaches
+          // this function rather than its sibling) always landed on the
+          // enum's own declaration line, never the variant actually
+          // clicked.
+          Pos variant_pos = n.pos;
+          if variant.has_pos {
+            variant_pos = variant.pos;
+          }
+          Declaration d = _declaration(variant_name, .Variant, typed_detail, variant_pos);
           d.container = e.name;
           ret .Some(d);
         }
@@ -6138,7 +6621,11 @@ fun _variant_ordinal(EnumDeclNode e, num index) num {
 // of `concrete_args` when `payload` is written as a bare type param
 // name found in `type_params` (positional match). Renders as-is
 // otherwise.
-fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataType*> concrete_args) str {
+fun _substituted_payload_type(
+  DataType* payload,
+  Vec<str> type_params,
+  Vec<DataType*> concrete_args
+) str {
   if payload == nil {
     ret "";
   }
@@ -6158,7 +6645,13 @@ fun _substituted_payload_type(DataType* payload, Vec<str> type_params, Vec<DataT
 // pattern's own qualified `Enum.VariantName`) written at `line` in
 // `file`, resolved against the enclosing `fit` statement's subject
 // type.
-pub fun lookup_fit_variant(Vec<Token>* tokens, Vec<Node>* program, str name, str file, num line) Option<Declaration> {
+pub fun lookup_fit_variant(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  str name,
+  str file,
+  num line
+) Option<Declaration> {
   fit covering_fit(program, file, line)?.kind {
     .StatementFit(f) -> {
       str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
@@ -6236,7 +6729,11 @@ pub fun variant_payload_type(
           // enum_variant_declaration already does for the whole
           // variant's own rendered signature. A length mismatch (no
           // concrete args known) leaves it as declared.
-          Vec<str> filled_args = fill_default_args(&e.type_params, &e.type_param_defaults, concrete_args);
+          Vec<str> filled_args = fill_default_args(
+            &e.type_params,
+            &e.type_param_defaults,
+            concrete_args
+          );
           str substituted = specialize_signature(declared, e.type_params, filled_args);
           free_filled_args(filled_args, concrete_args.len);
           if substituted != declared {
@@ -6261,7 +6758,12 @@ pub fun variant_payload_type(
 // return value): `.SomeVariant`'s own expected type is `Some`'s payload
 // at position 0, substituted against whatever the enclosing return type
 // instantiated `Option`'s own type param as.
-pub fun variant_payload_type_typed(Vec<Node>* program, DataType* dt, str variant_name, num idx) Option<str> {
+pub fun variant_payload_type_typed(
+  Vec<Node>* program,
+  DataType* dt,
+  str variant_name,
+  num idx
+) Option<str> {
   if dt == nil {
     ret .None;
   }
@@ -6287,8 +6789,17 @@ pub fun variant_payload_type_typed(Vec<Node>* program, DataType* dt, str variant
           // A reference written without its defaulted arguments (`Res<num>`)
           // reads as though they were there.
           flag completed = false;
-          Vec<DataType*> full_args = _args_with_defaults(&e.type_params, &e.type_param_defaults, &dt.generic_args, &completed);
-          str subst = _substituted_payload_type(variant.payload.get(idx), e.type_params, full_args);
+          Vec<DataType*> full_args = _args_with_defaults(
+            &e.type_params,
+            &e.type_param_defaults,
+            &dt.generic_args,
+            &completed
+          );
+          str subst = _substituted_payload_type(
+            variant.payload.get(idx),
+            e.type_params,
+            full_args
+          );
           _free_completed_args(full_args, completed);
           ret .Some(subst);
         }
@@ -6466,7 +6977,14 @@ fun _lookup_fit_binding(
     .Body(block) -> {
       num i = 0;
       for i < block.statements.len {
-        let found = _lookup_fit_binding(tokens, block.statements.get(i), name, program, file, line);
+        let found = _lookup_fit_binding(
+          tokens,
+          block.statements.get(i),
+          name,
+          program,
+          file,
+          line
+        );
         if found.is_some() {
           ret found;
         }
@@ -6560,7 +7078,13 @@ fun _lookup_fit_binding(
             }
             str enum_name = fit_subject_type(tokens, program, f.exp, file, line);
             if !equals(enum_name, "") {
-              Vec<str> concrete_args = fit_subject_generic_args(tokens, program, f.exp, file, line);
+              Vec<str> concrete_args = fit_subject_generic_args(
+                tokens,
+                program,
+                f.exp,
+                file,
+                line
+              );
               let payload_type = variant_payload_type(
                 program,
                 enum_name,
@@ -6658,21 +7182,37 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
     fit n.kind {
       .Function(f) -> {
         if f.has_name && !equals(f.name, "") {
-          out.push(_declaration_vis(
+          out.push(
+            _declaration_vis(
             f.name,
             .Function,
             render_function(f),
             n.pos,
             n.flags.is_public
-          ));
+            )
+          );
         }
       }
       .Compound(c) -> {
         StringBuilder cb = string_builder_init(32);
         cb.append("compound ");
         cb.append(c.name);
-        _append_type_params(&cb, c.has_type_params, &c.type_params, &c.type_param_constraints, &c.type_param_defaults);
-        out.push(_declaration_vis(c.name, .Compound, cb.build(), n.pos, n.flags.is_public));
+        _append_type_params(
+          &cb,
+          c.has_type_params,
+          &c.type_params,
+          &c.type_param_constraints,
+          &c.type_param_defaults
+        );
+        out.push(
+          _declaration_vis(
+          c.name,
+          .Compound,
+          cb.build(),
+          n.pos,
+          n.flags.is_public
+          )
+        );
         num f = 0;
         for f < c.fields.len {
           CompoundField cf = c.fields.get(f);
@@ -6687,7 +7227,13 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
           if cf.has_pos {
             field_pos = cf.pos;
           }
-          Declaration fd = _declaration_vis(cf.name, .Field, fb.build(), field_pos, true);
+          Declaration fd = _declaration_vis(
+            cf.name,
+            .Field,
+            fb.build(),
+            field_pos,
+            true
+          );
           fd.container = c.name;
           out.push(fd);
         }
@@ -6696,8 +7242,16 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder eb = string_builder_init(32);
         eb.append("enum ");
         eb.append(e.name);
-        _append_type_params(&eb, e.has_type_params, &e.type_params, nil, &e.type_param_defaults);
-        out.push(_declaration_vis(e.name, .Enum, eb.build(), n.pos, n.flags.is_public));
+        _append_type_params(
+          &eb,
+          e.has_type_params,
+          &e.type_params,
+          nil,
+          &e.type_param_defaults
+        );
+        out.push(
+          _declaration_vis(e.name, .Enum, eb.build(), n.pos, n.flags.is_public)
+        );
         num v = 0;
         for v < e.variants.len {
           EnumVariant variant = e.variants.get(v);
@@ -6718,7 +7272,13 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
             }
             vb.append(")");
           }
-          Declaration vd = _declaration_vis(variant.name, .Variant, vb.build(), n.pos, true);
+          Declaration vd = _declaration_vis(
+            variant.name,
+            .Variant,
+            vb.build(),
+            n.pos,
+            true
+          );
           vd.container = e.name;
           out.push(vd);
         }
@@ -6727,14 +7287,28 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         StringBuilder qb = string_builder_init(32);
         qb.append("shape ");
         qb.append(q.name);
-        _append_type_params(&qb, q.has_type_params, &q.type_params, nil, &q.type_param_defaults);
-        out.push(_declaration_vis(q.name, .Shape, qb.build(), n.pos, n.flags.is_public));
+        _append_type_params(
+          &qb,
+          q.has_type_params,
+          &q.type_params,
+          nil,
+          &q.type_param_defaults
+        );
+        out.push(
+          _declaration_vis(q.name, .Shape, qb.build(), n.pos, n.flags.is_public)
+        );
       }
       .TypeAlias(a) -> {
         StringBuilder ab = string_builder_init(32);
         ab.append("als ");
         ab.append(a.name);
-        _append_type_params(&ab, a.has_type_params, &a.type_params, nil, &a.type_param_defaults);
+        _append_type_params(
+          &ab,
+          a.has_type_params,
+          &a.type_params,
+          nil,
+          &a.type_param_defaults
+        );
         ab.append(" = ");
         if a.is_bound_list {
           num bi = 0;
@@ -6750,7 +7324,15 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
           ab.append(ab_body_text);
           free(ab_body_text);
         }
-        out.push(_declaration_vis(a.name, .TypeAlias, ab.build(), n.pos, n.flags.is_public));
+        out.push(
+          _declaration_vis(
+          a.name,
+          .TypeAlias,
+          ab.build(),
+          n.pos,
+          n.flags.is_public
+          )
+        );
       }
       .Impl(im) -> {
         num m = 0;
@@ -6790,7 +7372,15 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         free(gb_type_text);
         gb.append(" ");
         gb.append(v.name);
-        out.push(_declaration_vis(v.name, .Global, gb.build(), n.pos, n.flags.is_public));
+        out.push(
+          _declaration_vis(
+          v.name,
+          .Global,
+          gb.build(),
+          n.pos,
+          n.flags.is_public
+          )
+        );
       }
       _ -> {}
     }

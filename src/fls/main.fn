@@ -25,12 +25,14 @@ fun main(str[] args) num {
       ret 0;
     }
     if equals(first, "--help") || equals(first, "-h") {
-      println(`Fun Language Server (fls)
+      println(
+        `Fun Language Server (fls)
       `
       `Usage:
       `  fls            Run language server over stdio (LSP)
       `  fls --version  Print version
-      `  fls --help     Show this help`);
+      `  fls --help     Show this help`
+      );
       ret 0;
     }
   }

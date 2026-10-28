@@ -1209,7 +1209,10 @@ impl Analysis {
       if equals(variant, "") {
         str shape_type = _pattern_shape_type(branch);
         if !equals(shape_type, "") {
-          shape_type = self._auto_resolve_bare_generic_shape_target(shape_type, subject_shape_name);
+          shape_type = self._auto_resolve_bare_generic_shape_target(
+            shape_type,
+            subject_shape_name
+          );
           if covered.has(shape_type) {
             self.report(
               .FitUnreachableBranch,
@@ -1324,7 +1327,11 @@ impl Analysis {
       missing_count = missing_count + 1;
     }
     if missing_count > 0 {
-      self.report(.FitNonExhaustive, format("fit does not handle {str}", missing.build()), stmt);
+      self.report(
+        .FitNonExhaustive,
+        format("fit does not handle {str}", missing.build()),
+        stmt
+      );
     }
   }
 
@@ -1619,7 +1626,11 @@ impl Analysis {
       missing_count = missing_count + 1;
     }
     if missing_count > 0 {
-      self.report(.FitNonExhaustive, format("fit does not handle {str}", missing.build()), stmt);
+      self.report(
+        .FitNonExhaustive,
+        format("fit does not handle {str}", missing.build()),
+        stmt
+      );
     }
   }
 
@@ -1960,7 +1971,11 @@ impl Analysis {
             program
           );
           if !earned {
-            self.report(.UnusedImport, format("unused import '{str}'", module.path), node);
+            self.report(
+              .UnusedImport,
+              format("unused import '{str}'", module.path),
+              node
+            );
           }
         }
         .Function(f) -> {
@@ -1972,17 +1987,29 @@ impl Analysis {
             f.name,
             "main"
           ) {
-            self.report(.UnusedFunction, format("unused function '{str}'", f.name), node);
+            self.report(
+              .UnusedFunction,
+              format("unused function '{str}'", f.name),
+              node
+            );
           }
         }
         .Compound(c) -> {
           if !node.flags.is_public && !read.has(c.name) {
-            self.report(.UnusedCompound, format("unused compound '{str}'", c.name), node);
+            self.report(
+              .UnusedCompound,
+              format("unused compound '{str}'", c.name),
+              node
+            );
           }
         }
         .Variable(v) -> {
           if v.is_const && !node.flags.is_public && !read.has(v.name) {
-            self.report(.UnusedVariable, format("unused constant '{str}'", v.name), node);
+            self.report(
+              .UnusedVariable,
+              format("unused constant '{str}'", v.name),
+              node
+            );
           }
         }
         .TypeAlias(a) -> {
@@ -1991,7 +2018,11 @@ impl Analysis {
           // `was_used` (set by `expand_type_aliases` itself, while the
           // reference still existed) is the only real signal left.
           if !node.flags.is_public && !a.was_used {
-            self.report(.UnusedTypeAlias, format("unused type alias '{str}'", a.name), node);
+            self.report(
+              .UnusedTypeAlias,
+              format("unused type alias '{str}'", a.name),
+              node
+            );
           }
         }
         _ -> {}

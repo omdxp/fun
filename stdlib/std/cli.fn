@@ -212,8 +212,15 @@ pub fun cli_parse_flags(str[] args, Vec<str>* value_flags) CliArgs {
     let body = substr(arg, dashes, len(arg) - dashes);
     let eq = index_of_char(body, '=');
     if eq != -1 {
-      out.opts.put(substr(body, 0, eq), substr(body, eq + 1, len(body) - (eq + 1)));
-      _push_multi(&out.all_opts, substr(body, 0, eq), substr(body, eq + 1, len(body) - (eq + 1)));
+      out.opts.put(
+        substr(body, 0, eq),
+        substr(body, eq + 1, len(body) - (eq + 1))
+      );
+      _push_multi(
+        &out.all_opts,
+        substr(body, 0, eq),
+        substr(body, eq + 1, len(body) - (eq + 1))
+      );
       i = i + 1;
       continue;
     }

@@ -20,6 +20,8 @@
 // code, and cached as module-level singletons so a second run in the
 // same page session reuses them rather than reloading either.
 
+import type { Wasmer, Package } from "@wasmer/sdk";
+
 type RunOutcome = { stdout: string; stderr: string };
 
 export type Diagnostic = {
@@ -178,10 +180,10 @@ async function runFrontend(files: Record<string, string>, entryPath: string): Pr
 // run - `@wasmer/sdk`'s own client and the ~105 MB `clang/clang`
 // package are too expensive to load on every click, or before the
 // first one.
-let wasmerClientPromise: Promise<any> | null = null;
-let clangPackagePromise: Promise<any> | null = null;
+let wasmerClientPromise: Promise<Wasmer> | null = null;
+let clangPackagePromise: Promise<Package> | null = null;
 
-async function getClang() {
+async function getClang(): Promise<{ wasmer: Wasmer; clangPkg: Package }> {
   if (!wasmerClientPromise) {
     wasmerClientPromise = import("@wasmer/sdk").then(({ Wasmer }) => Wasmer.create());
   }
@@ -199,9 +201,7 @@ async function getClang() {
 // this feature's own research spike (a compile sandbox producing wasm
 // bytes, then a fresh sandbox loading and running those bytes as their
 // own package).
-async function compileAndRun(c: string): Promise<RunOutcome> {
-  const { wasmer, clangPkg } = await getClang();
-
+async function compileAndRunOnce(wasmer: Wasmer, clangPkg: Package, c: string): Promise<RunOutcome> {
   const compileSandbox = await wasmer.sandboxes.create({ packages: [clangPkg] });
   let wasmBytes: Uint8Array;
   try {
@@ -214,15 +214,23 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
         "/workspace/program.wasm",
         "--target=wasm32-wasi",
       ])
-      .run();
+      .run({ check: false });
     if (compile.exitCode !== 0) {
-      // A real, substantive answer - the C compiler actually rejected
-      // the generated program - not an infrastructure failure, so it's
-      // thrown as the same authoritative type as a Fun-level compile
-      // error rather than one the caller falls back to a backend for.
-      throw new FunCompileError(
-        compile.stderr.text() || "the C compiler rejected the generated program",
-      );
+      const stderr = compile.stderr.text();
+      if (stderr) {
+        // A real, substantive answer - the C compiler actually rejected
+        // the generated program - not an infrastructure failure, so
+        // it's thrown as the same authoritative type as a Fun-level
+        // compile error rather than one the caller falls back to a
+        // backend for.
+        throw new FunCompileError(stderr);
+      }
+      // A nonzero exit with nothing on stderr isn't a real compile
+      // answer - clang always explains an actual rejection - so it
+      // reads as the same infrastructure hiccup as a dead scheduler,
+      // thrown as a plain error the caller retries against a fresh
+      // client rather than showing the user an unexplained failure.
+      throw new Error(`clang exited with status ${compile.exitCode} and no diagnostic`);
     }
     wasmBytes = await compileSandbox.fs.readFile("/workspace/program.wasm");
   } finally {
@@ -232,10 +240,41 @@ async function compileAndRun(c: string): Promise<RunOutcome> {
   const programPkg = await wasmer.packages.load(wasmBytes);
   const runSandbox = await wasmer.sandboxes.create({ packages: [programPkg] });
   try {
-    const out = await runSandbox.command(programPkg).run();
+    // `check: false` - the compiled program's own exit code is not this
+    // function's business to judge. Left at the SDK's default (`true`),
+    // any nonzero exit (a deliberate `exit(1)`, a panic, ...) throws
+    // `ProcessExitError` instead of returning `Output`, discarding
+    // whatever stdout the program already produced and surfacing only a
+    // generic "process exited unsuccessfully" message to the user.
+    const out = await runSandbox.command(programPkg).run({ check: false });
     return { stdout: out.stdout.text(), stderr: out.stderr.text() };
   } finally {
     await runSandbox.close();
+  }
+}
+
+// User-reported: every run after some earlier one failed outright with
+// "command execution failed: unable to spawn the command: Initialization
+// function failed - the thread pool is shut down: Scheduler is dead" -
+// an `@wasmer/sdk`-internal runtime, not a Fun-level or C-level failure
+// (never a `FunCompileError`), surfacing only once the cached `wasmer`
+// client's own worker/scheduler infrastructure has gone bad, apparently
+// as a side effect of an earlier run's own sandboxes closing. Retried
+// once here, against a genuinely fresh client - `getClang`'s own cache
+// invalidated first, since reusing the same dead client would just
+// reproduce the identical failure.
+async function compileAndRun(c: string): Promise<RunOutcome> {
+  const { wasmer, clangPkg } = await getClang();
+  try {
+    return await compileAndRunOnce(wasmer, clangPkg, c);
+  } catch (err) {
+    if (err instanceof FunCompileError) {
+      throw err;
+    }
+    wasmerClientPromise = null;
+    clangPackagePromise = null;
+    const fresh = await getClang();
+    return await compileAndRunOnce(fresh.wasmer, fresh.clangPkg, c);
   }
 }
 
@@ -503,16 +542,27 @@ async function runFlsSessionQueued(
 // all - a module that failed to load, a timeout, a malformed or empty
 // response - every one of these features is a nice-to-have overlay on
 // top of the editor, never something that should visibly break it.
+//
+// `textOverride`, when given, is what `activePath`'s own `didOpen` is
+// sent with instead of `files[activePath]` - what a stdlib reference
+// file (never part of `files` at all; see `Playground.tsx`'s own
+// `externalFiles`) needs: the document's own content reaches fls
+// directly through this message, with no need for it to also exist on
+// the mounted filesystem (that's only for resolving what this
+// document itself imports, already covered by the sandbox's own
+// preloaded stdlib tree) - the exact mount that collides and hangs
+// the whole session if this file were added to `files` instead.
 async function flsPositionRequest(
   files: Record<string, string>,
   activePath: string,
   method: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
   try {
     const uri = uriFor(activePath);
-    const text = files[activePath] ?? "";
+    const text = textOverride ?? files[activePath] ?? "";
     const id = "1";
     const messages = [
       didOpenMessage(uri, text),
@@ -531,8 +581,9 @@ export async function getHover(
   activePath: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
-  return flsPositionRequest(files, activePath, "textDocument/hover", line, character);
+  return flsPositionRequest(files, activePath, "textDocument/hover", line, character, textOverride);
 }
 
 export async function getDefinition(
@@ -540,8 +591,9 @@ export async function getDefinition(
   activePath: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
-  return flsPositionRequest(files, activePath, "textDocument/definition", line, character);
+  return flsPositionRequest(files, activePath, "textDocument/definition", line, character, textOverride);
 }
 
 export async function getSignatureHelp(
@@ -549,8 +601,9 @@ export async function getSignatureHelp(
   activePath: string,
   line: number,
   character: number,
+  textOverride?: string,
 ): Promise<any | null> {
-  return flsPositionRequest(files, activePath, "textDocument/signatureHelp", line, character);
+  return flsPositionRequest(files, activePath, "textDocument/signatureHelp", line, character, textOverride);
 }
 
 export async function getCompletions(
@@ -566,15 +619,17 @@ export async function getCompletions(
 // with a list rather than one result - its own shape, not
 // `flsPositionRequest`'s. `[]` on any failure, same reasoning as every
 // other fls feature here: an overlay the editor works fine without.
+// `textOverride` - see `flsPositionRequest`'s own comment.
 export async function getInlayHints(
   files: Record<string, string>,
   activePath: string,
   startLine: number,
   endLine: number,
+  textOverride?: string,
 ): Promise<any[]> {
   try {
     const uri = uriFor(activePath);
-    const text = files[activePath] ?? "";
+    const text = textOverride ?? files[activePath] ?? "";
     const id = "1";
     const messages = [
       didOpenMessage(uri, text),
@@ -616,6 +671,39 @@ export async function getDiagnostics(
   } catch {
     return [];
   }
+}
+
+// A stdlib file's own real source, read-only reference material for a
+// goto-definition/doc-link jump that lands outside the person's own
+// project (`stdlib/std/io.fn`, say) - `wasm_fls_main.js` already has
+// the whole stdlib tree mounted inside its own sandboxed filesystem
+// (`prebake-wasm-fls.mjs`'s own `--preload-file`), which is how a
+// `std.*` import resolves at all, but that content never reaches back
+// out to this module; `prebake-stdlib-src.mjs` ships the same tree a
+// second time, as plain static files, just for this. `relPath` is the
+// target path with its leading `stdlib/` stripped (`std/io.fn`).
+// Cached per path for the page session; `null` for anything that
+// isn't actually there (a target outside `stdlib/` entirely, or a
+// fetch failure).
+const stdlibSourceCache = new Map<string, Promise<string | null>>();
+export function fetchStdlibSource(relPath: string): Promise<string | null> {
+  let p = stdlibSourceCache.get(relPath);
+  if (!p) {
+    p = (async () => {
+      const base = import.meta.env.BASE_URL || "/";
+      const hash = await manifestHash("stdlib-src");
+      const versioned = hash ? `?v=${hash}` : "";
+      try {
+        const res = await fetch(`${base}stdlib-src/${relPath}${versioned}`);
+        if (!res.ok) return null;
+        return await res.text();
+      } catch {
+        return null;
+      }
+    })();
+    stdlibSourceCache.set(relPath, p);
+  }
+  return p;
 }
 
 // The full pipeline for a Playground project - every file the person's

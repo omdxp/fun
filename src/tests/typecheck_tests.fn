@@ -484,6 +484,287 @@ test "a bare enum-variant shorthand unambiguous across the program still infers 
   );
 }
 
+test "a bare compound literal with no declared type anywhere is rejected, not left to leak into codegen" {
+  // User-reported: `let x = .{ a = 1 };` has nothing anywhere to
+  // infer a type from (unlike `let x = Account{ a = 1 };`, which
+  // already resolves fine) - `infer_compound_init` correctly answers
+  // Unknown for this shape, but nothing then reported that as an
+  // error the way the sibling bare-enum-variant case just above
+  // already does. Left unchecked, the `let`'s own inferred type
+  // stayed the internal `__let_infer__` placeholder all the way to
+  // codegen, which wrote that literal string into the generated C as
+  // if it were a real type name - confirmed directly as a real C
+  // compiler error ("use of undeclared identifier '__let_infer__'"),
+  // not even a clean Fun-level diagnostic.
+  rejects(
+    `fun main() {
+    `  let x = .{ a = 1 };
+    `}`,
+    "expected a bare compound literal with no type anywhere to be rejected with a real diagnostic"
+  );
+  // An explicitly-typed declaration using the same bare-literal
+  // shorthand (`Account x = .{ a = 1 };`, the type written on the
+  // declaration rather than the literal) has a real type to check
+  // against from the start - `declared` is never Unknown here, so
+  // this new check must not touch it at all.
+  accepts(
+    `compound Account {
+    `  num a;
+    `}
+    `fun main() {
+    `  Account x = .{ a = 1 };
+    `}`,
+    "expected an explicitly-typed declaration's own bare-literal shorthand to still work"
+  );
+}
+
+test "a method that does not exist on a generic enum is rejected, not left to leak into codegen" {
+  // `knows_methods_of` used to stay silent on any generic receiver
+  // (`receiver.generic_args.len > 0` returned early), on the theory
+  // that an instantiation's impls weren't resolvable through its own
+  // tables. That theory was stale: every impl in the program is
+  // collected before method calls are checked, so a registered enum's
+  // absent method entry already means "has none," not "unmodeled." Left
+  // unfixed, a typo'd or nonexistent method on a generic enum passed
+  // typecheck outright and crashed codegen with a raw C compiler error
+  // ("call to undeclared function") instead of a real diagnostic.
+  rejects(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `fun main() {
+    `  MyOpt<num> o = .Some(5);
+    `  o.unwrap();
+    `}`,
+    "expected a nonexistent method on a generic enum to be rejected"
+  );
+  // The sibling case: a real method, declared on the same generic enum,
+  // must still resolve - the fix must not turn every generic method
+  // call into a false positive.
+  accepts(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `impl MyOpt<T> {
+    `  pub unwrap() T {
+    `    fit self {
+    `      .Some(v) -> { ret v; }
+    `      _ -> { panic("none"); }
+    `    }
+    `  }
+    `}
+    `fun main() {
+    `  MyOpt<num> o = .Some(5);
+    `  o.unwrap();
+    `}`,
+    "expected a real method on a generic enum to still resolve"
+  );
+}
+
+test "a dotted call through a completely undeclared identifier is rejected, not left to leak into codegen" {
+  // `check_receiver_has_method`'s own silence-on-Unknown rule exists
+  // for a receiver the checker merely failed to model (a still-
+  // abstract generic type param, say) - but `infer()` returns that
+  // exact same Unknown-with-empty-name shape for a receiver that
+  // resolves to nothing at all, an undeclared identifier, making the
+  // two indistinguishable by the time that rule runs. Checked
+  // earlier now, directly against the bare name itself.
+  rejects(
+    `fun main() {
+    `  num r = nonexistent_thing.foo(5);
+    `}`,
+    "expected a call through a wholly undeclared identifier to be rejected"
+  );
+  // A plain data-carrying variant pattern's own binding (`.Rotating
+  // (r)`, no shape/tuple destructure involved) must still resolve as
+  // a known name, not get swept up by the same check: it was never
+  // given a real binding in `env` at all before this fix, which the
+  // new check above would otherwise have wrongly flagged as
+  // undeclared (confirmed directly against this exact shape in
+  // stdlib/std/io.fn's own `Sink.write`).
+  accepts(
+    `compound Thing {
+    `  num v;
+    `}
+    `impl Thing {
+    `  pub bump(num n) num { ret n; }
+    `}
+    `enum Holder {
+    `  Rotating(Thing),
+    `  Plain,
+    `}
+    `fun main() {
+    `  Holder h = .Rotating(.{ v = 1 });
+    `  fit h {
+    `    .Rotating(r) -> { r.bump(5); }
+    `    .Plain -> {}
+    `  }
+    `}`,
+    "expected a plain data-carrying variant pattern's own binding to still resolve as a known receiver"
+  );
+}
+
+test "a generic function's type param that appears nowhere at all is rejected, not left to leak into codegen" {
+  // `_infer_call_generic_args` only ever checks a bare argument
+  // written directly as a type param - when the param appears
+  // nowhere in the signature at all (not in any argument, nested or
+  // not, and not in the return type), nothing could ever infer it,
+  // yet typecheck itself never noticed: `make_zero`'s own call-site
+  // return type ("num") never depended on T either, so the call
+  // typechecked fine. Codegen's own, separately-written inference
+  // mirrors the same limitation and silently fell back to the bare,
+  // unmangled name - a real function this genuinely is not, since it
+  // was declared with its own `<T>`.
+  rejects(
+    `fun make_zero<T>(num count) num {
+    `  ret count;
+    `}
+    `fun main() {
+    `  num r = make_zero(3);
+    `}`,
+    "expected a call to a generic function whose type param appears nowhere to be rejected"
+  );
+  // A type param nested inside an argument's own declared type (not a
+  // bare occurrence `_infer_call_generic_args` itself can match) must
+  // still be recognized as reachable, not wrongly flagged the same
+  // way - the fix only rejects a param that is truly absent from
+  // every source, never one this file's own narrower inference
+  // merely fails to resolve a concrete value for.
+  accepts(
+    `use std.vec;
+    `fun first<T>(Vec<T> items) T {
+    `  ret items.get(0);
+    `}
+    `fun main() {
+    `  Vec<num> nums;
+    `  nums.init(1);
+    `  nums.push(5);
+    `  num n = first(nums);
+    `}`,
+    "expected a type param nested inside an argument's own type to still be accepted, not flagged as unreachable"
+  );
+  // An explicit call-site type argument reaches a param no argument
+  // or return type could ever pin down on its own.
+  accepts(
+    `fun make_zero<T>(num count) num {
+    `  ret count;
+    `}
+    `fun main() {
+    `  num r = make_zero<num>(3);
+    `}`,
+    "expected an explicit call-site type argument to satisfy an otherwise-unreachable type param"
+  );
+}
+
+test "a method on a concretely-specialized generic impl mangles its primitive argument's own name" {
+  // `mangled_name(CheckedType)` built a generic instantiation's key
+  // from each argument's bare `name`, which is blank for a primitive
+  // (it carries its kind through `base` instead, never `name` - see
+  // `is_unknown`'s own doc) - so `Atomic<num>` mangled to `Atomic__`
+  // instead of `Atomic__num`, the exact key `impl Atomic<num>` itself
+  // registers its methods under. Never caught before: the only caller
+  // that cared was muted by the `knows_methods_of` fix just above,
+  // which would otherwise have flagged every real primitive-specialized
+  // method call as nonexistent.
+  accepts(
+    `compound Box<T: num | flag> {
+    `  T v;
+    `}
+    `impl Box<num> {
+    `  pub doubled() num {
+    `    ret self.v * 2;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b = .{ v = 5 };
+    `  b.doubled();
+    `}`,
+    "expected a method on a primitive-specialized generic impl to resolve"
+  );
+}
+
+test "arithmetic between two strings is rejected, not left to leak into codegen" {
+  // `infer_expression`'s binary-operator fallthrough never validated
+  // its operands at all once no `op_add`/... impl applied - any named
+  // type reached the bottom `ret left;` untouched. `"woof " + "rex"`
+  // leaked straight through as `char*` addition, which C itself then
+  // rejected with no real diagnostic ("invalid operands to binary
+  // expression").
+  rejects(
+    `fun main() {
+    `  str a = "woof " + "rex";
+    `}`,
+    "expected '+' between two strings to be rejected"
+  );
+  // `str` is itself a pointer at the C level, so offsetting one by a
+  // number is ordinary, long-standing pointer arithmetic (this very
+  // file's own `canonical_type_name` does exactly this) - the fix
+  // above must not touch that.
+  accepts(
+    `fun main() {
+    `  str s = "hello";
+    `  str tail = s + 2;
+    `}`,
+    "expected 'str + num' pointer arithmetic to still be accepted"
+  );
+  // Char arithmetic (`'0' - 'a'`, the lexer's own idiom) must also
+  // still be accepted.
+  accepts(
+    `fun main() {
+    `  chr c = '5';
+    `  num digit = c - '0';
+    `}`,
+    "expected char arithmetic to still be accepted"
+  );
+}
+
+test "a method's own default parameter value referencing 'self' is rejected, not left to leak into codegen" {
+  // A default is spliced into each call site's own argument list
+  // verbatim (`emit_default_trailing_args`), never evaluated against a
+  // bound receiver the way the method's own body is - `self.v` leaked
+  // straight through as a genuine identifier lookup and crashed
+  // codegen ("unsupported node: unknown identifier 'self'"). Checked
+  // in `check_impl` itself, before the generic-impl skip, since a
+  // generic impl's methods never reach `check_function_with_self` at
+  // all (their bodies are left alone until instantiated) - confirmed
+  // directly: the first version of this fix lived in
+  // `check_function_with_self` and never ran for this exact repro.
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_or(T fallback = self.v) T {
+    `    ret fallback;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b = .{ v = 5 };
+    `  b.get_or();
+    `}`,
+    "expected a method's own default value referencing self to be rejected"
+  );
+  // An ordinary default, naming nothing receiver-specific, must still
+  // work on a generic impl's own method.
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_or(T fallback) T {
+    `    ret fallback;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b = .{ v = 5 };
+    `  b.get_or(9);
+    `}`,
+    "expected an ordinary default on a generic impl's own method to still work"
+  );
+}
+
 test "an ambiguous variant name with an explicit declared type is not flagged" {
   // The declared type on the left resolves it outright; the ambiguity
   // check only applies to a fully `let`-inferred initializer, which has
@@ -901,13 +1182,15 @@ test "a shape-bounded generic parameter rejects a non-implementor" {
   // coarser any-pointer-satisfies-any-shape approximation used for
   // ordinary shape-typed parameters - a bound is held to real membership.
   assert contains(
-    check(`shape Renderable { render() str; }
+    check(
+    `shape Renderable { render() str; }
     `compound Other { num v; }
     `fun show<T: Renderable>(T x) str { ret x.render(); }
     `fun main() str {
     `  Other o;
     `  ret show(&o);
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a non-implementor rejected";
 }
@@ -927,12 +1210,14 @@ test "a generic-instantiation bound alternative accepts a matching instantiation
 
 test "a generic-instantiation bound alternative rejects a mismatching instantiation" {
   assert contains(
-    check(`compound Box<T> { T value; }
+    check(
+    `compound Box<T> { T value; }
     `fun identity<T: num | Box<num>>(T x) T { ret x; }
     `fun main() str {
     `  let out = identity("nope");
     `  ret out;
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a type outside the bound list rejected";
 }
@@ -985,7 +1270,8 @@ test "a bound naming a generic shape's own self-referential instantiation accept
 
 test "a bound naming a generic shape's own instantiation still rejects a non-implementor" {
   assert contains(
-    check(`shape Steppable<T> { succ() T; }
+    check(
+    `shape Steppable<T> { succ() T; }
     `compound Other { num v; }
     `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
     `fun main() num {
@@ -993,7 +1279,8 @@ test "a bound naming a generic shape's own instantiation still rejects a non-imp
     `  o.v = 1;
     `  let b = bump(o);
     `  ret b.v;
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a non-implementor still rejected, not accidentally accepted by the suffix-stripping fix";
 }
@@ -1042,11 +1329,13 @@ test "a bound-list type alias is usable as a generic constraint" {
     "expected the bound-list alias spliced into the constraint"
   );
   assert contains(
-    check(`als Numeric = num | dec;
+    check(
+    `als Numeric = num | dec;
     `fun identity<T: Numeric>(T x) T { ret x; }
     `fun main() str {
     `  ret identity("nope");
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a type outside the bound-list alias rejected";
 }
@@ -1102,12 +1391,14 @@ test "a bound-list type alias is usable as a generic constraint on a compound" {
     "expected the bound-list alias spliced into a compound's own constraint"
   );
   assert contains(
-    check(`als Numeric = num | dec;
+    check(
+    `als Numeric = num | dec;
     `compound Box<T: Numeric> { T value; }
     `fun main() str {
     `  Box<str> b = Box<str>{value = "nope"};
     `  ret b.value;
-    `}`),
+    `}`
+    ),
     "does not accept"
   ), "expected a type outside a compound's bound-list alias rejected";
 }
@@ -1194,14 +1485,16 @@ test "a matching instantiation, and one still standing for a parameter, are acce
 test "two different enums are not compared by ordinal" {
   // Both lower to a number, so nothing stopped the comparison; it asks
   // whether two unrelated ordinals coincide, which is never the point.
-  str found = check(`enum A { X }
+  str found = check(
+    `enum A { X }
   `enum B { P }
   `fun main() num {
   `  A a = .X;
   `  B b = .P;
   `  if a == b { ret 1; }
   `  ret 0;
-  `}`);
+  `}`
+  );
   assert contains(found, "share no variants"), "expected the cross-enum comparison rejected";
 }
 
@@ -2100,7 +2393,10 @@ test "a macro or type the always-included C headers declare is rejected as a nam
   rejects(`fun main() { num NULL = 1; }`, "expected NULL to be rejected as a variable name");
   rejects(`fun main() { num EOF = 1; }`, "expected EOF to be rejected as a variable name");
   rejects(`fun main() { num bool = 1; }`, "expected bool to be rejected as a variable name");
-  rejects(`fun main() { num INT_MAX = 1; }`, "expected INT_MAX to be rejected as a variable name");
+  rejects(
+    `fun main() { num INT_MAX = 1; }`,
+    "expected INT_MAX to be rejected as a variable name"
+  );
   rejects(`fun NULL() num { ret 1; }`, "expected NULL to be rejected as a function name");
   rejects(`compound FILE { num v; }`, "expected FILE to be rejected as a compound name");
   rejects(`compound size_t { num v; }`, "expected size_t to be rejected as a compound name");
@@ -2133,8 +2429,14 @@ test "a function cannot be defined under the name of a C library function the ge
 
 test "a similar name, a generic function, or a name from a header included only on demand is accepted" {
   accepts(`fun divide(num a, num b) num { ret a / b; }`, "expected divide to be fine");
-  accepts(`fun abs<T>(T x) T { ret x; }`, "expected a generic function, mangled per instantiation, to be fine");
-  accepts(`fun log(num x) num { ret x; }`, "expected a math.h name to be fine when math.h is not pulled in");
+  accepts(
+    `fun abs<T>(T x) T { ret x; }`,
+    "expected a generic function, mangled per instantiation, to be fine"
+  );
+  accepts(
+    `fun log(num x) num { ret x; }`,
+    "expected a math.h name to be fine when math.h is not pulled in"
+  );
   accepts(`fun main() {}`, "expected an ordinary program to be fine");
 }
 
@@ -2718,23 +3020,30 @@ test "an enum whose variants carry data cannot be compared with == or !=, but a 
   str msg = check(tagged);
   assert contains(msg, "'==' cannot compare 'Outcome'"), "expected == on a data-carrying enum to be rejected by name";
   assert contains(msg, "use `fit`"), "expected the message to point at fit";
-  rejects(`enum Outcome {
+  rejects(
+    `enum Outcome {
   `  Done(num),
   `  Failed,
   `}
   `fun main() {
   `  Outcome a = Outcome.Failed;
   `  flag differs = a != Outcome.Failed;
-  `}`, "expected != to be rejected too");
-  accepts(`enum Color {
+  `}`,
+    "expected != to be rejected too"
+  );
+  accepts(
+    `enum Color {
   `  Red,
   `  Green,
   `}
   `fun main() {
   `  Color c = Color.Red;
   `  flag same = c == Color.Green;
-  `}`, "expected a plain enum to compare fine");
-  accepts(`enum Outcome {
+  `}`,
+    "expected a plain enum to compare fine"
+  );
+  accepts(
+    `enum Outcome {
   `  Done(num),
   `  Failed,
   `}
@@ -2742,7 +3051,9 @@ test "an enum whose variants carry data cannot be compared with == or !=, but a 
   `  Outcome a = Outcome.Failed;
   `  Outcome* p = &a;
   `  flag same = p == nil;
-  `}`, "expected a pointer to a data-carrying enum to compare against nil");
+  `}`,
+    "expected a pointer to a data-carrying enum to compare against nil"
+  );
 }
 
 test "a shape-downcast fit accepts a real implementor and rejects everything else" {
@@ -3163,5 +3474,300 @@ test "operator overloading: a field-access operand (self.pos + other.pos) resolv
     `  Vec3 c = a.combine(b);
     `}`,
     "expected self.pos + other.pos to type-check through op_add on the field's own type"
+  );
+}
+
+test "a generic enum method's own return type substitutes before a fit matches it against variant patterns" {
+  // User-reported: `fit compute(10, 2).unwrap() { .Ok(v) -> ... .Err(e)
+  // -> ... }` reached codegen with no real diagnostic at all and
+  // crashed there ("unsupported node: function") - `unwrap`'s own
+  // declared return type (`T`, belonging to the enclosing `impl
+  // MyResult<T, E>`, not to `unwrap` itself) was never substituted
+  // against the receiver's own concrete generic arguments at all:
+  // `check_method_call`'s own `receiver_type_params` lookup only ever
+  // checked `self.compounds`, which never holds an enum, so it came
+  // back empty for every enum method, and the substitution it was
+  // meant to feed silently did nothing. Fixed two ways: looking
+  // `enum_type_params` up too, and (separately) recording the return
+  // type's own pre-erasure form (`rtype_template`) at all, since
+  // `_erase_signature` had already wiped the type param's own name by
+  // the time a caller could substitute anything back into it.
+  rejects(
+    `enum MyResult<T, E> {
+    `  Ok(T),
+    `  Err(E),
+    `}
+    `impl MyResult<T, E> {
+    `  pub unwrap() T {
+    `    fit *self {
+    `      .Ok(v) -> { ret v; }
+    `      .Err(e) -> { ret panic("err"); }
+    `    }
+    `  }
+    `}
+    `fun compute() MyResult<num, str> {
+    `  ret .Ok(5);
+    `}
+    `fun main() {
+    `  fit compute().unwrap() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected a real diagnostic naming the mismatch, not nothing"
+  );
+}
+
+test "a generic enum method's own correctly-typed result still fits a matching fit statement" {
+  // Companion to the test above: the exact same generic method call
+  // chain, but used the way it was actually meant to be - matching the
+  // enum ITSELF, not something already unwrapped out of it - must stay
+  // accepted, not newly rejected by the fix above.
+  accepts(
+    `enum MyResult<T, E> {
+    `  Ok(T),
+    `  Err(E),
+    `}
+    `fun compute() MyResult<num, str> {
+    `  ret .Ok(5);
+    `}
+    `fun main() {
+    `  fit compute() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected fitting the enum itself, unwrapped or not, to still type-check"
+  );
+}
+
+test "a generic enum method's result inside another generic class's own body, still abstract, isn't flagged" {
+  // Regression caught alongside the fix above: compiling this very
+  // compiler's own `src/cli/wasm_frontend_main.fn` (which pulls in
+  // `warnings.fn`) started failing the moment the fix above landed,
+  // for a shape distilled down to this - `Holder<V>`'s own method
+  // calling `MyOption<V>.unwrap()` legitimately gets back `V` itself,
+  // not a concrete type, since `Holder<V>` hasn't been instantiated
+  // with anything concrete yet either; fitting that still-abstract `V`
+  // against `.Some`/`.None` must stay silent, the same as it always
+  // did before the fix above existed, not newly fail as if `V` were
+  // some genuinely-resolved, wrong, concrete type. The first version
+  // of this fix flagged any name that wasn't a registered enum at all
+  // - too broad, since a still-abstract type parameter's own name
+  // also isn't registered anywhere; narrowed to only a name that is a
+  // registered compound, the one case actually unambiguous.
+  accepts(
+    `enum MyOption<V> {
+    `  Some(V),
+    `  None,
+    `}
+    `impl MyOption<V> {
+    `  pub unwrap() V {
+    `    fit *self {
+    `      .Some(v) -> { ret v; }
+    `      .None -> { ret panic("none"); }
+    `    }
+    `  }
+    `}
+    `compound Holder<V> {
+    `  V slot;
+    `}
+    `impl Holder<V> {
+    `  pub get_wrapped() MyOption<V> {
+    `    ret .Some(self.slot);
+    `  }
+    `  pub use_it() {
+    `    let opt = self.get_wrapped();
+    `    fit opt.unwrap() {
+    `      .Some(v) -> {}
+    `      .None -> {}
+    `    }
+    `  }
+    `}`,
+    "expected a still-abstract type parameter, substituted correctly, not to be flagged as a resolved non-enum type"
+  );
+}
+
+test "a bare variant shorthand matched against a tuple is rejected, not left to crash codegen" {
+  // Same gap as the primitive-scalar case above, found right alongside
+  // it: a tuple is also resolved and also carries no name of its own
+  // (`is_tuple` says what it is instead - see `CheckedType`'s own
+  // comment), so it fell through the exact same `want.name == ""`
+  // path a genuinely unresolved expression does, reaching codegen
+  // with no enum tag to switch on.
+  rejects(
+    `fun main() {
+    `  (num, str) t = (1, "x");
+    `  fit t {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected a tuple subject to be rejected with a real diagnostic, not reach codegen"
+  );
+}
+
+test "a bare variant shorthand matched against a function-typed value is rejected, not left to crash codegen" {
+  // Same gap again, for the other resolved-but-nameless shape
+  // (`has_fn_sig`).
+  rejects(
+    `fun f() num {
+    `  ret 1;
+    `}
+    `fun main() {
+    `  fun() num cb = f;
+    `  fit cb {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected a function-typed subject to be rejected with a real diagnostic, not reach codegen"
+  );
+}
+
+test "a generic function's own call-site return type substitutes, not just a generic method's" {
+  // Different gap from the generic-method fix above, found right
+  // alongside it: `check_call` (a plain top-level function call,
+  // never a method) always returned the callee's own declared return
+  // type completely unsubstituted - `check_arguments`' own generic
+  // branch (`check_type_bounds`) only ever verifies a type param's
+  // bounds against what was supplied, never resolves what it
+  // concretely is for this call, so every generic function's own call
+  // result reached every caller still erased to Unknown, not even
+  // template form. Fixed by inferring each type param from the first
+  // argument written as it (the same convention `check_type_bounds`
+  // already uses) and substituting that into the declared return
+  // type's own pristine, pre-erasure form (`rtype_template`). A
+  // second, independent gap had to be fixed alongside it for this
+  // exact fixture to actually work: `substitute` only ever replaced
+  // its own argument directly when its name matched one of `params` -
+  // correct for a generic method's own bare `T` return (already
+  // substituted correctly before this session), but `wrap`'s own
+  // return is `MyOpt<T>`, where `T` is only nested inside an enum that
+  // isn't itself named `T` - the top-level check alone never looked
+  // inside, so the outer `MyOpt` substituted fine while its own
+  // generic argument stayed the literal, unresolved name `T`.
+  //
+  // Reached through a `let` here, not chained directly onto the call
+  // (`wrap(5).unwrap()`) - that shape still has a separate, open gap
+  // of its own (receiver resolution for a method called directly on a
+  // generic free function's result disagrees with resolution through
+  // a `let`), not something this fix covers; `is_unknown`'s own
+  // leniency means it fails silently rather than wrongly instead, so
+  // it is at least not a regression.
+  rejects(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `impl MyOpt<T> {
+    `  pub unwrap() T {
+    `    fit *self {
+    `      .Some(v) -> { ret v; }
+    `      .None -> { ret panic("none"); }
+    `    }
+    `  }
+    `}
+    `fun wrap<T>(T v) MyOpt<T> {
+    `  ret .Some(v);
+    `}
+    `fun main() {
+    `  let r = wrap(5);
+    `  fit r.unwrap() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`,
+    "expected r.unwrap() to resolve to num (not an enum at all), rejecting the mismatched .Ok/.Err pattern"
+  );
+}
+
+test "a generic function called with different concrete types doesn't corrupt its own shared signature" {
+  // `substitute`'s own recursive fix builds fresh Vecs rather than
+  // mutating a type's own generic_args/tuple_members in place,
+  // specifically because `rtype_template` (what gets substituted) is
+  // the same shared value read on every call to this function, not a
+  // fresh copy per call site - mutating it in place for the first
+  // call would corrupt what every later call sees. Calling `wrap`
+  // with `num` first, then mismatching the second call's own result
+  // (a `str`) against `.Ok`/`.Err` is what would actually surface
+  // that: a corrupted shared template would leak the first call's own
+  // resolved `num` into the second instead of resolving its own `str`
+  // - checked by matching the real diagnostic's own wording, not just
+  // that there is one.
+  str msg = check(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `impl MyOpt<T> {
+    `  pub unwrap() T {
+    `    fit *self {
+    `      .Some(v) -> { ret v; }
+    `      .None -> { ret panic("none"); }
+    `    }
+    `  }
+    `}
+    `fun wrap<T>(T v) MyOpt<T> {
+    `  ret .Some(v);
+    `}
+    `fun main() {
+    `  let a = wrap(5);
+    `  num x = a.unwrap();
+    `  let b = wrap("hello");
+    `  fit b.unwrap() {
+    `    .Ok(v) -> {}
+    `    .Err(e) -> {}
+    `  }
+    `}`
+  );
+  assert contains(msg, "'str'"), "expected the second call's own real type (str), not the first call's num leaking into it";
+}
+
+test "a generic method's own pointer-typed return substitutes without losing its own pointer depth" {
+  // Regression caught alongside the fix above: `rtype_template`'s own
+  // first version recorded just the erased type param's own name, but
+  // `_erase_signature` had already reset the rest of the type (its own
+  // `pointer_depth` included) to a fresh Unknown before that name was
+  // ever read - so a method declared to return `T*` substituted back
+  // to a bare, non-pointer concrete type instead, confirmed directly
+  // against `examples/stdlib/guarded_basic.fn`'s own real `Guarded<T>.
+  // lock() T*`. Fixed by recording the whole pre-erasure type, pointer
+  // depth and all, rather than just its name.
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_ptr() T* {
+    `    ret &self.v;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b;
+    `  num* p = b.get_ptr();
+    `}`,
+    "expected a generic method's own pointer return type to stay a pointer after substitution"
+  );
+  // The same call, assigned to the type it would also have fit as an
+  // unsubstituted, leniently-accepted Unknown (missing the `*`) - a
+  // plain `accepts` above can't tell "correctly substituted" apart
+  // from "never substituted, Unknown accepts anything", so this one
+  // specifically needs the substituted type to be held to strictly,
+  // the only way to confirm the pointer depth genuinely survived.
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_ptr() T* {
+    `    ret &self.v;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b;
+    `  num p = b.get_ptr();
+    `}`,
+    "expected assigning a T* result to a non-pointer num to be rejected, not leniently accepted as Unknown"
   );
 }

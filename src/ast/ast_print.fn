@@ -193,7 +193,13 @@ pub fun print_node(Node* node, num depth) {
             _line(depth + 1, format("Index: {str}", it.index_name));
           }
           if it.item_is_destructure {
-            _line(depth + 1, format("Item (destructured): ({str})", join(&it.item_destructure_names, ", ")));
+            _line(
+              depth + 1,
+              format(
+              "Item (destructured): ({str})",
+              join(&it.item_destructure_names, ", ")
+              )
+            );
           } else {
             _line(depth + 1, format("Item: {str}", it.item_name));
           }
@@ -320,7 +326,10 @@ pub fun print_node(Node* node, num depth) {
         num fi = 0;
         for fi < c.fields.len {
           CompoundField field = c.fields.get(fi);
-          _line(depth + 2, format("{str}: {str}", field.name, _dtype_str(field.dtype)));
+          _line(
+            depth + 2,
+            format("{str}: {str}", field.name, _dtype_str(field.dtype))
+          );
           fi = fi + 1;
         }
       }
@@ -443,7 +452,8 @@ test "dtype text names tuples, pointers and plain types" {
 }
 
 test "print_ast walks declarations, statements and expressions of every kind" {
-  Vec<Node> nodes = _parse_for_print(`use std.io;
+  Vec<Node> nodes = _parse_for_print(
+    `use std.io;
   `als Score = num;
   `compound Point {
   `  num x;
@@ -519,7 +529,8 @@ test "print_ast walks declarations, statements and expressions of every kind" {
   `fun main() {
   `  num n = sample(1, nil);
   `  panic("stop");
-  `}`);
+  `}`
+  );
   assert nodes.len > 8, "expected a node per top-level declaration";
   print_ast(&nodes);
   print_node(nil, 0);

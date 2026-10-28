@@ -165,7 +165,9 @@ fun _git_current_branch_name(str dir) Result<str, str> {
   args.push("HEAD");
   let res = _git(args)!;
   if !_git_ok(&res) {
-    ret .Err(format("could not determine the default branch in {str}: {str}", dir, res.stderr_text));
+    ret .Err(
+      format("could not determine the default branch in {str}: {str}", dir, res.stderr_text)
+    );
   }
   ret .Ok(trim(res.stdout_text));
 }
@@ -236,7 +238,14 @@ fun _git_fetch_rev(str url, str rev, str dest) Result<flag, str> {
   checkout_args.push(checkout_target);
   let checkout_res = _git(checkout_args)!;
   if !_git_ok(&checkout_res) {
-    ret .Err(format("git checkout {str} in {str} failed: {str}", rev, dest, checkout_res.stderr_text));
+    ret .Err(
+      format(
+      "git checkout {str} in {str} failed: {str}",
+      rev,
+      dest,
+      checkout_res.stderr_text
+      )
+    );
   }
   ret .Ok(true);
 }
@@ -314,7 +323,15 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
     // destination is already known before fetching.
     dest = dep_cache_dir(d.git, ref_value);
     if !is_dir(dest) {
-      println(format("  fetching {str} @ {str} ({str}){str}", d.name, ref_value, d.git, provenance));
+      println(
+        format(
+        "  fetching {str} @ {str} ({str}){str}",
+        d.name,
+        ref_value,
+        d.git,
+        provenance
+        )
+      );
       _ = _git_fetch_rev(d.git, ref_value, dest)!;
     }
     resolved_rev = ref_value;
@@ -326,15 +343,36 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
     // if resolution races with another `fun build`.
     flag default_branch = equals(ref_kind, "branch") && equals(ref_value, "");
     if default_branch {
-      println(format("  fetching {str} @ default branch ({str}){str}", d.name, d.git, provenance));
+      println(
+        format(
+        "  fetching {str} @ default branch ({str}){str}",
+        d.name,
+        d.git,
+        provenance
+        )
+      );
     } else {
-      println(format("  fetching {str} @ {str} {str} ({str}){str}", d.name, ref_kind, ref_value, d.git, provenance));
+      println(
+        format(
+        "  fetching {str} @ {str} {str} ({str}){str}",
+        d.name,
+        ref_kind,
+        ref_value,
+        d.git,
+        provenance
+        )
+      );
     }
     str staging_ref = ref_value;
     if equals(staging_ref, "") {
       staging_ref = "default";
     }
-    str staging = format("{str}/.staging-{str}-{str}", deps_cache_root(), sanitize_url(d.git), staging_ref);
+    str staging = format(
+      "{str}/.staging-{str}-{str}",
+      deps_cache_root(),
+      sanitize_url(d.git),
+      staging_ref
+    );
     remove_dir_best_effort(staging);
     make_dir_all(deps_cache_root());
     if default_branch {
@@ -354,7 +392,9 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
       // ref of this repo is fetched.
       make_dir_all(dirname(dest));
       if rename(staging, dest) != 0 {
-        ret .Err(format("could not move {str} into the dependency cache at {str}", staging, dest));
+        ret .Err(
+          format("could not move {str} into the dependency cache at {str}", staging, dest)
+        );
       }
     }
   }
@@ -398,7 +438,13 @@ fun _spec_still_matches(str spec_text, Dependency* d) flag {
 // same reuse-or-fetch decision against the one flat lock.
 // `fetched_count` is incremented on every real fetch, so `resolve_all`
 // can decide at the end whether any network work happened at all.
-fun _resolve_one_reusing(Dependency* d, Vec<ResolvedDep>* locked, flag force_update, num* fetched_count, str required_by) Result<ResolvedDep, str> {
+fun _resolve_one_reusing(
+  Dependency* d,
+  Vec<ResolvedDep>* locked,
+  flag force_update,
+  num* fetched_count,
+  str required_by
+) Result<ResolvedDep, str> {
   flag is_rev = false;
   fit d.spec {
     .Rev(_) -> { is_rev = true; }
@@ -477,17 +523,24 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
   i = 0;
   for i < out.len {
     let parent = out.get(i);
-    str node_key = format("{str}|{str}|{str}", parent.git, parent.path, parent.resolved_rev);
+    str node_key = format(
+      "{str}|{str}|{str}",
+      parent.git,
+      parent.path,
+      parent.resolved_rev
+    );
     i = i + 1;
     if visited_nodes.contains(node_key) {
       continue;
     }
     visited_nodes.push(node_key);
     if visited_nodes.len > max_deps_graph_size {
-      ret .Err(format(
+      ret .Err(
+        format(
         "[deps] the dependency graph reaches more than {num} distinct fetched repositories, likely a cycle; check for a dependency that transitively depends on itself",
         max_deps_graph_size
-      ));
+        )
+      );
     }
 
     str child_toml_path = format("{str}/fun.toml", parent.local_root);
@@ -497,7 +550,13 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
     let child_text = read_to_string(child_toml_path);
     let child_manifest_r = parse_manifest(child_text);
     if child_manifest_r.is_err() {
-      ret .Err(format("[deps] `{str}`'s own fun.toml is invalid: {str}", parent.name, child_manifest_r.unwrap_err()));
+      ret .Err(
+        format(
+        "[deps] `{str}`'s own fun.toml is invalid: {str}",
+        parent.name,
+        child_manifest_r.unwrap_err()
+        )
+      );
     }
     Manifest child_m = child_manifest_r.unwrap();
     defer child_m.free();
@@ -513,7 +572,13 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
       }
       num existing_idx = _index_of_name(&out, cd.name);
       if existing_idx < 0 {
-        let resolved_child = _resolve_one_reusing(&cd, &locked, force_update, &fetched, parent.name)!;
+        let resolved_child = _resolve_one_reusing(
+          &cd,
+          &locked,
+          force_update,
+          &fetched,
+          parent.name
+        )!;
         out.push(resolved_child);
         owners.push(parent.name);
         continue;
@@ -527,22 +592,37 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
       // the branch that tag was cut from) - resolve for real before
       // calling this an actual conflict, since they might still land on
       // the exact same commit.
-      let resolved_child = _resolve_one_reusing(&cd, &locked, force_update, &fetched, parent.name)!;
+      let resolved_child = _resolve_one_reusing(
+        &cd,
+        &locked,
+        force_update,
+        &fetched,
+        parent.name
+      )!;
       if equals(resolved_child.resolved_rev, existing.resolved_rev) &&
         equals(resolved_child.git, existing.git) &&
         equals(resolved_child.path, existing.path) {
         continue; // same content, different spelling - harmless
       }
-      ret .Err(format(
+      ret .Err(
+        format(
         "[deps] `{str}` is required by both `{str}` and `{str}` pinned to different commits ({str} vs {str}); add `{str}` to this project's own [deps] to pick one",
-        cd.name, owners.get(existing_idx), parent.name, existing.resolved_rev, resolved_child.resolved_rev, cd.name
-      ));
+        cd.name,
+        owners.get(existing_idx),
+        parent.name,
+        existing.resolved_rev,
+        resolved_child.resolved_rev,
+        cd.name
+        )
+      );
     }
   }
 
   write_lock(root, &out);
   if fetched > 0 {
-    println(format("Resolved {num} dependencies ({num} fetched or updated).", out.len, fetched));
+    println(
+      format("Resolved {num} dependencies ({num} fetched or updated).", out.len, fetched)
+    );
   }
   ret .Ok(out);
 }
@@ -698,7 +778,13 @@ fun _local_repo(str name, str file_name, str file_text, str tag, str branch) str
 
 sequential test "a dependency resolves from a local repository by tag, branch, revision and default" {
   set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
-  str url = _local_repo("basic", "lib.fn", "pub fun one() num { ret 1; }\n", "v1.0.0", "main");
+  str url = _local_repo(
+    "basic",
+    "lib.fn",
+    "pub fun one() num { ret 1; }\n",
+    "v1.0.0",
+    "main"
+  );
   if equals(url, "") {
     clear_env("FUN_DEPS_CACHE");
     ret;
@@ -769,7 +855,13 @@ sequential test "a repository with no tags resolves to its default branch, and t
 
 sequential test "resolve_all resolves a manifest's dependencies, follows theirs, and reuses the lock" {
   set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
-  str leaf_url = _local_repo("leaf", "leaf.fn", "pub fun leaf() num { ret 3; }\n", "v1.0.0", "main");
+  str leaf_url = _local_repo(
+    "leaf",
+    "leaf.fn",
+    "pub fun leaf() num { ret 3; }\n",
+    "v1.0.0",
+    "main"
+  );
   if equals(leaf_url, "") {
     clear_env("FUN_DEPS_CACHE");
     ret;
@@ -795,7 +887,13 @@ sequential test "resolve_all resolves a manifest's dependencies, follows theirs,
 
 sequential test "two dependencies that need the same library at different commits are reported" {
   set_env("FUN_DEPS_CACHE", "fun-out/deps_test_cache");
-  str shared_v1 = _local_repo("shared", "s.fn", "pub fun s() num { ret 1; }\n", "v1.0.0", "main");
+  str shared_v1 = _local_repo(
+    "shared",
+    "s.fn",
+    "pub fun s() num { ret 1; }\n",
+    "v1.0.0",
+    "main"
+  );
   if equals(shared_v1, "") {
     clear_env("FUN_DEPS_CACHE");
     ret;
@@ -828,7 +926,12 @@ sequential test "two dependencies that need the same library at different commit
   str b_toml = _manifest_with_dep("b", "shared", shared_v1, "v2.0.0");
   str a_url = _local_repo("conflict_a", "fun.toml", a_toml, "v1.0.0", "main");
   str b_url = _local_repo("conflict_b", "fun.toml", b_toml, "v1.0.0", "main");
-  str top_toml = format("{str}a = {str}\nb = {str}\n", "[package]\nname = \"top\"\n\n[deps]\n", _inline_dep(a_url, "v1.0.0"), _inline_dep(b_url, "v1.0.0"));
+  str top_toml = format(
+    "{str}a = {str}\nb = {str}\n",
+    "[package]\nname = \"top\"\n\n[deps]\n",
+    _inline_dep(a_url, "v1.0.0"),
+    _inline_dep(b_url, "v1.0.0")
+  );
   Manifest m = parse_manifest(top_toml).unwrap();
   str root = "fun-out/deps_test_conflict_root";
   make_dir_all(root);

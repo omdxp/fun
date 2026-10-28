@@ -37,8 +37,22 @@ if (typeof window === "undefined") {
     /\/(wasm|wasm-frontend|wasm-fls)\//.test(pathname) &&
     !pathname.endsWith("manifest.json");
 
+  // Safari/WebKit enforces the Fetch spec's "no body allowed" statuses
+  // strictly - constructing a `Response` with a body for one of these
+  // (most commonly 304, a conditional GET's cache-revalidation hit,
+  // which Vite's dev server sends often) throws "Response cannot have
+  // a body with the given status" outright, breaking the fetch for
+  // whatever asset this wraps. Confirmed directly: `@wasmer/sdk`'s own
+  // worker script failed to load this way under WebKit, silently
+  // breaking the compiler's worker infrastructure underneath it -
+  // Chromium stays lenient here, which is why this went unnoticed
+  // testing there. `response.status === 0` (opaque, cross-origin with
+  // no CORS) already skipped reconstruction for the same reason.
+  const NO_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
   const withCoiHeaders = (response) => {
-    if (response.status === 0) return response;
+    if (response.status === 0 || NO_BODY_STATUSES.has(response.status)) {
+      return response;
+    }
     const headers = new Headers(response.headers);
     headers.set("Cross-Origin-Embedder-Policy", "require-corp");
     headers.set("Cross-Origin-Opener-Policy", "same-origin");

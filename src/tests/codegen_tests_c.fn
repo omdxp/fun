@@ -284,7 +284,10 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
   `  }
   `  ret 0;
   `}`;
-  let out = emit_c(src, "generic data enum: Result<T, E> with two type params and mixed payloads");
+  let out = emit_c(
+    src,
+    "generic data enum: Result<T, E> with two type params and mixed payloads"
+  );
   assert contains(out, "Res__num__str"), "expected the two-parameter monomorphization";
 }
 
@@ -599,7 +602,10 @@ test "a method chain's own second-innermost call is not evaluated twice" {
   `}`;
   let out = emit_c(src, "a method chain's own second-innermost call is not evaluated twice");
   num make_box_calls = count(out, "= make_box()");
-  assert make_box_calls == 1, format("expected make_box()'s own call emitted exactly once, found {num}", make_box_calls);
+  assert make_box_calls == 1, format(
+    "expected make_box()'s own call emitted exactly once, found {num}",
+    make_box_calls
+  );
 }
 
 test "a const local's own compound value never gets a conflicting C const qualifier" {
@@ -623,7 +629,10 @@ test "a const local's own compound value never gets a conflicting C const qualif
   `  x.show();
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a const local's own compound value never gets a conflicting C const qualifier");
+  let out = emit_c(
+    src,
+    "a const local's own compound value never gets a conflicting C const qualifier"
+  );
   assert !contains(out, "const Box x"), "expected no C const qualifier on a const-bound compound local";
 }
 
@@ -1344,7 +1353,10 @@ test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
   `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "sizeof accepts a user-defined type name with a trailing pointer suffix");
+  let out = emit_c(
+    src,
+    "sizeof accepts a user-defined type name with a trailing pointer suffix"
+  );
   assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
 }
 
@@ -1614,7 +1626,10 @@ test "a generic function-type alias emits the real callback signature, not the a
   `  printf("%lld\n", apply(square, 4));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a generic function-type alias emits the real callback signature, not the alias name");
+  let out = emit_c(
+    src,
+    "a generic function-type alias emits the real callback signature, not the alias name"
+  );
   assert !contains(out, "Callback"), "expected the alias name to never reach emitted C";
 }
 
@@ -1638,7 +1653,10 @@ test "a type alias naming a shape still dispatches dynamically through the alias
   `  printf("%lld\n", describe(d));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a type alias naming a shape still dispatches dynamically through the alias");
+  let out = emit_c(
+    src,
+    "a type alias naming a shape still dispatches dynamically through the alias"
+  );
   assert !contains(out, "Drawable"), "expected the alias name to never reach emitted C";
   assert contains(out, "Shape"), "expected the real shape type to reach emitted C";
 }
@@ -1712,7 +1730,11 @@ test "a shape-bounded generic impl monomorphizes for a real implementor" {
   `  printf("%s\n", w.describe());
   `  ret 0;
   `}`;
-  assert_emits(src, "Wrapper__Point__describe", "expected the shape-implementor instantiation to monomorphize");
+  assert_emits(
+    src,
+    "Wrapper__Point__describe",
+    "expected the shape-implementor instantiation to monomorphize"
+  );
 }
 
 test "a shape-bounded generic impl does not monomorphize for a non-implementor" {
@@ -1810,7 +1832,11 @@ test "a self-referential generic-shape bound (T: Shape<T>) monomorphizes for a r
   `  printf("%lld\n", n.v);
   `  ret 0;
   `}`;
-  let out = run_source(src, "self_ref_shape_bound", "a self-referential shape bound monomorphizes for a real implementor");
+  let out = run_source(
+    src,
+    "self_ref_shape_bound",
+    "a self-referential shape bound monomorphizes for a real implementor"
+  );
   assert equals(out, "2\n"), "expected Box<Counter>.advance() to call Counter's own Steppable succ() and return the incremented value";
 }
 
@@ -1855,7 +1881,11 @@ test "a generic user type implementing Iterator<T> directly on itself works in a
   `  printf("%lld\n", total);
   `  ret 0;
   `}`;
-  let out = run_source(src, "generic_user_type_iterator", "a generic user type's own Iterator<T> impl works in a for loop");
+  let out = run_source(
+    src,
+    "generic_user_type_iterator",
+    "a generic user type's own Iterator<T> impl works in a for loop"
+  );
   assert equals(out, "6\n"), "expected 1+2+3 over [1, 4) through the user's own generic Iterator<T> impl";
 }
 
@@ -2092,6 +2122,388 @@ test "constructing a generic enum from a method's own type param does not cross-
   `}`;
   let out = emit_c(src, "constructing a generic enum from a method's own type param");
   assert contains(out, "tag == Maybe__str_Has"), "expected the arm to test the substituted tag";
+}
+
+test "a method's own type param inferred from a function-typed argument's return type monomorphizes" {
+  // `map<U>(fun(T) U f)` never matches the bare `v.var_type.type_str
+  // == tp` check `maybe_instantiate_generic_impl_method_own_params`
+  // uses to infer `U` - `f`'s own declared type is a function
+  // signature, not literally `U` - so `U` leaked through as a real C
+  // type name at the call site. A `let`-inferred local's own return
+  // type carried the same gap through a second, independent path
+  // (`infer_let_expr_type`'s own method-call case, which fell all the
+  // way to `lookup_impl_method_rtype`'s flat, unsubstituted table).
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `impl MyOpt<T> {
+  `  pub map<U>(fun(T) U f) MyOpt<U> {
+  `    fit self {
+  `      .Some(v) -> { ret .Some(f(v)); }
+  `      .None -> { ret .None; }
+  `    }
+  `  }
+  `}
+  `fun doubleit(num x) num {
+  `  ret x * 2;
+  `}
+  `fun main() {
+  `  MyOpt<num> o = .Some(5);
+  `  let r = o.map(doubleit);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a method's own type param inferred from a function-typed argument's return type"
+  );
+  assert contains(out, "MyOpt__num__map__num"), "expected the call site monomorphized on the inferred return type";
+  assert contains(out, "MyOpt__num r ="), "expected the let-inferred local substituted, not left as the template's bare MyOpt__U";
+}
+
+test "a generic function's own type param infers from an argument that is itself a call to another generic function" {
+  // `infer_arg_type_name`'s own `()`-call case resolved the callee's
+  // return type only through `lookup_function_rtype`'s flat,
+  // non-generic registry - a generic callee (`identity<T>`) isn't in
+  // it at all, so `?` propagated `.None` straight out instead of
+  // falling back to `maybe_instantiate_generic_function` the way
+  // `_resolve_call_rtype` already does for the same gap elsewhere.
+  // `wrap`'s own `T` never got inferred from `identity(5)`'s result,
+  // so the call site emitted the bare, unmangled `wrap(...)` instead
+  // of `wrap__num(...)`.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun identity<T>(T v) T {
+  `  ret v;
+  `}
+  `fun wrap<T>(T v) MyOpt<T> {
+  `  ret .Some(v);
+  `}
+  `fun main() {
+  `  let outer = wrap(identity(5));
+  `  fit outer {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's own type param infers from a call to another generic function"
+  );
+  assert contains(out, "wrap__num(identity__num(5))"), "expected wrap's own call site monomorphized on the inner generic call's inferred return type";
+}
+
+test "a generic function's own type param infers from the enclosing let's own declared type" {
+  // `maybe_instantiate_generic_function`'s own per-param inference
+  // already fell back to the enclosing function's own return type
+  // when a call's arguments reveal nothing - but a type param that
+  // appears in neither (`make_empty<T>()` takes no arguments at all)
+  // still has the enclosing let's own declared type to infer from
+  // (`Vec<num> v = make_empty();`), which nothing read before this
+  // fix: the call fell back to the bare, unmangled name instead of
+  // `make_empty__num`.
+  str src = `use std.io;
+  `compound Box2<T> {
+  `  T v;
+  `}
+  `fun make_zero_box<T>() Box2<T> {
+  `  ret .{ v = 0 };
+  `}
+  `fun main() {
+  `  Box2<num> b = make_zero_box();
+  `  println_fmt("{num}", b.v);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's own type param infers from the enclosing let's own declared type"
+  );
+  assert contains(out, "Box2__num b = make_zero_box__num();"), "expected make_zero_box's own call site monomorphized on the declared local's own type";
+}
+
+test "a generic impl's operator method monomorphizes through operator syntax, not just an explicit .method() call" {
+  // `emit_operator_call`'s three callers (binary, unary, `[]`/`[]=`)
+  // never triggered `ensure_generic_impl_method_emitted` the way an
+  // ordinary `.method()` call site already does - `p1 + p2` resolved
+  // the right mangled name (`Pair__num__op_add`) but never caused it
+  // to actually be emitted, while `p1.op_add(p2)` on the identical
+  // type worked, since only the latter went through the ordinary
+  // method-call path.
+  str src = `use std.io;
+  `compound Pair<T: num | flag> {
+  `  T a;
+  `  T b;
+  `}
+  `impl Pair<T> {
+  `  pub op_add(Pair<T> other) Pair<T> {
+  `    ret .{ a = self.a + other.a, b = self.b + other.b };
+  `  }
+  `}
+  `fun main() {
+  `  Pair<num> p1 = .{ a = 1, b = 2 };
+  `  Pair<num> p2 = .{ a = 3, b = 4 };
+  `  Pair<num> p3 = p1 + p2;
+  `  println_fmt("{num} {num}", p3.a, p3.b);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl's operator method monomorphizes through operator syntax"
+  );
+  assert contains(out, "Pair__num Pair__num__op_add(Pair__num* self, Pair__num other)"), "expected op_add's own body emitted, not just referenced";
+}
+
+test "operator dispatch resolves a dereferenced-pointer left operand, not just a plain value" {
+  // `resolve_operator_operand`'s own `.Unary` case rejected any
+  // dereference outright (`u.has_indirection` being true was itself
+  // disqualifying, before even checking which operator) - only
+  // `op_neg`/`op_not` through a plain value ever matched. `*ptr1 +
+  // p2` silently fell through to raw infix `+` on two full compound
+  // values instead of dispatching to `op_add`, while the identical
+  // dereference through an explicit `.op_add()` call already worked.
+  str src = `use std.io;
+  `compound Pair<T: num | flag> {
+  `  T a;
+  `  T b;
+  `}
+  `impl Pair<T> {
+  `  pub op_add(Pair<T> other) Pair<T> {
+  `    ret .{ a = self.a + other.a, b = self.b + other.b };
+  `  }
+  `}
+  `fun main() {
+  `  Pair<num> p1 = .{ a = 1, b = 2 };
+  `  Pair<num> p2 = .{ a = 3, b = 4 };
+  `  Pair<num>* ptr1 = &p1;
+  `  Pair<num> p3 = *ptr1 + p2;
+  `  println_fmt("{num} {num}", p3.a, p3.b);
+  `}`;
+  let out = emit_c(src, "operator dispatch resolves a dereferenced-pointer left operand");
+  assert contains(out, "Pair__num__op_add(&(*ptr1), p2)"), "expected the dereferenced operand dispatched through op_add, not raw infix +";
+}
+
+test "a generic impl's op_index/op_index_set monomorphize through [] syntax, not just an explicit call" {
+  str src = `use std.io;
+  `compound Grid<T> {
+  `  T v;
+  `}
+  `impl Grid<T> {
+  `  pub op_index(num i) T {
+  `    ret self.v;
+  `  }
+  `  pub op_index_set(num i, T val) {
+  `    self.v = val;
+  `  }
+  `}
+  `fun main() {
+  `  Grid<num> g = .{ v = 1 };
+  `  g[0] = 9;
+  `  println_fmt("{num}", g[0]);
+  `}`;
+  let out = emit_c(src, "a generic impl's op_index/op_index_set monomorphize through [] syntax");
+  assert contains(
+    out,
+    "void Grid__num__op_index_set(Grid__num* self, int64_t i, int64_t val) {"
+  ), "expected op_index_set's own body emitted";
+  assert contains(out, "int64_t Grid__num__op_index(Grid__num* self, int64_t i) {"), "expected op_index's own body emitted";
+}
+
+test "a let-bound await result on an enum-returning async function resolves for a later fit" {
+  // `infer_let_expr_type` had no case for `await` at all - it fell
+  // straight to `.None`, which left `r` registered with no real Fun
+  // type (fine for a plain value, since the GNU `__auto_type` fallback
+  // still gets the right native C type, but a later `fit r { .Variant
+  // -> ... }` has nothing to resolve r's own tag/variants against).
+  // Not generic-specific: reproduces with a plain, non-generic async
+  // function returning a plain, non-generic enum.
+  str src = `use std.io;
+  `enum MyOpt {
+  `  Some(num),
+  `  None,
+  `}
+  `async fun fetch(num v) MyOpt {
+  `  ret .Some(v);
+  `}
+  `async fun main() {
+  `  let r = await fetch(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a let-bound await result on an enum-returning async function");
+  assert contains(out, "tag == MyOpt_Some"), "expected the fit arm to test the real tag, not crash or fall back to an unresolved type";
+}
+
+test "a let-bound await result on a generic enum-returning async function resolves for a later fit" {
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `async fun fetch<T>(T v) MyOpt<T> {
+  `  ret .Some(v);
+  `}
+  `async fun main() {
+  `  let r = await fetch(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a let-bound await result on a generic enum-returning async function");
+  assert contains(out, "tag == MyOpt__num_Some"), "expected the fit arm to test the real, substituted tag";
+}
+
+test "a let-bound array index of a user-defined element type resolves, not just a pointer-decayed one" {
+  // `infer_let_expr_type`'s own `[]` case only covered a pointer-typed
+  // receiver indexing to its pointee (`f[0]` where `f` is a real
+  // pointer, C's own `pointer[0]` being `*pointer`) or a plain `str`
+  // indexing to `chr` - a genuinely array-typed local (`Box[] arr`,
+  // `is_pointer` false the same way it is for `str`) matched neither
+  // case and fell through to the unconditional `.None`, so `x` in
+  // `let x = arr[0];` was never recorded with any type at all and
+  // crashed as "unknown identifier 'x'" on its very next use.
+  // Reproduces identically for a compound or a plain enum element -
+  // not generics-specific.
+  str src = `use std.io;
+  `compound Box {
+  `  num v;
+  `}
+  `fun main() {
+  `  Box[] arr = [.{v=1}, .{v=2}];
+  `  let x = arr[0];
+  `  println_fmt("{num}", x.v);
+  `}`;
+  let out = emit_c(src, "a let-bound array index of a user-defined element type");
+  assert contains(out, "x.v"), "expected x's own field access to resolve, not leak an unknown identifier";
+}
+
+test "a bare compound literal as a function's own ret value resolves its type, not just a let's" {
+  // `ret`'s own context-setup set `expected_enum_type` (for a bare
+  // enum-variant shorthand, `ret .Some(x);`) but never
+  // `expected_compound_type` - so a bare `.{ field = value, ... }`
+  // return value had nothing to resolve its own type from and
+  // crashed codegen outright, with nothing generics-specific about
+  // it at all. The explicitly-typed form (`ret Pair{ ... };`) always
+  // worked; this is the one gap in `ret` specifically. Reproduces
+  // identically for an impl method's own `ret .{ ... };`, since both
+  // share the same emission path.
+  str src = `use std.io;
+  `compound Pair {
+  `  num first;
+  `  num second;
+  `}
+  `fun make_pair() Pair {
+  `  ret .{ first = 1, second = 2 };
+  `}
+  `fun main() {
+  `  let p = make_pair();
+  `  println_fmt("{num} {num}", p.first, p.second);
+  `}`;
+  let out = emit_c(
+    src,
+    "a bare compound literal as a function's own ret value resolves its type"
+  );
+  assert contains(out, "return (Pair){.first = 1, .second = 2};"), "expected the bare literal resolved to a real Pair compound literal, not an unsupported node";
+}
+
+test "a generic function's result passed directly as another call's argument infers its own type param" {
+  // `maybe_instantiate_generic_function`'s own per-param fallback
+  // chain had bare-arg match, enclosing-function-return-type, and
+  // enclosing-let-declared-type - but a generic call passed directly
+  // as an argument to another call, with no intermediate `let` at
+  // all (`take_box(make_zero_box())`), had none of those: the
+  // argument-emission loop never set `expected_let_dt` from the
+  // outer call's own declared parameter type the way a `let`
+  // statement's own declared type already does.
+  str src = `use std.io;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `fun make_zero_box<T>() Box<T> {
+  `  ret .{ v = 0 };
+  `}
+  `fun take_box(Box<num> b) num {
+  `  ret b.v;
+  `}
+  `fun main() {
+  `  num r = take_box(make_zero_box());
+  `  println_fmt("{num}", r);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's result passed directly as another call's argument"
+  );
+  assert contains(out, "take_box(make_zero_box__num())"), "expected make_zero_box's own call site monomorphized on the outer call's own declared parameter type";
+}
+
+test "a generic impl method's own additional type param falls back to the enclosing let's own declared type" {
+  // `maybe_instantiate_generic_impl_method_own_params`'s own per-
+  // param inference had bare-arg match, a function-typed argument's
+  // return type, and a declared default - but no enclosing-let-
+  // declared-type fallback at all, the one a plain generic function's
+  // own type param already got fixed earlier this session. A method
+  // with its own additional type param that takes no arguments at
+  // all (`make_other<U>()`) had nothing else to infer `U` from.
+  str src = `use std.io;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> {
+  `  pub make_other<U>() Box<U> {
+  `    ret .{ v = 0 };
+  `  }
+  `}
+  `fun main() {
+  `  Box<num> b1 = .{ v = 1 };
+  `  Box<num> b2 = b1.make_other();
+  `  println_fmt("{num}", b2.v);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl method's own additional type param falls back to the enclosing let's own declared type"
+  );
+  assert contains(out, "Box__num b2 = Box__num__make_other__num(&b1);"), "expected make_other's own call site monomorphized on the enclosing let's own declared type";
+}
+
+test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
+  // `resolve_type_subst`'s own generic_args loop only matched a bare
+  // param (`a.generic_args.len == 0`) - a nested argument that is
+  // itself generic (`Box2<T>`, inside `MyOpt<Box2<T>>`) matched
+  // neither that case nor any other, so it was pushed through
+  // completely unsubstituted. The same shape of gap `substitute()` had
+  // on the typecheck side this session, one level further in: the
+  // outer `MyOpt` substituted to `num` fine, but the inner `Box2<T>`
+  // stayed `Box2<T>` verbatim in the generated C.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `compound Box2<T> {
+  `  T v;
+  `}
+  `fun wrap<T>(T v) MyOpt<Box2<T>> {
+  `  Box2<T> b;
+  `  b.v = v;
+  `  ret .Some(b);
+  `}
+  `fun main() {
+  `  let r = wrap(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v.v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a doubly-nested generic return type substitutes at every level");
+  assert contains(out, "MyOpt__Box2__num r = wrap__num(5);"), "expected the let-inferred local fully substituted at both levels";
+  assert contains(out, "tag == MyOpt__Box2__num_Some"), "expected the fit arm to test the fully-substituted tag";
 }
 
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {

@@ -98,6 +98,10 @@ fun main() num {
     .Err(e) -> { printf("parse_and_double err: line=%lld reason=%s\n", e.line, e.reason); }
   }
 
-  printf("sum_list: %lld, none=%d\n", sum_list(5).unwrap(), sum_list(-1).is_none());
+  printf(
+    "sum_list: %lld, none=%d\n",
+    sum_list(5).unwrap(),
+    sum_list(-1).is_none()
+  );
   ret 0;
 }

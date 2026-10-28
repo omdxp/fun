@@ -14,7 +14,12 @@ impl Person {
   }
 
   printInfo() {
-    printf("Name: %s, Age: %d, Favorite Color: %d\n", self.name, self.age, self.favoriteColor);
+    printf(
+      "Name: %s, Age: %d, Favorite Color: %d\n",
+      self.name,
+      self.age,
+      self.favoriteColor
+    );
   }
 }
 
