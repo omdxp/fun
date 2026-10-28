@@ -606,6 +606,58 @@ test "a dotted call through a completely undeclared identifier is rejected, not 
   );
 }
 
+test "a generic function's type param that appears nowhere at all is rejected, not left to leak into codegen" {
+  // `_infer_call_generic_args` only ever checks a bare argument
+  // written directly as a type param - when the param appears
+  // nowhere in the signature at all (not in any argument, nested or
+  // not, and not in the return type), nothing could ever infer it,
+  // yet typecheck itself never noticed: `make_zero`'s own call-site
+  // return type ("num") never depended on T either, so the call
+  // typechecked fine. Codegen's own, separately-written inference
+  // mirrors the same limitation and silently fell back to the bare,
+  // unmangled name - a real function this genuinely is not, since it
+  // was declared with its own `<T>`.
+  rejects(
+    `fun make_zero<T>(num count) num {
+    `  ret count;
+    `}
+    `fun main() {
+    `  num r = make_zero(3);
+    `}`,
+    "expected a call to a generic function whose type param appears nowhere to be rejected"
+  );
+  // A type param nested inside an argument's own declared type (not a
+  // bare occurrence `_infer_call_generic_args` itself can match) must
+  // still be recognized as reachable, not wrongly flagged the same
+  // way - the fix only rejects a param that is truly absent from
+  // every source, never one this file's own narrower inference
+  // merely fails to resolve a concrete value for.
+  accepts(
+    `use std.vec;
+    `fun first<T>(Vec<T> items) T {
+    `  ret items.get(0);
+    `}
+    `fun main() {
+    `  Vec<num> nums;
+    `  nums.init(1);
+    `  nums.push(5);
+    `  num n = first(nums);
+    `}`,
+    "expected a type param nested inside an argument's own type to still be accepted, not flagged as unreachable"
+  );
+  // An explicit call-site type argument reaches a param no argument
+  // or return type could ever pin down on its own.
+  accepts(
+    `fun make_zero<T>(num count) num {
+    `  ret count;
+    `}
+    `fun main() {
+    `  num r = make_zero<num>(3);
+    `}`,
+    "expected an explicit call-site type argument to satisfy an otherwise-unreachable type param"
+  );
+}
+
 test "a method on a concretely-specialized generic impl mangles its primitive argument's own name" {
   // `mangled_name(CheckedType)` built a generic instantiation's key
   // from each argument's bare `name`, which is blank for a primitive

@@ -3943,8 +3943,81 @@ impl Checker {
     // call - no explicit `<...>` call-site syntax to prefer it over.
     Vec<CheckedType> inferred_args = self._infer_call_generic_args(sig, &args, env);
     defer inferred_args.free();
+    // A type param this call could never infer from anything - no
+    // bare argument written as it, nothing nested inside any
+    // argument's own declared type, no mention in the return type
+    // either, and no explicit `<...>` supplied at the call site - is
+    // not a type the checker merely failed to model; it is dead,
+    // unreachable from this call under any circumstance. Left
+    // unchecked, `make_zero<T>(num count) num` (T named nowhere at
+    // all) passed typecheck outright, and codegen's own, separately-
+    // written inference (which this mirrors) silently gave up and
+    // fell back to the bare, unmangled name - a real function this
+    // genuinely is not, since it was declared with its own `<T>`.
+    num tpi = 0;
+    for tpi < sig.type_params.len {
+      if !is_unknown(inferred_args.get(tpi)) {
+        tpi = tpi + 1;
+        continue;
+      }
+      if e.has_generic_args && tpi < e.generic_args.len {
+        tpi = tpi + 1;
+        continue;
+      }
+      str tp = sig.type_params.get(tpi);
+      flag reachable = _checked_type_references_param(sig.rtype_template, tp);
+      num ai = 0;
+      for !reachable && ai < sig.args.len {
+        if _checked_type_references_param(sig.args.get(ai), tp) {
+          reachable = true;
+        }
+        ai = ai + 1;
+      }
+      if !reachable {
+        self.fail(
+          format(
+          "cannot infer type parameter '{str}' for this call to '{str}' - pass it explicitly ('{str}<...>(...)')",
+          tp,
+          name,
+          name
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
+      tpi = tpi + 1;
+    }
     ret substitute(sig.rtype_template, &sig.type_params, &inferred_args);
   }
+}
+
+// True when `t`, or anything nested inside it, names `param` -
+// `_erase_type_params` only erases a bare top-level occurrence
+// (`T x`), never one nested further in (`Vec<T> items`), so `t`'s own
+// structural `generic_args`/`tuple_members` still carry a nested
+// occurrence intact even after a signature's own params go through
+// it. Used to tell "this type param genuinely cannot be inferred
+// from anything" apart from "it can, just not by this call's own
+// narrow bare-argument check" - the two read identically as far as
+// `_infer_call_generic_args` alone can tell.
+fun _checked_type_references_param(CheckedType t, str param) flag {
+  if t.is_tuple {
+    for m : t.tuple_members {
+      if _checked_type_references_param(m, param) {
+        ret true;
+      }
+    }
+    ret false;
+  }
+  if equals(t.name, param) {
+    ret true;
+  }
+  for a : t.generic_args {
+    if _checked_type_references_param(a, param) {
+      ret true;
+    }
+  }
+  ret false;
 }
 
 // True when some subtree of `n` reads the identifier `self` - used to
