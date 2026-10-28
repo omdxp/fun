@@ -10094,7 +10094,16 @@ impl Codegen {
               self.state.write("(");
             }
             let prev_expected = self.expected_enum_type;
+            let prev_expected_compound = self.expected_compound_type;
             self.expected_enum_type = self.current_fn_rtype_name;
+            // A bare `.{ field = value, ... }` return value has only
+            // this to resolve its own type from - `expected_enum_type`
+            // alone covers a bare enum-variant shorthand (`ret
+            // .Some(x);`), never a compound literal, which crashed
+            // codegen outright with nothing generics-specific about
+            // it at all (confirmed directly: `Pair{ ... }`, the
+            // explicitly-typed form, always worked).
+            self.expected_compound_type = self.current_fn_rtype_name;
             flag prev_has_expected_tuple4 = self.has_expected_tuple_type;
             DataType prev_expected_tuple4 = self.expected_tuple_type;
             if self.current_fn_rtype_dt.is_some() &&
@@ -10104,6 +10113,7 @@ impl Codegen {
             }
             let eerr = self.emit_expr(*exp);
             self.expected_enum_type = prev_expected;
+            self.expected_compound_type = prev_expected_compound;
             self.has_expected_tuple_type = prev_has_expected_tuple4;
             self.expected_tuple_type = prev_expected_tuple4;
             if eerr.is_some() {
@@ -10138,7 +10148,12 @@ impl Codegen {
             self.state.write("(");
           }
           let prev_expected = self.expected_enum_type;
+          let prev_expected_compound = self.expected_compound_type;
           self.expected_enum_type = self.current_fn_rtype_name;
+          // Same reason as the non-deferred `return` path just above:
+          // a bare `.{ }` return value needs this to resolve its own
+          // type, which `expected_enum_type` alone never covers.
+          self.expected_compound_type = self.current_fn_rtype_name;
           flag prev_has_expected_tuple5 = self.has_expected_tuple_type;
           DataType prev_expected_tuple5 = self.expected_tuple_type;
           if self.current_fn_rtype_dt.is_some() &&
@@ -10148,6 +10163,7 @@ impl Codegen {
           }
           let eerr = self.emit_expr(*exp);
           self.expected_enum_type = prev_expected;
+          self.expected_compound_type = prev_expected_compound;
           self.has_expected_tuple_type = prev_has_expected_tuple5;
           self.expected_tuple_type = prev_expected_tuple5;
           if eerr.is_some() {
