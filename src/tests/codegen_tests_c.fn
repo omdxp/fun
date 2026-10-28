@@ -2222,6 +2222,53 @@ test "a generic impl's op_index/op_index_set monomorphize through [] syntax, not
   assert contains(out, "int64_t Grid__num__op_index(Grid__num* self, int64_t i) {"), "expected op_index's own body emitted";
 }
 
+test "a let-bound await result on an enum-returning async function resolves for a later fit" {
+  // `infer_let_expr_type` had no case for `await` at all - it fell
+  // straight to `.None`, which left `r` registered with no real Fun
+  // type (fine for a plain value, since the GNU `__auto_type` fallback
+  // still gets the right native C type, but a later `fit r { .Variant
+  // -> ... }` has nothing to resolve r's own tag/variants against).
+  // Not generic-specific: reproduces with a plain, non-generic async
+  // function returning a plain, non-generic enum.
+  str src = `use std.io;
+  `enum MyOpt {
+  `  Some(num),
+  `  None,
+  `}
+  `async fun fetch(num v) MyOpt {
+  `  ret .Some(v);
+  `}
+  `async fun main() {
+  `  let r = await fetch(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a let-bound await result on an enum-returning async function");
+  assert contains(out, "tag == MyOpt_Some"), "expected the fit arm to test the real tag, not crash or fall back to an unresolved type";
+}
+
+test "a let-bound await result on a generic enum-returning async function resolves for a later fit" {
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `async fun fetch<T>(T v) MyOpt<T> {
+  `  ret .Some(v);
+  `}
+  `async fun main() {
+  `  let r = await fetch(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a let-bound await result on a generic enum-returning async function");
+  assert contains(out, "tag == MyOpt__num_Some"), "expected the fit arm to test the real, substituted tag";
+}
+
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   str src = `use std.c.io;
   `pub fun fork() num {

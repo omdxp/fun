@@ -16166,6 +16166,26 @@ impl Codegen {
       // resolves `pb`'s chain first, then drops one level of
       // `pointer_depth`, a dereferenced pointer being a plain value.
       .Unary(u) -> {
+        // `let v = await fn(...);`: `v`'s own type is the awaited
+        // call's own declared return type - unresolved otherwise (no
+        // case fell through to anything but `.None` here), which left
+        // `v` registered with no real Fun type at all. Fine for a
+        // plain value (the GNU `__auto_type` fallback this triggers
+        // still gets the right native C type), but a later `fit v {
+        // .Variant -> ... }` on an enum-returning async call has
+        // nothing to resolve `v`'s own tag/variants against, and
+        // crashed codegen outright instead of a working program.
+        if !u.is_left_operanded_unary && equals(u.op, "await") {
+          fit u.operand.kind {
+            .Expression(await_e) -> {
+              if equals(await_e.op, "()") && await_e.has_left {
+                ret self._resolve_call_rtype(await_e);
+              }
+            }
+            _ -> {}
+          }
+          ret .None;
+        }
         // `let v = expr?;`/`let v = expr!;`: `v`'s own type is `T`, the
         // propagated value's own generic arg (`expr`'s `Option<T>`/
         // `Result<T,E>`), not the whole Option/Result - needed so a
