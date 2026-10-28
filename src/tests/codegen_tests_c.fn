@@ -2413,6 +2413,36 @@ test "a bare compound literal as a function's own ret value resolves its type, n
   assert contains(out, "return (Pair){.first = 1, .second = 2};"), "expected the bare literal resolved to a real Pair compound literal, not an unsupported node";
 }
 
+test "a generic function's result passed directly as another call's argument infers its own type param" {
+  // `maybe_instantiate_generic_function`'s own per-param fallback
+  // chain had bare-arg match, enclosing-function-return-type, and
+  // enclosing-let-declared-type - but a generic call passed directly
+  // as an argument to another call, with no intermediate `let` at
+  // all (`take_box(make_zero_box())`), had none of those: the
+  // argument-emission loop never set `expected_let_dt` from the
+  // outer call's own declared parameter type the way a `let`
+  // statement's own declared type already does.
+  str src = `use std.io;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `fun make_zero_box<T>() Box<T> {
+  `  ret .{ v = 0 };
+  `}
+  `fun take_box(Box<num> b) num {
+  `  ret b.v;
+  `}
+  `fun main() {
+  `  num r = take_box(make_zero_box());
+  `  println_fmt("{num}", r);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's result passed directly as another call's argument"
+  );
+  assert contains(out, "take_box(make_zero_box__num())"), "expected make_zero_box's own call site monomorphized on the outer call's own declared parameter type";
+}
+
 test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
   // `resolve_type_subst`'s own generic_args loop only matched a bare
   // param (`a.generic_args.len == 0`) - a nested argument that is

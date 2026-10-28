@@ -202,14 +202,15 @@ pub compound Codegen {
   // type param from the enclosing function's own return type when it
   // can't be read off the call's arguments.
   Option<DataType> current_fn_rtype_dt;
-  // A `let`/declared-variable statement's own declared type, while its
-  // initializer is being emitted - the sibling context
-  // `maybe_instantiate_generic_function` falls back to when a type
-  // param appears in neither the call's arguments nor the enclosing
-  // function's own return type, but does in the declared local's: `Vec
-  // <num> v = make_empty();` has nothing else anywhere to infer `T`
-  // from. `.None` outside a declared (non-`__let_infer__`) `let`'s own
-  // initializer.
+  // The expected declared type of whatever's being emitted right now
+  // - a `let`/declared-variable's own type while its initializer is
+  // emitted, or a call's own declared parameter type while that
+  // argument is emitted - the context `maybe_instantiate_generic_
+  // function` falls back to when a type param appears in neither the
+  // call's own arguments nor the enclosing function's own return
+  // type: `Vec<num> v = make_empty();` and `take_box(make_zero_box
+  // ());` both have nothing else anywhere to infer `T` from. `.None`
+  // outside either of those two positions.
   Option<DataType> expected_let_dt;
   // The enum a bare `.Variant`/`.Variant(x)` shorthand resolves against,
   // standing in for "the expected type from context." Empty when nothing
@@ -7870,6 +7871,8 @@ impl Codegen {
         }
       }
       str prev_expected = self.expected_enum_type;
+      str prev_expected_compound2 = self.expected_compound_type;
+      let prev_expected_let_dt2 = self.expected_let_dt;
       flag prev_has_expected_tuple2 = self.has_expected_tuple_type;
       DataType prev_expected_tuple2 = self.expected_tuple_type;
       flag arg_did_shape_coerce = false;
@@ -7878,9 +7881,19 @@ impl Codegen {
           self.has_expected_tuple_type = true;
           self.expected_tuple_type = ptype.unwrap();
         }
+        // A nested generic call passed directly as this argument
+        // (`take_box(make_zero_box())`, no intermediate `let`) has
+        // this declared parameter type as its own only context to
+        // infer an unreachable-from-its-own-arguments type param
+        // from - the same fallback `expected_let_dt` already gives a
+        // declared local's own initializer.
+        if ptype.unwrap().generic_args.len > 0 {
+          self.expected_let_dt = .Some(ptype.unwrap());
+        }
         let resolved = self.resolve_type_name(ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
+          self.expected_compound_type = resolved.unwrap();
           // A concrete-typed argument passed where the declared parameter
           // is a shape type needs the same coercion wrap a `Variable` or
           // `ret` initializer gets; without it the argument's concrete
@@ -7901,6 +7914,8 @@ impl Codegen {
       }
       let aerr = self.emit_expr(*arg);
       self.expected_enum_type = prev_expected;
+      self.expected_compound_type = prev_expected_compound2;
+      self.expected_let_dt = prev_expected_let_dt2;
       self.has_expected_tuple_type = prev_has_expected_tuple2;
       self.expected_tuple_type = prev_expected_tuple2;
       if aerr.is_some() {
@@ -16414,11 +16429,14 @@ impl Codegen {
   }
 
   // `infer_generic_function_type_param_from_context`'s own sibling,
-  // against the declared local's own type (`Vec<num> v =
-  // make_empty();`) instead of the enclosing function's return type -
-  // the other real context a type param that appears in neither the
-  // call's own arguments nor the enclosing function's return type can
-  // still be pinned down by.
+  // against `self.expected_let_dt` - a declared local's own type
+  // (`Vec<num> v = make_empty();`) or an enclosing call's own
+  // declared parameter type for an argument that is itself this call
+  // (`take_box(make_zero_box());`), whichever is active - instead of
+  // the enclosing function's own return type. The other real context
+  // a type param that appears in neither the call's own arguments
+  // nor the enclosing function's return type can still be pinned
+  // down by.
   infer_generic_function_type_param_from_let_context(FunctionNode f, str tp) Option<str> {
     if !f.has_rtype || self.expected_let_dt.is_none() {
       ret .None;
