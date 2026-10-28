@@ -625,6 +625,51 @@ test "arithmetic between two strings is rejected, not left to leak into codegen"
   );
 }
 
+test "a method's own default parameter value referencing 'self' is rejected, not left to leak into codegen" {
+  // A default is spliced into each call site's own argument list
+  // verbatim (`emit_default_trailing_args`), never evaluated against a
+  // bound receiver the way the method's own body is - `self.v` leaked
+  // straight through as a genuine identifier lookup and crashed
+  // codegen ("unsupported node: unknown identifier 'self'"). Checked
+  // in `check_impl` itself, before the generic-impl skip, since a
+  // generic impl's methods never reach `check_function_with_self` at
+  // all (their bodies are left alone until instantiated) - confirmed
+  // directly: the first version of this fix lived in
+  // `check_function_with_self` and never ran for this exact repro.
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_or(T fallback = self.v) T {
+    `    ret fallback;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b = .{ v = 5 };
+    `  b.get_or();
+    `}`,
+    "expected a method's own default value referencing self to be rejected"
+  );
+  // An ordinary default, naming nothing receiver-specific, must still
+  // work on a generic impl's own method.
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  pub get_or(T fallback) T {
+    `    ret fallback;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b = .{ v = 5 };
+    `  b.get_or(9);
+    `}`,
+    "expected an ordinary default on a generic impl's own method to still work"
+  );
+}
+
 test "an ambiguous variant name with an explicit declared type is not flagged" {
   // The declared type on the left resolves it outright; the ambiguity
   // check only applies to a fully `let`-inferred initializer, which has

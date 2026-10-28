@@ -3921,6 +3921,56 @@ impl Checker {
   }
 }
 
+// True when some subtree of `n` reads the identifier `self` - used to
+// reject it inside a parameter's own default-value expression (see
+// `check_function_with_self`'s own caller for why). Walks only the
+// node kinds an expression can actually be built from; a statement or
+// declaration never appears inside one, so those kinds need no case.
+fun _references_self(Node* n) flag {
+  if n == nil {
+    ret false;
+  }
+  fit n.kind {
+    .Identifier(name) -> { ret equals(name, "self"); }
+    .Expression(e) -> {
+      if e.has_left && _references_self(e.left) {
+        ret true;
+      }
+      ret e.has_right && _references_self(e.right);
+    }
+    .ExpressionParenthesis(inner) -> { ret _references_self(inner); }
+    .Unary(u) -> {
+      if _references_self(u.operand) {
+        ret true;
+      }
+      ret u.has_error_arg && _references_self(u.error_arg);
+    }
+    .Ternary(t) -> {
+      ret _references_self(t.cond) || _references_self(t.then_val) ||
+        _references_self(t.else_val);
+    }
+    .Bracket(inner) -> { ret _references_self(inner); }
+    .CompoundInit(c) -> {
+      for f : c.fields {
+        if _references_self(f.value) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .TupleLiteral(t) -> {
+      for el : t.elements {
+        if _references_self(el) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Panic(inner) -> { ret _references_self(inner); }
+    _ -> { ret false; }
+  }
+}
+
 // True for `=` and the operators that read and write in one step.
 fun _is_assignment(str op) flag {
   if equals(op, "=") {
@@ -5432,6 +5482,35 @@ impl Checker {
   // Walks the methods an impl block supplies, with the receiver bound to
   // the type they belong to.
   check_impl(ImplNode block, Vec<Node>* nodes) {
+    // A parameter's default is spliced into each call site's own
+    // argument list verbatim (`emit_default_trailing_args`), never
+    // evaluated against a bound receiver the way the method's own body
+    // is - a call through a value with no `self` of its own (an
+    // ordinary top-level statement) has nothing to splice it against.
+    // Checked unconditionally, before the generic skip just below,
+    // since it needs no type substitution at all - only whether the
+    // expression itself mentions `self`. Left unchecked, `self.v`
+    // leaked through as a genuine identifier lookup and crashed
+    // codegen ("unsupported node: unknown identifier 'self'") instead
+    // of a real diagnostic.
+    for m : block.methods {
+      fit m.kind {
+        .Function(f) -> {
+          for pa : f.args {
+            fit pa.kind {
+              .Variable(pv) -> {
+                if pv.has_val && _references_self(pv.val) {
+                  self.fail("a parameter's default value cannot reference 'self'", pa);
+                  ret;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
     // A generic impl's methods are written in terms of type parameters
     // the checker does not substitute, so their bodies are left alone.
     if block.has_type_params && block.type_params.len > 0 {
