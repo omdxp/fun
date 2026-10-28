@@ -4248,6 +4248,24 @@ impl Codegen {
                       found = true;
                     }
                   }
+                  // A method's own additional type param this call's
+                  // arguments reveal nothing about (`make_other<U>()`
+                  // takes none at all) still has the enclosing `let`'s
+                  // own declared type to infer from (`Box<num> b2 =
+                  // b1.make_other();`) - the same context a plain
+                  // generic function's own type param already falls
+                  // back to, reused here since `fnv` is the same
+                  // `FunctionNode` shape that helper already reads.
+                  if !found {
+                    let let_ctx = self.infer_generic_function_type_param_from_let_context(
+                      fnv,
+                      tp
+                    );
+                    if let_ctx.is_some() {
+                      found_name = let_ctx.unwrap();
+                      found = true;
+                    }
+                  }
                   if !found {
                     ret .None;
                   }

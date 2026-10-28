@@ -2443,6 +2443,35 @@ test "a generic function's result passed directly as another call's argument inf
   assert contains(out, "take_box(make_zero_box__num())"), "expected make_zero_box's own call site monomorphized on the outer call's own declared parameter type";
 }
 
+test "a generic impl method's own additional type param falls back to the enclosing let's own declared type" {
+  // `maybe_instantiate_generic_impl_method_own_params`'s own per-
+  // param inference had bare-arg match, a function-typed argument's
+  // return type, and a declared default - but no enclosing-let-
+  // declared-type fallback at all, the one a plain generic function's
+  // own type param already got fixed earlier this session. A method
+  // with its own additional type param that takes no arguments at
+  // all (`make_other<U>()`) had nothing else to infer `U` from.
+  str src = `use std.io;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> {
+  `  pub make_other<U>() Box<U> {
+  `    ret .{ v = 0 };
+  `  }
+  `}
+  `fun main() {
+  `  Box<num> b1 = .{ v = 1 };
+  `  Box<num> b2 = b1.make_other();
+  `  println_fmt("{num}", b2.v);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl method's own additional type param falls back to the enclosing let's own declared type"
+  );
+  assert contains(out, "Box__num b2 = Box__num__make_other__num(&b1);"), "expected make_other's own call site monomorphized on the enclosing let's own declared type";
+}
+
 test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
   // `resolve_type_subst`'s own generic_args loop only matched a bare
   // param (`a.generic_args.len == 0`) - a nested argument that is
