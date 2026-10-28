@@ -253,6 +253,25 @@ pub fun type_name(CheckedType t) str {
   ret b.build();
 }
 
+// The written name of a leaf (non-generic) type for mangling purposes.
+// A primitive carries its kind via `base`, never `name` (see
+// `is_unknown`'s own doc), so `t.name` alone is blank for one - this
+// maps it back to the keyword `impl Atomic<num>` itself was written
+// with, matching `_mangled_dtype_name`'s identical mapping over the
+// parser's own `DataType`.
+fun _mangled_leaf_name(CheckedType t) str {
+  fit t.base {
+    .Void -> { ret "void"; }
+    .Raw -> { ret "raw"; }
+    .Chr -> { ret "chr"; }
+    .Str -> { ret "str"; }
+    .Dec -> { ret "dec"; }
+    .Num -> { ret "num"; }
+    .Bin -> { ret "flag"; }
+    .Unknown -> { ret t.name; }
+  }
+}
+
 // The name an instantiation is registered under, which carries its
 // arguments the way an impl on a concrete instantiation is written
 // (`impl Vec<str>` registers as `Vec__str`).
@@ -263,10 +282,10 @@ pub fun type_name(CheckedType t) str {
 // theirs to free - mirrors `canonical_type_name`'s identical contract.
 pub fun mangled_name(CheckedType t) str {
   if t.generic_args.len == 0 {
-    ret t.name;
+    ret _mangled_leaf_name(t);
   }
   StringBuilder b = string_builder_init(len(t.name) + 8);
-  b.append(t.name);
+  b.append(_mangled_leaf_name(t));
   num i = 0;
   for i < t.generic_args.len {
     b.append("__");
@@ -2889,18 +2908,21 @@ impl Checker {
   }
 
   // True when the checker has seen what methods a type has, which is
-  // what lets it say a call names none of them.
+  // what lets it say a call names none of them. Every impl block in the
+  // program is collected before method calls are checked, so a type the
+  // checker has fully registered (a compound, shape, or enum) has
+  // already shown it everything it will ever declare - whether or not
+  // `self.methods` ended up with an entry for it - and an entry's
+  // absence then means "this type has no such method," not "unmodeled."
+  // Only a type the checker never registered at all (an opaque or
+  // external one) stays silent.
   knows_methods_of(CheckedType receiver) flag {
     if equals(receiver.name, "") {
       ret false;
     }
-    // An instantiation reaches methods through impls written against the
-    // type parameter, which these tables do not resolve, so only a type
-    // with no arguments of its own is judged.
-    if receiver.generic_args.len > 0 {
-      ret false;
-    }
-    ret self.methods.at(self.canonical_type_name(receiver.name)).is_some();
+    str canonical = self.canonical_type_name(receiver.name);
+    ret self.compounds.at(canonical).is_some() || self.shapes.has(canonical) ||
+      self.enum_names.has(canonical);
   }
 
   // The signature of `method` on `type_name`, if the type declares one.

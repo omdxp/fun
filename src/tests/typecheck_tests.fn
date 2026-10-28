@@ -518,6 +518,78 @@ test "a bare compound literal with no declared type anywhere is rejected, not le
   );
 }
 
+test "a method that does not exist on a generic enum is rejected, not left to leak into codegen" {
+  // `knows_methods_of` used to stay silent on any generic receiver
+  // (`receiver.generic_args.len > 0` returned early), on the theory
+  // that an instantiation's impls weren't resolvable through its own
+  // tables. That theory was stale: every impl in the program is
+  // collected before method calls are checked, so a registered enum's
+  // absent method entry already means "has none," not "unmodeled." Left
+  // unfixed, a typo'd or nonexistent method on a generic enum passed
+  // typecheck outright and crashed codegen with a raw C compiler error
+  // ("call to undeclared function") instead of a real diagnostic.
+  rejects(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `fun main() {
+    `  MyOpt<num> o = .Some(5);
+    `  o.unwrap();
+    `}`,
+    "expected a nonexistent method on a generic enum to be rejected"
+  );
+  // The sibling case: a real method, declared on the same generic enum,
+  // must still resolve - the fix must not turn every generic method
+  // call into a false positive.
+  accepts(
+    `enum MyOpt<T> {
+    `  Some(T),
+    `  None,
+    `}
+    `impl MyOpt<T> {
+    `  pub unwrap() T {
+    `    fit self {
+    `      .Some(v) -> { ret v; }
+    `      _ -> { panic("none"); }
+    `    }
+    `  }
+    `}
+    `fun main() {
+    `  MyOpt<num> o = .Some(5);
+    `  o.unwrap();
+    `}`,
+    "expected a real method on a generic enum to still resolve"
+  );
+}
+
+test "a method on a concretely-specialized generic impl mangles its primitive argument's own name" {
+  // `mangled_name(CheckedType)` built a generic instantiation's key
+  // from each argument's bare `name`, which is blank for a primitive
+  // (it carries its kind through `base` instead, never `name` - see
+  // `is_unknown`'s own doc) - so `Atomic<num>` mangled to `Atomic__`
+  // instead of `Atomic__num`, the exact key `impl Atomic<num>` itself
+  // registers its methods under. Never caught before: the only caller
+  // that cared was muted by the `knows_methods_of` fix just above,
+  // which would otherwise have flagged every real primitive-specialized
+  // method call as nonexistent.
+  accepts(
+    `compound Box<T: num | flag> {
+    `  T v;
+    `}
+    `impl Box<num> {
+    `  pub doubled() num {
+    `    ret self.v * 2;
+    `  }
+    `}
+    `fun main() {
+    `  Box<num> b = .{ v = 5 };
+    `  b.doubled();
+    `}`,
+    "expected a method on a primitive-specialized generic impl to resolve"
+  );
+}
+
 test "an ambiguous variant name with an explicit declared type is not flagged" {
   // The declared type on the left resolves it outright; the ambiguity
   // check only applies to a fully `let`-inferred initializer, which has
