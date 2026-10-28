@@ -563,6 +563,49 @@ test "a method that does not exist on a generic enum is rejected, not left to le
   );
 }
 
+test "a dotted call through a completely undeclared identifier is rejected, not left to leak into codegen" {
+  // `check_receiver_has_method`'s own silence-on-Unknown rule exists
+  // for a receiver the checker merely failed to model (a still-
+  // abstract generic type param, say) - but `infer()` returns that
+  // exact same Unknown-with-empty-name shape for a receiver that
+  // resolves to nothing at all, an undeclared identifier, making the
+  // two indistinguishable by the time that rule runs. Checked
+  // earlier now, directly against the bare name itself.
+  rejects(
+    `fun main() {
+    `  num r = nonexistent_thing.foo(5);
+    `}`,
+    "expected a call through a wholly undeclared identifier to be rejected"
+  );
+  // A plain data-carrying variant pattern's own binding (`.Rotating
+  // (r)`, no shape/tuple destructure involved) must still resolve as
+  // a known name, not get swept up by the same check: it was never
+  // given a real binding in `env` at all before this fix, which the
+  // new check above would otherwise have wrongly flagged as
+  // undeclared (confirmed directly against this exact shape in
+  // stdlib/std/io.fn's own `Sink.write`).
+  accepts(
+    `compound Thing {
+    `  num v;
+    `}
+    `impl Thing {
+    `  pub bump(num n) num { ret n; }
+    `}
+    `enum Holder {
+    `  Rotating(Thing),
+    `  Plain,
+    `}
+    `fun main() {
+    `  Holder h = .Rotating(.{ v = 1 });
+    `  fit h {
+    `    .Rotating(r) -> { r.bump(5); }
+    `    .Plain -> {}
+    `  }
+    `}`,
+    "expected a plain data-carrying variant pattern's own binding to still resolve as a known receiver"
+  );
+}
+
 test "a method on a concretely-specialized generic impl mangles its primitive argument's own name" {
   // `mangled_name(CheckedType)` built a generic instantiation's key
   // from each argument's bare `name`, which is blank for a primitive

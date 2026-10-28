@@ -3433,6 +3433,32 @@ impl Checker {
         if !equals(callee.op, ".") || !callee.has_left {
           ret;
         }
+        // A receiver written as a bare name that resolves to nothing
+        // at all - not a local, a const, a type, or a still-abstract
+        // type param - is a plain typo or undeclared reference, not a
+        // type the checker merely failed to model. Checked here,
+        // before `infer()` folds it into the same Unknown-with-empty-
+        // name shape a legitimately-unresolvable type gets, which this
+        // function's own silence-on-Unknown rule below would otherwise
+        // never catch: left unchecked, `nonexistent_thing.foo(5)`
+        // passed typecheck outright and crashed codegen instead of a
+        // real diagnostic. `check_alias_qualified_call` already ran
+        // and failed by the time this is reached, so a real module
+        // alias is already ruled out.
+        fit callee.left.kind {
+          .Identifier(bare_name) -> {
+            if env.lookup(bare_name).is_none() &&
+              self.compounds.at(bare_name).is_none() &&
+              !self.shapes.has(bare_name) &&
+              !self.plain_enums.has(bare_name) &&
+              !self.enum_names.has(bare_name) &&
+              !self.active_type_params.contains(bare_name) {
+              self.fail(format("undeclared identifier '{str}'", bare_name), node);
+              ret;
+            }
+          }
+          _ -> {}
+        }
         CheckedType receiver = self.infer(callee.left, env);
         // A pointer or an array is not the receiver itself, so what it
         // reaches is judged elsewhere.
@@ -4287,6 +4313,19 @@ impl Checker {
         self.bind_fit_tuple_pattern(branch, subject_type, env);
       } elif !equals(shape_type_name, "") {
         self.bind_fit_shape_pattern(branch, shape_type_name, env);
+      } elif branch.has_bindings {
+        // A plain data-carrying variant pattern (`.Rotating(r)`), not
+        // itself a tuple or shape destructure - its own payload type
+        // isn't modeled here (codegen resolves it independently, the
+        // same split this file already has everywhere else), but the
+        // name itself still needs a real binding: left unbound
+        // entirely, `env.lookup` reported it as not found at all,
+        // indistinguishable from a genuinely undeclared identifier -
+        // exactly what a receiver-existence check added elsewhere in
+        // this file needs to tell apart.
+        for bname : branch.bindings {
+          env.define(bname, checked_unknown());
+        }
       }
       self.check_statement(branch.body, env);
       env.pop();
