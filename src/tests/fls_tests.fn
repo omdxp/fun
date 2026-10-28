@@ -9513,3 +9513,44 @@ test "signature help answers for a method called on a plain local receiver, mid-
   assert contains(out, `"label":"scale(Box* self, num factor, num offset) num"`), "expected scale's own signature, self included";
   assert contains(out, `"activeParameter":2`), "expected the second argument (past self and factor) active";
 }
+
+test "hover and goto-definition resolve a bare variant shorthand in a fit pattern, not just a value expression" {
+  // `covering_fit`'s own range check (`_find_covering_fit`) rejected
+  // every position inside a fit statement whose branches all have a
+  // genuinely empty body (`.Variant(v) -> { }`, the ordinary shape
+  // while a reader has only just typed the pattern and hasn't filled
+  // the arm in yet) - `_last_line` has nothing to read for an empty
+  // `{ }` (no `Body` node ever gets a `pos` of its own at all, see
+  // `create_node`), so every branch contributed 0 to the fit's own
+  // computed reach, understating it and rejecting the very lines the
+  // patterns themselves sit on. The same `.Some` shorthand used as a
+  // plain value (`ret .Some(5);`) never hit this at all - it resolves
+  // through a completely different path (the enclosing function's own
+  // return type), not `covering_fit`.
+  str src = `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun make() MyOpt<num> {
+  `  ret .Some(5);
+  `}
+  `fun main() {
+  `  let o = make();
+  `  fit o {
+  `    .Some(v) -> { }
+  `    .None -> { }
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fit_pattern_empty_body.fn";
+  doc.path = "fit_pattern_empty_body.fn";
+  doc.text = src;
+  doc.version = 1;
+  // ".Some(v) -> { }" - cursor on "Some" itself.
+  str hover_out = hover(&reads, doc, 10, 7);
+  assert contains(hover_out, "Some(num)"), "expected the pattern's own variant hover, not null";
+  str def_out = definition(&reads, doc, 10, 7);
+  assert contains(def_out, `"line":1`), "expected goto-definition to land on Some's own declaration line";
+}

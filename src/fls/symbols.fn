@@ -6340,6 +6340,26 @@ fun _find_covering_fit(Node* body, num line) Option<Node*> {
         FitBranch br = f.branches.get(bi);
         bi = bi + 1;
         num reach = _last_line(br.body);
+        // A container statement's own `pos` only covers its leading
+        // token, same as the fit itself - but a branch's own `{ }`
+        // body never gets one at all (`create_node` sets none for
+        // any `Body` node), so a truly empty arm (`.Variant(v) -> {
+        // }`, the ordinary shape while a reader is just starting to
+        // fill one in) has nothing `_last_line` can read and reports
+        // 0, understating how far the fit statement actually
+        // reaches. The branch's own condition is a real expression,
+        // which does get a position, and sits on the same line as an
+        // empty body always would - a reliable floor for this one
+        // branch's own reach when the body itself has none.
+        if br.has_condition && br.condition != nil && br.condition.has_pos {
+          num cond_reach = br.condition.pos.end_line;
+          if cond_reach == 0 {
+            cond_reach = br.condition.pos.line;
+          }
+          if cond_reach > reach {
+            reach = cond_reach;
+          }
+        }
         if reach > last {
           last = reach;
         }
