@@ -2269,6 +2269,30 @@ test "a let-bound await result on a generic enum-returning async function resolv
   assert contains(out, "tag == MyOpt__num_Some"), "expected the fit arm to test the real, substituted tag";
 }
 
+test "a let-bound array index of a user-defined element type resolves, not just a pointer-decayed one" {
+  // `infer_let_expr_type`'s own `[]` case only covered a pointer-typed
+  // receiver indexing to its pointee (`f[0]` where `f` is a real
+  // pointer, C's own `pointer[0]` being `*pointer`) or a plain `str`
+  // indexing to `chr` - a genuinely array-typed local (`Box[] arr`,
+  // `is_pointer` false the same way it is for `str`) matched neither
+  // case and fell through to the unconditional `.None`, so `x` in
+  // `let x = arr[0];` was never recorded with any type at all and
+  // crashed as "unknown identifier 'x'" on its very next use.
+  // Reproduces identically for a compound or a plain enum element -
+  // not generics-specific.
+  str src = `use std.io;
+  `compound Box {
+  `  num v;
+  `}
+  `fun main() {
+  `  Box[] arr = [.{v=1}, .{v=2}];
+  `  let x = arr[0];
+  `  println_fmt("{num}", x.v);
+  `}`;
+  let out = emit_c(src, "a let-bound array index of a user-defined element type");
+  assert contains(out, "x.v"), "expected x's own field access to resolve, not leak an unknown identifier";
+}
+
 test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
   // `resolve_type_subst`'s own generic_args loop only matched a bare
   // param (`a.generic_args.len == 0`) - a nested argument that is

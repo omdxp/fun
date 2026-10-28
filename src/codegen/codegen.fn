@@ -16001,6 +16001,26 @@ impl Codegen {
                 dt.type_str = t.unwrap();
                 ret .Some(dt);
               }
+              // A genuine array-typed local (`Box[] arr`), not a
+              // decayed pointer - neither check above matches it
+              // (`is_pointer` reads false for an array, same as it
+              // does for `str`), so it fell all the way through to
+              // the unconditional `.None` below and `x` in `let x =
+              // arr[0];` never got recorded with any type at all,
+              // crashing as "unknown identifier 'x'" on its very
+              // next use. The element's own full type - compound/
+              // enum name, pointer depth, one array level shallower -
+              // comes straight off the local's own recorded dtype.
+              let arr_dt = self.lookup_local_dtype(recv_name);
+              if arr_dt.is_some() {
+                let full = arr_dt.unwrap();
+                if full.is_array && full.array_depth > 0 {
+                  DataType elem = full;
+                  elem.array_depth = full.array_depth - 1;
+                  elem.is_array = elem.array_depth > 0;
+                  ret .Some(elem);
+                }
+              }
             }
             _ -> {
               // A field-chain receiver like `self.workers`: resolve the
