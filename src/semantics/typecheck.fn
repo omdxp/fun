@@ -4933,6 +4933,32 @@ impl Checker {
             ret;
           }
         }
+        // A bare compound literal (`let x = .{ a = 1 };`, no type
+        // written anywhere - unlike `let x = Account{ a = 1 };`, which
+        // `infer_compound_init` already resolves fine) has nothing at
+        // all to infer a type from either. Left unchecked, `declared`
+        // below became Unknown, which this language's `let`-infer
+        // placeholder (`LET_INFER_TYPE`, "__let_infer__") is written
+        // as - codegen then wrote that literal placeholder string into
+        // the generated C as if it were a real type name, confirmed
+        // directly as `error: use of undeclared identifier
+        // '__let_infer__'` from the C compiler, not even a clean Fun-
+        // level diagnostic.
+        fit v.val.kind {
+          .CompoundInit(init) -> {
+            if !init.has_dtype {
+              self.fail(
+                format(
+                "cannot infer a type for '{str}': a bare compound literal needs an explicit declared type",
+                v.name
+                ),
+                stmt
+              );
+              ret;
+            }
+          }
+          _ -> {}
+        }
         // A shape names a contract rather than a type a value can be
         // stored as, so it cannot be what a `let` infers.
         if self.shapes.has(value.name) {

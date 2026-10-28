@@ -484,6 +484,40 @@ test "a bare enum-variant shorthand unambiguous across the program still infers 
   );
 }
 
+test "a bare compound literal with no declared type anywhere is rejected, not left to leak into codegen" {
+  // User-reported: `let x = .{ a = 1 };` has nothing anywhere to
+  // infer a type from (unlike `let x = Account{ a = 1 };`, which
+  // already resolves fine) - `infer_compound_init` correctly answers
+  // Unknown for this shape, but nothing then reported that as an
+  // error the way the sibling bare-enum-variant case just above
+  // already does. Left unchecked, the `let`'s own inferred type
+  // stayed the internal `__let_infer__` placeholder all the way to
+  // codegen, which wrote that literal string into the generated C as
+  // if it were a real type name - confirmed directly as a real C
+  // compiler error ("use of undeclared identifier '__let_infer__'"),
+  // not even a clean Fun-level diagnostic.
+  rejects(
+    `fun main() {
+    `  let x = .{ a = 1 };
+    `}`,
+    "expected a bare compound literal with no type anywhere to be rejected with a real diagnostic"
+  );
+  // An explicitly-typed declaration using the same bare-literal
+  // shorthand (`Account x = .{ a = 1 };`, the type written on the
+  // declaration rather than the literal) has a real type to check
+  // against from the start - `declared` is never Unknown here, so
+  // this new check must not touch it at all.
+  accepts(
+    `compound Account {
+    `  num a;
+    `}
+    `fun main() {
+    `  Account x = .{ a = 1 };
+    `}`,
+    "expected an explicitly-typed declaration's own bare-literal shorthand to still work"
+  );
+}
+
 test "an ambiguous variant name with an explicit declared type is not flagged" {
   // The declared type on the left resolves it outright; the ambiguity
   // check only applies to a fully `let`-inferred initializer, which has
