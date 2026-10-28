@@ -2124,6 +2124,47 @@ test "constructing a generic enum from a method's own type param does not cross-
   assert contains(out, "tag == Maybe__str_Has"), "expected the arm to test the substituted tag";
 }
 
+test "a method's own type param inferred from a function-typed argument's return type monomorphizes" {
+  // `map<U>(fun(T) U f)` never matches the bare `v.var_type.type_str
+  // == tp` check `maybe_instantiate_generic_impl_method_own_params`
+  // uses to infer `U` - `f`'s own declared type is a function
+  // signature, not literally `U` - so `U` leaked through as a real C
+  // type name at the call site. A `let`-inferred local's own return
+  // type carried the same gap through a second, independent path
+  // (`infer_let_expr_type`'s own method-call case, which fell all the
+  // way to `lookup_impl_method_rtype`'s flat, unsubstituted table).
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `impl MyOpt<T> {
+  `  pub map<U>(fun(T) U f) MyOpt<U> {
+  `    fit self {
+  `      .Some(v) -> { ret .Some(f(v)); }
+  `      .None -> { ret .None; }
+  `    }
+  `  }
+  `}
+  `fun doubleit(num x) num {
+  `  ret x * 2;
+  `}
+  `fun main() {
+  `  MyOpt<num> o = .Some(5);
+  `  let r = o.map(doubleit);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a method's own type param inferred from a function-typed argument's return type"
+  );
+  assert contains(out, "MyOpt__num__map__num"), "expected the call site monomorphized on the inferred return type";
+  assert contains(out, "MyOpt__num r ="), "expected the let-inferred local substituted, not left as the template's bare MyOpt__U";
+}
+
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   str src = `use std.c.io;
   `pub fun fork() num {

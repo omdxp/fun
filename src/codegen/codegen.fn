@@ -4049,6 +4049,28 @@ impl Codegen {
     ret false;
   }
 
+  // The declared return type of a plain (non-generic) top-level
+  // function named `fname`, resolved to its own C type name - used to
+  // infer a method's own type param from a function-typed argument's
+  // *return* type (`map<U>(fun(T) U f)`, called with a plain function
+  // reference), the one shape the bare-match inference just below can
+  // never catch on its own: `f`'s declared type is a function
+  // signature, not literally `U`, so the direct `type_str` comparison
+  // never fires no matter what gets passed.
+  _toplevel_function_rtype_name(str fname) Option<str> {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Function(f) -> {
+          if f.has_name && equals(f.name, fname) && !f.has_type_params && f.has_rtype {
+            ret self.resolve_type_name(*f.rtype);
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+
   // Monomorphizes a method that declares its own generic type params,
   // combining the impl's known substitution with a fresh one inferred
   // from `args`. Signature and body are hoisted together to the current
@@ -4148,6 +4170,22 @@ impl Codegen {
                             if inferred.is_some() {
                               found_name = inferred.unwrap();
                               found = true;
+                            }
+                          } elif !found && v.var_type.has_fn_sig &&
+                          v.var_type.fn_sig != nil &&
+                          v.var_type.fn_sig.rtype != nil &&
+                            equals(v.var_type.fn_sig.rtype.type_str, tp) &&
+                            v.var_type.fn_sig.rtype.generic_args.len == 0 &&
+                            arg_i < args.len {
+                            fit args.get(arg_i).kind {
+                              .Identifier(fname) -> {
+                                let fn_rtype = self._toplevel_function_rtype_name(fname);
+                                if fn_rtype.is_some() {
+                                  found_name = fn_rtype.unwrap();
+                                  found = true;
+                                }
+                              }
+                              _ -> {}
                             }
                           }
                         }
@@ -16041,6 +16079,29 @@ impl Codegen {
                 qdi2 = qdi2 + 1;
               }
               ret .None;
+            }
+            // A method declaring its own generic type param on top of
+            // the receiver's (`impl MyOpt<T> { pub map<U>(fun(T) U f)
+            // MyOpt<U> }`) needs that param substituted too, which
+            // `lookup_impl_method_rtype`'s flat, unsubstituted table
+            // can never do on its own - left unchecked, `let r =
+            // o.map(doubleit);` recorded `r`'s own type as the
+            // template's literal `MyOpt<U>` instead of the inferred
+            // `MyOpt<num>`, which the enum's own tagged-union template
+            // then tried to monomorphize as if `U` were itself a real
+            // concrete type name.
+            if e.has_right {
+              Vec<Node*> own_args;
+              own_args.init(0);
+              self.flatten_call_args(e.right, &own_args);
+              let own_res = self.maybe_instantiate_generic_impl_method_own_params(
+                recv_r.type_name,
+                method_name,
+                own_args
+              );
+              if own_res.is_some() {
+                ret .Some(own_res.unwrap().rtype);
+              }
             }
             ret .Some(
               *(self.lookup_impl_method_rtype(recv_r.type_name, method_name)?)
