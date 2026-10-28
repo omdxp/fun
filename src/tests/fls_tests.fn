@@ -7784,6 +7784,54 @@ test "completion inside a type-param bound still offers builtin types while the 
   assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside the bound position even while the document fails to parse";
 }
 
+test "completion inside a generic type argument offers only types, not the whole program's own names" {
+  // `Vec<n|>` (cursor mid-way through a type argument, `|` marking
+  // it) only ever completes to a type - nothing else is legal there -
+  // but nothing filtered for that position at all before, dumping
+  // every keyword and every declared name in the program instead.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generictypearg.fn";
+  doc.path = "generictypearg.fn";
+  doc.text = `compound Pair<A, B> {
+  `  A a;
+  `  B b;
+  `}
+  `fun helper() num {
+  `  ret 1;
+  `}
+  `fun main() {
+  `  Pair<num, n> p;
+  `}`;
+  doc.version = 1;
+
+  // Cursor right after the partial "n" in the second argument slot,
+  // on line 8: `  Pair<num, n> p;`.
+  str out = completion(&reads, doc, 8, 13, false);
+  assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside a generic type argument";
+  assert contains(out, `"label":"Pair"`), "expected a declared compound offered too (a generic can nest another)";
+  assert !contains(out, `"label":"helper"`), "expected a function name never offered inside a generic type argument";
+}
+
+test "completion inside a generic type argument still offers builtin types while the document does not parse" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generictypeargunparsed.fn";
+  doc.path = "generictypeargunparsed.fn";
+  doc.text = `fun main() {
+  `  Vec<n
+  `}
+  `fun broken( {`;
+  doc.version = 1;
+
+  // Cursor right after "n" on line 1: `  Vec<n`.
+  str out = completion(&reads, doc, 1, 7, false);
+  assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside a generic type argument even while the document fails to parse";
+  assert !contains(out, `"label":"broken"`), "expected a written-but-unrelated name never offered inside a generic type argument, parsed or not";
+}
+
 test "hover on a 'let'-inferred top-level const shows its character-literal type" {
   // `_infer_global_const_type` had arms for .Number/.String/.Boolean but
   // not .Character, the node kind a bare 'c' literal actually parses to

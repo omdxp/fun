@@ -142,7 +142,8 @@ pub fun completion(
     if equals(receiver, "") {
       Vec<Node> no_program;
       no_program.init(0);
-      if _in_type_param_bound_position(&tokens, line, character) {
+      if _in_type_param_bound_position(&tokens, line, character) ||
+        _in_generic_type_arg_position(&tokens, line, character) {
         _type_and_shape_bound_completions(&no_program, &items);
         ret _reply(&items);
       }
@@ -318,7 +319,8 @@ pub fun completion(
   }
 
   if equals(receiver, "") {
-    if _in_type_param_bound_position(&tokens, line, character) {
+    if _in_type_param_bound_position(&tokens, line, character) ||
+      _in_generic_type_arg_position(&tokens, line, character) {
       _type_and_shape_bound_completions(&program.nodes, &items);
       ret _reply(&items);
     }
@@ -3069,6 +3071,67 @@ fun _in_type_param_bound_position(Vec<Token>* tokens, num line, num character) f
     }
     // Any other token (an identifier/keyword mid-typed for the current
     // alternative) leaves `after_boundary` exactly as it was.
+  }
+  ret depth > 0 && after_boundary;
+}
+
+// True when the cursor sits right after `<` or `,` inside an unclosed
+// `<...>` generic argument list (`Vec<n|>`, `Map<str, n|>`) - a type-
+// argument position, where only a type name is legal, same shape as
+// `_in_type_param_bound_position`'s own depth-tracking just above but
+// boundaried on `<`/`,` (a type argument always starts right after
+// one of those) rather than a bound alternative's `:`/`|`. Confirmed
+// as a real gap, not just a hypothetical: without this, typing a type
+// argument offered every keyword and every declared name in the whole
+// program - not wrong, just an unfiltered dump, since nothing there
+// could actually be completed to anything but a type.
+fun _in_generic_type_arg_position(Vec<Token>* tokens, num line, num character) flag {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num depth = 0;
+  flag after_boundary = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.pos.line > source_line ||
+      (t.pos.line == source_line && t.pos.start_col >= source_col) {
+      break;
+    }
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if token_is_symbol(t, ';') || token_is_symbol(t, '{') || token_is_symbol(t, '}') {
+      depth = 0;
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, "<") {
+      depth = depth + 1;
+      after_boundary = true;
+      continue;
+    }
+    if token_is_operator(t, ">") {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ">>") {
+      depth = depth - 2;
+      if depth < 0 {
+        depth = 0;
+      }
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ",") {
+      after_boundary = true;
+      continue;
+    }
+    // Any other token (an identifier/keyword mid-typed for the
+    // current argument) leaves `after_boundary` exactly as it was.
   }
   ret depth > 0 && after_boundary;
 }
