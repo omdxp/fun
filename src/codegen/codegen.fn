@@ -15666,8 +15666,38 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(callee_name) -> {
-            let rt = self.lookup_function_rtype(callee_name)?;
-            ret .Some(rt.type_str);
+            let rt = self.lookup_function_rtype(callee_name);
+            if rt.is_some() {
+              ret .Some(rt.unwrap().type_str);
+            }
+            // A generic callee (`identity<T>`) isn't in the plain
+            // registry `lookup_function_rtype` reads - its own
+            // substituted return type comes from the same
+            // instantiation other callers already trigger for this
+            // (see `_resolve_call_rtype`'s identical fallback). Left
+            // unhandled before, inferring a type param from an
+            // argument that is itself a call to another generic
+            // function (`wrap(identity(5))`) silently gave up here,
+            // leaving `wrap`'s own `T` uninferred - which this
+            // function's only caller then read as "no instantiation
+            // exists," emitting the bare, unmangled `wrap(...)`
+            // instead of `wrap__num(...)`.
+            if e.has_right {
+              Vec<Node*> inner_args;
+              inner_args.init(0);
+              self.flatten_call_args(e.right, &inner_args);
+              Vec<DataType*> no_explicit_gargs;
+              no_explicit_gargs.init(0);
+              let ginst = self.maybe_instantiate_generic_function(
+                callee_name,
+                inner_args,
+                no_explicit_gargs
+              );
+              if ginst.is_some() {
+                ret self.resolve_type_name(ginst.unwrap().rtype);
+              }
+            }
+            ret .None;
           }
           _ -> {
             // Method call (`receiver.method(args)`): resolve via the chain

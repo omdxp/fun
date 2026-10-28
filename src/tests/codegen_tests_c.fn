@@ -2165,6 +2165,41 @@ test "a method's own type param inferred from a function-typed argument's return
   assert contains(out, "MyOpt__num r ="), "expected the let-inferred local substituted, not left as the template's bare MyOpt__U";
 }
 
+test "a generic function's own type param infers from an argument that is itself a call to another generic function" {
+  // `infer_arg_type_name`'s own `()`-call case resolved the callee's
+  // return type only through `lookup_function_rtype`'s flat,
+  // non-generic registry - a generic callee (`identity<T>`) isn't in
+  // it at all, so `?` propagated `.None` straight out instead of
+  // falling back to `maybe_instantiate_generic_function` the way
+  // `_resolve_call_rtype` already does for the same gap elsewhere.
+  // `wrap`'s own `T` never got inferred from `identity(5)`'s result,
+  // so the call site emitted the bare, unmangled `wrap(...)` instead
+  // of `wrap__num(...)`.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun identity<T>(T v) T {
+  `  ret v;
+  `}
+  `fun wrap<T>(T v) MyOpt<T> {
+  `  ret .Some(v);
+  `}
+  `fun main() {
+  `  let outer = wrap(identity(5));
+  `  fit outer {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's own type param infers from a call to another generic function"
+  );
+  assert contains(out, "wrap__num(identity__num(5))"), "expected wrap's own call site monomorphized on the inner generic call's inferred return type";
+}
+
 test "a generic impl's operator method monomorphizes through operator syntax, not just an explicit .method() call" {
   // `emit_operator_call`'s three callers (binary, unary, `[]`/`[]=`)
   // never triggered `ensure_generic_impl_method_emitted` the way an
