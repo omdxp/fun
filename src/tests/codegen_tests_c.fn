@@ -2269,6 +2269,40 @@ test "a let-bound await result on a generic enum-returning async function resolv
   assert contains(out, "tag == MyOpt__num_Some"), "expected the fit arm to test the real, substituted tag";
 }
 
+test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
+  // `resolve_type_subst`'s own generic_args loop only matched a bare
+  // param (`a.generic_args.len == 0`) - a nested argument that is
+  // itself generic (`Box2<T>`, inside `MyOpt<Box2<T>>`) matched
+  // neither that case nor any other, so it was pushed through
+  // completely unsubstituted. The same shape of gap `substitute()` had
+  // on the typecheck side this session, one level further in: the
+  // outer `MyOpt` substituted to `num` fine, but the inner `Box2<T>`
+  // stayed `Box2<T>` verbatim in the generated C.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `compound Box2<T> {
+  `  T v;
+  `}
+  `fun wrap<T>(T v) MyOpt<Box2<T>> {
+  `  Box2<T> b;
+  `  b.v = v;
+  `  ret .Some(b);
+  `}
+  `fun main() {
+  `  let r = wrap(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v.v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a doubly-nested generic return type substitutes at every level");
+  assert contains(out, "MyOpt__Box2__num r = wrap__num(5);"), "expected the let-inferred local fully substituted at both levels";
+  assert contains(out, "tag == MyOpt__Box2__num_Some"), "expected the fit arm to test the fully-substituted tag";
+}
+
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   str src = `use std.c.io;
   `pub fun fork() num {

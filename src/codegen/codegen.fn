@@ -1318,6 +1318,20 @@ impl Codegen {
         new_args.push(sub_tuple);
         continue;
       }
+      // A nested generic argument (`MyOpt<Vec<T>>`'s own `Vec<T>`) has
+      // its own further-nested param, which the bare-name check just
+      // below can never match since `a.type_str` here is `Vec`, not
+      // `T` - recursing into the same substitution the outer call
+      // already got reaches it. Left unfixed, a doubly-nested generic
+      // return type substituted its outer level fine but left the
+      // inner one's own type param untouched - the same shape of gap
+      // the tuple case just above already covers, one level further.
+      if a.generic_args.len > 0 {
+        DataType* sub_nested = malloc(sizeof(DataType));
+        *sub_nested = self.resolve_type_subst(*a);
+        new_args.push(sub_nested);
+        continue;
+      }
       if a.generic_args.len == 0 {
         for i : 0..self.type_subst_param_names.len {
           if equals(self.type_subst_param_names.get(i), a.type_str) {
