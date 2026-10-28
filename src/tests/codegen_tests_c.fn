@@ -2165,6 +2165,63 @@ test "a method's own type param inferred from a function-typed argument's return
   assert contains(out, "MyOpt__num r ="), "expected the let-inferred local substituted, not left as the template's bare MyOpt__U";
 }
 
+test "a generic impl's operator method monomorphizes through operator syntax, not just an explicit .method() call" {
+  // `emit_operator_call`'s three callers (binary, unary, `[]`/`[]=`)
+  // never triggered `ensure_generic_impl_method_emitted` the way an
+  // ordinary `.method()` call site already does - `p1 + p2` resolved
+  // the right mangled name (`Pair__num__op_add`) but never caused it
+  // to actually be emitted, while `p1.op_add(p2)` on the identical
+  // type worked, since only the latter went through the ordinary
+  // method-call path.
+  str src = `use std.io;
+  `compound Pair<T: num | flag> {
+  `  T a;
+  `  T b;
+  `}
+  `impl Pair<T> {
+  `  pub op_add(Pair<T> other) Pair<T> {
+  `    ret .{ a = self.a + other.a, b = self.b + other.b };
+  `  }
+  `}
+  `fun main() {
+  `  Pair<num> p1 = .{ a = 1, b = 2 };
+  `  Pair<num> p2 = .{ a = 3, b = 4 };
+  `  Pair<num> p3 = p1 + p2;
+  `  println_fmt("{num} {num}", p3.a, p3.b);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl's operator method monomorphizes through operator syntax"
+  );
+  assert contains(out, "Pair__num Pair__num__op_add(Pair__num* self, Pair__num other)"), "expected op_add's own body emitted, not just referenced";
+}
+
+test "a generic impl's op_index/op_index_set monomorphize through [] syntax, not just an explicit call" {
+  str src = `use std.io;
+  `compound Grid<T> {
+  `  T v;
+  `}
+  `impl Grid<T> {
+  `  pub op_index(num i) T {
+  `    ret self.v;
+  `  }
+  `  pub op_index_set(num i, T val) {
+  `    self.v = val;
+  `  }
+  `}
+  `fun main() {
+  `  Grid<num> g = .{ v = 1 };
+  `  g[0] = 9;
+  `  println_fmt("{num}", g[0]);
+  `}`;
+  let out = emit_c(src, "a generic impl's op_index/op_index_set monomorphize through [] syntax");
+  assert contains(
+    out,
+    "void Grid__num__op_index_set(Grid__num* self, int64_t i, int64_t val) {"
+  ), "expected op_index_set's own body emitted";
+  assert contains(out, "int64_t Grid__num__op_index(Grid__num* self, int64_t i) {"), "expected op_index's own body emitted";
+}
+
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   str src = `use std.c.io;
   `pub fun fork() num {

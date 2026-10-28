@@ -71,6 +71,11 @@ compound ChainResolution {
 compound OperatorDispatchTarget {
   ChainResolution recv;
   str mangled;
+  // The bare method name (`op_add`, `op_index`, ...) `mangled` was
+  // resolved from - needed by every caller to trigger the same lazy
+  // monomorphization an ordinary `.method()` call site already gets
+  // (see `emit_operator_call`'s own callers for why).
+  str method;
 }
 
 // Which mangled `to_string` function to call for a `Display` argument in
@@ -5226,6 +5231,7 @@ impl Codegen {
     OperatorDispatchTarget t;
     t.recv = recv_r;
     t.mangled = mangled;
+    t.method = method;
     ret .Some(t);
   }
 
@@ -6297,6 +6303,20 @@ impl Codegen {
                 u.operand
               );
               if recv_r_opt.is_some() {
+                // A generic impl's own `op_neg`/`op_not` gets its C
+                // prototype and body emitted here, at the first call
+                // site for this instantiation - the same trigger an
+                // ordinary `.method()` call already gets, which the
+                // operator syntax (confirmed for the binary case just
+                // below, `p1 + p2`) never reached on its own.
+                let emit_err = self.ensure_generic_impl_method_emitted(
+                  recv_r_opt.unwrap().type_name,
+                  op_method,
+                  ""
+                );
+                if emit_err.is_some() {
+                  ret emit_err;
+                }
                 ret self.emit_operator_call(
                   recv_r_opt.unwrap(),
                   mangled_opt.unwrap(),
@@ -6402,6 +6422,14 @@ impl Codegen {
                   let dispatched_set = self.resolve_operator_dispatch("[]=", idx_e.left);
                   if dispatched_set.is_some() {
                     let target = dispatched_set.unwrap();
+                    let emit_err = self.ensure_generic_impl_method_emitted(
+                      target.recv.type_name,
+                      target.method,
+                      ""
+                    );
+                    if emit_err.is_some() {
+                      ret emit_err;
+                    }
                     ret self.emit_operator_index_set_call(
                       target.recv,
                       target.mangled,
@@ -6485,6 +6513,22 @@ impl Codegen {
         if dispatched.is_some() {
           self.suppress_next_expr_parens = false;
           let target = dispatched.unwrap();
+          // A generic impl's own operator method gets its C prototype
+          // and body emitted here, at the first call site for this
+          // instantiation - the same trigger an ordinary `.method()`
+          // call already gets. Confirmed directly as a real gap: `p1 +
+          // p2` on a generic `Pair<T>` resolved the right mangled name
+          // ("Pair__num__op_add") but never triggered its emission,
+          // while `p1.op_add(p2)` on the identical type worked, since
+          // only the latter went through the ordinary method-call path.
+          let emit_err = self.ensure_generic_impl_method_emitted(
+            target.recv.type_name,
+            target.method,
+            ""
+          );
+          if emit_err.is_some() {
+            ret emit_err;
+          }
           ret self.emit_operator_call(target.recv, target.mangled, .Some(e.right));
         }
         // Consumed here, one shot: only this outermost pair is skipped,
@@ -8868,6 +8912,14 @@ impl Codegen {
       let dispatched = self.resolve_operator_dispatch("[]", e.left);
       if dispatched.is_some() {
         let target = dispatched.unwrap();
+        let emit_err = self.ensure_generic_impl_method_emitted(
+          target.recv.type_name,
+          target.method,
+          ""
+        );
+        if emit_err.is_some() {
+          ret emit_err;
+        }
         ret self.emit_operator_call(target.recv, target.mangled, .Some(index_node));
       }
     }
