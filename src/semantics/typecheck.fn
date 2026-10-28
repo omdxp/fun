@@ -5029,17 +5029,29 @@ impl Checker {
       ret;
     }
     if !self.enum_names.has(enum_name) {
-      // A resolved, named type (a compound, say) that still isn't a
-      // registered enum - the same contradiction as above, just for
-      // the other half of what `want.base == .Unknown` can mean.
-      self.fail(
-        format(
-        "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
-        variant_name,
-        type_name(want)
-        ),
-        val
-      );
+      // Still ambiguous even past `is_unknown`: a name that resolves
+      // to nothing registered at all is just as often a generic
+      // method's own still-abstract type parameter (the enclosing
+      // class's own `V`, say, substituted into a nested generic call's
+      // return type correctly - see `check_method_call` - but no
+      // closer to a concrete type for it) as it is a genuine mistake.
+      // Only a name registered as a real COMPOUND is unambiguous: that
+      // one definitely resolved to an actual type, and it definitely
+      // isn't an enum. Confirmed directly as a real regression without
+      // this narrowing: a generic class's own `V` substituted correctly
+      // through `Option<V>.unwrap()` read as "a real resolved type
+      // named 'V' that isn't a registered enum" here, failing code
+      // that was never actually wrong.
+      if self.compounds.at(enum_name).is_some() {
+        self.fail(
+          format(
+          "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+          variant_name,
+          type_name(want)
+          ),
+          val
+        );
+      }
       ret;
     }
     flag declared = false;

@@ -3260,6 +3260,53 @@ test "a generic enum method's own correctly-typed result still fits a matching f
   );
 }
 
+test "a generic enum method's result inside ANOTHER generic class's own body, still abstract, isn't flagged" {
+  // Regression caught alongside the fix above: compiling this very
+  // compiler's own `src/cli/wasm_frontend_main.fn` (which pulls in
+  // `warnings.fn`) started failing the moment the fix above landed,
+  // for a shape distilled down to this - `Holder<V>`'s own method
+  // calling `MyOption<V>.unwrap()` legitimately gets back `V` itself,
+  // not a concrete type, since `Holder<V>` hasn't been instantiated
+  // with anything concrete yet either; fitting that still-abstract `V`
+  // against `.Some`/`.None` must stay silent, the same as it always
+  // did before the fix above existed, not newly fail as if `V` were
+  // some genuinely-resolved, wrong, concrete type. The first version
+  // of this fix flagged any name that wasn't a registered enum at all
+  // - too broad, since a still-abstract type parameter's own name
+  // ALSO isn't registered anywhere; narrowed to only a name that IS a
+  // registered compound, the one case actually unambiguous.
+  accepts(
+    `enum MyOption<V> {
+    `  Some(V),
+    `  None,
+    `}
+    `impl MyOption<V> {
+    `  pub unwrap() V {
+    `    fit *self {
+    `      .Some(v) -> { ret v; }
+    `      .None -> { ret panic("none"); }
+    `    }
+    `  }
+    `}
+    `compound Holder<V> {
+    `  V slot;
+    `}
+    `impl Holder<V> {
+    `  pub get_wrapped() MyOption<V> {
+    `    ret .Some(self.slot);
+    `  }
+    `  pub use_it() {
+    `    let opt = self.get_wrapped();
+    `    fit opt.unwrap() {
+    `      .Some(v) -> {}
+    `      .None -> {}
+    `    }
+    `  }
+    `}`,
+    "expected a still-abstract type parameter, substituted correctly, not to be flagged as a resolved non-enum type"
+  );
+}
+
 test "a generic method's own pointer-typed return substitutes without losing its own pointer depth" {
   // Regression caught alongside the fix above: `rtype_template`'s own
   // first version recorded just the erased type param's own NAME, but
