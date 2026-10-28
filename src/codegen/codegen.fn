@@ -5158,6 +5158,21 @@ impl Codegen {
       // (unary operators don't go through that mapping at all - see
       // the unary call site's own doc comment).
       .Unary(u) -> {
+        // `*ptr + other`: a dereferenced pointer as the operator's own
+        // left operand. `resolve_field_chain` already resolves exactly
+        // this shape correctly (the pointee's own type, `is_pointer`
+        // cleared) for every other receiver position - delegating to
+        // it here is what every other dispatch-capable receiver in
+        // this function already does for its own base case (see the
+        // `.Identifier` arm above). Left unhandled before, this check
+        // alone rejected every dereferenced-pointer operand outright
+        // (`u.has_indirection` being true was itself disqualifying),
+        // so `*ptr1 + p2` silently fell through to raw infix `+` on
+        // two full compound values instead of dispatching to `op_add`.
+        if !u.is_left_operanded_unary && equals(u.op, "*") && u.has_indirection &&
+          u.indirection_depth == 1 {
+          ret self.resolve_field_chain(operand);
+        }
         if u.is_left_operanded_unary || u.has_indirection ||
           (!equals(u.op, "-") && !equals(u.op, "!")) {
           ret .None;

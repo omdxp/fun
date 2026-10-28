@@ -2196,6 +2196,35 @@ test "a generic impl's operator method monomorphizes through operator syntax, no
   assert contains(out, "Pair__num Pair__num__op_add(Pair__num* self, Pair__num other)"), "expected op_add's own body emitted, not just referenced";
 }
 
+test "operator dispatch resolves a dereferenced-pointer left operand, not just a plain value" {
+  // `resolve_operator_operand`'s own `.Unary` case rejected any
+  // dereference outright (`u.has_indirection` being true was itself
+  // disqualifying, before even checking which operator) - only
+  // `op_neg`/`op_not` through a plain value ever matched. `*ptr1 +
+  // p2` silently fell through to raw infix `+` on two full compound
+  // values instead of dispatching to `op_add`, while the identical
+  // dereference through an explicit `.op_add()` call already worked.
+  str src = `use std.io;
+  `compound Pair<T: num | flag> {
+  `  T a;
+  `  T b;
+  `}
+  `impl Pair<T> {
+  `  pub op_add(Pair<T> other) Pair<T> {
+  `    ret .{ a = self.a + other.a, b = self.b + other.b };
+  `  }
+  `}
+  `fun main() {
+  `  Pair<num> p1 = .{ a = 1, b = 2 };
+  `  Pair<num> p2 = .{ a = 3, b = 4 };
+  `  Pair<num>* ptr1 = &p1;
+  `  Pair<num> p3 = *ptr1 + p2;
+  `  println_fmt("{num} {num}", p3.a, p3.b);
+  `}`;
+  let out = emit_c(src, "operator dispatch resolves a dereferenced-pointer left operand");
+  assert contains(out, "Pair__num__op_add(&(*ptr1), p2)"), "expected the dereferenced operand dispatched through op_add, not raw infix +";
+}
+
 test "a generic impl's op_index/op_index_set monomorphize through [] syntax, not just an explicit call" {
   str src = `use std.io;
   `compound Grid<T> {
