@@ -410,7 +410,10 @@ impl AnalysisCache {
     if doc.edit_base_version != found.version {
       ret false;
     }
-    num old_idx = _decl_index_at_line(&found.program.entry_nodes, doc.edit_start_line + 1);
+    num old_idx = _decl_index_at_line(
+      &found.program.entry_nodes,
+      doc.edit_start_line + 1
+    );
     if old_idx < 0 {
       ret false;
     }

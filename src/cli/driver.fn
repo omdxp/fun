@@ -235,7 +235,10 @@ fun _parse_cover_options(CliArgs* parsed, Options* o) {
       }
       if !_cover_format_known(name) {
         o.has_error = true;
-        o.error_text = format("-cover-report expects text, lcov, cobertura, json or html, found `{str}`", name);
+        o.error_text = format(
+          "-cover-report expects text, lcov, cobertura, json or html, found `{str}`",
+          name
+        );
         ret;
       }
       if equals(where, "") {
@@ -260,7 +263,10 @@ fun _parse_cover_options(CliArgs* parsed, Options* o) {
     num tenths = parse_percent_tenths(min_text);
     if tenths < 0 {
       o.has_error = true;
-      o.error_text = format("-cover-min expects a percentage from 0 to 100, found `{str}`", min_text);
+      o.error_text = format(
+        "-cover-min expects a percentage from 0 to 100, found `{str}`",
+        min_text
+      );
       ret;
     }
     o.cover.has_min = true;
@@ -515,13 +521,46 @@ pub fun compiler_is_emscripten(str cc) flag {
 // consumer outside this compilation links against), where a public
 // symbol nothing in this compilation calls itself may still be a real
 // external entry point.
-pub fun compile_to_c(str input, str out_path, Vec<Define>* defines, flag debug_info, flag prune_unreachable = true) Result<flag, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, false, false, "", debug_info, false, prune_unreachable);
+pub fun compile_to_c(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  flag debug_info,
+  flag prune_unreachable = true
+) Result<flag, str> {
+  ret compile_to_c_mode(
+    input,
+    out_path,
+    defines,
+    false,
+    false,
+    false,
+    "",
+    debug_info,
+    false,
+    prune_unreachable
+  );
 }
 
 // Lowers `input` to C, reporting declarations nothing reads.
-pub fun compile_to_c_warning_unused(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
-  ret compile_to_c_mode(input, out_path, defines, false, true, false, "", debug_info, false, true);
+pub fun compile_to_c_warning_unused(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  flag debug_info
+) Result<flag, str> {
+  ret compile_to_c_mode(
+    input,
+    out_path,
+    defines,
+    false,
+    true,
+    false,
+    "",
+    debug_info,
+    false,
+    true
+  );
 }
 
 // Lowers `input` to C, emitting a test runner in place of the program's
@@ -543,7 +582,21 @@ pub fun compile_to_c_mode(
   flag memcheck = false,
   flag memcheck_leaks = false
 ) Result<flag, str> {
-  ret compile_to_c_cover(input, out_path, defines, test_mode, warn_unused, fuzz_mode, fuzz_target, debug_info, warn_unused_lenient, nil, prune_unreachable, memcheck, memcheck_leaks);
+  ret compile_to_c_cover(
+    input,
+    out_path,
+    defines,
+    test_mode,
+    warn_unused,
+    fuzz_mode,
+    fuzz_target,
+    debug_info,
+    warn_unused_lenient,
+    nil,
+    prune_unreachable,
+    memcheck,
+    memcheck_leaks
+  );
 }
 
 // `compile_to_c_mode`, optionally instrumented for coverage
@@ -595,8 +648,26 @@ pub fun compile_to_c_cover(
 // through `std.memcheck`'s own page-guarded allocator (see
 // `Codegen.memcheck`'s own note), auto-`use`d into the program so no
 // `.fn` source needs to change.
-pub fun compile_to_c_memcheck(str input, str out_path, Vec<Define>* defines, flag debug_info) Result<flag, str> {
-  ret compile_to_c_cover(input, out_path, defines, false, false, false, "", debug_info, false, nil, true, true);
+pub fun compile_to_c_memcheck(
+  str input,
+  str out_path,
+  Vec<Define>* defines,
+  flag debug_info
+) Result<flag, str> {
+  ret compile_to_c_cover(
+    input,
+    out_path,
+    defines,
+    false,
+    false,
+    false,
+    "",
+    debug_info,
+    false,
+    nil,
+    true,
+    true
+  );
 }
 
 // The first of Homebrew's usual keg-only OpenSSL install prefixes (3.x
@@ -638,7 +709,14 @@ fun _wants_optimization(flag optimize, flag debug_info) flag {
   ret !contains(extra, "-O") && !contains(extra, "/O");
 }
 
-fun _append_compile_args(Vec<str>* argv_args, str cc, str c_path, str exe_path, flag debug_info, flag optimize) {
+fun _append_compile_args(
+  Vec<str>* argv_args,
+  str cc,
+  str c_path,
+  str exe_path,
+  flag debug_info,
+  flag optimize
+) {
   if compiler_is_msvc(cc) {
     argv_args.push("/nologo");
     argv_args.push("/std:c17");
@@ -877,7 +955,10 @@ fun _ensure_msvc_env() {
   }
   str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
   str bat_path = path_join(temp_dir, "fun_msvc_env.bat");
-  write_string(bat_path, format("@echo off\ncall \"{str}\" x64 > NUL 2>&1\nset\n", vcvarsall));
+  write_string(
+    bat_path,
+    format("@echo off\ncall \"{str}\" x64 > NUL 2>&1\nset\n", vcvarsall)
+  );
   Vec<str> bat_args;
   bat_args.init(3);
   bat_args.push("cmd.exe");
@@ -917,7 +998,13 @@ fun _ensure_msvc_env() {
 // fallback when `_ensure_msvc_env` could not propagate INCLUDE to the current
 // process environment (which happens on some Windows configurations where
 // _putenv_s does not update the Windows environment block for child processes).
-fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, flag debug_info, flag optimize) num {
+fun _compile_with_msvc_bat(
+  str vcvarsall,
+  str c_path,
+  str exe_path,
+  flag debug_info,
+  flag optimize
+) num {
   str temp_dir = env_or("TEMP", env_or("TMP", "C:\\Temp"));
   str bat_path = path_join(temp_dir, "fun_cl.bat");
   str debug_flag = "";
@@ -927,10 +1014,16 @@ fun _compile_with_msvc_bat(str vcvarsall, str c_path, str exe_path, flag debug_i
   if _wants_optimization(optimize, debug_info) {
     debug_flag = format("{str} /O2", debug_flag);
   }
-  if !write_string(bat_path, format(
+  if !write_string(
+    bat_path,
+    format(
     "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17 \"{str}\"{str} \"/Fe:{str}\" /link /STACK:134217728\nexit /b %ERRORLEVEL%\n",
-    vcvarsall, c_path, debug_flag, exe_path
-  )) {
+    vcvarsall,
+    c_path,
+    debug_flag,
+    exe_path
+    )
+  ) {
     writeln_to(Sink.Stderr, "could not write MSVC build wrapper");
     ret 1;
   }
@@ -1183,7 +1276,10 @@ pub fun compile_c_to_exe_mode(str c_path, str exe_path, flag debug_info, flag op
     ret r.exit_code;
   }
 
-  writeln_to(Sink.Stderr, "no C compiler found (tried clang, gcc, cc); set FUN_CC to override");
+  writeln_to(
+    Sink.Stderr,
+    "no C compiler found (tried clang, gcc, cc); set FUN_CC to override"
+  );
   ret 1;
 }
 
@@ -1632,7 +1728,10 @@ test "compile_to_c prunes an unreferenced function by default, but keeps it for 
 
   str c_whole_program = "src/cli/driver_prune_default_exe.test.c";
   let exe_lowered = compile_to_c(path, c_whole_program, &defines, false);
-  assert exe_lowered.is_ok(), format("expected the fixture to lower to C for a whole-program build: {str}", exe_lowered.unwrap_err());
+  assert exe_lowered.is_ok(), format(
+    "expected the fixture to lower to C for a whole-program build: {str}",
+    exe_lowered.unwrap_err()
+  );
   defer remove_file(c_whole_program);
   str exe_c = read_to_string(c_whole_program);
   // A one-line forward declaration still exists regardless (only body
@@ -1641,7 +1740,10 @@ test "compile_to_c prunes an unreferenced function by default, but keeps it for 
 
   str c_library = "src/cli/driver_prune_default_lib.test.c";
   let lib_lowered = compile_to_c(path, c_library, &defines, false, false);
-  assert lib_lowered.is_ok(), format("expected the fixture to lower to C for a library build: {str}", lib_lowered.unwrap_err());
+  assert lib_lowered.is_ok(), format(
+    "expected the fixture to lower to C for a library build: {str}",
+    lib_lowered.unwrap_err()
+  );
   defer remove_file(c_library);
   str lib_c = read_to_string(c_library);
   assert contains(lib_c, "return 7;"), "expected a library build (prune_unreachable=false) to keep a public function nothing in this compilation calls";
@@ -1674,10 +1776,18 @@ sequential test "std.net and std.process are rejected with a real message for th
   assert write_string(net_path, net_src), "could not stage the net-reject fixture";
   defer remove_file(net_path);
   set_env("FUN_CC", "emcc");
-  let net_lowered = compile_to_c(net_path, "src/cli/driver_wasm_net_reject.test.c", &defines, false);
+  let net_lowered = compile_to_c(
+    net_path,
+    "src/cli/driver_wasm_net_reject.test.c",
+    &defines,
+    false
+  );
   set_env("FUN_CC", "");
   assert net_lowered.is_err(), "expected std.net to be rejected for the wasm target";
-  assert contains(net_lowered.unwrap_err(), "std.net is not supported when compiling for WebAssembly"), "expected the message to name std.net specifically";
+  assert contains(
+    net_lowered.unwrap_err(),
+    "std.net is not supported when compiling for WebAssembly"
+  ), "expected the message to name std.net specifically";
 
   str proc_src = `use std.process;
   `fun main() num {
@@ -1694,13 +1804,26 @@ sequential test "std.net and std.process are rejected with a real message for th
   assert write_string(proc_path, proc_src), "could not stage the process-reject fixture";
   defer remove_file(proc_path);
   set_env("FUN_CC", "emcc");
-  let proc_lowered = compile_to_c(proc_path, "src/cli/driver_wasm_proc_reject.test.c", &defines, false);
+  let proc_lowered = compile_to_c(
+    proc_path,
+    "src/cli/driver_wasm_proc_reject.test.c",
+    &defines,
+    false
+  );
   set_env("FUN_CC", "");
   assert proc_lowered.is_err(), "expected std.process to be rejected for the wasm target";
-  assert contains(proc_lowered.unwrap_err(), "std.process is not supported when compiling for WebAssembly"), "expected the message to name std.process specifically";
+  assert contains(
+    proc_lowered.unwrap_err(),
+    "std.process is not supported when compiling for WebAssembly"
+  ), "expected the message to name std.process specifically";
 
   // Not rejected for an ordinary native build - only the wasm target.
-  let net_native = compile_to_c(net_path, "src/cli/driver_wasm_net_reject.test.c", &defines, false);
+  let net_native = compile_to_c(
+    net_path,
+    "src/cli/driver_wasm_net_reject.test.c",
+    &defines,
+    false
+  );
   assert net_native.is_ok(), "expected std.net to compile fine for a native target";
 }
 
@@ -1733,7 +1856,10 @@ sequential test "wasm target real end to end, through the actual emscripten tool
   defines.init(0);
   defer defines.free();
   let lowered = compile_to_c(source_path, c_path, &defines, false);
-  assert lowered.is_ok(), format("expected the wasm end-to-end fixture to lower to C: {str}", lowered.unwrap_err());
+  assert lowered.is_ok(), format(
+    "expected the wasm end-to-end fixture to lower to C: {str}",
+    lowered.unwrap_err()
+  );
   defer remove_file(c_path);
 
   set_env("FUN_CC", "emcc");
@@ -1803,7 +1929,10 @@ sequential test "wasm target: numeric varargs read back at their real width, not
   defines.init(0);
   defer defines.free();
   let lowered = compile_to_c(source_path, c_path, &defines, false);
-  assert lowered.is_ok(), format("expected the wasm vararg-width fixture to lower to C: {str}", lowered.unwrap_err());
+  assert lowered.is_ok(), format(
+    "expected the wasm vararg-width fixture to lower to C: {str}",
+    lowered.unwrap_err()
+  );
   defer remove_file(c_path);
 
   set_env("FUN_CC", "emcc");
@@ -1835,7 +1964,12 @@ test "a compound field whose type was never imported is reported by name" {
   defines.init(0);
   defer defines.free();
   str out_path = "src/parser/import_resolver_fixtures/missing_map_import.test.c";
-  let lowered = compile_to_c("src/parser/import_resolver_fixtures/missing_map_import.fn", out_path, &defines, false);
+  let lowered = compile_to_c(
+    "src/parser/import_resolver_fixtures/missing_map_import.fn",
+    out_path,
+    &defines,
+    false
+  );
   remove_file(out_path);
   if !lowered.is_err() {
     allow assert_constant, "reports when the missing import unexpectedly compiles";
@@ -1980,7 +2114,18 @@ test "a coverage compile counts each measured statement once and leaves the test
   plan.out_path = "counts.cov";
   plan.pwd = "";
   str out_path = "src/cli/coverage_samples/sample.cover.test.c";
-  let lowered = compile_to_c_cover("src/cli/coverage_samples/sample.fn", out_path, &defines, true, false, false, "", false, false, &plan);
+  let lowered = compile_to_c_cover(
+    "src/cli/coverage_samples/sample.fn",
+    out_path,
+    &defines,
+    true,
+    false,
+    false,
+    "",
+    false,
+    false,
+    &plan
+  );
   assert lowered.is_ok(), "expected the sample to compile with instrumentation";
   str c = read_to_string(out_path);
   remove_file(out_path);
@@ -1994,7 +2139,12 @@ test "a coverage compile counts each measured statement once and leaves the test
   Vec<Define> defines2;
   defines2.init(0);
   defer defines2.free();
-  let plain = compile_to_c(("src/cli/coverage_samples/sample.fn"), out_path, &defines2, false);
+  let plain = compile_to_c(
+    ("src/cli/coverage_samples/sample.fn"),
+    out_path,
+    &defines2,
+    false
+  );
   assert plain.is_ok(), "expected an ordinary compile";
   str plain_c = read_to_string(out_path);
   remove_file(out_path);
@@ -2002,7 +2152,9 @@ test "a coverage compile counts each measured statement once and leaves the test
 }
 
 test "a test binary keeps only its own file's test blocks, not the ones it imports" {
-  let merged = parse_program_with_imports("src/parser/import_resolver_fixtures/own_tests_main.fn");
+  let merged = parse_program_with_imports(
+    "src/parser/import_resolver_fixtures/own_tests_main.fn"
+  );
   assert merged.is_ok(), "expected the fixture to parse";
   let nodes = merged.unwrap().nodes;
   num before = 0;
@@ -2149,7 +2301,10 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
       writeln_to(Sink.Stderr, format("[Error]\n{str}", lowered.unwrap_err()));
       ret 1;
     }
-    let code = compile_c_to_object(c_path, path_join("fun-out/lib", format("{str}.o", m.lib.name)));
+    let code = compile_c_to_object(
+      c_path,
+      path_join("fun-out/lib", format("{str}.o", m.lib.name))
+    );
     if code != 0 {
       ret 1;
     }
@@ -2223,11 +2378,17 @@ pub fun add_dependency(
   // rejected before it's ever written rather than leaving the user to
   // hand-edit the manifest after a confusing later failure.
   if !is_safe_dep_name(name) {
-    writeln_to(Sink.Stderr, "[Error]\na dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)");
+    writeln_to(
+      Sink.Stderr,
+      "[Error]\na dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)"
+    );
     ret 1;
   }
   if !is_safe_git_url(git) {
-    writeln_to(Sink.Stderr, "[Error]\n-git must start with https://, ssh://, git@, or file://");
+    writeln_to(
+      Sink.Stderr,
+      "[Error]\n-git must start with https://, ssh://, git@, or file://"
+    );
     ret 1;
   }
   if !is_safe_dep_path(path) {
@@ -2465,10 +2626,12 @@ pub fun init_project(str kind) num {
   // `docs/get-started.md`'s "[package]" section), so a fresh project
   // isn't forced to fill them in, but `fun init` still shows what's
   // available rather than leaving a newcomer to find them in the docs.
-  toml.append(format(
+  toml.append(
+    format(
     "# description = \"\"\n# license = \"\"\n# authors = []\n# repository = \"\"\n# min_fun_version = \"{str}\"\n",
     PACKAGE_VERSION
-  ));
+    )
+  );
 
   if wants_lib {
     toml.append("\n[lib]\npath = \"src/lib.fn\"\n");
@@ -2593,7 +2756,10 @@ fun _cover_declare_lines(CoverReport* report, Vec<str>* files, str pwd) {
     collect_program_lines(&nodes, &found_files, &found_lines);
     num i = 0;
     for i < found_lines.len {
-      report.declare(cover_display_path(found_files.get(i), pwd), found_lines.get(i));
+      report.declare(
+        cover_display_path(found_files.get(i), pwd),
+        found_lines.get(i)
+      );
       i = i + 1;
     }
     found_files.free();
@@ -2630,7 +2796,10 @@ fun _cover_finish(CoverReport* full, CoverOptions* cover) num {
     if write_string(where, body) {
       println(format("wrote {str} coverage to {str}", kind, where));
     } else {
-      writeln_to(Sink.Stderr, format("could not write {str} coverage to {str}", kind, where));
+      writeln_to(
+        Sink.Stderr,
+        format("could not write {str} coverage to {str}", kind, where)
+      );
       code = 1;
     }
   }
@@ -3811,7 +3980,12 @@ fun _lint_file(str file, LintOutcome* out) {
     UnmetExpectation ue = noticed.unwrap_err();
     str where = file;
     if ue.has_pos {
-      where = format("{str}:{num}:{num}", ue.pos.filename, ue.pos.line, ue.pos.col);
+      where = format(
+        "{str}:{num}:{num}",
+        ue.pos.filename,
+        ue.pos.line,
+        ue.pos.col
+      );
     }
     out.failures.push(format("{str}: error: {str}", where, ue.message));
     ret;
@@ -3955,7 +4129,16 @@ pub fun run_lint(str root, flag summary_only) num {
       LintFinding f = outcome.findings.get(fi);
       fi = fi + 1;
       if f.has_pos {
-        println(format("{str}:{num}:{num}: warning[{str}]: {str}", f.file, f.line, f.col, f.id, f.message));
+        println(
+          format(
+          "{str}:{num}:{num}: warning[{str}]: {str}",
+          f.file,
+          f.line,
+          f.col,
+          f.id,
+          f.message
+          )
+        );
       } else {
         println(format("{str}: warning[{str}]: {str}", f.file, f.id, f.message));
       }
@@ -4000,23 +4183,29 @@ pub fun run_lint(str root, flag summary_only) num {
     println("Files with warnings:");
     num wi = 0;
     for wi < with_findings.len {
-      println(format("  {str}  {num}", with_findings.get(wi), file_counts.get(wi)));
+      println(
+        format("  {str}  {num}", with_findings.get(wi), file_counts.get(wi))
+      );
       wi = wi + 1;
     }
-    println(format(
+    println(
+      format(
       "{str} in {num} of {str}",
       _counted(outcome.findings.len, "warning", "warnings"),
       with_findings.len,
       _counted(outcome.files, "file", "files")
-    ));
+      )
+    );
   } else {
     println(format("No warnings in {str}", _counted(outcome.files, "file", "files")));
   }
   if outcome.failures.len > 0 {
-    println(format(
+    println(
+      format(
       "{str} could not be analyzed",
       _counted(outcome.failures.len, "file", "files")
-    ));
+      )
+    );
   }
   if outcome.findings.len > 0 || outcome.failures.len > 0 {
     ret 1;
@@ -4284,7 +4473,14 @@ sequential test "a suite run over a directory passes, and reports coverage in th
   cover.paths.push("fun-out/driver_suite_cover.info");
   cover.formats.push("text");
   cover.paths.push("-");
-  num code = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  num code = run_test_suite(
+    "src/cli/coverage_samples",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  );
   assert code == 0, "expected the sample's passing test to give a zero exit";
   str lcov = read_to_string("fun-out/driver_suite_cover.info");
   assert contains(lcov, "SF:src/cli/coverage_samples/sample.fn"), "expected the measured file in the report";
@@ -4305,20 +4501,47 @@ sequential test "a coverage minimum turns a passing run into a failure, and -g b
   cover.enabled = true;
   cover.has_min = true;
   cover.min_tenths = 1000;
-  num under = run_test_suite("src/cli/coverage_samples", true, false, false, &defines, &cover);
+  num under = run_test_suite(
+    "src/cli/coverage_samples",
+    true,
+    false,
+    false,
+    &defines,
+    &cover
+  );
   assert under == 1, "expected a run below the minimum to fail";
   cover.min_tenths = 100;
-  num met = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  num met = run_test_suite(
+    "src/cli/coverage_samples",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  );
   assert met == 0, "expected a run at or above the minimum to pass";
   cover.exclude.push("src/cli/coverage_samples");
-  num excluded = run_test_suite("src/cli/coverage_samples", false, false, false, &defines, &cover);
+  num excluded = run_test_suite(
+    "src/cli/coverage_samples",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  );
   assert excluded == 1, "expected an empty report to fall below a nonzero minimum";
 }
 
 test "a suite with a failing test, or a file that does not compile, exits nonzero" {
   str dir = _scratch_project("failing");
-  write_string(path_join(dir, "fails.fn"), "test \"always fails\" {\n  assert false, \"boom\";\n}\n");
-  write_string(path_join(dir, "broken.fn"), "fun broken( {\ntest \"never\" { assert true, \"x\"; }\n");
+  write_string(
+    path_join(dir, "fails.fn"),
+    "test \"always fails\" {\n  assert false, \"boom\";\n}\n"
+  );
+  write_string(
+    path_join(dir, "broken.fn"),
+    "fun broken( {\ntest \"never\" { assert true, \"x\"; }\n"
+  );
   Vec<Define> defines;
   defines.init(0);
   defer defines.free();
@@ -4355,18 +4578,73 @@ sequential test "running one file's tests returns their result, and can stop at 
   defer cover.formats.free();
   defer cover.paths.free();
   defer cover.exclude.free();
-  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected the sample's tests to pass";
+  assert run_tests(
+    "src/cli/coverage_samples/sample.fn",
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  ) == 0, "expected the sample's tests to pass";
   args.push("pick returns 1 for a positive number");
-  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected a single named test to run";
+  assert run_tests(
+    "src/cli/coverage_samples/sample.fn",
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  ) == 0, "expected a single named test to run";
   args.pop();
-  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, true, "fun-out/driver_one_file.c", false, false, true, &defines, &cover) == 0, "expected no_exec to stop after writing the C";
+  assert run_tests(
+    "src/cli/coverage_samples/sample.fn",
+    &args,
+    false,
+    true,
+    "fun-out/driver_one_file.c",
+    false,
+    false,
+    true,
+    &defines,
+    &cover
+  ) == 0, "expected no_exec to stop after writing the C";
   assert exists("fun-out/driver_one_file.c"), "expected the C file to be kept";
   remove_file("fun-out/driver_one_file.c");
   cover.enabled = true;
-  assert run_tests("src/cli/coverage_samples/sample.fn", &args, false, false, "", false, false, false, &defines, &cover) == 0, "expected a covered single-file run to pass";
+  assert run_tests(
+    "src/cli/coverage_samples/sample.fn",
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  ) == 0, "expected a covered single-file run to pass";
   str dir = _scratch_project("onefile");
   write_string(path_join(dir, "bad.fn"), "fun bad( {\n");
-  assert run_tests(path_join(dir, "bad.fn"), &args, false, false, "", false, false, false, &defines, &cover) == 1, "expected a file that does not compile to fail";
+  assert run_tests(
+    path_join(dir, "bad.fn"),
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover
+  ) == 1, "expected a file that does not compile to fail";
 }
 
 test "run_tests under -memcheck ignores an ordinary leak by default, but catches a real double-free" {
@@ -4395,10 +4673,35 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
   // (see `Codegen.memcheck_leaks`'s own note) - this is exactly the
   // false-positive flood that made the leak sweep unusable across a
   // real test corpus.
-  assert run_tests(leaky, &args, false, false, "", false, false, false, &defines, &cover, true) == 0, "expected an ordinary leak not to fail the test under plain -memcheck";
+  assert run_tests(
+    leaky,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true
+  ) == 0, "expected an ordinary leak not to fail the test under plain -memcheck";
   // Opting into `-memcheck-leaks` turns it back on, for a caller that
   // genuinely wants it (testing a long-running program's own body).
-  assert run_tests(leaky, &args, false, false, "", false, false, false, &defines, &cover, true, true) != 0, "expected -memcheck-leaks to still catch a real leak";
+  assert run_tests(
+    leaky,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true,
+    true
+  ) != 0, "expected -memcheck-leaks to still catch a real leak";
 
   str clean = path_join(dir, "clean.fn");
   write_string(
@@ -4408,8 +4711,22 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  raw* p = malloc(16);
     `  free(p);
     `}
-);
-  assert run_tests(clean, &args, false, false, "", false, false, false, &defines, &cover, true, true) == 0, "expected a clean allocation/free pair to pass even with -memcheck-leaks on";
+
+  );
+  assert run_tests(
+    clean,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true,
+    true
+  ) == 0, "expected a clean allocation/free pair to pass even with -memcheck-leaks on";
 
   str doubled = path_join(dir, "doubled.fn");
   write_string(
@@ -4420,10 +4737,23 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  free(p);
     `  free(p);
     `}
-);
+
+  );
   // A double-free is never a matter of process lifetime, so it's
   // caught unconditionally, with no opt-in needed.
-  assert run_tests(doubled, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real double-free to fail the test under plain -memcheck";
+  assert run_tests(
+    doubled,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true
+  ) != 0, "expected a real double-free to fail the test under plain -memcheck";
 
   // A real off-by-one, not a gross overread. This allocation is small
   // enough to land in a shared slab arena, where a one-byte overflow
@@ -4439,8 +4769,21 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  num* arr = malloc(8 * 4);
     `  arr[4] = 1;
     `}
-);
-  assert run_tests(overflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a one-element overflow to fail the test under plain -memcheck";
+
+  );
+  assert run_tests(
+    overflow,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true
+  ) != 0, "expected a one-element overflow to fail the test under plain -memcheck";
 
   // The other direction: a leading guard page too, added alongside the
   // trailing one. mprotect only works at whole-page granularity, so (see
@@ -4466,8 +4809,21 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `    i = i + 1;
     `  }
     `}
-);
-  assert run_tests(underflow, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected a real underflow to fail the test under plain -memcheck";
+
+  );
+  assert run_tests(
+    underflow,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true
+  ) != 0, "expected a real underflow to fail the test under plain -memcheck";
 
   // User-reported question: `free(ptr); ptr += 1;` with no dereference
   // afterward is not a use-after-free this (or any guard-page/ASan-style)
@@ -4484,8 +4840,21 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  free(p);
     `  p = p + 1;
     `}
-);
-  assert run_tests(arith_only, &args, false, false, "", false, false, false, &defines, &cover, true) == 0, "expected pointer arithmetic alone, with no dereference, not to be flagged";
+
+  );
+  assert run_tests(
+    arith_only,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true
+  ) == 0, "expected pointer arithmetic alone, with no dereference, not to be flagged";
 
   // Above `__MC_SMALL_THRESHOLD`, so this goes through the regular
   // per-allocation guard-page path rather than a shared slab arena - a
@@ -4504,8 +4873,21 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  num x = *p;
     `  _ = x;
     `}
-);
-  assert run_tests(arith_then_deref, &args, false, false, "", false, false, false, &defines, &cover, true) != 0, "expected the actual dereference after the arithmetic to be caught as a use-after-free";
+
+  );
+  assert run_tests(
+    arith_then_deref,
+    &args,
+    false,
+    false,
+    "",
+    false,
+    false,
+    false,
+    &defines,
+    &cover,
+    true
+  ) != 0, "expected the actual dereference after the arithmetic to be caught as a use-after-free";
 }
 
 // `-memcheck` auto-injects `use std.memcheck;` into whatever is being
@@ -4538,7 +4920,10 @@ test "compiling a std.memcheck dependency directly under -memcheck does not doub
     true
   );
   if lowered.is_err() {
-    panic(format("expected std.io to compile cleanly under -memcheck, found: {str}", lowered.unwrap_err()));
+    panic(format(
+      "expected std.io to compile cleanly under -memcheck, found: {str}",
+      lowered.unwrap_err()
+    ));
   }
 }
 
@@ -4570,7 +4955,10 @@ test "format_file_and_imports rewrites an unformatted file and its imports" {
 test "fuzz targets are read from a file by name" {
   str dir = _scratch_project("fuzz");
   str path = path_join(dir, "targets.fn");
-  write_string(path, "fuzz \"first target\" (raw* data, num len) {\n}\nfuzz \"second\" (raw* data, num len) {\n}\n");
+  write_string(
+    path,
+    "fuzz \"first target\" (raw* data, num len) {\n}\nfuzz \"second\" (raw* data, num len) {\n}\n"
+  );
   Vec<str> found = _collect_fuzz_targets(path);
   assert found.len == 2 && equals(found.get(0), "first target") &&
     equals(found.get(1), "second"), "expected both names in order";

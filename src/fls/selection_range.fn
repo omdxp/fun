@@ -38,7 +38,12 @@ compound _OpenBracket {
 // Every requested position's own selection-range chain, as the
 // result a client is sent. `lines`/`chars` are parallel to each
 // other, one 0-indexed position per requested selection.
-pub fun selection_ranges(AnalysisCache* cache, Document doc, Vec<num>* lines, Vec<num>* chars) str {
+pub fun selection_ranges(
+  AnalysisCache* cache,
+  Document doc,
+  Vec<num>* lines,
+  Vec<num>* chars
+) str {
   Analyzed read = cache.of(doc);
   if !read.lexed {
     ret "[]";

@@ -213,7 +213,10 @@ test "long type name with shape impl does not overflow mangled C identifiers" {
   `  g.x = 1;
   `  ret 0;
   `}`;
-  let out = emit_c(src, "long type name with shape impl does not overflow mangled C identifiers");
+  let out = emit_c(
+    src,
+    "long type name with shape impl does not overflow mangled C identifiers"
+  );
   assert contains(out, "AAAAAAAAAA__Greeter__greet"), "expected the mangled impl method";
 }
 
@@ -725,7 +728,10 @@ test "data-carrying enum: shorthand construction in typed var-init and return" {
   `  num c = get(mk(42));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "data-carrying enum: shorthand construction in typed var-init and return");
+  let out = emit_c(
+    src,
+    "data-carrying enum: shorthand construction in typed var-init and return"
+  );
   assert contains(out, ".tag = Opt_Some"), "expected the shorthand to resolve its enum";
   assert contains(out, ".tag = Opt_None"), "expected the payload-free shorthand";
 }
@@ -767,7 +773,10 @@ test "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce" 
   `  describe(7, &d, "hi");
   `  ret 0;
   `}`;
-  let out = emit_c(src, "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce");
+  let out = emit_c(
+    src,
+    "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce"
+  );
   assert contains(out, "describe(7, __fun_coerce_Dog_"), "expected the shape argument to be wrapped";
   assert contains(out, "int64_t plain(int64_t a, int64_t b)"), "expected the non-shape callee untouched";
 }
@@ -899,7 +908,10 @@ test "P0: block comment is lexed; unterminated and stray token error cleanly" {
   `  printf("ok\n");
   `  ret 0;
   `}`;
-  let out = emit_c(src, "P0: block comment is lexed; unterminated and stray token error cleanly");
+  let out = emit_c(
+    src,
+    "P0: block comment is lexed; unterminated and stray token error cleanly"
+  );
   assert contains(out, "printf(\"ok"), "expected the surviving statement";
   assert !contains(out, "block comment"), "expected the comment to be skipped";
 
@@ -1089,7 +1101,11 @@ test "a hex string escape is bounded to two digits" {
   `  printf("%s\n", s);
   `  ret 0;
   `}`;
-  str out = run_source(src, "hex_escape_bounded", "a hex string escape is bounded to two digits");
+  str out = run_source(
+    src,
+    "hex_escape_bounded",
+    "a hex string escape is bounded to two digits"
+  );
   assert equals(out, "BC\n"), "expected the escape read as one byte, followed by a literal C";
 }
 
@@ -1812,7 +1828,11 @@ test "a method dispatches on a global compound variable, not just a local" {
   `  printf("%lld\n", _b.get());
   `  ret 0;
   `}`;
-  str out = run_source(src, "global_compound_method", "a method dispatches on a global compound variable");
+  str out = run_source(
+    src,
+    "global_compound_method",
+    "a method dispatches on a global compound variable"
+  );
   assert contains(out, "5"), "expected the global's own method call to dispatch and mutate correctly";
 }
 
@@ -1831,7 +1851,11 @@ test "a method dispatches on a global generic compound instantiation" {
   `  printf("%lld\n", _seen.len);
   `  ret 0;
   `}`;
-  str out = run_source(src, "global_generic_method", "a method dispatches on a global generic compound instantiation");
+  str out = run_source(
+    src,
+    "global_generic_method",
+    "a method dispatches on a global generic compound instantiation"
+  );
   assert contains(out, "1"), "expected 'init'/'put' to dispatch on the global Map instantiation and 'len' to read back correctly";
 }
 
@@ -1871,7 +1895,11 @@ test "chaining a field access directly onto a Vec<T*>.get(...) call uses '->', n
   `  printf("%lld\n", items.get(0).v);
   `  ret 0;
   `}`;
-  str out = run_source(src, "vec_ptr_get_field_chain", "chaining a field access directly onto a Vec<T*>.get(...) call");
+  str out = run_source(
+    src,
+    "vec_ptr_get_field_chain",
+    "chaining a field access directly onto a Vec<T*>.get(...) call"
+  );
   assert contains(out, "5"), "expected the field read through the pointer-typed Vec element to work directly";
 }
 
@@ -2449,7 +2477,11 @@ test "a generic method that calls through a call result keeps its temp in its ow
   `  Set<num> copy = a.clone();
   `  println_fmt("{num}", copy.len());
   `}`;
-  str out = run_source(src, "generic_method_call_result_temp", "Set.clone reads Map.clone, which calls through self.at(k).unwrap()");
+  str out = run_source(
+    src,
+    "generic_method_call_result_temp",
+    "Set.clone reads Map.clone, which calls through self.at(k).unwrap()"
+  );
   assert contains(out, "2"), "expected the clone to compile, run and hold both elements";
 }
 
@@ -2478,7 +2510,11 @@ test "a call-result receiver on the right of && or || only runs when it is reach
   `  if always && c.bump().is_some() { println("ran"); }
   `  println_fmt("calls={num}", c.calls);
   `}`;
-  str out = run_source(src, "short_circuit_call_result", "the right operand of && and || is skipped when the left decides");
+  str out = run_source(
+    src,
+    "short_circuit_call_result",
+    "the right operand of && and || is skipped when the left decides"
+  );
   assert contains(out, "yes"), "expected the || branch to be taken";
   assert !contains(out, "no\n"), "expected the && branch not to be taken";
   assert contains(out, "calls=0\n"), "expected neither skipped call to have run";
@@ -2504,7 +2540,11 @@ test "a call-result receiver in a loop condition runs on every iteration" {
   `  }
   `  println_fmt("turns={num} calls={num}", turns, c.calls);
   `}`;
-  str out = run_source(src, "loop_condition_call_result", "a loop condition is re-evaluated each pass");
+  str out = run_source(
+    src,
+    "loop_condition_call_result",
+    "a loop condition is re-evaluated each pass"
+  );
   assert contains(out, "turns=3 calls=4"), "expected the condition to be re-evaluated until it failed";
 }
 
@@ -2536,7 +2576,11 @@ test "a call-result receiver in an elif condition only runs when the earlier bra
   `  }
   `  println_fmt("calls={num}", c.calls);
   `}`;
-  str out = run_source(src, "elif_call_result", "an elif condition is only evaluated when reached");
+  str out = run_source(
+    src,
+    "elif_call_result",
+    "an elif condition is only evaluated when reached"
+  );
   assert contains(out, "first\ncalls=0\n"), "expected the elif not to run when the if was taken";
   assert contains(out, "second\ncalls=1\n"), "expected it to run once when reached";
 }
@@ -2548,7 +2592,11 @@ test "a {flag} placeholder prints true or false for a literal, a comparison and 
   `  num n = 5;
   `  println_fmt("{flag} {flag} {flag} {flag}", true, n > 3, known, n == 4);
   `}`;
-  str out = run_source(src, "flag_placeholder_bool", "a flag is a bool for formatting, whatever its C type");
+  str out = run_source(
+    src,
+    "flag_placeholder_bool",
+    "a flag is a bool for formatting, whatever its C type"
+  );
   assert contains(out, "true true false false"), "expected the words, not 1 and 0";
 }
 
@@ -2584,8 +2632,14 @@ test "a program function named like a C math builtin is renamed so it does not r
 test "the prelude turns off the MS CRT's deprecation warnings on Windows only" {
   let out = transpile_source("fun main() {}");
   assert out.is_ok(), "expected the program to transpile";
-  assert contains(out.unwrap(), "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"), "expected the define";
-  assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(out.unwrap(), "#include <stdio.h>"), "expected the define before the first include, where it takes effect";
+  assert contains(
+    out.unwrap(),
+    "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"
+  ), "expected the define";
+  assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(
+    out.unwrap(),
+    "#include <stdio.h>"
+  ), "expected the define before the first include, where it takes effect";
 }
 
 test "operator overloading: op_add dispatches to the impl method, not raw C +" {
@@ -2605,7 +2659,11 @@ test "operator overloading: op_add dispatches to the impl method, not raw C +" {
   let out = emit_c(src, "op_add dispatch");
   assert contains(out, "Vec3__op_add(&a, b)"), "expected the + to compile to a direct call to the impl method";
   assert !contains(out, "(a + b)"), "expected no raw C + between two structs";
-  let ran = run_source(src, "op_add_dispatch", "op_add dispatches to the impl method, not raw C +");
+  let ran = run_source(
+    src,
+    "op_add_dispatch",
+    "op_add dispatches to the impl method, not raw C +"
+  );
   assert equals(ran, "11 22 33\n"), "expected componentwise addition";
 }
 
@@ -2711,7 +2769,11 @@ test "operator overloading: op_index_set dispatches a[i] = v, not raw C []=" {
   `}`;
   let out = emit_c(src, "op_index_set dispatch");
   assert contains(out, "Grid__op_index_set(&g, "), "expected the assignment to compile to a direct call to the setter";
-  let ran = run_source(src, "op_index_set_dispatch", "op_index_set dispatches a[i] = v, not raw C []=");
+  let ran = run_source(
+    src,
+    "op_index_set_dispatch",
+    "op_index_set dispatches a[i] = v, not raw C []="
+  );
   assert equals(ran, "10 20 30\n"), "expected every index write to land on the right field";
 }
 
@@ -2750,7 +2812,11 @@ test "operator overloading: a chained operand (a * 2 + b) dispatches both operat
   let out = emit_c(src, "chained operand dispatch");
   assert contains(out, "Vec3__op_mul(&a, 2)"), "expected the inner * to compile to a direct call";
   assert contains(out, "Vec3__op_add(&"), "expected the outer + to compile to a direct call too, not raw C + on the inner call's result";
-  let ran = run_source(src, "op_chained_dispatch", "a chained operand (a * 2 + b) dispatches both operators");
+  let ran = run_source(
+    src,
+    "op_chained_dispatch",
+    "a chained operand (a * 2 + b) dispatches both operators"
+  );
   assert equals(ran, "12 24 36\n"), "expected a * 2 + b to componentwise compute (a*2) + b";
 }
 
@@ -2774,7 +2840,11 @@ test "operator overloading: a field-access operand (self.pos + other.pos) dispat
   `}`;
   let out = emit_c(src, "field-access operand dispatch");
   assert contains(out, "Vec3__op_add(&"), "expected self.pos + other.pos to compile to a direct call, not raw C + on two structs";
-  let ran = run_source(src, "op_field_dispatch", "a field-access operand (self.pos + other.pos) dispatches");
+  let ran = run_source(
+    src,
+    "op_field_dispatch",
+    "a field-access operand (self.pos + other.pos) dispatches"
+  );
   assert equals(ran, "11 22 33\n"), "expected componentwise addition across two different receivers' own fields";
 }
 
@@ -2805,7 +2875,11 @@ test "operator overloading: a nested index/unary operand dispatches too" {
   let out = emit_c(src, "nested index/unary operand dispatch");
   assert contains(out, "Pair__op_index"), "expected p[0] to compile through op_index";
   assert contains(out, "Vec3__op_neg"), "expected -a to compile through op_neg";
-  let ran = run_source(src, "op_nested_idx_unary", "a nested index/unary operand dispatches too");
+  let ran = run_source(
+    src,
+    "op_nested_idx_unary",
+    "a nested index/unary operand dispatches too"
+  );
   assert equals(ran, "101 202 303 / 9 18 27\n"), "expected p[0] + c and -a + b to both componentwise compute correctly";
 }
 

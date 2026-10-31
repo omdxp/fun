@@ -36,7 +36,10 @@ use std.json;
 fun main() num {
   str request_path = "/fls_request.json";
   if !exists(request_path) {
-    writeln_to(.Stderr, "no request provided: expected /fls_request.json to exist before this module runs");
+    writeln_to(
+      .Stderr,
+      "no request provided: expected /fls_request.json to exist before this module runs"
+    );
     ret 1;
   }
 

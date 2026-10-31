@@ -543,7 +543,9 @@ impl Map<str, str> as Display {
     num i = 0;
     for i < self.cap {
       if self.used[i] != false && self.tomb[i] == false {
-        budget = budget + _map_str_len(self.key_slots[i]) + _map_str_len(self.value_slots[i]) + 10;
+        budget = budget + _map_str_len(self.key_slots[i]) + _map_str_len(
+          self.value_slots[i]
+        ) + 10;
       }
       i = i + 1;
     }

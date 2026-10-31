@@ -20,7 +20,12 @@ use std.c.mem;
 
 // The quick fixes available for `diags`, as the result a client is
 // sent.
-pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<Diagnostic>* diags) str {
+pub fun code_actions(
+  AnalysisCache* cache,
+  Document doc,
+  str document_uri,
+  Vec<Diagnostic>* diags
+) str {
   Vec<str> lines = split(doc.text, '\n');
   StringBuilder b = string_builder_init(256);
   b.append("[");
@@ -59,7 +64,11 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
         b.append(",");
       }
       any = true;
-      str remove_line_text = _remove_line_action(document_uri, "Remove unused import", d.line);
+      str remove_line_text = _remove_line_action(
+        document_uri,
+        "Remove unused import",
+        d.line
+      );
       b.append(remove_line_text);
       free(remove_line_text);
     }
@@ -234,7 +243,12 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   for ri < refs.len {
     EnumVariantRef ev = refs.get(ri);
     ri = ri + 1;
-    let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name, no_args);
+    let variant = enum_variant_declaration(
+      &read.program.nodes,
+      ev.enum_name,
+      ev.variant_name,
+      no_args
+    );
     if variant.is_none() {
       continue;
     }
@@ -522,7 +536,11 @@ fun _shape_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   if !read.lexed || !read.parsed {
     ret "";
   }
-  let method = shape_method_declaration(&read.program.nodes, qc.shape_name, qc.method_name);
+  let method = shape_method_declaration(
+    &read.program.nodes,
+    qc.shape_name,
+    qc.method_name
+  );
   if method.is_none() {
     ret "";
   }

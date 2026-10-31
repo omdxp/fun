@@ -28,6 +28,7 @@ import {
   getSignatureHelp,
   getInlayHints,
   warmPlaygroundRuntime,
+  fetchStdlibSource,
 } from "../utils/compileInBrowser";
 
 // Fun Web/Fun Web Light (the same two editor themes this project ships
@@ -420,11 +421,59 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const [flsReady, setFlsReady] = useState(false);
   const flsReadyRef = useRef(false);
 
+  // Stdlib reference source, fetched on demand when a goto-definition/
+  // doc-link jump lands outside the person's own project
+  // (`fetchStdlibSource`) - deliberately its OWN store, never merged
+  // into `files`. `files` is what gets mounted into the wasm fls
+  // sandbox for every feature call (`mountProjectFiles`) - but the
+  // sandbox's own `--preload-file` package already owns every one of
+  // these exact paths (that's how `use std.*` resolves at all), and
+  // mounting a second, different file at a path the preload package
+  // is about to create throws inside its own (uncaught) mount step,
+  // which never recovers: `removeRunDependency` for that package never
+  // runs, so the module's run-dependency count never reaches zero and
+  // the ENTIRE session hangs - confirmed directly against the real
+  // generated `wasm_fls_main.js`, not theoretical, and not limited to
+  // the stdlib file itself: every later fls call for ANY file remounts
+  // the same now-colliding `files` map, so one visited stdlib symbol
+  // silently breaks hover/completion/signature-help/diagnostics
+  // project-wide until the page reloads. Shown read-only (`stateFor`
+  // below) and skipped entirely by every fls-backed extension (same
+  // functions, each checked against `externalFilesRef` first) - a
+  // reference-only file has nothing for fls to analyze anyway. Read
+  // via `externalFilesRef` inside closures created once per file and
+  // cached, the same reason `flsReadyRef` mirrors `flsReady`.
+  const [externalFiles, setExternalFiles] = useState<Record<string, string>>({});
+  const externalFilesRef = useRef(externalFiles);
+  externalFilesRef.current = externalFiles;
+
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const statesRef = useRef<Map<string, EditorState>>(new Map());
   const filesRef = useRef(files);
   filesRef.current = files;
+
+  // `path`'s own current text regardless of which store it lives in -
+  // a project file (`files`) or a stdlib reference one (`externalFiles`,
+  // never mounted; see that state's own comment). What every fls call
+  // below sends as `textOverride` so a reference file's own hover/
+  // goto-definition/signature-help/inlay-hints still have real content
+  // to analyze, without ever mounting it at the path that collides.
+  const textFor = (path: string): string =>
+    filesRef.current[path] ?? externalFilesRef.current[path] ?? "";
+
+  // Every position a jump left behind, most recent last - what "Go
+  // back" (`goBack` below) pops from. User-reported: jumping from one
+  // stdlib reference file to another had no way back at all, since an
+  // external file never appears in the project tree to click back to
+  // (deliberately - see `externalFiles`' own comment) and there was no
+  // navigation stack of any kind, for project files either. A plain
+  // ref, not state: the stack's own contents never need to drive a
+  // render, only `hasBack` (below) does, kept in sync on every push/
+  // pop for the toolbar button's own enabled state.
+  const navHistoryRef = useRef<{ path: string; line: number; character: number }[]>([]);
+  const NAV_HISTORY_LIMIT = 50;
+  const [hasBack, setHasBack] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -465,51 +514,117 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const severityFor = (n: number): "error" | "warning" | "info" =>
     n === 2 ? "warning" : n >= 3 ? "info" : "error";
 
-  // Goto-definition's own target: jumps within the same file directly;
-  // a different project file sets `pendingJumpRef` and switches to it
-  // (the sync effect applies the position once that file's state is
-  // live). A target outside the project (stdlib, say) is silently a
-  // no-op - there's nowhere in this editor to show it.
+  // Shared by `gotoDefinition` and `navigateToDocLink`: jumps within
+  // the same file directly; a different project file sets
+  // `pendingJumpRef` and switches to it (the sync effect applies the
+  // position once that file's state is live). A target outside the
+  // project entirely (a `stdlib/std/io.fn`, say - never written by the
+  // person, so never in `files`) is fetched once into `externalFiles`
+  // (never `files` - see that state's own comment for why) from the
+  // site's own static copy of the real stdlib tree
+  // (`fetchStdlibSource`, `prebake-stdlib-src.mjs`), so there's
+  // somewhere to actually show it rather than a silent no-op. Any
+  // other target outside the project (nothing recognized as `stdlib/`)
+  // is still a no-op - there's no source for it to fetch.
+  const jumpTo = async (
+    view: EditorView,
+    currentPath: string,
+    targetPath: string,
+    targetLine: number,
+    targetCharacter: number,
+  ) => {
+    // Pushed only once the jump is actually about to happen - an
+    // unrecognized target below returns before this, and a dead entry
+    // that just bounces back to the same spot isn't worth leaving on
+    // the stack.
+    const pushHistory = () => {
+      const from = posFor(view.state.doc, view.state.selection.main.head);
+      navHistoryRef.current.push({ path: currentPath, line: from.line, character: from.character });
+      if (navHistoryRef.current.length > NAV_HISTORY_LIMIT) {
+        navHistoryRef.current.shift();
+      }
+      setHasBack(true);
+    };
+    if (targetPath === currentPath) {
+      pushHistory();
+      const off = offsetFor(view.state.doc, targetLine, targetCharacter);
+      // `scrollIntoView: true` only scrolls the minimum distance needed -
+      // a jump landing just past the bottom edge of the viewport stays
+      // pinned there instead of settling in view the way a real editor's
+      // goto-definition does. Centering it is what `EditorView.
+      // scrollIntoView`'s own `y: "center"` effect is for.
+      view.dispatch({
+        selection: { anchor: off },
+        effects: EditorView.scrollIntoView(off, { y: "center" }),
+      });
+      view.focus();
+      return;
+    }
+    if (filesRef.current[targetPath] === undefined && externalFilesRef.current[targetPath] === undefined) {
+      if (!targetPath.startsWith("stdlib/")) return;
+      const content = await fetchStdlibSource(targetPath.slice("stdlib/".length));
+      if (content == null) return;
+      setExternalFiles((prev) => (prev[targetPath] !== undefined ? prev : { ...prev, [targetPath]: content }));
+    }
+    pushHistory();
+    pendingJumpRef.current = { line: targetLine, character: targetCharacter };
+    setActiveFile(targetPath);
+  };
+
+  // Pops the most recent position a jump left behind (`navHistoryRef`,
+  // pushed by `jumpTo`) and returns there - "Go back", the standard
+  // mental model for undoing a goto-definition chain every mainstream
+  // editor has, which this Playground had none of at all: a stdlib
+  // reference file especially has nowhere else to return to, since it
+  // never appears in the project tree (see `externalFiles`' own
+  // comment) - the only way back to one is this stack.
+  const goBack = (view: EditorView, currentPath: string) => {
+    const prev = navHistoryRef.current.pop();
+    setHasBack(navHistoryRef.current.length > 0);
+    if (!prev) return;
+    if (prev.path === currentPath) {
+      const off = offsetFor(view.state.doc, prev.line, prev.character);
+      view.dispatch({
+        selection: { anchor: off },
+        effects: EditorView.scrollIntoView(off, { y: "center" }),
+      });
+      view.focus();
+      return;
+    }
+    if (filesRef.current[prev.path] === undefined && externalFilesRef.current[prev.path] === undefined) {
+      // Gone - a project file the person deleted since. Nothing to
+      // return to; try the entry before it instead.
+      goBack(view, currentPath);
+      return;
+    }
+    pendingJumpRef.current = { line: prev.line, character: prev.character };
+    setActiveFile(prev.path);
+  };
+
   const gotoDefinition = async (view: EditorView, path: string, atPos?: number) => {
     const pos = atPos ?? view.state.selection.main.head;
     const { line, character } = posFor(view.state.doc, pos);
-    const result = await getDefinition(filesRef.current, path, line, character);
+    const result = await getDefinition(filesRef.current, path, line, character, textFor(path));
     const loc = Array.isArray(result) ? result[0] : result;
     if (!loc?.uri || !loc?.range?.start) return;
     const targetPath = String(loc.uri).replace(/^file:\/\/\//, "").replace(/^\/+/, "");
     const targetLine = loc.range.start.line ?? 0;
     const targetCharacter = loc.range.start.character ?? 0;
-    if (filesRef.current[targetPath] === undefined) return;
-    if (targetPath === path) {
-      const off = offsetFor(view.state.doc, targetLine, targetCharacter);
-      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
-      view.focus();
-      return;
-    }
-    pendingJumpRef.current = { line: targetLine, character: targetCharacter };
-    setActiveFile(targetPath);
+    await jumpTo(view, path, targetPath, targetLine, targetCharacter);
   };
 
   // A hover/completion doc's own "See also" link (`file:///path#L3`,
   // built by `_see_also_footer` in `navigation.fn`) already names its
   // target directly - no `getDefinition` round-trip needed, just the
-  // same same-file-vs-cross-file jump `gotoDefinition` uses. `#L3` is
-  // 1-indexed (a GitHub-style anchor, matching `td.pos.line`'s own
-  // convention), so it's converted to 0-indexed before use here.
+  // same jump `gotoDefinition` uses. `#L3` is 1-indexed (a GitHub-style
+  // anchor, matching `td.pos.line`'s own convention), so it's
+  // converted to 0-indexed before use here.
   const navigateToDocLink = (view: EditorView, currentPath: string, href: string) => {
     const m = href.match(/^file:\/\/\/(.+?)(?:#L(\d+))?$/);
     if (!m) return;
     const targetPath = decodeURIComponent(m[1]);
-    if (filesRef.current[targetPath] === undefined) return;
     const targetLine = m[2] ? Math.max(0, parseInt(m[2], 10) - 1) : 0;
-    if (targetPath === currentPath) {
-      const off = offsetFor(view.state.doc, targetLine, 0);
-      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
-      view.focus();
-      return;
-    }
-    pendingJumpRef.current = { line: targetLine, character: 0 };
-    setActiveFile(targetPath);
+    void jumpTo(view, currentPath, targetPath, targetLine, 0);
   };
 
   // Whatever's actually scrolled into view, not the whole document - a
@@ -523,7 +638,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     if (!flsReadyRef.current) return;
     const firstLine = view.state.doc.lineAt(view.viewport.from).number - 1;
     const lastLine = view.state.doc.lineAt(view.viewport.to).number - 1;
-    const hints = await getInlayHints(filesRef.current, path, firstLine, lastLine);
+    const hints = await getInlayHints(filesRef.current, path, firstLine, lastLine, textFor(path));
     if (!Array.isArray(hints) || hints.length === 0) {
       view.dispatch({ effects: setInlayHints.of(Decoration.none) });
       return;
@@ -543,6 +658,14 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     const existing = statesRef.current.get(path);
     if (existing) return existing;
 
+    // A stdlib reference file (see `externalFiles`' own comment) is
+    // read-only display, nothing more - fls has no mounted content
+    // for it to analyze (mounting it would reproduce the exact hang
+    // `externalFiles` exists to avoid), so every fls-backed feature
+    // below is skipped outright for it rather than firing requests
+    // that would either hang or answer against the wrong document.
+    const isExternal = externalFilesRef.current[path] !== undefined;
+
     const setSignatureTooltip = StateEffect.define<Tooltip | null>();
     const signatureTooltipField = StateField.define<Tooltip | null>({
       create: () => null,
@@ -556,7 +679,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     });
 
     const completionSource: CompletionSource = async (context) => {
-      if (!flsReadyRef.current) return null;
+      if (!flsReadyRef.current || isExternal) return null;
       const { line, character } = posFor(context.state.doc, context.pos);
       const result = await getCompletions(filesRef.current, path, line, character);
       const items = Array.isArray(result) ? result : result?.items;
@@ -594,9 +717,11 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         funEditorTheme(isDarkTheme()),
         funLanguage,
         indentUnit.of("  "),
+        EditorState.readOnly.of(isExternal),
         keymap.of([
           { key: "F12", run: (view) => { gotoDefinition(view, path); return true; } },
           { key: "Alt-d", run: (view) => { gotoDefinition(view, path); return true; } },
+          { key: "Alt-ArrowLeft", run: (view) => { goBack(view, path); return true; } },
           ...defaultKeymap,
           ...historyKeymap,
           indentWithTab,
@@ -605,7 +730,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         lintGutter(),
         linter(
           async (view) => {
-            if (!flsReadyRef.current) return [];
+            if (!flsReadyRef.current || isExternal) return [];
             const diags = await getDiagnostics(filesRef.current, path);
             const out: CMDiagnostic[] = [];
             for (const d of diags) {
@@ -620,7 +745,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
         hoverTooltip(async (view, pos) => {
           if (!flsReadyRef.current) return null;
           const { line, character } = posFor(view.state.doc, pos);
-          const result = await getHover(filesRef.current, path, line, character);
+          const result = await getHover(filesRef.current, path, line, character, textFor(path));
           const text = contentsToText(result?.contents);
           if (!text) return null;
           const range = result?.range;
@@ -681,7 +806,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
               const view = update.view;
               const pos = view.state.selection.main.head;
               const { line, character } = posFor(view.state.doc, pos);
-              const result = await getSignatureHelp(filesRef.current, path, line, character);
+              const result = await getSignatureHelp(filesRef.current, path, line, character, textFor(path));
               const sig = result?.signatures?.[result.activeSignature ?? 0];
               if (!sig) {
                 view.dispatch({ effects: setSignatureTooltip.of(null) });
@@ -723,7 +848,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   useEffect(() => {
     if (!editorHostRef.current) return;
     const view = new EditorView({
-      state: stateFor(activeFile, files[activeFile] ?? ""),
+      state: stateFor(activeFile, files[activeFile] ?? externalFiles[activeFile] ?? ""),
       parent: editorHostRef.current,
     });
     viewRef.current = view;
@@ -734,7 +859,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
-    const nextState = stateFor(activeFile, filesRef.current[activeFile] ?? "");
+    const nextState = stateFor(activeFile, filesRef.current[activeFile] ?? externalFilesRef.current[activeFile] ?? "");
     if (view.state !== nextState) {
       view.setState(nextState);
     }
@@ -742,7 +867,13 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     if (jump) {
       pendingJumpRef.current = null;
       const off = offsetFor(view.state.doc, jump.line, jump.character);
-      view.dispatch({ selection: { anchor: off }, scrollIntoView: true });
+      // Same centering as the same-file jump above (`jumpTo`) - this is
+      // the cross-file half, applied once the target file's own state
+      // is live.
+      view.dispatch({
+        selection: { anchor: off },
+        effects: EditorView.scrollIntoView(off, { y: "center" }),
+      });
       view.focus();
     }
     // A freshly created/restored state has no inlay hints of its own
@@ -841,6 +972,9 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setFiles(sampleFiles);
     setEntry(sampleEntry);
     setActiveFile(sampleEntry);
+    setExternalFiles({});
+    navHistoryRef.current = [];
+    setHasBack(false);
     statesRef.current.clear();
     setGeneration((g) => g + 1);
     setHasRun(false);
@@ -852,6 +986,9 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setFiles(DEFAULT_FILES);
     setEntry("main.fn");
     setActiveFile("main.fn");
+    setExternalFiles({});
+    navHistoryRef.current = [];
+    setHasBack(false);
     statesRef.current.clear();
     setGeneration((g) => g + 1);
     setHasRun(false);
@@ -952,13 +1089,30 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       </div>
       <div className="pg-main">
         <div className="pg-toolbar">
-          <span className="pg-active-file">
-            {activeFile}
-            {!flsReady && (
-              <span className="pg-loading-badge" title="Diagnostics, hover, completion, and signature help become available once this finishes loading">
-                loading language features...
-              </span>
+          <span className="pg-toolbar-left">
+            {hasBack && (
+              <button
+                type="button"
+                className="ghost pg-back-button"
+                onClick={() => {
+                  if (viewRef.current) goBack(viewRef.current, activeFile);
+                }}
+                title="Go back (Alt+Left)"
+              >
+                ← Back
+              </button>
             )}
+            <span className="pg-active-file">
+              {activeFile}
+              {externalFiles[activeFile] !== undefined && (
+                <span className="pg-readonly-badge">read-only</span>
+              )}
+              {!flsReady && (
+                <span className="pg-loading-badge" title="Diagnostics, hover, completion, and signature help become available once this finishes loading">
+                  loading language features...
+                </span>
+              )}
+            </span>
           </span>
           <div className="run-actions pg-static-actions">
             <button
@@ -978,7 +1132,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           </div>
         </div>
         <div className="pg-hint">
-          Cmd/Ctrl+click or F12 to jump to a definition &middot; hover a symbol for its docs &middot; start typing for completions
+          Cmd/Ctrl+click or F12 to jump to a definition, Alt+Left to go back &middot; hover a symbol for its docs &middot; start typing for completions
         </div>
         <div ref={editorHostRef} className="pg-editor-host" />
         {hasRun && (

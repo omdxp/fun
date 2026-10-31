@@ -185,7 +185,12 @@ pub fun cover_is_measured(str path) flag {
 // a range belong to the measuring instrument and are not counted, even when
 // they are emitted late, as part of a generic function a test happened to
 // instantiate.
-pub fun collect_test_ranges(Vec<Node>* nodes, Vec<str>* files, Vec<num>* from, Vec<num>* to) {
+pub fun collect_test_ranges(
+  Vec<Node>* nodes,
+  Vec<str>* files,
+  Vec<num>* from,
+  Vec<num>* to
+) {
   for n : nodes {
     Node* body = nil;
     fit n.kind {
@@ -245,7 +250,10 @@ test "collect_program_lines leaves out a function allow no_cover excludes, but s
   Vec<num> lines;
   lines.init(8);
   collect_program_lines(&nodes, &files, &lines);
-  assert lines.len == 1, format("expected only kept()'s own statement declared, got {num}", lines.len);
+  assert lines.len == 1, format(
+    "expected only kept()'s own statement declared, got {num}",
+    lines.len
+  );
 }
 
 test "collect_program_lines leaves out every function in a file allow no_covers (plural) excludes" {
@@ -263,7 +271,10 @@ test "collect_program_lines leaves out every function in a file allow no_covers 
   Vec<num> lines;
   lines.init(8);
   collect_program_lines(&nodes, &files, &lines);
-  assert lines.len == 0, format("expected no lines declared for a whole-file exclusion, got {num}", lines.len);
+  assert lines.len == 0, format(
+    "expected no lines declared for a whole-file exclusion, got {num}",
+    lines.len
+  );
 }
 
 test "collect_no_cover_ranges records only the one function its own directive covers" {
@@ -293,13 +304,22 @@ test "collect_no_cover_ranges records only the one function its own directive co
   Vec<num> skip_to;
   skip_to.init(4);
   collect_no_cover_ranges(&nodes, &skip_files, &skip_from, &skip_to);
-  assert skip_files.len == 1, format("expected exactly one no_cover range, got {num}", skip_files.len);
+  assert skip_files.len == 1, format(
+    "expected exactly one no_cover range, got {num}",
+    skip_files.len
+  );
   assert !in_test_range("t.fn", kept_line, &skip_files, &skip_from, &skip_to), "expected kept()'s own line to fall outside the recorded range";
 }
 
 // True when a statement at `line` of `filename` sits inside one of the
 // ranges `collect_test_ranges` recorded.
-pub fun in_test_range(str filename, num line, Vec<str>* files, Vec<num>* from, Vec<num>* to) flag {
+pub fun in_test_range(
+  str filename,
+  num line,
+  Vec<str>* files,
+  Vec<num>* from,
+  Vec<num>* to
+) flag {
   num i = 0;
   for i < files.len {
     if line >= from.get(i) && line <= to.get(i) && equals(files.get(i), filename) {
@@ -314,7 +334,13 @@ pub fun in_test_range(str filename, num line, Vec<str>* files, Vec<num>* from, V
 // `collect_test_ranges` records for a test/fuzz body - shared by
 // `collect_no_cover_ranges` below for both a free function and a
 // method found inside an `impl`'s own method list.
-fun _record_no_cover_range(Node* decl, Node* body, Vec<str>* files, Vec<num>* from, Vec<num>* to) {
+fun _record_no_cover_range(
+  Node* decl,
+  Node* body,
+  Vec<str>* files,
+  Vec<num>* from,
+  Vec<num>* to
+) {
   Vec<str> body_files;
   body_files.init(8);
   Vec<num> body_lines;
@@ -349,7 +375,12 @@ fun _record_no_cover_range(Node* decl, Node* body, Vec<str>* files, Vec<num>* fr
 // whole merged, multi-file program, not just one file's own
 // declarations, so "the rest of this list" would reach into a
 // different file entirely.
-pub fun collect_no_cover_ranges(Vec<Node>* nodes, Vec<str>* files, Vec<num>* from, Vec<num>* to) {
+pub fun collect_no_cover_ranges(
+  Vec<Node>* nodes,
+  Vec<str>* files,
+  Vec<num>* from,
+  Vec<num>* to
+) {
   Set<str> whole_file = set_init("", 4);
   defer whole_file.free();
   flag pending_next = false;

@@ -651,7 +651,11 @@ impl Lexer {
     chr value = c;
     if c == '\\' {
       if self.pos >= self.len {
-        ret err_kind(.Parse, "unexpected end of file while reading character escape", token_zero());
+        ret err_kind(
+          .Parse,
+          "unexpected end of file while reading character escape",
+          token_zero()
+        );
       }
       let esc = self._advance();
       let decoded = self._decode_escape_char(esc);

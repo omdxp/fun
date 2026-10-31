@@ -708,7 +708,9 @@ test "parses repeated array-of-table entries in order" {
 }
 
 test "sections and array-of-tables coexist" {
-  let doc = parse_document("[package]\nname = \"demo\"\n\n[lib]\npath = \"src/lib.fn\"\n\n[[bin]]\nname = \"app\"\n");
+  let doc = parse_document(
+    "[package]\nname = \"demo\"\n\n[lib]\npath = \"src/lib.fn\"\n\n[[bin]]\nname = \"app\"\n"
+  );
   defer doc.free();
   assert equals(doc.table("package").unwrap().get_str("name"), "demo"), "expected the package section";
   assert equals(doc.table("lib").unwrap().get_str("path"), "src/lib.fn"), "expected the lib section";
@@ -743,7 +745,9 @@ test "a hash inside quotes is kept" {
 }
 
 test "parses an inline table's fields" {
-  let doc = parse_document("[deps]\nsomejson = { git = \"https://example.com/repo\", tag = \"v1.0.0\" }\n");
+  let doc = parse_document(
+    "[deps]\nsomejson = { git = \"https://example.com/repo\", tag = \"v1.0.0\" }\n"
+  );
   defer doc.free();
   let deps = doc.table("deps").unwrap();
   let entry = deps.values.get("somejson");
