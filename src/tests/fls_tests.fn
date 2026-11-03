@@ -7784,6 +7784,41 @@ test "completion inside a type-param bound still offers builtin types while the 
   assert contains(out, `"label":"num"`), "expected a builtin scalar type offered inside the bound position even while the document fails to parse";
 }
 
+test "completion on a partially-retyped shorthand argument still offers the receiver's own variants" {
+  // `_bare_dot_shorthand_index` reset the moment it saw any non-dot
+  // token, recognizing only the instant right after the dot itself
+  // (`.`, nothing typed yet) - a reader renaming an existing
+  // shorthand by retyping just the variant name with the dot left in
+  // place (`.Text` -> `.J` on the way to `.Json`) triggers completion
+  // with the cursor sitting after that partial word, which this
+  // dropped entirely, falling back to the ordinary top-level dump
+  // (every keyword, every declared name) instead of the receiver's
+  // own variants.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///retypedshorthand.fn";
+  doc.path = "retypedshorthand.fn";
+  doc.text = `enum Format {
+  `  Text,
+  `  Json,
+  `}
+  `fun configure(num level, Format fmt) num {
+  `  ret level;
+  `}
+  `fun main() {
+  `  configure(1, .J);
+  `}`;
+  doc.version = 1;
+
+  // Cursor right after the partial "J" in `.J);`, on line 8:
+  // `  configure(1, .J);`.
+  str out = completion(&reads, doc, 8, 17, false);
+  assert contains(out, `"label":"Text"`), "expected the receiver's own Text variant offered";
+  assert contains(out, `"label":"Json"`), "expected the receiver's own Json variant offered";
+  assert !contains(out, `"label":"configure"`), "expected the ordinary top-level dump not to leak in once the shorthand position is recognized";
+}
+
 test "completion inside a generic type argument offers only types, not the whole program's own names" {
   // `Vec<n|>` (cursor mid-way through a type argument, `|` marking
   // it) only ever completes to a type - nothing else is legal there -

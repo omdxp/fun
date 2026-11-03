@@ -1500,27 +1500,42 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
 fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
   num source_line = line + 1;
   num source_col = character + 1;
-  num dot_idx = -1;
+  // The last real token at or before the cursor - either the dot
+  // itself (nothing typed after it yet) or a partial identifier being
+  // typed/retyped after it. A reader renaming an existing shorthand
+  // (`.Text` -> `.Json`, retyping just the variant name with the dot
+  // left in place) triggers completion with the cursor sitting after
+  // that partial word, not immediately after the dot - the original
+  // version of this scan reset on the very first non-dot token,
+  // recognizing only the instant right after the dot was typed and
+  // nothing past it.
+  num last_idx = -1;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == .NewLine || t.type == .Comment {
-      i = i + 1;
-      continue;
-    }
-    if t.pos.line != source_line || t.pos.end_col > source_col {
-      i = i + 1;
-      continue;
-    }
-    if token_is_operator(t, ".") {
-      dot_idx = i;
-    } else {
-      dot_idx = -1;
-    }
     i = i + 1;
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.start_col >= source_col {
+      continue;
+    }
+    last_idx = i - 1;
   }
-  if dot_idx < 0 {
+  if last_idx < 0 {
     ret -1;
+  }
+  Token last = tokens.get(last_idx);
+  num dot_idx = last_idx;
+  if !token_is_operator(last, ".") {
+    if last.type != .Identifier {
+      ret -1;
+    }
+    let maybe_dot = _prev_real_token(tokens, last_idx);
+    if maybe_dot.is_none() || !token_is_operator(maybe_dot.unwrap(), ".") {
+      ret -1;
+    }
+    dot_idx = index_of_token(tokens, maybe_dot.unwrap());
   }
   let before = _prev_real_token(tokens, dot_idx);
   if before.is_none() {
