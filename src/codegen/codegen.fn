@@ -9146,6 +9146,31 @@ impl Codegen {
       }
       ret .None;
     }
+    // `enum_recv_name` names a real generic enum template (`Option`,
+    // never registered under its own bare name - only a concrete
+    // instantiation like `Option__num` is), but nothing anywhere
+    // provided a concrete instantiation to fall back to either: no
+    // declared type on the statement this sits in, no enclosing call
+    // argument or return type, nothing. A payload-less variant like
+    // `None` carries no information of its own to infer one from, so
+    // this is genuinely unresolvable, not a gap in this fallback
+    // chain - reported here with a real diagnostic instead of
+    // falling through to emit `enum_recv_name` as a bare, undeclared
+    // C identifier (confirmed directly: `let opt = Option.None;`
+    // crashed as "unknown identifier 'Option'" with no real error at
+    // all).
+    if left_is_single_level && !is_bare_shorthand &&
+      self.generic_enum_names.contains(enum_recv_name) {
+      self.error_note = format(
+        "cannot infer {str}'s own type argument from '{str}.{str}' alone - write it explicitly ({str}<...>.{str}) or declare the variable's own type",
+        enum_recv_name,
+        enum_recv_name,
+        field_name,
+        enum_recv_name,
+        field_name
+      );
+      ret .Some(.UnsupportedNode);
+    }
     if is_bare_shorthand {
       ret .Some(.UnsupportedNode);
     }

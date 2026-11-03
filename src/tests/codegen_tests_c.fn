@@ -6,6 +6,42 @@ use harness;
 use std.sys;
 use std.fs;
 use std.string;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..semantics.alias_expand;
+use ..codegen.codegen;
+use ..codegen.codegen_state;
+
+// `transpile_source`, with the real `error_note` instead of the
+// generic "codegen error" string it collapses every codegen failure
+// to - needed to tell a genuine crash (an `UnsupportedNode` with no
+// real explanation) apart from a deliberate, informative rejection.
+fun transpile_source_with_detail(str src) Result<str, str> {
+  let tok_result = tokenize(src, "test.fn");
+  if tok_result.is_err() {
+    ret .Err("lex error");
+  }
+  ParseState state = parse_state_new("test.fn", src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Err("parse error");
+  }
+  let alias_err = expand_type_aliases(&state.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
+  }
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  let cerr = g.transpile(state.nodes);
+  if cerr.is_some() {
+    ret .Err(g.error_note);
+  }
+  ret .Ok(cst.out.build());
+}
 
 test "ra3: no crash on field access of a generic-impl method returning a compound" {
   str src = `use std.c.io;
@@ -2470,6 +2506,48 @@ test "a generic impl method's own additional type param falls back to the enclos
     "a generic impl method's own additional type param falls back to the enclosing let's own declared type"
   );
   assert contains(out, "Box__num b2 = Box__num__make_other__num(&b1);"), "expected make_other's own call site monomorphized on the enclosing let's own declared type";
+}
+
+test "a bare qualified enum-variant reference with no declared type and no payload is rejected, not left to leak into codegen" {
+  // `let opt = Option.None;` (no declared type, no function-call
+  // argument/return context, and `None` itself carries no payload to
+  // infer from) left the generic enum's own type argument completely
+  // unresolvable - `emit_field_access`'s own fallback (checking
+  // `expected_enum_type` for a mangled match) found nothing, and fell
+  // through to emitting `Option` as a plain, undeclared C identifier
+  // instead of a real diagnostic.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun main() {
+  `  let opt = MyOpt.None;
+  `  println("built");
+  `}`;
+  let r = transpile_source_with_detail(src);
+  assert r.is_err(), "expected the unresolvable instantiation rejected";
+  assert contains(r.unwrap_err(), "cannot infer"), "expected a real, informative diagnostic, not a generic crash";
+}
+
+test "a qualified enum-variant reference still resolves once the enclosing let declares its own concrete type" {
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun main() {
+  `  MyOpt<num> opt = MyOpt.None;
+  `  fit opt {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> { println("none"); }
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a qualified enum-variant reference once the enclosing let declares its own concrete type"
+  );
+  assert contains(out, "MyOpt__num_None"), "expected the let's own declared type to resolve the instantiation";
 }
 
 test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
