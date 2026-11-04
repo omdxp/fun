@@ -358,6 +358,37 @@ test "double pointer dereference emits two stars" {
   assert contains(out, "**pp"), "expected a double dereference";
 }
 
+test "a field access through a dereferenced multi-level pointer picks '.' or '->' correctly at every remaining level" {
+  // `resolve_field_chain`'s own dereference branch hardcoded
+  // `is_pointer = false` on its result regardless of how many levels
+  // of pointer the operand actually had - correct for a single-level
+  // pointer (fully dereferenced to a plain value), but wrong for a
+  // multi-level one: `(*pp).field` on `Box** pp` still yields a
+  // `Box*`, which needs `->` for its own next field read, not `.`.
+  // The same hardcoded branch also only ever matched exactly one `*`
+  // (`u.indirection_depth != 1`), so `(**pp).field` - the fully
+  // correct double-deref - crashed codegen outright instead of
+  // working at all.
+  str src = `use std.c.io;
+  `use std.c.mem;
+  `compound Box { num val; }
+  `fun main() num {
+  `  Box* p = malloc(sizeof(Box));
+  `  Box** pp = malloc(8);
+  `  p.val = 42;
+  `  *pp = p;
+  `  printf("%lld\n", (*pp).val);
+  `  printf("%lld\n", (**pp).val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "multi_level_pointer_field_access",
+    "a field access through a dereferenced multi-level pointer picks '.' or '->' correctly at every remaining level"
+  );
+  assert contains(out, "42"), "expected both the single- and double-deref field reads to actually compile and run correctly";
+}
+
 // gap, though not a parity gap: the reference has the identical bug.
 // `Item*[] arr` as a parameter, then `arr[0]->id` in the body, fails
 // with "unknown identifier 'id'" against either compiler, reproduced

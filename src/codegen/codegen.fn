@@ -10024,33 +10024,47 @@ impl Codegen {
           ret .Some(r0);
         }
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
-          u.indirection_depth != 1 {
+          u.indirection_depth < 1 {
           ret .None;
         }
         let recv_r = self.resolve_field_chain(u.operand)?;
         if !recv_r.is_pointer {
           ret .None;
         }
-        StringBuilder deref_sb = string_builder_init(8);
-        deref_sb.append("(*");
+        StringBuilder deref_sb = string_builder_init(8 + u.indirection_depth);
+        deref_sb.append("(");
+        num di = 0;
+        for di < u.indirection_depth {
+          deref_sb.append("*");
+          di = di + 1;
+        }
         deref_sb.append(recv_r.text);
         deref_sb.append(")");
         Option<DataType> deref_dtype = recv_r.dtype;
         if deref_dtype.is_some() {
           DataType dd = deref_dtype.unwrap();
-          if dd.pointer_depth > 0 {
+          num remaining = u.indirection_depth;
+          for remaining > 0 && dd.pointer_depth > 0 {
             dd.pointer_depth = dd.pointer_depth - 1;
+            remaining = remaining - 1;
           }
           // `dtype_is_pointer` also honors `flags.is_pointer`
-          // independently of `pointer_depth`, so clearing it too is what
-          // keeps the deref from still reading as a pointer.
+          // independently of `pointer_depth`, so clearing it too is
+          // what keeps a fully-dereferenced plain value from still
+          // reading as a pointer - a partial deref of a multi-level
+          // pointer (`(*pp).field` on `Box** pp`) correctly still is
+          // one, computed below from whatever `pointer_depth` remains
+          // rather than hardcoded false the way this used to read:
+          // every multi-level pointer's own single-`*` deref emitted
+          // `.field` instead of `->field` for the remaining level,
+          // which the real C compiler rejects outright.
           dd.flags.is_pointer = false;
           deref_dtype = .Some(dd);
         }
         ChainResolution r;
         r.text = deref_sb.build();
         r.type_name = recv_r.type_name;
-        r.is_pointer = false;
+        r.is_pointer = deref_dtype.is_some() && dtype_is_pointer(deref_dtype.unwrap());
         r.dtype = deref_dtype;
         r.is_call_result = false;
         ret .Some(r);
