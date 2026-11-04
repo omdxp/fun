@@ -1788,6 +1788,71 @@ test "hover on a call-inferred local still resolves when a different, unrelated 
   assert contains(hovered, "Logger l"), "expected the call-inferred local's own real type, not null";
 }
 
+test "hover resolves a bare local's explicit type, a plain field, and a chain through a local impl method, all while the document doesn't parse" {
+  // Unlike completion and signature help, hover had no token-only
+  // fallback tier of its own at all: `resolve_at` returns `.None`
+  // outright the moment the document fails to parse, and nothing
+  // downstream recovered anything beyond a narrow call-inferred-local
+  // case (the test above). Fixed by reusing the exact same
+  // `chain_tail_type_from_tokens`/`_receiver_type_from_tokens`
+  // machinery completion/signature-help already rely on for this,
+  // moved into symbols.fn so hover (navigation.fn) can reach it too
+  // without importing a module that already imports navigation
+  // itself. Along the way, fixed a real memory-safety bug this
+  // exposed: `local_method_return_type_from_tokens`,
+  // `_local_fn_return_type_from_tokens`, and `_field_type_from_tokens`
+  // each returned a borrowed `token_word` directly instead of a
+  // fresh copy, violating `chain_tail_type_from_tokens`'s own "every
+  // non-empty result is a fresh allocation callers free uniformly"
+  // contract - freeing a borrowed pointer corrupted the heap
+  // silently, crashing on a later, unrelated allocation. Also fixed:
+  // `_base_type_before` never recognized a builtin scalar type
+  // (`num`, `str`, ...) as a valid declared type at all, since those
+  // lex as `.Keyword` tokens, not `.Identifier` the way a
+  // user-defined type name does - the simplest possible repro
+  // (`num x = 5;`) hit this before even reaching the memory bug.
+  str base = "fun-out/_hover_unparsed_probe";
+  make_dir_all(base);
+
+  str src1 = `fun main() {
+  `  num x = 5
+  `  x
+  `}`;
+  AnalysisCache reads1 = analysis_cache_new();
+  defer reads1.free();
+  Document doc1;
+  doc1.uri = "file:///hover_unparsed1.fn";
+  doc1.path = path_join(base, "hover_unparsed1.fn");
+  doc1.text = src1;
+  doc1.version = 1;
+  str h1 = hover(&reads1, doc1, 1, 6);
+  assert contains(h1, "num x"), "expected a bare local's own explicit builtin-scalar type to resolve, not null";
+
+  str src2 = `compound Box<T> { T val; }
+  `impl Box<T> {
+  `  inner() Box<T> { ret self; }
+  `}
+  `fun main() {
+  `  Box<num> b;
+  `  b.val = 5
+  `  b.val
+  `  b.inner().val
+  `}`;
+  AnalysisCache reads2 = analysis_cache_new();
+  defer reads2.free();
+  Document doc2;
+  doc2.uri = "file:///hover_unparsed2.fn";
+  doc2.path = path_join(base, "hover_unparsed2.fn");
+  doc2.text = src2;
+  doc2.version = 1;
+  // `b.val`, line 7.
+  str h2 = hover(&reads2, doc2, 7, 4);
+  assert contains(h2, "val"), "expected a plain field's own type to resolve, not null";
+  // `b.inner().val`, line 8 - a chain through a locally-declared impl method.
+  str h3 = hover(&reads2, doc2, 8, 12);
+  assert contains(h3, "val"), "expected a chain through a local impl method to resolve, not null";
+}
+
 test "go-to-definition on a member of a call-inferred local resolves through a working import, when a different import is broken" {
   // navigation.fn's own version of the same gap: `l.debug` jumping
   // nowhere once the document stopped parsing, even when `debug`'s own

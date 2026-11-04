@@ -611,6 +611,45 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
       ret _hover_result(detail, span_of(t, doc.text));
     }
+    // Unlike completion and signature help, hover had no token-only
+    // fallback tier of its own at all while the document doesn't
+    // parse - `resolve_at` above returns `.None` outright the moment
+    // `!read.parsed`, with nothing here recovering anything beyond
+    // the two narrow cases above and the call-inferred local just
+    // below. A dot-qualified chain (`b.val`, `b.inner().val`, any
+    // length) is the broadest gap: `chain_tail_type_from_tokens`
+    // (symbols.fn) already walks the whole thing token-only for
+    // completion and signature help, reused here unchanged.
+    if !read.parsed && _preceded_by_dot(&tokens, t) {
+      str chain_type = chain_tail_type_from_tokens(
+        &tokens,
+        doc.path,
+        cache,
+        index_of_token(&tokens, t)
+      );
+      if !equals(chain_type, "") {
+        str detail = format("{str} {str}", chain_type, token_word(t));
+        str result = _hover_result(detail, span_of(t, doc.text));
+        free(detail);
+        free(chain_type);
+        ret result;
+      }
+    }
+    // A bare local with an explicit declared type (`num x = 5;`,
+    // nothing inferred at all) is the other half of that same gap:
+    // `resolve_at`'s own parsed-tree lookup would have found this
+    // trivially, but with no tree at all `_receiver_type_from_tokens`
+    // (symbols.fn) reads the exact same "Type name" declaration
+    // straight off the tokens instead.
+    if !read.parsed && !_preceded_by_dot(&tokens, t) {
+      str explicit_type = _receiver_type_from_tokens(&tokens, token_word(t));
+      if !equals(explicit_type, "") {
+        str detail = format("{str} {str}", explicit_type, token_word(t));
+        str result = _hover_result(detail, span_of(t, doc.text));
+        free(detail);
+        ret result;
+      }
+    }
     // A call-inferred local (`let l = logger_init(...)`, no type
     // annotation for `resolve_at`'s own parsed-tree lookup to use, and
     // the document doesn't parse at all right now - most commonly a
