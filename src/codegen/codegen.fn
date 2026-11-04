@@ -2531,6 +2531,17 @@ impl Codegen {
     CodegenState qvt_scratch = self.new_scratch_state();
     CodegenState* saved_qvt_state = self.state;
     self.state = &qvt_scratch;
+    // Forward-declared ahead of the vtable struct, same as `emit_shape_
+    // vtable_machinery`'s own identical line: a method can return the
+    // very shape it belongs to (`self_ref() Chain` on `shape Chain`),
+    // and the vtable's function-pointer field for it needs the name in
+    // scope before the shape's own fat pointer struct is completed
+    // below. Harmless when nothing actually self-refers.
+    self.state.write("typedef struct ");
+    self.state.write(q_mangled);
+    self.state.write(" ");
+    self.state.write(q_mangled);
+    self.state.write(";\n");
     self.state.write("typedef struct ");
     self.state.write(q_mangled);
     self.state.write("_vtable ");
@@ -13136,22 +13147,57 @@ impl Codegen {
               recon_sb.append(tp);
             }
             str reconstructed = recon_sb.build();
-            if !equals(reconstructed, type_name) {
-              continue;
+            if equals(reconstructed, type_name) {
+              DataType dt = dtype_new();
+              dt.type_str = i.type_name;
+              Vec<DataType*> gargs;
+              gargs.init(i.type_params.len);
+              for tp : i.type_params {
+                DataType* argdt = malloc(sizeof(DataType));
+                *argdt = dtype_new();
+                argdt.type_str = tp;
+                gargs.push(argdt);
+              }
+              dt.generic_args = gargs;
+              self._trigger_compound_instantiation_hoisted(dt);
+              ret;
             }
-            DataType dt = dtype_new();
-            dt.type_str = i.type_name;
-            Vec<DataType*> gargs;
-            gargs.init(i.type_params.len);
+            // A genuinely unbound template (every `tp` a fresh type
+            // param, never a reference to an already-declared type)
+            // has nothing to reconstruct ahead of time - mirrors the
+            // same gap, and the same fix, in `Checker.
+            // _shape_downcast_target_verdict`'s own reconstruction
+            // loop: an explicit `Box<num>(b)` arm names its own chosen
+            // instantiation directly, taken at face value here for the
+            // single-type-param case (the only one a flat mangled
+            // suffix can be split back out of unambiguously).
+            flag all_unbound = true;
             for tp : i.type_params {
+              if self._is_known_concrete_type_name(tp) {
+                all_unbound = false;
+                break;
+              }
+            }
+            str prefix = format("{str}__", i.type_name);
+            if all_unbound && i.type_params.len == 1 &&
+            starts_with(type_name, prefix) {
+              str explicit_arg = substr(
+                type_name,
+                len(prefix),
+                len(type_name) - len(prefix)
+              );
+              DataType dt = dtype_new();
+              dt.type_str = i.type_name;
               DataType* argdt = malloc(sizeof(DataType));
               *argdt = dtype_new();
-              argdt.type_str = tp;
+              argdt.type_str = explicit_arg;
+              Vec<DataType*> gargs;
+              gargs.init(1);
               gargs.push(argdt);
+              dt.generic_args = gargs;
+              self._trigger_compound_instantiation_hoisted(dt);
+              ret;
             }
-            dt.generic_args = gargs;
-            self._trigger_compound_instantiation_hoisted(dt);
-            ret;
           }
         }
         _ -> {}
@@ -17620,6 +17666,31 @@ impl Codegen {
         pfx.append("__");
         str prefix = pfx.build();
 
+        // The vtable's own fields, and each instance's own initializer,
+        // are scoped to exactly the shape's own declared method names -
+        // never the impl's full method list, which can carry extra
+        // `pub` methods beyond what the shape requires (`impl Vec<T> as
+        // Sized { pub len()... pub is_empty()... pub capacity()... }`,
+        // `capacity` no part of `Sized`'s own contract, called
+        // statically wherever a concrete `Vec<T>` needs it, never
+        // through this vtable at all). Skipping an extra method here
+        // keeps every implementor of the same shape - including one
+        // with a different extra-method set - building the identical
+        // struct shape.
+        Set<str> shape_own_method_names = set_init("", 8);
+        flag have_shape_own_methods = false;
+        num shp_qi = 0;
+        for shp_qi < self.shape_decl_names.len {
+          if equals(self.shape_decl_names.get(shp_qi), shape_name) {
+            for shp_qm : self.shape_decl_methods.get(shp_qi) {
+              shape_own_method_names.add(shp_qm.name);
+            }
+            have_shape_own_methods = true;
+            break;
+          }
+          shp_qi = shp_qi + 1;
+        }
+
         if !self.shape_names.contains(shape_type_identity) {
           // Forward-declared ahead of the vtable struct: a method can
           // return the very shape it belongs to (`self_ref() Chain` on
@@ -17644,6 +17715,10 @@ impl Codegen {
           for m : i.methods {
             fit m.kind {
               .Function(fnv) -> {
+                let base = strip_prefix(fnv.name, prefix);
+                if have_shape_own_methods && !shape_own_method_names.has(base) {
+                  continue;
+                }
                 vtable_has_methods = true;
                 self.state.write("  ");
                 if fnv.has_rtype {
@@ -17654,7 +17729,6 @@ impl Codegen {
                 } else {
                   self.state.write("void");
                 }
-                let base = strip_prefix(fnv.name, prefix);
                 self.state.write(" (*");
                 self.state.write(base);
                 self.state.write(")(void* self");
@@ -17768,6 +17842,19 @@ impl Codegen {
               }
               self.state.write(");\n");
 
+              // The forward prototype above is written for every
+              // method regardless - a static call elsewhere (`bg.
+              // capacity()`, not through the vtable) relies on it
+              // existing before its own real body, which `ensure_
+              // generic_impl_method_emitted` supplies lazily the same
+              // way any other generic method's does. Only the wrapper
+              // trampoline and vtable-instance field below are scoped
+              // to the shape's own contract - nothing ever calls
+              // `vtable->capacity`, so there is nothing for a wrapper
+              // to dispatch to in the first place.
+              if have_shape_own_methods && !shape_own_method_names.has(base) {
+                continue;
+              }
               self.state.write("static ");
               if fnv.has_rtype {
                 let wt2 = self.write_type(*fnv.rtype);
@@ -17839,6 +17926,9 @@ impl Codegen {
           fit m.kind {
             .Function(fnv) -> {
               let base2 = strip_prefix(fnv.name, prefix);
+              if have_shape_own_methods && !shape_own_method_names.has(base2) {
+                continue;
+              }
               StringBuilder wsb2 = string_builder_init(32);
               wsb2.append("__fun_wrap_");
               wsb2.append(type_name);
@@ -20344,6 +20434,35 @@ impl Codegen {
               self.state.write(e.name);
               self.state.write(";\n");
             }
+          }
+        }
+        _ -> {}
+      }
+    }
+    // Builds every non-generic shape's own vtable struct and fat-
+    // pointer type here too, before any function prototype - unlike a
+    // plain compound/enum above, a shape used by value as a parameter
+    // or return type needs its complete definition in scope, not just
+    // an opaque forward tag, so this calls straight through to
+    // `ensure_shape_instantiated` (the same builder a generic shape's
+    // own concrete instantiation already goes through) rather than
+    // only writing a name. Previously this only ever got built as a
+    // side effect of emitting its first impl (`emit_shape_vtable_
+    // machinery`, reached in plain source order) or a generic
+    // implementor's first instantiation, either of which can be
+    // textually later than a function already declaring a parameter
+    // of that shape - a real, deterministic C error (`unknown type
+    // name`), not a flake. A generic shape itself (`shape Container<T>
+    // { ... }`) has no single monomorphic struct to build this early;
+    // only a concrete instantiation does, built lazily wherever that
+    // instantiation is first needed, unaffected by this.
+    for n : nodes {
+      fit n.kind {
+        .Shape(q) -> {
+          if q.type_params.len == 0 {
+            DataType q_dt = dtype_new();
+            q_dt.type_str = q.name;
+            self.ensure_shape_instantiated(q_dt);
           }
         }
         _ -> {}

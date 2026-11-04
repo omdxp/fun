@@ -123,6 +123,80 @@ test "two instantiations of the same generic implementing the same shape dispatc
   assert equals(out, "5 70\n"), "expected each instantiation's own len() to dispatch correctly, not the first-declared one's";
 }
 
+test "a plain shape-typed parameter works regardless of where its sole implementor's impl appears in the file" {
+  // A shape used by value as a parameter or return type needs its
+  // complete struct definition in scope at that point, not just an
+  // opaque forward tag - unlike a plain compound/enum, which already
+  // gets exactly that treatment in an early, source-order-independent
+  // pass. A shape's own vtable struct previously only ever got built
+  // as a side effect of emitting its first impl in plain source order,
+  // or (for a generic implementor) that implementor's first real
+  // instantiation - either of which can be textually later than a
+  // function already declaring a parameter of that shape, a real,
+  // deterministic "unknown type name" C error, not a flake. Covers
+  // both a non-generic implementor declared after its own user, and a
+  // generic implementor whose first instantiation is triggered later
+  // still (from inside `main`, itself declared last).
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `fun show_a(Sized c) num { ret c.len(); }
+  `compound Circle { num r; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `shape Named { label() str; }
+  `fun show_b(Named c) str { ret c.label(); }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Named { label() str { ret "box"; } }
+  `fun main() num {
+  `  Circle c;
+  `  printf("%lld\n", show_a(&c));
+  `  Box<num> b; b.val = 1;
+  `  printf("%s\n", show_b(&b));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_param_order_independent",
+    "a plain shape-typed parameter works regardless of its implementor's own position in the file"
+  );
+  assert equals(out, "1\nbox\n"), "expected both the non-generic and generic implementor's shape dispatch to work despite appearing after their own user";
+}
+
+test "a shape impl's own extra pub method beyond the shape's declared contract doesn't corrupt its vtable" {
+  // `impl Vec<T> as Sized { pub len()... pub is_empty()... pub
+  // capacity()... }` is a real stdlib pattern (`capacity` isn't part of
+  // `Sized`'s own declared contract, called statically wherever a
+  // concrete `Vec<T>` needs it, never through the vtable). The vtable
+  // struct and every instance's own initializer used to derive their
+  // fields from the impl's full method list rather than the shape's
+  // own declared one, so whichever impl of a shape happened to run
+  // first silently decided the shared vtable struct's real shape - an
+  // extra method on one impl, built before the shape's own struct is
+  // otherwise forced into existence, made every other impl's own
+  // instance literal fail to compile (`field designator does not refer
+  // to any field`) the moment this extra field wasn't there to begin
+  // with.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Bag<T> { T val; num extra; }
+  `impl Bag<T> as Sized { pub len() num { ret 1; } pub capacity() num { ret self.extra; } }
+  `compound Circle { num r; }
+  `impl Circle as Sized { len() num { ret 2; } }
+  `fun main() num {
+  `  Bag<num> bg; bg.val = 1; bg.extra = 9;
+  `  Circle c;
+  `  Sized a = &bg;
+  `  Sized b = &c;
+  `  printf("%lld %lld %lld\n", a.len(), b.len(), bg.capacity());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_extra_method_vtable",
+    "an extra pub method beyond a shape's own contract doesn't corrupt the shared vtable"
+  );
+  assert equals(out, "1 2 9\n"), "expected both implementors' own len() to dispatch correctly, and the extra method to still work statically";
+}
+
 test "a generic compound implementing a shape that is itself generic dispatches correctly, keyed per instantiation" {
   // `impl Box<T> as Container<T>` is doubly generic: both the
   // implementor and the shape it implements still carry the
