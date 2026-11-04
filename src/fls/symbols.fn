@@ -7799,7 +7799,7 @@ pub fun _fls_auto_resolve_bare_generic_shape_target(
 // split back out of a flat mangled name this way; a multi-param
 // instantiation passes through unchanged, same residual as every
 // other mangled-name reconstruction in this codebase.
-fun _fls_mangled_instantiation_to_generic_text(Vec<Node>* program, str mangled_name) str {
+pub fun _fls_mangled_instantiation_to_generic_text(Vec<Node>* program, str mangled_name) str {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);

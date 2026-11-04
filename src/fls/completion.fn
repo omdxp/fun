@@ -271,7 +271,16 @@ pub fun completion(
               continue;
             }
             ProgramMergeResult target = merged.unwrap();
-            _members_of(&target.nodes, local_type, &items, snippets, doc.path);
+            Vec<str> no_cross_import_args;
+            no_cross_import_args.init(0);
+            _members_of(
+              &target.nodes,
+              local_type,
+              &items,
+              snippets,
+              doc.path,
+              no_cross_import_args
+            );
             free(text);
           }
         }
@@ -340,7 +349,16 @@ pub fun completion(
     source_line
   );
   if !equals(propagation_type, "") {
-    _members_of(&program.nodes, propagation_type, &items, snippets, doc.path);
+    Vec<str> no_propagation_args;
+    no_propagation_args.init(0);
+    _members_of(
+      &program.nodes,
+      propagation_type,
+      &items,
+      snippets,
+      doc.path,
+      no_propagation_args
+    );
     ret _reply(&items);
   }
 
@@ -350,14 +368,17 @@ pub fun completion(
     // chain, not just the immediate receiver segment, the same way
     // hover/definition do.
     str type_name = "";
+    Vec<str> receiver_args;
+    receiver_args.init(0);
     let receiver_tok = _receiver_token_before(&tokens, line, character);
     if receiver_tok.is_some() {
-      type_name = _receiver_own_type(
+      type_name = _receiver_own_type_with_args(
         &tokens,
         receiver_tok.unwrap(),
         &program.nodes,
         doc.path,
-        source_line
+        source_line,
+        &receiver_args
       );
     }
     if starts_with(type_name, "(") {
@@ -368,7 +389,14 @@ pub fun completion(
       ret _reply(&items);
     }
     if !equals(type_name, "") {
-      _members_of(&program.nodes, type_name, &items, snippets, doc.path);
+      _members_of(
+        &program.nodes,
+        type_name,
+        &items,
+        snippets,
+        doc.path,
+        receiver_args
+      );
     } else {
       // `receiver` may be an import alias (`use std.c.math as cmath;`)
       // rather than a value at all. `cmath.` names a module, not a
@@ -2541,12 +2569,24 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
 // everything *before* the token it's handed). When there's no dotted
 // chain ahead of `receiver_tok` at all, it's a bare local/global
 // itself.
-fun _receiver_own_type(
+// Resolves the receiver's own type for a dot-completion request,
+// additionally filling `out_args` with the receiver's own concrete
+// generic args when it's a bare local or
+// parameter (`Box<num> c` -> `["num"]`) - needed for `_members_of`'s
+// own field/method substitution, the same way `lookup_field`/
+// `lookup_method` already substitute given a real `concrete_args`
+// list. Every other receiver shape (a chained call/field result)
+// leaves `out_args` empty for now; nothing yet threads a concrete
+// instantiation through more than one hop of a chain for completion
+// specifically, matching this function's own prior behavior there -
+// not a regression, a bounded scope decision.
+fun _receiver_own_type_with_args(
   Vec<Token>* tokens,
   Token receiver_tok,
   Vec<Node>* program,
   str file,
-  num line
+  num line,
+  Vec<str>* out_args
 ) str {
   str prefix_type = chain_receiver_type(tokens, receiver_tok, program, file, line);
   if equals(prefix_type, "") {
@@ -2577,6 +2617,13 @@ fun _receiver_own_type(
       line
     );
     if !equals(local_type, "") {
+      *out_args = local_generic_args(
+        tokens,
+        program,
+        token_word(receiver_tok),
+        file,
+        line
+      );
       ret local_type;
     }
     // Not a value at all: `Color.Green` names the enum itself as its
@@ -3154,7 +3201,8 @@ fun _members_of(
   str type_name,
   Vec<Item>* items,
   flag snippets,
-  str current_file
+  str current_file,
+  Vec<str> concrete_args
 ) {
   num i = 0;
   for i < program.len {
@@ -3170,6 +3218,19 @@ fun _members_of(
           CompoundField cf = c.fields.get(f);
           f = f + 1;
           str field_type_text2 = render_type(cf.dtype);
+          if c.has_type_params {
+            Vec<str> filled_field_args = fill_default_args(
+              &c.type_params,
+              &c.type_param_defaults,
+              concrete_args
+            );
+            field_type_text2 = specialize_signature(
+              field_type_text2,
+              c.type_params,
+              filled_field_args
+            );
+            free_filled_args(filled_field_args, concrete_args.len);
+          }
           items.push(_item(cf.name, .Field, field_type_text2));
           free(field_type_text2);
         }
@@ -3221,6 +3282,19 @@ fun _members_of(
               }
               str method_name = bare_method_name(f.name);
               str method_detail = render_function_named(f, method_name, false);
+              if block.has_type_params {
+                Vec<str> filled_method_args = fill_default_args_for_type(
+                  program,
+                  type_name,
+                  concrete_args
+                );
+                method_detail = specialize_signature(
+                  method_detail,
+                  block.type_params,
+                  filled_method_args
+                );
+                free_filled_args(filled_method_args, concrete_args.len);
+              }
               str method_snippet = _call_snippet(method_name, method_detail, true, snippets);
               items.push(
                 _snippet_item(method_name, .Method, method_detail, method_snippet)
@@ -3525,7 +3599,15 @@ fun _collect_locals(
           );
           str bname = branch.bindings.get(0);
           if !equals(bname, "_") {
-            items.push(_item(bname, .Variable, format("{str}*", shape_type_name)));
+            // Same gap, same fix, as `symbols.fn`'s own `_lookup_fit_
+            // binding`: a flat mangled instantiation ("Box__num")
+            // needs the "Box<num>" form before any member lookup off
+            // this binding substitutes its own type params correctly.
+            str display_shape_type = _fls_mangled_instantiation_to_generic_text(
+              program,
+              shape_type_name
+            );
+            items.push(_item(bname, .Variable, format("{str}*", display_shape_type)));
           }
         } elif branch.has_bindings && !equals(enum_name, "") {
           str variant_name = branch_variant_name(branch);

@@ -4896,6 +4896,51 @@ test "hover and completion resolve a bare generic shape-downcast arm auto-resolv
   assert contains(dotted, `"label":"extra"`), "expected Wrapper__Circle's own field 'extra' offered through the auto-resolved binding";
 }
 
+test "dot-completion substitutes a generic local's own type param against its real concrete argument" {
+  // `_members_of` never substituted a generic receiver's own type
+  // param in either a field's type or a method's own signature at
+  // all - unrelated to any shape, the plainest possible generic
+  // local already showed the bare, unsubstituted "T" for `val`'s own
+  // type instead of "num". `lookup_field`/`lookup_method` (hover's
+  // own path) already did this substitution; completion's dot-path
+  // never threaded `concrete_args` through at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///plaingenericcompletion.fn";
+  doc.path = "plaingenericcompletion.fn";
+  doc.text = `compound Box<T> { T val; }
+  `impl Box<T> { pub get() T { ret self.val; } }
+  `fun main() num {
+  `  Box<num> c;
+  `  c.val;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+  str dotted = completion(&reads, doc, 4, 4, false);
+  assert contains(dotted, `{"label":"val","kind":5,"detail":"num"}`), "expected the field's own type substituted against num, not left as T";
+  assert contains(dotted, `"detail":"get(Box<num>* self) num"`), "expected the method's own signature substituted against num too";
+}
+
+test "dot-completion on a bare shape-typed parameter offers the shape's own filtered members" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapeparamcompletion.fn";
+  doc.path = "shapeparamcompletion.fn";
+  doc.text = `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret self.val; } }
+  `fun use_it(Sized c) num {
+  `  ret c.
+  `}`;
+  doc.version = 1;
+  assert equals(
+    completion(&reads, doc, 4, 8, false),
+    `[{"label":"len","kind":2,"detail":"method"}]`
+  ), "expected the shape-typed parameter to offer only its own declared method, not every name in the file";
+}
+
 test "hover resolves a field through a shape-downcast arm naming an explicit instantiation of an unbound generic impl" {
   // `Box<num>(b) -> ...` against a genuinely unbound `impl Box<T> as
   // Sized` (never narrowed to one concrete type at the impl itself,
@@ -4922,6 +4967,13 @@ test "hover resolves a field through a shape-downcast arm naming an explicit ins
 
   assert contains(hover(&reads, doc, 5, 13), "Box<num>* b"), "expected the binding site to show the explicitly-named instantiation";
   assert contains(hover(&reads, doc, 5, 27), "num val"), "expected the field hover to resolve through the binding (T substituted against num), not null";
+
+  // Dot-completion keeps its own independent copy of this same
+  // binding-type resolution (mirroring hover/symbols.fn's own) - it
+  // used the flat mangled form too, so `val`'s own detail showed the
+  // bare, unsubstituted "T" instead of "num".
+  str dotted = completion(&reads, doc, 5, 27, false);
+  assert contains(dotted, `"label":"val","kind":5,"detail":"num"`), "expected dot-completion's own field detail to substitute T against num too";
 }
 
 test "hover resolves a doubly-generic shape's own method, substituted against the parameter's concrete instantiation" {
