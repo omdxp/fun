@@ -148,6 +148,30 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   } else {
     found = lookup_top_level(&program.nodes, c.callee);
   }
+  if found.is_none() && c.has_receiver && !equals(c.receiver_name, "") {
+    // `EnumName.Variant(payload)`: a variant's own longhand
+    // construction, not a method call on a typed receiver at all -
+    // `chain_receiver`'s own machinery above only ever resolves a
+    // local's declared type, so a bare enum type name used as a
+    // qualifier here never matched anything. Checked directly against
+    // the program's own enum declarations instead, the same way
+    // `_infer_type_primary`'s identical branch (symbols.fn) already
+    // does for let-inference. No implicit `self` here, so
+    // `active_param` stays at the cursor's own raw position, not
+    // shifted the way a real method's own lookup above is.
+    Vec<str> no_args;
+    no_args.init(0);
+    let variant_decl = enum_variant_declaration(
+      &program.nodes,
+      c.receiver_name,
+      c.callee,
+      no_args
+    );
+    no_args.free();
+    if variant_decl.is_some() {
+      ret _signature_result(variant_decl.unwrap().detail, c.active_param);
+    }
+  }
   if found.is_none() {
     ret NO_SIGNATURE;
   }
@@ -161,12 +185,18 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
 
 // One call the cursor sits inside: the callee's own bare name, the
 // callee's own token (so its receiver, if any, can be resolved
-// through a chain of any length rather than just a plain local), and
-// which positional argument (0-based) the cursor currently sits on.
+// through a chain of any length rather than just a plain local), the
+// receiver's own immediate bare name when it's a single plain
+// identifier right before the dot (`EnumName.Variant(`'s own
+// `EnumName` - a longer chain's own receiver still resolves through
+// `callee_token` instead, this is only ever read as a fallback for a
+// bare qualified enum-variant construction), and which positional
+// argument (0-based) the cursor currently sits on.
 compound CallSite {
   str callee;
   Token callee_token;
   flag has_receiver;
+  str receiver_name;
   num active_param;
 }
 
@@ -204,10 +234,18 @@ fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite
   num callee_index = index_of_token(tokens, ct);
   let dot = token_before(tokens, callee_index);
   flag has_receiver = dot.is_some() && token_is_operator(dot.unwrap(), ".");
+  str receiver_name = "";
+  if has_receiver {
+    let recv_tok = token_before(tokens, index_of_token(tokens, dot.unwrap()));
+    if recv_tok.is_some() && recv_tok.unwrap().type == .Identifier {
+      receiver_name = token_word(recv_tok.unwrap());
+    }
+  }
   CallSite c;
   c.callee = token_word(ct);
   c.callee_token = ct;
   c.has_receiver = has_receiver;
+  c.receiver_name = receiver_name;
   c.active_param = commas;
   ret .Some(c);
 }

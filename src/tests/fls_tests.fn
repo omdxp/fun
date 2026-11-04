@@ -9741,6 +9741,43 @@ test "signature help answers for a method called on a plain local receiver, mid-
   assert contains(out, `"activeParameter":2`), "expected the second argument (past self and factor) active";
 }
 
+test "signature help resolves an explicit EnumName.Variant(...) constructor call, not just a method call" {
+  // No code path here ever recognized this shape at all: `c.has_
+  // receiver` is true for `Shape2.Rect(` the same as it would be for
+  // a real method call, so it went through `chain_receiver`'s own
+  // local-type lookup - which fails for a bare enum type name, since
+  // an enum type name is never a local's own declared type. Resolved
+  // directly against the program's own enum declarations instead, the
+  // same way `_infer_type_primary`'s identical branch (symbols.fn)
+  // already does for let-inference. No implicit `self` here, unlike
+  // a real method.
+  str src = `enum Shape2 {
+  `  Circle(num),
+  `  Rect(num, num),
+  `}
+  `fun main() {
+  `  let s = Shape2.Rect(1, 2);
+  `  let c = Shape2.Circle(3);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelpvariant.fn";
+  doc.path = "sighelpvariant.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Cursor right at the second argument, line 5: `  let s = Shape2.Rect(1, 2);`.
+  str rect_out = signature_help(&reads, doc, 5, 25);
+  assert contains(rect_out, `"label":"Rect(num, num) = 1"`), "expected the variant's own signature, no implicit self";
+  assert contains(rect_out, `"activeParameter":1`), "expected the second argument active";
+
+  // Cursor inside the single argument, line 6: `  let c = Shape2.Circle(3);`.
+  str circle_out = signature_help(&reads, doc, 6, 24);
+  assert contains(circle_out, `"label":"Circle(num) = 0"`), "expected a single-payload variant's own signature too";
+  assert contains(circle_out, `"activeParameter":0`), "expected its one argument active";
+}
+
 test "hover and goto-definition resolve a bare variant shorthand in a fit pattern, not just a value expression" {
   // `covering_fit`'s own range check (`_find_covering_fit`) rejected
   // every position inside a fit statement whose branches all have a
