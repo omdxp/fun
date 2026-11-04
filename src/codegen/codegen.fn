@@ -5853,9 +5853,29 @@ impl Codegen {
       self.state.write(operand_enum_name);
       self.state.write("_");
       self.state.write(none_or_err);
-      self.state.write(") { return ");
-      self.state.write(early_ret_text);
-      self.state.write("; } ");
+      self.state.write(") { ");
+      if self.defer_stack.len > 0 {
+        // A pending `defer` must still run on this early return -
+        // evaluated into its own temp first, same reasoning `ret`'s own
+        // defer-aware path uses, so a deferred statement can't change
+        // what gets returned.
+        self.state.write("__auto_type __fun_prop_ret_");
+        self.state.write(format_num(try_id));
+        self.state.write(" = ");
+        self.state.write(early_ret_text);
+        self.state.write("; ");
+        let prop_dferr = self.emit_function_scope_defers();
+        if prop_dferr.is_some() {
+          ret prop_dferr;
+        }
+        self.state.write("return __fun_prop_ret_");
+        self.state.write(format_num(try_id));
+        self.state.write("; } ");
+      } else {
+        self.state.write("return ");
+        self.state.write(early_ret_text);
+        self.state.write("; } ");
+      }
       self.state.write(try_name);
       self.state.write(".payload.");
       self.state.write(some_or_ok);
@@ -5906,9 +5926,37 @@ impl Codegen {
     try_decl_sb.append(operand_enum_name);
     try_decl_sb.append("_");
     try_decl_sb.append(none_or_err);
-    try_decl_sb.append(") { return ");
-    try_decl_sb.append(early_ret_text);
-    try_decl_sb.append("; }\n");
+    try_decl_sb.append(") { ");
+    if self.defer_stack.len > 0 {
+      // Same reasoning as the GNU statement-expression path above: a
+      // pending `defer` must still run before this early return, which
+      // this hoisted MSVC/wasm form - no GNU statement expressions
+      // available - splices as its own extra statement inside the same
+      // guard, rather than skipping it outright.
+      CodegenState prop_defer_scratch = self.new_scratch_state();
+      CodegenState* prop_defer_saved_state = self.state;
+      self.state = &prop_defer_scratch;
+      let prop_dferr2 = self.emit_function_scope_defers();
+      self.state = prop_defer_saved_state;
+      if prop_dferr2.is_some() {
+        ret prop_dferr2;
+      }
+      str prop_defer_text = prop_defer_scratch.out.build();
+      try_decl_sb.append(self.current_fn_rtype_name);
+      try_decl_sb.append(" __fun_prop_ret_");
+      try_decl_sb.append(format_num(try_id));
+      try_decl_sb.append(" = ");
+      try_decl_sb.append(early_ret_text);
+      try_decl_sb.append("; ");
+      try_decl_sb.append(prop_defer_text);
+      try_decl_sb.append(" return __fun_prop_ret_");
+      try_decl_sb.append(format_num(try_id));
+      try_decl_sb.append("; }\n");
+    } else {
+      try_decl_sb.append("return ");
+      try_decl_sb.append(early_ret_text);
+      try_decl_sb.append("; }\n");
+    }
     str try_decl_text = try_decl_sb.build();
     let try_hoist_save = self.hoist_insert_pos;
     let try_splice_pos = self.current_stmt_start_pos;

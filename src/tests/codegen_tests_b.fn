@@ -1254,6 +1254,45 @@ test "postfix '!' unwraps a let-bound Result and propagates '.Err', both observe
   assert contains(out, "104 odd"), "expected the '.Ok' path unwrapped and the '.Err' path propagated";
 }
 
+test "a '?' propagation's own early return still runs the enclosing function's pending defer" {
+  // `emit_propagation` wrote a raw C `return <early-return value>;`
+  // directly, on both its GNU statement-expression path and its
+  // MSVC/hoisted path, without the `emit_function_scope_defers()` call
+  // the ordinary `StatementRet` codegen path already makes - a
+  // deferred cleanup silently never ran on the `.None`/`.Err`
+  // short-circuit, while the equivalent hand-written `if ... { ret
+  // .None; }` form ran it correctly.
+  str src = `use std.c.io;
+  `use std.option;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  defer printf("cleanup\n");
+  `  num v = half(x)?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  describe(8);
+  `  describe(7);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_defer_runs",
+    "a '?' propagation's own early return still runs the enclosing function's pending defer"
+  );
+  assert count(out, "cleanup") == 2, "expected the defer to run on both the propagated-through path and the early-returned path";
+
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "propagation_defer_runs_strict",
+    "a '?' propagation's own early return still runs the enclosing function's pending defer (strict MSVC-shaped compile)"
+  );
+  assert count(out_msvc, "cleanup") == 2, "expected the hoisted MSVC-shaped form to run the defer on both paths too";
+}
+
 test "'?!(err)' unwraps a let-bound Option and propagates err as .Err(err) into an enclosing Result" {
   str src = `use std.c.io;
   `use std.option;
