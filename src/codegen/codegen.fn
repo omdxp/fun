@@ -6033,7 +6033,18 @@ impl Codegen {
         self.state.write(format_num(try_id));
         self.state.write(" = ");
         self.state.write(early_ret_text);
-        self.state.write("; ");
+        self.state.write(";\n");
+        // Under `-g`/debug info, a deferred statement's own
+        // `write_indent` flushes a pending `#line` directive the
+        // instant it runs - fine at the start of an ordinary
+        // statement, but this whole construct is one single line of
+        // hand-assembled inline text, so with no newline here first
+        // that flush landed the directive (which only ever ends with
+        // its own trailing newline, never starts with one) stray
+        // mid-line, after the `;` just written - confirmed directly
+        // against a real `-memcheck` run (which forces debug info
+        // on): the real C compiler rejected it outright with "stray
+        // '#' in program".
         let prop_dferr = self.emit_function_scope_defers();
         if prop_dferr.is_some() {
           ret prop_dferr;
@@ -6148,7 +6159,16 @@ impl Codegen {
       try_decl_sb.append(format_num(try_id));
       try_decl_sb.append(" = ");
       try_decl_sb.append(early_ret_text);
-      try_decl_sb.append("; ");
+      // Same reasoning as the GNU statement-expression path above:
+      // under `-g`/debug info, the first deferred statement's own
+      // `write_indent` flushes a pending `#line` directive the
+      // instant it starts writing into `prop_defer_scratch` - which,
+      // being a fresh scratch buffer, means that directive (which
+      // only ever ends with its own trailing newline, never starts
+      // with one) would otherwise become the very first text in
+      // `prop_defer_text`, landing stray mid-line once spliced in
+      // right after the `;` above with no newline between them.
+      try_decl_sb.append(";\n");
       try_decl_sb.append(prop_defer_text);
       try_decl_sb.append(" return __fun_prop_ret_");
       try_decl_sb.append(format_num(try_id));

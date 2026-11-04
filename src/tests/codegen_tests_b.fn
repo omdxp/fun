@@ -1355,6 +1355,48 @@ test "a '?' propagation's own early return still runs the enclosing function's p
   assert count(out_msvc, "cleanup") == 2, "expected the hoisted MSVC-shaped form to run the defer on both paths too";
 }
 
+test "a '?' propagation's own early return still emits valid C under debug info, on both the GNU and MSVC paths" {
+  // The fix for the test above wrote the deferred statement's own
+  // replay with a bare `"; "` separator on both paths - fine for an
+  // ordinary build, but under `-g`/debug info (which `-memcheck`
+  // forces on), the first replayed statement's own `write_indent`
+  // flushes a pending `#line N "file"` directive the instant it
+  // starts writing, landing it stray mid-line right after that `;`
+  // with no newline before it (a `#line` directive only ever ends
+  // with its own trailing newline, never starts with one). A real,
+  // non-GNU-extension-tolerant C compiler rejects that outright with
+  // "stray '#' in program" - confirmed directly against a real
+  // `-memcheck` run under GCC, not a hypothetical. A local enum and
+  // function, not `std.option`/`std.c.io`: `emit_c_with_debug_info`'s
+  // own `transpile_source_with_debug_info` never resolves real
+  // imports at all, the same harness limitation other tests in this
+  // file already work around the same way.
+  str src = `enum MyOpt<T> { Some(T), None }
+  `fun mark() num { ret 0; }
+  `fun half(num x) MyOpt<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) MyOpt<num> {
+  `  defer mark();
+  `  num v = half(x)?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num { ret 0; }`;
+  str out = emit_c_with_debug_info(
+    src,
+    "a '?' propagation's own early return still emits valid C under debug info (GNU path)"
+  );
+  assert !contains(out, "; #line"), "expected the deferred statement's own #line directive to start on a fresh line, not stray mid-statement";
+
+  str out_msvc = emit_c_with_imports_forcing_msvc_with_debug_info(
+    src,
+    "propagation_defer_debug_info_msvc",
+    "a '?' propagation's own early return still emits valid C under debug info (MSVC path)"
+  );
+  assert !contains(out_msvc, "; #line"), "expected the same fix to hold on the hoisted MSVC path too";
+}
+
 test "'?!(err)' unwraps a let-bound Option and propagates err as .Err(err) into an enclosing Result" {
   str src = `use std.c.io;
   `use std.option;
