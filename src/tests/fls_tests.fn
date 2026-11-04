@@ -323,6 +323,36 @@ test "hover on a top-level const whose own initializer is another const resolves
   assert !contains(hovered, "const  MID_X"), "expected no blank type leaking through";
 }
 
+test "hover on a top-level const whose own initializer is a qualified alias.CONST reference resolves too" {
+  // Same gap as the test above, one layer further: a reference
+  // qualified through an import alias (`pub const MID_X =
+  // b.BASE_X;`) parses as an `.Expression` with op "." - `fit
+  // val.kind` only ever matched a bare `.Identifier`, so this fell
+  // to the default "" case the same way the bare-reference form used
+  // to, leaking a blank type (`const  MID_X`) instead of resolving
+  // through the qualified reference.
+  str base = "fun-out/_alias_const_chain_test";
+  make_dir_all(base);
+  write_string(path_join(base, "base.fn"), "pub const BASE_X = 42;\n");
+  defer remove_file(path_join(base, "base.fn"));
+
+  str src = `use base as b;
+  `pub const MID_X = b.BASE_X;
+  `fun main() num { ret MID_X; }`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///aliasconstchain.fn";
+  doc.path = path_join(base, "aliasconstchain.fn");
+  doc.text = src;
+  doc.version = 1;
+
+  // Hover on `MID_X` at its own declaration, line 1: `pub const MID_X = b.BASE_X;`.
+  str hovered = hover(&reads, doc, 1, 12);
+  assert contains(hovered, "const num MID_X"), "expected the real type resolved through the alias-qualified reference, not blank";
+  assert !contains(hovered, "const  MID_X"), "expected no blank type leaking through";
+}
+
 test "hover shows a ternary-bound local's own branch type, not the condition's" {
   str src = `fun pick(flag cond) num {
   `  let parsed = cond ? 1 : 2;

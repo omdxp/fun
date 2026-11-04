@@ -717,23 +717,22 @@ fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str
       // aliased import) - recursing into that const's own declared or
       // further-inferred type, rather than leaking blank the moment
       // the initializer isn't itself a literal.
-      num i = 0;
-      for i < program.len {
-        Node n = program.get(i);
-        i = i + 1;
-        fit n.kind {
-          .Variable(v) -> {
-            if !equals(v.name, name) {
-              continue;
-            }
-            str declared = render_type(v.var_type);
-            if !equals(declared, "__let_infer__") {
-              ret declared;
-            }
-            if v.has_val {
-              ret _infer_global_const_type_depth(v.val, program, depth + 1);
-            }
-            ret "";
+      ret _top_level_const_type_or_init(program, name, depth);
+    }
+    .Expression(e) -> {
+      // `pub const MID_X = other_mod.BASE_X;`: the same reference,
+      // qualified through an import alias. Resolving which file the
+      // alias names needs tokens/the importing file's own path,
+      // neither on hand here - read straight off `name`'s own bare
+      // right-hand word instead and search the whole merged program
+      // the same way the bare-reference case just above already
+      // does, the same compromise that case already makes (an
+      // aliased import's own top-level declarations are merged into
+      // this same `program`, same as a plain one's).
+      if equals(e.op, ".") && e.has_right {
+        fit e.right.kind {
+          .Identifier(field_name) -> {
+            ret _top_level_const_type_or_init(program, field_name, depth);
           }
           _ -> {}
         }
@@ -742,6 +741,36 @@ fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str
     }
     _ -> { ret ""; }
   }
+}
+
+// `name`'s own declared type, as a top-level const found anywhere in
+// `program` - or, when it's left `__let_infer__`, recursing into its
+// own initializer the same way `_infer_global_const_type_depth`
+// already does for any other shape. Shared by that function's own
+// bare-identifier and alias-qualified cases. "" when nothing matches.
+fun _top_level_const_type_or_init(Vec<Node>* program, str name, num depth) str {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Variable(v) -> {
+        if !equals(v.name, name) {
+          continue;
+        }
+        str declared = render_type(v.var_type);
+        if !equals(declared, "__let_infer__") {
+          ret declared;
+        }
+        if v.has_val {
+          ret _infer_global_const_type_depth(v.val, program, depth + 1);
+        }
+        ret "";
+      }
+      _ -> {}
+    }
+  }
+  ret "";
 }
 
 // The alias named `name`'s own `.TypeAlias` node, wherever in `program`
