@@ -489,6 +489,41 @@ test "a generic method returning Option<(K, V)> doesn't collide with Option's ow
   assert equals(out, "called\n"), "expected the tuple Elem to substitute correctly with no conflicting instantiation";
 }
 
+test "a tuple member that is itself a further-generic type substitutes correctly, not just a bare type param" {
+  // `resolve_type_subst`'s own tuple-member loop only ever matched a
+  // member that is a bare type param reference (`(T, T)`'s own `T`) -
+  // a member that is itself a further-generic type (`(TreeNode<T>*,
+  // TreeNode<T>*)`'s own `TreeNode<T>*`, generic_args.len > 0) has no
+  // bare `type_str` that check could ever match, so it fell through
+  // completely unsubstituted. The exact sibling gap the `generic_args`
+  // loop right below already covers for an ordinary instantiation's
+  // own further-nested argument - missing here one level up, in the
+  // tuple-member case specifically. Left unfixed, the unsubstituted
+  // member recursed into a separate, wrongly-mangled instantiation of
+  // the same template still carrying the bare type param, and once
+  // that got cached under the wrong name, every field resolved after
+  // it in the same struct - not just the tuple one - never got its
+  // own real type argument either.
+  str src = `use std.c.io;
+  `compound TreeNode<T> {
+  `  T val;
+  `  (TreeNode<T>*, TreeNode<T>*) children;
+  `}
+  `fun main() num {
+  `  TreeNode<num> n;
+  `  n.val = 5;
+  `  n.children = (nil, nil);
+  `  printf("%lld\n", n.val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "tuple_member_self_referential_generic",
+    "a tuple member that is itself a further-generic (self-referential) type substitutes correctly"
+  );
+  assert equals(out, "5\n"), "expected both the tuple member's own instantiation and every other field in the same struct to substitute correctly";
+}
+
 test "fit matches a tuple-Elem-typed Option right after a let binds it from a generic method call" {
   // `emit_tagged_union_enum_instance`, which writes a concrete generic
   // enum instantiation's own C struct, recorded each payload position's

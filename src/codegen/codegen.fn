@@ -1266,6 +1266,26 @@ impl Codegen {
       new_members.init(0);
       for m : dt.tuple_members {
         flag substituted = false;
+        // A tuple member that is itself a further-generic type
+        // (`(TreeNode<T>*, num)`'s own `TreeNode<T>*`) or a nested
+        // tuple has no bare `type_str` the check just below could ever
+        // match - its own type param lives one level deeper, inside
+        // `generic_args`/`tuple_members`, which only recursing into
+        // this same substitution reaches. The same shape of gap the
+        // `generic_args` loop below already covers for an ordinary
+        // generic instantiation's own further-nested argument, one
+        // level up: left unfixed, a tuple member referencing the
+        // template's own self (or any other further-generic type)
+        // stayed completely unsubstituted, so its own field - and,
+        // once a stale, wrongly-mangled recursive instantiation got
+        // cached under the unsubstituted name, every other field
+        // resolved after it too - never got its real type argument.
+        if m.is_tuple || m.generic_args.len > 0 {
+          DataType* sub_nested_member = malloc(sizeof(DataType));
+          *sub_nested_member = self.resolve_type_subst(*m);
+          new_members.push(sub_nested_member);
+          continue;
+        }
         if m.generic_args.len == 0 && !m.is_tuple {
           for i : 0..self.type_subst_param_names.len {
             if equals(self.type_subst_param_names.get(i), m.type_str) {
