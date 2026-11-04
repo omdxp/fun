@@ -299,6 +299,30 @@ test "hover on an inferred const local resolves its real type, not the raw senti
   assert !contains(hovered, "__let_infer__"), "expected the sentinel never to leak into a const's own hover";
 }
 
+test "hover on a top-level const whose own initializer is another const resolves through the reference, not just a literal" {
+  // `infer_global_const_type` only ever recognized a plain literal
+  // initializer (a number, string, boolean, character) - a bare
+  // reference to another top-level const (`pub const MID_X =
+  // BASE_X;`) fell through to "", leaking a blank type in hover
+  // (`const  MID_X`) instead of resolving through the reference the
+  // same way a chain of const-referencing-const should, end to end.
+  str src = `pub const BASE_X = 42;
+  `pub const MID_X = BASE_X;
+  `fun main() num { ret MID_X; }`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///constchain.fn";
+  doc.path = "constchain.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Hover on `MID_X` at its own declaration, line 1: `pub const MID_X = BASE_X;`.
+  str hovered = hover(&reads, doc, 1, 12);
+  assert contains(hovered, "const num MID_X"), "expected the real type resolved through the referenced const, not blank";
+  assert !contains(hovered, "const  MID_X"), "expected no blank type leaking through";
+}
+
 test "hover shows a ternary-bound local's own branch type, not the condition's" {
   str src = `fun pick(flag cond) num {
   `  let parsed = cond ? 1 : 2;

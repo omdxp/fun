@@ -3377,7 +3377,7 @@ fun _alias_module_completions(
         // showed the raw sentinel verbatim in its completion detail.
         if equals(decl_type_text, "__let_infer__") && v.has_val {
           free(decl_type_text);
-          str inferred = infer_global_const_type(v.val);
+          str inferred = infer_global_const_type(v.val, program);
           decl_type_text = substr(inferred, 0, len(inferred));
         }
         items.push(_item(v.name, .Variable, decl_type_text));
@@ -3755,7 +3755,7 @@ fun _declared(
           // `lookup_top_level` already runs for the exact same shape.
           if equals(decl_type_text, "__let_infer__") && v.has_val {
             free(decl_type_text);
-            str inferred = infer_global_const_type(v.val);
+            str inferred = infer_global_const_type(v.val, program);
             decl_type_text = substr(inferred, 0, len(inferred));
           }
           items.push(_item(v.name, .Variable, decl_type_text));

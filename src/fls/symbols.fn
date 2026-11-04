@@ -683,10 +683,20 @@ pub fun doc_comment_trailing(str text, num decl_line) str {
 // this the same way through token-based inference elsewhere (hover's
 // own re-inference, `infer_let_local_type`); a global has no token
 // stream on hand here, so this stays AST-only and narrower - "" for
-// anything past a plain literal, matching what a caller already does
-// with an unresolved type name.
-pub fun infer_global_const_type(Node* val) str {
-  if val == nil {
+// anything past a plain literal or a bare reference to another
+// top-level const, matching what a caller already does with an
+// unresolved type name.
+pub fun infer_global_const_type(Node* val, Vec<Node>* program) str {
+  ret _infer_global_const_type_depth(val, program, 0);
+}
+
+// `infer_global_const_type`'s own recursion, depth-capped the same
+// generous-but-bounded way `_resolve_alias_chain_display` caps its own
+// chase of one alias to the next: a real cycle is already a compile
+// error, this is just a display-time safety net for an invalid
+// mid-edit document, never meant to run long on a real program.
+fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str {
+  if val == nil || depth > 20 {
     ret "";
   }
   fit val.kind {
@@ -700,6 +710,36 @@ pub fun infer_global_const_type(Node* val) str {
     .String(_) -> { ret "str"; }
     .Boolean(_) -> { ret "flag"; }
     .Character(_) -> { ret "chr"; }
+    .Identifier(name) -> {
+      // `pub const MID_X = BASE_X;`: a bare reference to another
+      // top-level const, declared anywhere in the same merged program
+      // (this file, or one already reached through a plain, non-
+      // aliased import) - recursing into that const's own declared or
+      // further-inferred type, rather than leaking blank the moment
+      // the initializer isn't itself a literal.
+      num i = 0;
+      for i < program.len {
+        Node n = program.get(i);
+        i = i + 1;
+        fit n.kind {
+          .Variable(v) -> {
+            if !equals(v.name, name) {
+              continue;
+            }
+            str declared = render_type(v.var_type);
+            if !equals(declared, "__let_infer__") {
+              ret declared;
+            }
+            if v.has_val {
+              ret _infer_global_const_type_depth(v.val, program, depth + 1);
+            }
+            ret "";
+          }
+          _ -> {}
+        }
+      }
+      ret "";
+    }
     _ -> { ret ""; }
   }
 }
@@ -865,7 +905,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           str global_type_text = render_type(v.var_type);
           if equals(global_type_text, "__let_infer__") && v.has_val {
             free(global_type_text);
-            str inferred = infer_global_const_type(v.val);
+            str inferred = infer_global_const_type(v.val, program);
             global_type_text = substr(inferred, 0, len(inferred));
           }
           b.append(global_type_text);
@@ -4254,7 +4294,7 @@ fun _module_const_type(Vec<Node>* program, str module_path, str name) str {
         str type_text = render_type(v.var_type);
         if equals(type_text, "__let_infer__") && v.has_val {
           free(type_text);
-          str inferred = infer_global_const_type(v.val);
+          str inferred = infer_global_const_type(v.val, program);
           ret substr(inferred, 0, len(inferred));
         }
         ret type_text;
