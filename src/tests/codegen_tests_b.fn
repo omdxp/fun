@@ -421,6 +421,53 @@ test "a bare multi-level pointer local's own field access (no explicit deref at 
   assert contains(out, "99"), "expected the bare double-pointer's own field write to resolve through both levels too";
 }
 
+test "indexing a multi-level pointer as a field-access receiver doesn't double-deref" {
+  // Regression from the fix just above: `resolve_field_chain`'s own
+  // `[]`-indexed-receiver branch correctly computed `elem_is_pointer`
+  // (`edt.pointer_depth > 1` for a raw pointer indexed like an array)
+  // but stored the base array's own unmodified `dtype` into the
+  // element's `r.dtype` - still at the base's own full depth, one
+  // level too deep, since indexing itself consumes exactly one level.
+  // Harmless while nothing read `dtype.pointer_depth` directly; once
+  // `emit_receiver_and_resolve_type` started synthesizing `(depth-1)`
+  // leading derefs from it (the fix just above), this stale depth
+  // meant one extra, wrong deref on top of the one indexing already
+  // performed - `(*arr[0])->val` instead of `arr[0]->val`, a real C
+  // error. Covers a read and a write through a double pointer, three
+  // levels deep, and a real array of pointers (unaffected, the
+  // control case) side by side.
+  str src = `use std.c.io;
+  `use std.c.mem;
+  `compound Box { num val; }
+  `fun main() num {
+  `  Box* b = malloc(sizeof(Box));
+  `  b.val = 88;
+  `  Box** arr = malloc(16);
+  `  arr[0] = b;
+  `  printf("%lld\n", arr[0].val);
+  `  arr[0].val = 42;
+  `  printf("%lld\n", b.val);
+  `  Box* bb = malloc(sizeof(Box));
+  `  bb.val = 7;
+  `  Box** pp = malloc(8);
+  `  *pp = bb;
+  `  Box*** arr3 = malloc(16);
+  `  arr3[0] = pp;
+  `  printf("%lld\n", arr3[0].val);
+  `  Box b1 = Box{val = 1};
+  `  Box b2 = Box{val = 2};
+  `  Box*[2] parr = [&b1, &b2];
+  `  printf("%lld %lld\n", parr[0].val, parr[1].val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "indexed_multi_level_pointer_field_access",
+    "indexing a multi-level pointer as a field-access receiver doesn't double-deref"
+  );
+  assert equals(out, "88\n42\n7\n1 2\n"), "expected every indexed receiver to resolve through exactly the right number of levels";
+}
+
 // gap, though not a parity gap: the reference has the identical bug.
 // `Item*[] arr` as a parameter, then `arr[0]->id` in the body, fails
 // with "unknown identifier 'id'" against either compiler, reproduced

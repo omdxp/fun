@@ -1075,6 +1075,32 @@ fun dtype_is_pointer(DataType dt) flag {
   ret dt.flags.is_pointer;
 }
 
+// `dt`'s own type with one array dimension consumed, for an indexed
+// receiver's own element dtype (`arr[0]` off a real array `dt`) - the
+// array-ness is what indexing decays, any pointer star on the
+// element itself survives unchanged.
+fun _one_level_array_decay(DataType dt) DataType {
+  DataType out = dt;
+  if out.array_depth > 0 {
+    out.array_depth = out.array_depth - 1;
+  }
+  out.is_array = out.array_depth > 0;
+  ret out;
+}
+
+// `dt`'s own type with one pointer level consumed, for an indexed
+// receiver's own element dtype when `dt` is a raw pointer indexed
+// like an array (`pts[0]` off `Point** pts`, C pointer arithmetic for
+// `*(pts + 0)`) - the element is one level shallower than the base
+// pointer being indexed.
+fun _one_level_pointer_decay(DataType dt) DataType {
+  DataType out = dt;
+  if out.pointer_depth > 0 {
+    out.pointer_depth = out.pointer_depth - 1;
+  }
+  ret out;
+}
+
 // True for an unsized array type (`T[]`, no bracket dimension), which
 // decays to a plain C pointer. A sized array (`T[3]`) is excluded; it
 // stays a fixed-size inline array.
@@ -10025,12 +10051,19 @@ impl Codegen {
                     // A real array's own element star (if any) survives
                     // indexing unchanged; the array-ness is what decays.
                     elem_is_pointer = dtype_is_pointer(edt);
+                    elem_dtype = .Some(_one_level_array_decay(edt));
                   } else {
                     // A raw pointer indexed like an array (`pts[0]`,
                     // pointer arithmetic for `*(pts + 0)`) dereferences
                     // one level of the pointer itself: `Point* pts`
-                    // yields a value, `Point** pts` yields `Point*`.
+                    // yields a value, `Point** pts` yields `Point*` -
+                    // the element's own `dtype` needs that same level
+                    // taken off too, or a caller reading its real
+                    // remaining depth (an outer field access deciding
+                    // how many further derefs it needs) double-counts
+                    // the level indexing already consumed.
                     elem_is_pointer = edt.pointer_depth > 1;
+                    elem_dtype = .Some(_one_level_pointer_decay(edt));
                   }
                 } else {
                   let p = self.lookup_local_is_pointer(arr_name);
@@ -10049,8 +10082,10 @@ impl Codegen {
                   let bdt = base_r.dtype.unwrap();
                   if bdt.is_array {
                     elem_is_pointer = dtype_is_pointer(bdt);
+                    elem_dtype = .Some(_one_level_array_decay(bdt));
                   } else {
                     elem_is_pointer = bdt.pointer_depth > 1;
+                    elem_dtype = .Some(_one_level_pointer_decay(bdt));
                   }
                 } else {
                   elem_is_pointer = base_r.is_pointer;
