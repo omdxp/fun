@@ -1195,6 +1195,31 @@ test "a shape-bounded generic parameter rejects a non-implementor" {
   ), "expected a non-implementor rejected";
 }
 
+test "a generic function's own shape-typed parameter still checks the caller's argument, not just its type-param bounds" {
+  // `check_arguments`'s generic branch only ever ran
+  // `check_type_bounds` (for a type param's own `<T: Bound>` list),
+  // then returned unconditionally - skipping the ordinary per-argument
+  // `assignable` check entirely, even for a parameter whose declared
+  // type nests the type param inside a real declared type (`Container<
+  // T>`, not a bare `T`). A mismatched argument leaked straight through
+  // to a C-compiler-level error instead of being rejected here, the
+  // same way the equivalent non-generic parameter already is.
+  assert contains(
+    check(
+    `shape Container<T> { get() T; }
+    `compound Box<T> { T val; }
+    `fun show<T>(Container<T> c) { ret; }
+    `fun main() num {
+    `  Box<num> b;
+    `  b.val = 42;
+    `  show(b);
+    `  ret 0;
+    `}`
+    ),
+    "expects"
+  ), "expected a generic shape-typed parameter to reject a mismatched argument";
+}
+
 test "a generic-instantiation bound alternative accepts a matching instantiation" {
   accepts(
     `compound Box<T> { T value; }

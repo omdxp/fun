@@ -3589,8 +3589,11 @@ impl Checker {
   }
 
   // Checks the arguments of a call against what the callee declares. A
-  // generic callee's parameters stand for whatever the call supplies,
-  // so only the shape of such a call is checked.
+  // generic callee's own bare type-param positions stand for whatever
+  // the call supplies (checked instead by `check_type_bounds`), but a
+  // parameter whose declared type nests the type param inside a real
+  // declared type - a shape, or a generic compound - is still checked
+  // structurally, the same way a non-generic callee's argument is.
   check_arguments(
     Node* node,
     str name,
@@ -3621,7 +3624,9 @@ impl Checker {
     }
     if sig.is_generic {
       self.check_type_bounds(node, name, sig, args, env);
-      ret;
+      if self.failed {
+        ret;
+      }
     }
     num i = 0;
     for i < args.len && i < sig.args.len {
@@ -3635,6 +3640,14 @@ impl Checker {
       if self.failed {
         ret;
       }
+      // For a generic callee, `want` itself may still be the bare,
+      // unsubstituted type parameter (`T x`) - `assignable` already
+      // treats that as "stands for whatever's supplied" via
+      // `names_a_declared_type`, so only a `want` naming a real
+      // declared type (a shape, or a generic compound like `Box<T>`
+      // with the type param nested inside its own generic args) is
+      // actually constrained here; bound checking on the type param
+      // itself already happened above via `check_type_bounds`.
       if !self.assignable(want, got) {
         self.fail(
           format(
