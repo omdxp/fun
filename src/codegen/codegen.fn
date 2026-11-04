@@ -1073,6 +1073,29 @@ fun dtype_is_array_as_pointer(DataType dt) flag {
   ret dt.array_depth <= 1;
 }
 
+// True when `dt`, or any generic argument or tuple member nested inside
+// it to arbitrary depth, names `name` - a compound field whose own
+// declared type only reaches back to the enclosing template through
+// another generic wrapper (`Option<Node<T>*>` inside `compound
+// Node<T>`) is just as self-referential as a direct field of that type,
+// and needs the same forward declaration before instantiation.
+fun dtype_mentions_type_name(DataType dt, str name) flag {
+  if equals(dt.type_str, name) {
+    ret true;
+  }
+  for ga : dt.generic_args {
+    if dtype_mentions_type_name(*ga, name) {
+      ret true;
+    }
+  }
+  for tm : dt.tuple_members {
+    if dtype_mentions_type_name(*tm, name) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
 // True when `dt` matches a constraint name from an `impl Vec<T: num |
 // dec>`-style forced-instantiation list. A builtin scalar matches by
 // kind; a named type matches by its bare name, or by the base name
@@ -1918,7 +1941,7 @@ impl Codegen {
     // name to reference before the body is written.
     flag is_self_referential = false;
     for fdt : field_dtypes {
-      if equals(fdt.type_str, dt.type_str) {
+      if dtype_mentions_type_name(*fdt, dt.type_str) {
         is_self_referential = true;
       }
     }

@@ -1462,6 +1462,37 @@ test "a plain (non-generic) function can fit-match and destructure a concrete ge
   assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
 }
 
+test "a compound self-referential only through a generic enum wrapper (Option<Node<T>*>) still forward-declares itself" {
+  // `ensure_compound_instantiated`'s own self-referential check only
+  // compared a field's bare top-level type name against the enclosing
+  // template's own name - missing a field like `Option<Node<T>*> next;`,
+  // where the self-reference sits nested inside another generic type's
+  // own argument instead of being the field's own direct type. With no
+  // forward declaration, instantiating `Option<Node<T>*>` reached for
+  // `Node__num` before it had been declared at all, and the real C
+  // compiler rejected the generated program outright with "unknown type
+  // name 'Node__num'".
+  str src = `use std.c.io;
+  `use std.option;
+  `compound Node<T> {
+  `  T value;
+  `  Option<Node<T>*> next;
+  `}
+  `fun main() num {
+  `  Node<num> n;
+  `  n.value = 1;
+  `  n.next = Option.None;
+  `  printf("%lld\n", n.value);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "self_ref_through_generic_wrapper",
+    "a compound self-referential only through a generic enum wrapper still forward-declares itself"
+  );
+  assert contains(out, "1"), "expected the program to compile and run correctly end to end";
+}
+
 // Resolved: constructing and destructuring a self-referential recursive
 // generic enum works from both generic and plain non-generic code (the
 // two tests above). Ran the compiled programs, not just the emitted C:
