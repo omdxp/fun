@@ -4524,6 +4524,34 @@ test "hovering a fit arm's own payload binding resolves when the subject is a le
   assert contains(hover(&reads, doc, 12, 18), "num v"), "expected the payload binding to resolve through a let-inferred, method-call fit subject";
 }
 
+test "hovering a fit arm's own payload binding resolves when the subject is a let-inferred bare variant construction" {
+  // `_infer_type_primary`'s own `EnumName.Variant(payload)` branch
+  // resolved a `let`-inferred local's own bare type name correctly
+  // (`Option`), but never populated the generic args a fit's own
+  // destructuring-bound payload later substitutes against - `let opt =
+  // Option.Some(5);` carried no concrete type argument at all, so
+  // hovering `x` in `.Some(x) -> { ... }` showed the template's own
+  // bare type param (`T x`) instead of the concrete type the value was
+  // actually constructed with (`num x`).
+  str src = `use std.option;
+  `fun main() {
+  `  let opt = Option.Some(5);
+  `  fit opt {
+  `    .Some(x) -> { _ = x; }
+  `    .None -> {}
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letbareenumfitbind.fn";
+  doc.path = "letbareenumfitbind.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 4, 10), "num x"), "expected the payload binding to resolve to the concrete type the enum was constructed with, not the template's own bare type param";
+}
+
 test "hovering a shape-downcast fit arm's binding resolves to the concrete type" {
   str src = `shape HasArea { area() num; }
   `compound Circle { num radius; }

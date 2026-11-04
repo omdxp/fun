@@ -4147,6 +4147,118 @@ fun _infer_type(
   ret base_type;
 }
 
+// `enum_name`'s own declared type parameters (`Option<T>` -> ["T"]), a
+// fresh copy the caller frees the same way every other `Vec<str>` this
+// file hands back works - empty when no such enum is declared, or it
+// isn't generic.
+fun _enum_type_params_by_name(Vec<Node>* program, str enum_name) Vec<str> {
+  Vec<str> result;
+  result.init(0);
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Enum(e) -> {
+        if !equals(e.name, enum_name) {
+          continue;
+        }
+        for tp : e.type_params {
+          result.push(substr(tp, 0, len(tp)));
+        }
+        ret result;
+      }
+      _ -> {}
+    }
+  }
+  ret result;
+}
+
+// Fills `*out_args` with `enum_name`'s own concrete type argument(s),
+// inferred from a `EnumName.Variant(payload)` construction's own first
+// payload argument - mirrors `_call_return_type`'s own argument-
+// matching loop, but against an enum variant's declared payload type
+// instead of a function parameter's. Only the first payload position
+// is checked: every variant this has needed to resolve so far carries
+// exactly one. Leaves `*out_args` untouched when the payload isn't a
+// bare type param, or its own type can't be inferred.
+fun _fill_enum_variant_generic_args_from_payload(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  str file,
+  num line,
+  str enum_name,
+  str variant_name,
+  num open_paren_idx,
+  num depth,
+  Vec<str>* out_args
+) {
+  Vec<str> type_params = _enum_type_params_by_name(program, enum_name);
+  if type_params.len == 0 {
+    _free_str_vec_deep(&type_params);
+    ret;
+  }
+  Vec<str> empty_concrete;
+  empty_concrete.init(0);
+  let payload0_decl = variant_payload_type(
+    program,
+    enum_name,
+    variant_name,
+    0,
+    empty_concrete
+  );
+  empty_concrete.free();
+  if payload0_decl.is_none() {
+    _free_str_vec_deep(&type_params);
+    ret;
+  }
+  str payload0_type_str = payload0_decl.unwrap();
+  num match_idx = -1;
+  num tpi = 0;
+  for tpi < type_params.len {
+    if equals(type_params.get(tpi), payload0_type_str) {
+      match_idx = tpi;
+    }
+    tpi = tpi + 1;
+  }
+  free(payload0_type_str);
+  if match_idx < 0 {
+    _free_str_vec_deep(&type_params);
+    ret;
+  }
+  let first_arg_tok = token_after(tokens, open_paren_idx + 1);
+  if first_arg_tok.is_none() {
+    _free_str_vec_deep(&type_params);
+    ret;
+  }
+  str payload_val_type = _infer_type(
+    tokens,
+    first_arg_tok.unwrap(),
+    program,
+    file,
+    line,
+    nil,
+    depth + 1
+  );
+  if equals(payload_val_type, "") {
+    _free_str_vec_deep(&type_params);
+    ret;
+  }
+  Vec<str> filled;
+  filled.init(type_params.len);
+  num fi = 0;
+  for fi < type_params.len {
+    if fi == match_idx {
+      filled.push(payload_val_type);
+    } else {
+      filled.push(substr("", 0, 0));
+    }
+    fi = fi + 1;
+  }
+  _free_str_vec_deep(&type_params);
+  *out_args = filled;
+}
+
 // `_infer_type`'s own single-operand resolution: everything it covers
 // except the trailing-binary-operator combination, which lives in
 // `_infer_type` itself so every recursive entry point here benefits
@@ -4442,6 +4554,30 @@ fun _infer_type_primary(
                   );
                   if payload_close.is_some() {
                     end_idx = payload_close.unwrap();
+                    // Infers this generic enum's own concrete type
+                    // argument from the payload's own inferred type
+                    // (`.Some(5)` -> num -> `Option<num>`), the same way
+                    // `_call_return_type`'s own argument-matching loop
+                    // already does for a plain generic function call -
+                    // without this, a `let`-inferred local constructed
+                    // this way carried no generic args at all, leaking
+                    // the template's own bare type param (`T x`)
+                    // straight through to a later fit's own
+                    // destructuring-bound payload hover instead of the
+                    // concrete type the value was actually built with.
+                    if out_args != nil {
+                      _fill_enum_variant_generic_args_from_payload(
+                        tokens,
+                        program,
+                        file,
+                        line,
+                        name,
+                        variant_name,
+                        index_of_token(tokens, payload_paren.unwrap()),
+                        depth,
+                        out_args
+                      );
+                    }
                   }
                 }
                 *out_end_idx = end_idx;
