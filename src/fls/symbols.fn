@@ -2307,6 +2307,89 @@ pub fun local_fn_signature_from_tokens(Vec<Token>* tokens, str text, str callee)
   ret "";
 }
 
+// `local_method_signature_from_tokens`'s own lighter sibling: just a
+// local method's own bare return type name, with no raw `text` to
+// read exact param spelling from - a caller resolving what a chained
+// call's own result type is (to look up a further member on it) only
+// ever needs this bare name, never the full rendered signature, and
+// several such callers (`chain_tail_type_from_tokens`'s own recursive
+// chain walk) have no document text in scope at all to pass down -
+// only `tokens`. "" for a declared void return (`rt` is `{`/`;`), or
+// when no local `impl type_name` declares `method_name` this way.
+pub fun local_method_return_type_from_tokens(
+  Vec<Token>* tokens,
+  str type_name,
+  str method_name
+) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_keyword(t, "impl") {
+      let name_tok = token_after(tokens, i + 1);
+      if name_tok.is_some() && name_tok.unwrap().type == .Identifier &&
+        equals(token_word(name_tok.unwrap()), type_name) {
+        num j = index_of_token(tokens, name_tok.unwrap()) + 1;
+        for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
+          j = j + 1;
+        }
+        if j < tokens.len {
+          num depth = 1;
+          num k = j + 1;
+          for k < tokens.len && depth > 0 {
+            Token kt = tokens.get(k);
+            if token_is_symbol(kt, '{') {
+              depth = depth + 1;
+              k = k + 1;
+              continue;
+            }
+            if token_is_symbol(kt, '}') {
+              depth = depth - 1;
+              k = k + 1;
+              continue;
+            }
+            if depth == 1 && kt.type == .Identifier &&
+            equals(token_word(kt), method_name) {
+              let maybe_lparen = token_after(tokens, k + 1);
+              if maybe_lparen.is_some() &&
+              token_is_operator(maybe_lparen.unwrap(), "(") {
+                num lparen_idx = index_of_token(tokens, maybe_lparen.unwrap());
+                num pdepth = 1;
+                num m = lparen_idx + 1;
+                for m < tokens.len && pdepth > 0 {
+                  if token_is_operator(tokens.get(m), "(") {
+                    pdepth = pdepth + 1;
+                  } elif token_is_symbol(tokens.get(m), ')') {
+                    pdepth = pdepth - 1;
+                  }
+                  m = m + 1;
+                }
+                if pdepth == 0 {
+                  num k2 = m;
+                  for k2 < tokens.len &&
+                    (tokens.get(k2).type == .NewLine || tokens.get(k2).type == .Comment) {
+                    k2 = k2 + 1;
+                  }
+                  if k2 >= tokens.len {
+                    ret "";
+                  }
+                  Token rt = tokens.get(k2);
+                  if token_is_symbol(rt, '{') || token_is_symbol(rt, ';') {
+                    ret "";
+                  }
+                  ret token_word(rt);
+                }
+              }
+            }
+            k = k + 1;
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret "";
+}
+
 // `local_fn_signature_from_tokens`'s own sibling for a method,
 // written directly as `[pub] name(args) RType` inside `impl TypeName
 // { ... }` (no leading `fun` the way a top-level function gets, so

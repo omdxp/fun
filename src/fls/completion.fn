@@ -2804,6 +2804,16 @@ pub fun chain_tail_type_from_tokens(
     } else {
       result = bare_type_from_detail(decl.unwrap().detail);
     }
+  } elif is_call {
+    // `member_declaration_from_tokens`'s own local lookup needs a
+    // real re-parse of this document's tokens, which fails for the
+    // same reason the whole document doesn't parse in the first
+    // place - exactly the situation a chain ending in a call
+    // (`b.inner().`) hits while its own trailing dot has nothing
+    // typed after it yet. `local_method_return_type_from_tokens`
+    // needs no parse at all, scoped to this document's own `impl`
+    // blocks the same way signature help's identical gap was fixed.
+    result = local_method_return_type_from_tokens(tokens, prefix_type, name);
   }
   if prefix_type_owned {
     free(prefix_type);

@@ -1251,6 +1251,43 @@ test "dot-completion resolves a chained method call's own return type, not every
   assert !contains(out, `"label":"debug_r"`), "expected a real chain resolution, not every declared name";
 }
 
+test "dot-completion resolves a chained method call's own return type through a locally-declared impl, mid-typing" {
+  // Same gap as the test above, but through a type and method
+  // declared right in this same document rather than an import:
+  // `member_declaration_from_tokens`'s own local lookup re-parses
+  // this document's tokens to find a local method, which fails for
+  // the same reason the whole document doesn't parse while a reader
+  // is still typing `b.inner().` - the import-search fallback it
+  // falls through to otherwise never finds a method declared here
+  // at all. Fixed with `local_method_return_type_from_tokens`
+  // (symbols.fn), the same token-only, no-parse-needed sibling
+  // signature help's identical gap already uses for its own full
+  // signature (here only the bare return type is needed).
+  str src = `compound Box<T> { T val; }
+  `impl Box<T> {
+  `  inner() Box<T> { ret self; }
+  `  get() T { ret self.val; }
+  `}
+  `fun main() {
+  `  Box<num> b;
+  `  b.val = 5;
+  `  b.inner().
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///local_chain_call_dot.fn";
+  doc.path = "local_chain_call_dot.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Right after the dot following `b.inner()`'s own closing paren,
+  // line 8: `  b.inner().`.
+  str out = completion(&reads, doc, 8, 12, false);
+  assert contains(out, `"label":"val"`) && contains(out, `"label":"inner"`) &&
+    contains(out, `"label":"get"`), "expected Box's own members, inner's own return type";
+}
+
 test "dot-completion resolves a method chain three calls deep, not just the first one" {
   // Same user report, extended one hop further to make sure the fix
   // generalizes past a single chained call - `chain_tail_type_from_
