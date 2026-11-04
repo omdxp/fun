@@ -4636,6 +4636,38 @@ test "hovering a fit arm's own payload binding resolves when the subject is a le
   assert contains(hover(&reads, doc, 4, 10), "num x"), "expected the payload binding to resolve to the concrete type the enum was constructed with, not the template's own bare type param";
 }
 
+test "hovering a fit arm's second payload binding falls back to its own bare type param, not blank, when only the first position was inferred" {
+  // `_fill_enum_variant_generic_args_from_payload` only ever infers
+  // the type-param index matching the first payload argument - every
+  // other position was left as a bare empty string instead of
+  // falling back to its own template param name, the same fallback
+  // `_call_return_type`'s own argument-matching loop already applies
+  // once its own resolution pass is done. A second payload position's
+  // own destructuring-bound hover showed nothing at all (` b`)
+  // instead of a real, if unsubstituted, type (`B b`).
+  str src = `enum Pair2<A, B> {
+  `  Both(A, B),
+  `  Neither,
+  `}
+  `fun main() {
+  `  let p = Pair2.Both(1, "hi");
+  `  fit p {
+  `    Pair2.Both(a, b) -> { _ = a; _ = b; }
+  `    Pair2.Neither -> {}
+  `  }
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///twopayloadfitbind.fn";
+  doc.path = "twopayloadfitbind.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 7, 15), "num a"), "expected the first payload binding to resolve to the concrete type it was constructed with";
+  assert contains(hover(&reads, doc, 7, 18), "B b"), "expected the second payload binding to fall back to its own bare type param, not blank";
+}
+
 test "hovering a shape-downcast fit arm's binding resolves to the concrete type" {
   str src = `shape HasArea { area() num; }
   `compound Circle { num radius; }

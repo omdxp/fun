@@ -4286,7 +4286,16 @@ fun _fill_enum_variant_generic_args_from_payload(
     if fi == match_idx {
       filled.push(payload_val_type);
     } else {
-      filled.push(substr("", 0, 0));
+      // Nothing inferred this position's own concrete type (only the
+      // first payload argument is ever checked above) - left as the
+      // template's own bare type param name rather than blank, the
+      // same fallback `_call_return_type`'s own argument-matching
+      // loop already applies once its own resolution pass is done:
+      // without it, a second (or later) payload position's own
+      // destructuring-bound hover showed nothing at all instead of a
+      // real, if unsubstituted, type.
+      str fallback = type_params.get(fi);
+      filled.push(substr(fallback, 0, len(fallback)));
     }
     fi = fi + 1;
   }
