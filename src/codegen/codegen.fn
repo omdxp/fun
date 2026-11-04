@@ -13168,6 +13168,31 @@ impl Codegen {
     self.emit_hoisted(scratch.out.build());
   }
 
+  // The bare, declared name behind `maybe_mangled`, for a shape-
+  // downcast fit arm's own subject type: usually already bare
+  // ("Container"), but a doubly-generic shape (`impl Box<T> as
+  // Container<T>`) resolves a parameter/local declared with it to its
+  // own concrete per-instantiation identity instead ("Container__num"
+  // - see `ensure_shape_instantiated`), which `shape_decl_names` never
+  // registers directly (only the template's own bare declaration is).
+  // "" when `maybe_mangled` names neither - the caller's own signal
+  // this isn't a shape-downcast subject at all.
+  _bare_shape_decl_name_for(str maybe_mangled) str {
+    if self.shape_decl_names.contains(maybe_mangled) {
+      ret maybe_mangled;
+    }
+    num i = 0;
+    for i < self.shape_decl_names.len {
+      str decl_name = self.shape_decl_names.get(i);
+      if self.shape_decl_type_params.get(i).len > 0 &&
+        starts_with(maybe_mangled, format("{str}__", decl_name)) {
+        ret decl_name;
+      }
+      i = i + 1;
+    }
+    ret "";
+  }
+
   // Ensures the concrete impl (implementor, shape) pair a shape-downcast
   // fit arm names is fully instantiated (struct and vtable) before the
   // arm's own `if (subj.vtable == &__fun_impl_...)` check references it
@@ -14032,14 +14057,35 @@ impl Codegen {
       // vtable_emitted` below). Requiring `shape_names` here first would
       // mean a shape with no non-generic implementor anywhere in the
       // program could never enter this branch at all.
-      if subj_type.is_some() && self.shape_decl_names.contains(subj_type.unwrap()) {
+      str bare_subj_shape_name = "";
+      if subj_type.is_some() {
+        bare_subj_shape_name = self._bare_shape_decl_name_for(subj_type.unwrap());
+      }
+      if subj_type.is_some() && !equals(bare_subj_shape_name, "") {
         str shape_downcast_type = self._fit_shape_destructure_type_name(br);
         if !equals(shape_downcast_type, "") {
           shape_downcast_type = self._auto_resolve_bare_generic_shape_target(
             shape_downcast_type,
-            subj_type.unwrap()
+            bare_subj_shape_name
           );
           self.ensure_specific_shape_impl_vtable_emitted(
+            shape_downcast_type,
+            bare_subj_shape_name
+          );
+          // `ensure_specific_shape_impl_vtable_emitted` above only
+          // instantiates the implementor (`Box<num>`'s own struct),
+          // the same trigger an ordinary `Box<num> b;` declaration
+          // would use - when the shape itself is also generic
+          // (`impl Box<T> as Container<T>`), that alone never builds
+          // the vtable this branch's own comparison needs
+          // (`__fun_impl_Box__num_Container__num_vtable`), since the
+          // eager per-instantiation pass deliberately skips a
+          // doubly-generic shape (building it unconditionally there
+          // corrupts `impl Vec<T> as Iterator<T>` - see `maybe_emit_
+          // shape_vtable_for_instantiation`'s own comment). The lazy
+          // trigger every `__fun_coerce_` call site already uses
+          // covers this one too.
+          self.ensure_generic_impl_shape_vtable_instantiated(
             shape_downcast_type,
             subj_type.unwrap()
           );

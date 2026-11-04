@@ -323,6 +323,44 @@ test "a struct-literal field initializer coercing a concrete value into a shape-
   assert equals(out, "1 42\n"), "expected both the plain and doubly-generic shape-typed fields to coerce and dispatch correctly";
 }
 
+test "a shape-downcast fit arm dispatches correctly against a doubly-generic shape" {
+  // `impl Box<T> as Container<T>` is doubly generic - the subject's
+  // own declared type (`Container<num>`) resolves to its concrete
+  // per-instantiation identity ("Container__num"), which `shape_decl_
+  // names` never registers directly (only the template's bare
+  // declaration is) - the gate guarding this whole branch rejected it
+  // outright, falling through to the ordinary (non-shape) fit path,
+  // which has no idea what to do with a `Type<Args>(binding)` pattern
+  // at all (`[Error] codegen failed: unsupported node: function`).
+  // Fixed generally: the gate now recognizes a mangled instantiation
+  // of a declared generic shape too, and the vtable comparison this
+  // branch emits needs its own lazy trigger (the same one every
+  // `__fun_coerce_` call site already uses), since the ordinary
+  // eager per-instantiation trigger deliberately skips a doubly-
+  // generic shape.
+  str src = `use std.c.io;
+  `shape Container<T> { get() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Container<T> { get() T { ret self.val; } }
+  `fun show(Container<num> c) num {
+  `  fit c {
+  `    Box<num>(b) -> { ret b.val; }
+  `    _ -> { ret -1; }
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b; b.val = 7;
+  `  printf("%lld\n", show(&b));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_doubly_generic",
+    "a shape-downcast fit arm dispatches correctly against a doubly-generic shape"
+  );
+  assert equals(out, "7\n"), "expected the doubly-generic shape-downcast arm to dispatch to the real value";
+}
+
 test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Shape impl callable" {
   str src = `use std.c.io;
   `shape Named { name() str; }
