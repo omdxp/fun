@@ -1554,7 +1554,7 @@ fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
 // every other shape (comparison, assignment, call argument)
 // `dot_shorthand_context_type_at` already covers for hover. "" when
 // none apply.
-fun _dot_shorthand_enum_type(
+pub fun _dot_shorthand_enum_type(
   Vec<Token>* tokens,
   Vec<Node>* program,
   num dot_idx,

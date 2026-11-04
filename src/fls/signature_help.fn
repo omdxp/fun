@@ -148,28 +148,56 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
   } else {
     found = lookup_top_level(&program.nodes, c.callee);
   }
-  if found.is_none() && c.has_receiver && !equals(c.receiver_name, "") {
-    // `EnumName.Variant(payload)`: a variant's own longhand
-    // construction, not a method call on a typed receiver at all -
-    // `chain_receiver`'s own machinery above only ever resolves a
-    // local's declared type, so a bare enum type name used as a
-    // qualifier here never matched anything. Checked directly against
-    // the program's own enum declarations instead, the same way
-    // `_infer_type_primary`'s identical branch (symbols.fn) already
-    // does for let-inference. No implicit `self` here, so
-    // `active_param` stays at the cursor's own raw position, not
-    // shifted the way a real method's own lookup above is.
-    Vec<str> no_args;
-    no_args.init(0);
-    let variant_decl = enum_variant_declaration(
-      &program.nodes,
-      c.receiver_name,
-      c.callee,
-      no_args
-    );
-    no_args.free();
-    if variant_decl.is_some() {
-      ret _signature_result(variant_decl.unwrap().detail, c.active_param);
+  if found.is_none() && c.has_receiver {
+    // `EnumName.Variant(payload)` (an explicit receiver) or a bare
+    // `.Variant(payload)` shorthand: a variant's own longhand or
+    // short construction, not a method call on a typed receiver at
+    // all - `chain_receiver`'s own machinery above only ever resolves
+    // a local's declared type, so a bare enum type name (or nothing,
+    // for the shorthand) used as a qualifier here never matched
+    // anything. Checked directly against the program's own enum
+    // declarations instead, the same way `_infer_type_primary`'s
+    // identical branch (symbols.fn) already does for let-inference; a
+    // bare shorthand's own expected enum first goes through the same
+    // context inference (`_dot_shorthand_enum_type`, completion.fn) a
+    // reader already gets for hover/completion in the exact same
+    // position. No implicit `self` either way, so `active_param`
+    // stays at the cursor's own raw position, not shifted the way a
+    // real method's own lookup above is.
+    str enum_name = c.receiver_name;
+    flag owns_enum_name = false;
+    if equals(enum_name, "") {
+      let dot_tok = token_before(&tokens, index_of_token(&tokens, c.callee_token));
+      if dot_tok.is_some() {
+        enum_name = _dot_shorthand_enum_type(
+          &tokens,
+          &program.nodes,
+          index_of_token(&tokens, dot_tok.unwrap()),
+          doc.path,
+          source_line
+        );
+        owns_enum_name = true;
+      }
+    }
+    if !equals(enum_name, "") {
+      Vec<str> no_args;
+      no_args.init(0);
+      let variant_decl = enum_variant_declaration(
+        &program.nodes,
+        enum_name,
+        c.callee,
+        no_args
+      );
+      no_args.free();
+      if variant_decl.is_some() {
+        if owns_enum_name {
+          free(enum_name);
+        }
+        ret _signature_result(variant_decl.unwrap().detail, c.active_param);
+      }
+    }
+    if owns_enum_name {
+      free(enum_name);
     }
   }
   if found.is_none() {

@@ -9778,6 +9778,35 @@ test "signature help resolves an explicit EnumName.Variant(...) constructor call
   assert contains(circle_out, `"activeParameter":0`), "expected its one argument active";
 }
 
+test "signature help resolves a bare '.Variant(...)' shorthand constructor call too, not just the explicit form" {
+  // Same gap as the explicit form above, one layer further: a bare
+  // shorthand carries no receiver name at all (`c.receiver_name` is
+  // ""), so it needs the expected enum's own type worked out from
+  // context first - the same `_dot_shorthand_enum_type` inference
+  // (completion.fn) a reader already gets for hover/completion at
+  // the exact same position, here reused for signature help instead.
+  str src = `enum Shape2 {
+  `  Circle(num),
+  `  Rect(num, num),
+  `}
+  `fun make(Shape2 s) num { ret 0; }
+  `fun main() {
+  `  make(.Rect(1, 2));
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelpbareshort.fn";
+  doc.path = "sighelpbareshort.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  // Cursor at the second argument, line 6: `  make(.Rect(1, 2));`.
+  str out = signature_help(&reads, doc, 6, 16);
+  assert contains(out, `"label":"Rect(num, num) = 1"`), "expected the shorthand's own inferred enum to resolve the variant's real signature";
+  assert contains(out, `"activeParameter":1`), "expected the second argument active";
+}
+
 test "hover and goto-definition resolve a bare variant shorthand in a fit pattern, not just a value expression" {
   // `covering_fit`'s own range check (`_find_covering_fit`) rejected
   // every position inside a fit statement whose branches all have a
