@@ -123,6 +123,46 @@ test "two instantiations of the same generic implementing the same shape dispatc
   assert equals(out, "5 70\n"), "expected each instantiation's own len() to dispatch correctly, not the first-declared one's";
 }
 
+test "a generic compound implementing a shape that is itself generic dispatches correctly, keyed per instantiation" {
+  // `impl Box<T> as Container<T>` is doubly generic: both the
+  // implementor and the shape it implements still carry the
+  // implementor's own unbound type param. The eager, per-instantiation
+  // vtable-building pass that already handles a plain generic
+  // implementor of a non-generic shape (`impl Box<T> as Sized`)
+  // unconditionally skipped this combination outright - the coercion
+  // from a concrete `Box<num>` into a `Container<num>`-typed parameter
+  // referenced a `__fun_coerce_Box__num_Container__num` helper that was
+  // never emitted, a real C compile error, no fit involved. Fixed
+  // lazily instead of eagerly: eagerly building this for every generic
+  // compound implementing every generic shape corrupts something as
+  // ubiquitous as `impl Vec<T> as Iterator<T>`, built the moment any
+  // `Vec<T>` is instantiated whether or not the program ever dispatches
+  // through it dynamically. Covers two different instantiations of the
+  // same doubly-generic impl side by side, and a multi-type-param
+  // implementor where the shape's own argument names only one of them.
+  str src = `use std.c.io;
+  `shape Container<T> { get() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Container<T> { get() T { ret self.val; } }
+  `compound Pair<K, V> { K k; V v; }
+  `impl Pair<K, V> as Container<K> { get() K { ret self.k; } }
+  `fun show_num(Container<num> c) num { ret c.get(); }
+  `fun show_str(Container<str> c) str { ret c.get(); }
+  `fun main() num {
+  `  Box<num> bn; bn.val = 42;
+  `  Box<str> bs; bs.val = "hi";
+  `  Pair<str, num> p; p.k = "paired"; p.v = 7;
+  `  printf("%lld %s %s\n", show_num(&bn), show_str(&bs), show_str(&p));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "doubly_generic_shape_dispatch",
+    "a generic compound implementing a generic shape dispatches correctly"
+  );
+  assert equals(out, "42 hi paired\n"), "expected each instantiation's own get() to dispatch through its own vtable";
+}
+
 test "ra3: shape coercion of deref, parenthesized address-of, and pointer-field" {
   str src = `use std.c.io;
   `compound Inner { num v; }

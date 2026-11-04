@@ -455,6 +455,15 @@ pub compound Codegen {
   // `Box__num`) in place of the template's own bare `type_name`. Empty
   // is the ordinary, non-generic case.
   str shape_inst_override_name;
+  // Companion override, non-empty only when the shape itself is also
+  // generic and its own argument is the implementor's type param
+  // (`impl Box<T> as Container<T>`) - names that shape's own resolved
+  // concrete identity (e.g. `Container__num`) in place of the bare
+  // shape name, the same role `i.shape_concrete_instantiation` plays
+  // when the shape's argument was already concrete at parse time
+  // (`impl Config as To<JsonValue>`). Empty whenever the shape isn't
+  // itself generic, or already carries its own concrete instantiation.
+  str shape_inst_override_shape_concrete;
   // Where a lazily-monomorphized typedef or generic impl method
   // definition is spliced, instead of wherever the output happens to be
   // when it's first triggered: for a type used inside a function body
@@ -722,6 +731,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
   g.shape_inst_override_name = "";
+  g.shape_inst_override_shape_concrete = "";
   g.loop_defer_marks.init(0);
   g.hoist_insert_pos = .None;
   g.current_stmt_start_pos = .None;
@@ -3090,7 +3100,18 @@ impl Codegen {
           // against the shape's own declaration: that shape needs a
           // vtable keyed by the resolved `K`, which this machinery
           // doesn't build, so it's skipped rather than misfiring with a
-          // stale, unsubstituted vtable shape.
+          // stale, unsubstituted vtable shape. Dynamic dispatch through
+          // one of these (a bare `Container<T> c` parameter, not a
+          // static `for`/method call) is instead handled lazily, only
+          // when a real coercion needs it - see
+          // `ensure_generic_shape_vtable_instantiated`, called from
+          // `resolve_shape_coerce_concrete_type`'s own call sites.
+          // Firing this unconditionally for every instantiation here
+          // instead (as a first attempt at this did) corrupts something
+          // as ubiquitous as `impl Vec<T> as Iterator<T>` every time any
+          // `Vec<T>` is instantiated for completely unrelated reasons,
+          // whether or not the program ever dispatches through it
+          // dynamically at all.
           flag shape_itself_generic = false;
           num qdi = 0;
           for qdi < self.shape_decl_names.len {
@@ -6893,6 +6914,10 @@ impl Codegen {
             if self.shape_names.contains(lhs_type_name2) {
               let concrete2 = self.resolve_shape_coerce_concrete_type(e.right);
               if concrete2.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  concrete2.unwrap(),
+                  lhs_type_name2
+                );
                 self.state.write("__fun_coerce_");
                 self.state.write(concrete2.unwrap());
                 self.state.write("_");
@@ -8189,6 +8214,10 @@ impl Codegen {
           if self.shape_names.contains(resolved.unwrap()) {
             let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
             if arg_concrete.is_some() {
+              self.ensure_generic_impl_shape_vtable_instantiated(
+                arg_concrete.unwrap(),
+                resolved.unwrap()
+              );
               self.state.write("__fun_coerce_");
               self.state.write(arg_concrete.unwrap());
               self.state.write("_");
@@ -8676,6 +8705,147 @@ impl Codegen {
       _ -> {}
     }
     ret .None;
+  }
+
+  // Lazily builds the vtable machinery (struct, if not already built by
+  // `ensure_shape_instantiated`; trampolines; vtable instance; the
+  // `__fun_coerce_<concrete>_<shape>` helper) for one concrete
+  // instantiation of a generic compound's impl of a shape that is also
+  // generic (`impl Box<T> as Container<T>`), the moment a real coercion
+  // needs it - every `__fun_coerce_` call site above calls this first
+  // with the coercion's own source and destination types, already known
+  // there. Firing this unconditionally for every instantiation instead
+  // (`maybe_emit_shape_vtable_for_instantiation`'s own eager per-impl
+  // pass, which an earlier version of this routed through) corrupts
+  // something as ubiquitous as `impl Vec<T> as Iterator<T>` every time
+  // any `Vec<T>` is instantiated, whether or not the program ever
+  // dispatches through it dynamically at all - see that function's own
+  // comment. A no-op whenever `shape_concrete_name` isn't actually a
+  // generic shape's own per-instantiation identity (the ordinary
+  // non-generic and already-concrete-at-parse-time cases are already
+  // built eagerly, so no matching template is ever found here for
+  // them), or `concrete_type_name` isn't a tracked generic instantiation.
+  ensure_generic_impl_shape_vtable_instantiated(str concrete_type_name, str shape_concrete_name) {
+    num ii = 0;
+    flag found_inst = false;
+    for ii < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(ii), concrete_type_name) {
+        found_inst = true;
+        break;
+      }
+      ii = ii + 1;
+    }
+    if !found_inst {
+      ret;
+    }
+    str base_name = self.instantiation_base_name.get(ii);
+    let arg_type_names = self.instantiation_arg_type_names.get(ii);
+    let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
+    let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || !i.has_shape_name ||
+            i.has_shape_concrete_instantiation || !i.has_shape_arg_dtype ||
+            i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes,
+            self.all_nodes
+          ) {
+            continue;
+          }
+          let prev_params = self.type_subst_param_names;
+          let prev_arg_names = self.type_subst_arg_type_strs;
+          let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+          let prev_arg_dtypes = self.type_subst_arg_dtypes;
+          self.type_subst_param_names = i.type_params;
+          self.type_subst_arg_type_strs = arg_type_names;
+          self.type_subst_arg_is_pointer = arg_is_pointer;
+          self.type_subst_arg_dtypes = arg_dtypes;
+          // Whether this candidate's own shape argument, substituted
+          // against this instantiation, is the identity the caller is
+          // actually after - more than one impl can share
+          // (base_name, arity) the same way the eager pass's own
+          // disambiguation comment describes, so a name match alone
+          // isn't enough to commit to the wrong one.
+          let resolved_shape_arg = self.resolve_type_name(*i.shape_arg_dtype);
+          flag identity_matches = false;
+          if resolved_shape_arg.is_some() {
+            StringBuilder shape_id_sb = string_builder_init(16);
+            shape_id_sb.append(i.shape_name);
+            shape_id_sb.append("__");
+            shape_id_sb.append(resolved_shape_arg.unwrap());
+            identity_matches = equals(shape_id_sb.build(), shape_concrete_name);
+          }
+          if !identity_matches {
+            self.type_subst_param_names = prev_params;
+            self.type_subst_arg_type_strs = prev_arg_names;
+            self.type_subst_arg_is_pointer = prev_arg_ptrs;
+            self.type_subst_arg_dtypes = prev_arg_dtypes;
+            continue;
+          }
+
+          str prev_override = self.shape_inst_override_name;
+          self.shape_inst_override_name = concrete_type_name;
+          str prev_shape_concrete_override = self.shape_inst_override_shape_concrete;
+          self.shape_inst_override_shape_concrete = shape_concrete_name;
+
+          CodegenState qv_scratch = self.new_scratch_state();
+          CodegenState* saved_qv_state = self.state;
+          let saved_qv_hoist_pos = self.hoist_insert_pos;
+          let saved_qv_scratch_depth = self.hoist_scratch_depth;
+          let saved_qv_stmt_start_pos = self.current_stmt_start_pos;
+          self.state = &qv_scratch;
+          self.hoist_insert_pos = .None;
+          self.hoist_scratch_depth = 0;
+          self.current_stmt_start_pos = .None;
+          self.emit_shape_vtable_machinery(tmpl);
+
+          StringBuilder qm_pfx_sb = string_builder_init(16);
+          qm_pfx_sb.append(base_name);
+          qm_pfx_sb.append("__");
+          qm_pfx_sb.append(i.shape_name);
+          qm_pfx_sb.append("__");
+          str qm_prefix = qm_pfx_sb.build();
+          flag prev_suppress_qv = self.suppress_generic_impl_method_draining;
+          self.suppress_generic_impl_method_draining = true;
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                let qm_bare = strip_prefix(fnv.name, qm_prefix);
+                self.ensure_generic_impl_method_emitted(
+                  concrete_type_name,
+                  qm_bare,
+                  i.shape_name
+                );
+              }
+              _ -> {}
+            }
+          }
+          self.suppress_generic_impl_method_draining = prev_suppress_qv;
+
+          self.state = saved_qv_state;
+          self.hoist_insert_pos = saved_qv_hoist_pos;
+          self.hoist_scratch_depth = saved_qv_scratch_depth;
+          self.current_stmt_start_pos = saved_qv_stmt_start_pos;
+          self.emit_hoisted(qv_scratch.out.build());
+
+          self.shape_inst_override_name = prev_override;
+          self.shape_inst_override_shape_concrete = prev_shape_concrete_override;
+          self.type_subst_param_names = prev_params;
+          self.type_subst_arg_type_strs = prev_arg_names;
+          self.type_subst_arg_is_pointer = prev_arg_ptrs;
+          self.type_subst_arg_dtypes = prev_arg_dtypes;
+          ret;
+        }
+        _ -> {}
+      }
+    }
   }
 
   // Emits a method call `recv.method(arg1, ...)` as C
@@ -10455,6 +10625,10 @@ impl Codegen {
           if ret_concrete.is_some() {
             ret_did_shape_coerce = true;
             ret_shape_concrete = ret_concrete.unwrap();
+            self.ensure_generic_impl_shape_vtable_instantiated(
+              ret_shape_concrete,
+              self.current_fn_rtype_name
+            );
           }
         }
         if self.defer_stack.len == 0 {
@@ -10917,6 +11091,10 @@ impl Codegen {
           if self.shape_names.contains(var_shape_type) {
             let concrete = self.resolve_shape_coerce_concrete_type(v.val);
             if concrete.is_some() {
+              self.ensure_generic_impl_shape_vtable_instantiated(
+                concrete.unwrap(),
+                var_shape_type
+              );
               self.state.write("__fun_coerce_");
               self.state.write(concrete.unwrap());
               self.state.write("_");
@@ -17431,6 +17609,8 @@ impl Codegen {
         str shape_type_identity = shape_name;
         if i.has_shape_concrete_instantiation {
           shape_type_identity = i.shape_concrete_instantiation;
+        } elif !equals(self.shape_inst_override_shape_concrete, "") {
+          shape_type_identity = self.shape_inst_override_shape_concrete;
         }
 
         StringBuilder pfx = string_builder_init(16);
