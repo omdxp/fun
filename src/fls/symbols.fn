@@ -685,7 +685,7 @@ pub fun doc_comment_trailing(str text, num decl_line) str {
 // stream on hand here, so this stays AST-only and narrower - "" for
 // anything past a plain literal, matching what a caller already does
 // with an unresolved type name.
-fun _infer_global_const_type(Node* val) str {
+pub fun infer_global_const_type(Node* val) str {
   if val == nil {
     ret "";
   }
@@ -865,7 +865,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           str global_type_text = render_type(v.var_type);
           if equals(global_type_text, "__let_infer__") && v.has_val {
             free(global_type_text);
-            str inferred = _infer_global_const_type(v.val);
+            str inferred = infer_global_const_type(v.val);
             global_type_text = substr(inferred, 0, len(inferred));
           }
           b.append(global_type_text);
@@ -4147,6 +4147,41 @@ fun _infer_type(
   ret base_type;
 }
 
+// `name`'s own resolved type, as a top-level `pub` const/let declared
+// in `module_path` - the same literal-initializer fallback
+// `lookup_top_level`'s own `.Variable` branch already runs for an
+// untyped one, but returning just the type instead of a full rendered
+// declaration: that detail carries a const's own trailing "= value",
+// which `bare_type_from_detail` can't cleanly strip back off (it's
+// built for a plain "Type name" shape with nothing past the name).
+// "" when nothing matches.
+fun _module_const_type(Vec<Node>* program, str module_path, str name) str {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    if !equals(n.pos.filename, module_path) {
+      continue;
+    }
+    fit n.kind {
+      .Variable(v) -> {
+        if !equals(v.name, name) {
+          continue;
+        }
+        str type_text = render_type(v.var_type);
+        if equals(type_text, "__let_infer__") && v.has_val {
+          free(type_text);
+          str inferred = infer_global_const_type(v.val);
+          ret substr(inferred, 0, len(inferred));
+        }
+        ret type_text;
+      }
+      _ -> {}
+    }
+  }
+  ret "";
+}
+
 // `enum_name`'s own declared type parameters (`Option<T>` -> ["T"]), a
 // fresh copy the caller frees the same way every other `Vec<str>` this
 // file hands back works - empty when no such enum is declared, or it
@@ -4585,6 +4620,48 @@ fun _infer_type_primary(
               }
             }
             _ -> {}
+          }
+        }
+      }
+
+      // `alias.SOME`: `name` might name an import alias instead of a
+      // local at all (`use mod as m; let x = m.SOME;`) - an alias
+      // carries no type of its own, so the general chain-walk below
+      // (which only ever resolves a local's declared type) never
+      // reaches this. A call (`alias.func()`) already resolves
+      // correctly through that general chain-walk, so this only
+      // covers a bare field read, checked directly against the
+      // aliased file's own top-level declarations the same way
+      // `navigation.fn`'s own alias-qualified lookup already does for
+      // hover/goto-definition - without this, a `let`-inferred local
+      // built straight from an aliased module's own const carried no
+      // type at all.
+      let const_dot = token_after(tokens, idx + 1);
+      if const_dot.is_some() && token_is_operator(const_dot.unwrap(), ".") {
+        let const_field_opt = token_after(
+          tokens,
+          index_of_token(tokens, const_dot.unwrap()) + 1
+        );
+        if const_field_opt.is_some() && const_field_opt.unwrap().type == .Identifier {
+          let after_const_field = token_after(
+            tokens,
+            index_of_token(tokens, const_field_opt.unwrap()) + 1
+          );
+          flag const_field_is_call = after_const_field.is_some() &&
+            token_is_operator(after_const_field.unwrap(), "(");
+          if !const_field_is_call {
+            str alias_target = import_alias_target_from_tokens(tokens, file, name);
+            if !equals(alias_target, "") {
+              str field_type = _module_const_type(
+                program,
+                alias_target,
+                token_word(const_field_opt.unwrap())
+              );
+              if !equals(field_type, "") {
+                *out_end_idx = index_of_token(tokens, const_field_opt.unwrap());
+                ret field_type;
+              }
+            }
           }
         }
       }

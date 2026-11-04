@@ -2761,6 +2761,90 @@ test "hover, go-to-definition, and dot-completion resolve an import alias at a u
   assert contains(alias_completion, `"label":"cos"`), "expected another of the aliased module's own functions too";
 }
 
+test "hover, inlay hints, and completion resolve an untyped const read through an import alias, not just a call" {
+  // User-reported: `use some as s; let x = s.SOME;` where `some.fn`
+  // declares `pub const SOME = 'c';` with no explicit type. A call
+  // through an alias (`cmath.sqrt(4.0)`, the test above) already
+  // resolved correctly; a bare field read never did, on three fronts
+  // at once:
+  //
+  // - `_infer_type_primary`'s own chain-walk only ever resolved a
+  // local's declared type - an alias carries no type of its own, so
+  // `let x = s.SOME;` left `x` completely unresolved (no inlay
+  // hint, hover on `x` showed no type at all).
+  // - `_alias_module_completions`'s own `.Variable` branch rendered
+  // `v.var_type` directly, which an untyped const never resolves in
+  // the parsed tree (the permanent `__let_infer__` sentinel) -
+  // completing after `s.` showed that raw sentinel as `SOME`'s own
+  // detail instead of its real type.
+  str base = "fun-out/_alias_const_infer_test";
+  make_dir_all(base);
+  write_string(path_join(base, "some.fn"), "pub const SOME = 'c';\n");
+  defer remove_file(path_join(base, "some.fn"));
+
+  str src = `use std.c.io;
+  `use some as s;
+  `
+  `fun main() {
+  `  let x = s.SOME;
+  `  printf("hello from fun%c\n", x);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///aliasconsttest.fn";
+  doc.path = path_join(base, "aliasconsttest.fn");
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 4, 6), "chr x"), "expected hover on the let-inferred local to resolve through the aliased const's own real type";
+
+  str hints = inlay_hints(&reads, doc, 0, 6);
+  assert contains(hints, ": chr"), "expected an inlay hint for the let-inferred local, not nothing at all";
+
+  str alias_const_completion = completion(&reads, doc, 4, 13, false);
+  assert contains(alias_const_completion, `"detail":"chr"`), "expected the aliased const's own real type, not the raw __let_infer__ sentinel";
+  assert !contains(alias_const_completion, "__let_infer__"), "expected the sentinel never to leak into an aliased const's own completion detail";
+}
+
+test "hover, inlay hints, and completion resolve an untyped const read through a plain import with no alias at all" {
+  // Same gap as the aliased case above, one layer further back:
+  // `import_alias_target`/`import_alias_target_from_tokens` only ever
+  // matched a declared `as name`, so a plain `use some;` referenced by
+  // its own path's bare final segment (`some.SOME`, no alias written
+  // anywhere) didn't resolve at all - not even the module itself
+  // (hovering `some` here used to show nothing, same as `math` in a
+  // bare `use std.c.math; math.sqrt(...)` with no alias).
+  str base = "fun-out/_noalias_const_infer_test";
+  make_dir_all(base);
+  write_string(path_join(base, "some.fn"), "pub const SOME = 'c';\n");
+  defer remove_file(path_join(base, "some.fn"));
+
+  str src = `use std.c.io;
+  `use some;
+  `
+  `fun main() {
+  `  let x = some.SOME;
+  `  printf("hello from fun%c\n", x);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///noaliasconsttest.fn";
+  doc.path = path_join(base, "noaliasconsttest.fn");
+  doc.text = src;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 4, 6), "chr x"), "expected hover on the let-inferred local to resolve through the plainly-imported const's own real type";
+
+  str hints = inlay_hints(&reads, doc, 0, 6);
+  assert contains(hints, ": chr"), "expected an inlay hint for the let-inferred local even with no alias at all";
+
+  str noalias_completion = completion(&reads, doc, 4, 16, false);
+  assert contains(noalias_completion, `"detail":"chr"`), "expected the plainly-imported const's own real type, not the raw __let_infer__ sentinel";
+  assert !contains(noalias_completion, "__let_infer__"), "expected the sentinel never to leak into a plainly-imported const's own completion detail";
+}
+
 test "hover, go-to-definition, and completion cover a C builtin the language accepts without a declaration" {
   str src = `fun main() num {
   `  ret NULL;

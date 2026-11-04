@@ -3357,6 +3357,19 @@ fun _alias_module_completions(
       .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       .Variable(v) -> {
         str decl_type_text = render_type(v.var_type);
+        // An untyped top-level `const`/`let` never resolves its own
+        // declared type in the parsed tree - the parser leaves it as
+        // the permanent `__let_infer__` sentinel - so this falls back
+        // to the same literal-initializer inference `lookup_top_level`
+        // already runs for the exact same shape, the same way hovering
+        // this same const through its own `use`-site already resolves
+        // correctly; without it, an aliased module's own untyped const
+        // showed the raw sentinel verbatim in its completion detail.
+        if equals(decl_type_text, "__let_infer__") && v.has_val {
+          free(decl_type_text);
+          str inferred = infer_global_const_type(v.val);
+          decl_type_text = substr(inferred, 0, len(inferred));
+        }
         items.push(_item(v.name, .Variable, decl_type_text));
         free(decl_type_text);
       }
@@ -3725,6 +3738,16 @@ fun _declared(
       .Variable(v) -> {
         if _visible_from(n, file) {
           str decl_type_text = render_type(v.var_type);
+          // Same reasoning as `_alias_module_completions`'s own
+          // `.Variable` branch: an untyped top-level const/let never
+          // resolves its own declared type in the parsed tree, so this
+          // falls back to the same literal-initializer inference
+          // `lookup_top_level` already runs for the exact same shape.
+          if equals(decl_type_text, "__let_infer__") && v.has_val {
+            free(decl_type_text);
+            str inferred = infer_global_const_type(v.val);
+            decl_type_text = substr(inferred, 0, len(inferred));
+          }
           items.push(_item(v.name, .Variable, decl_type_text));
           free(decl_type_text);
         }
@@ -3803,6 +3826,15 @@ fun _collect_locals(
   fit body.kind {
     .Variable(v) -> {
       str local_type_text = render_type(v.var_type);
+      // An untyped `let`/`const` local never resolves its own declared
+      // type in the parsed tree either - same reasoning as the
+      // top-level `.Variable` branches above, falling back here to the
+      // real token-based re-inference `hover` already uses for the
+      // same local, instead of leaking the raw sentinel.
+      if equals(local_type_text, "__let_infer__") {
+        free(local_type_text);
+        local_type_text = type_name_of_local(tokens, program, v.name, file, line);
+      }
       items.push(_item(v.name, .Variable, local_type_text));
       free(local_type_text);
     }
