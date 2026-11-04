@@ -2573,6 +2573,13 @@ impl Codegen {
       }
       self.state.write(");\n");
     }
+    // MSVC rejects an empty struct outright (`shape Empty { }` is
+    // explicitly documented as valid - see examples/sizeof_all_types.fn)
+    // - the same dummy field `emit_shape_vtable_machinery`'s own
+    // identical struct-build already writes for this exact case.
+    if self.msvc_mode && q_methods.len == 0 {
+      self.state.write("  int __fun_dummy;\n");
+    }
     self.state.write("};\n");
     self.state.write("typedef struct ");
     self.state.write(q_mangled);

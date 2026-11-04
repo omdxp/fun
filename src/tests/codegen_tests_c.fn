@@ -123,6 +123,28 @@ test "two instantiations of the same generic implementing the same shape dispatc
   assert equals(out, "5 70\n"), "expected each instantiation's own len() to dispatch correctly, not the first-declared one's";
 }
 
+test "an empty shape's own early-built struct still gets MSVC's dummy field, not just the impl-triggered one" {
+  // `shape Empty { }` is explicitly documented as valid (examples/
+  // sizeof_all_types.fn). The struct built the moment any non-generic
+  // shape is now forward-declared early (so a parameter of that shape
+  // works regardless of file order) never carried the same MSVC
+  // empty-struct guard `emit_shape_vtable_machinery`'s own, later,
+  // impl-triggered struct build already has - a real MSVC C2016 ("a
+  // struct or union have at least one member"), caught on this
+  // project's own Windows CI, not locally reproducible without a real
+  // MSVC compiler, so asserted here directly against the generated
+  // text instead.
+  str src = `shape Empty { }
+  `fun main() { }`;
+  let out = emit_c_with_imports_forcing_msvc(
+    src,
+    "shape_empty_msvc_dummy",
+    "an empty shape's struct carries MSVC's dummy field"
+  );
+  assert contains(out, "struct Empty_vtable {\n  int __fun_dummy;\n};"),
+  "expected the empty shape's vtable struct to get MSVC's dummy field";
+}
+
 test "a plain shape-typed parameter works regardless of where its sole implementor's impl appears in the file" {
   // A shape used by value as a parameter or return type needs its
   // complete struct definition in scope at that point, not just an
