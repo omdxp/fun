@@ -1204,6 +1204,37 @@ test "a function value works as a local, a function's own return type, and a com
   assert contains(out, "13"), "expected the compound field's own call, not a method dispatch, to add correctly";
 }
 
+test "a zero-parameter function-pointer type writes a real (void) parameter list everywhere, not a bare ()" {
+  // Five independent declarator sites each wrote a function pointer's
+  // own parameter list as a bare `()` for a zero-parameter signature
+  // instead of `(void)` - a plain `()` means "unspecified arguments"
+  // in C, not "no arguments", which a strict (non-GNU) compiler
+  // rejects outright with "a function declaration without a prototype
+  // is deprecated". GNU/clang's default mode stays silent about it,
+  // so this slipped past every other test in this file; only a real
+  // strict compile (`run_source_forcing_msvc`) catches it. Covers a
+  // local (`mangled_fn_type_name`'s own typedef, `write_named_type`),
+  // a plain function's own return type (`emit_function_named`), and a
+  // parameter (`emit_function_param`).
+  str src = `use std.io;
+  `fun cleanup_action() num { println("cleanup ran"); ret 0; }
+  `fun get_action() fun() num { ret cleanup_action; }
+  `fun call_it(fun() num f) num { ret f(); }
+  `fun main() num {
+  `  fun() num action = cleanup_action;
+  `  println_fmt("{num}", action());
+  `  fun() num g = get_action();
+  `  println_fmt("{num}", call_it(g));
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fnptr_zero_param_void",
+    "a zero-parameter function-pointer type writes (void), not a bare () (strict MSVC-shaped compile)"
+  );
+  assert count(out_msvc, "cleanup ran") == 2, "expected both calls through a zero-parameter function pointer to actually run under the strict compile";
+}
+
 test "postfix '?' unwraps a let-bound Option and propagates '.None', both observed at runtime" {
   str src = `use std.c.io;
   `use std.option;

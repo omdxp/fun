@@ -1610,6 +1610,12 @@ impl Codegen {
     self.state.write(" (*");
     self.state.write(mangled_name);
     self.state.write(")(");
+    if sig.params.len == 0 {
+      // A real empty parameter list ("void"), not a bare "()" - the
+      // latter declares an old-style function accepting anything,
+      // which MSVC (and any strict C compiler) rejects outright.
+      self.state.write("void");
+    }
     flag first = true;
     for p2 : sig.params {
       if !first {
@@ -2487,6 +2493,9 @@ impl Codegen {
             ret perr;
           }
           self.state.write("))(");
+          if rsig.params.len == 0 {
+            self.state.write("void");
+          }
           flag rfirst = true;
           for rp : rsig.params {
             if !rfirst {
@@ -2552,6 +2561,9 @@ impl Codegen {
             self.state.write(" (*");
             self.state.write(v.name);
             self.state.write(")(");
+            if sig.params.len == 0 {
+              self.state.write("void");
+            }
             flag pfirst = true;
             for p : sig.params {
               if !pfirst {
@@ -14122,6 +14134,9 @@ impl Codegen {
     self.state.write(" (*");
     self.state.write(name);
     self.state.write(")(");
+    if sig.params.len == 0 {
+      self.state.write("void");
+    }
     flag first = true;
     for p : sig.params {
       if !first {
@@ -14149,6 +14164,9 @@ impl Codegen {
           self.state.write(" (*");
           self.state.write(v.name);
           self.state.write(")(");
+          if sig.params.len == 0 {
+            self.state.write("void");
+          }
           flag first = true;
           for p : sig.params {
             if !first {
@@ -14763,6 +14781,9 @@ impl Codegen {
         // itself takes, completing `R (*name(args))(P1, P2)`.
         if f.rtype.has_fn_sig {
           self.state.write("))(");
+          if f.rtype.fn_sig.params.len == 0 {
+            self.state.write("void");
+          }
           flag rpfirst = true;
           for rp : f.rtype.fn_sig.params {
             if !rpfirst {
