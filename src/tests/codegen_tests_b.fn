@@ -389,6 +389,38 @@ test "a field access through a dereferenced multi-level pointer picks '.' or '->
   assert contains(out, "42"), "expected both the single- and double-deref field reads to actually compile and run correctly";
 }
 
+test "a bare multi-level pointer local's own field access (no explicit deref at all) picks the right number of stars" {
+  // Same gap as the test above, one layer further: `resolve_field_
+  // chain`'s own bare-identifier branch (no `*` written by the
+  // reader at all - `pp.val`, not `(*pp).val`) only ever read a
+  // local's own `is_pointer` as a plain boolean, never its real
+  // `pointer_depth` - so a `Box** pp;` local's bare `pp.val` always
+  // emitted exactly one `->`, still a pointer to a pointer in C,
+  // never a structure. Covers a read, a write, and three levels deep.
+  str src = `use std.c.io;
+  `use std.c.mem;
+  `compound Box { num val; }
+  `fun main() num {
+  `  Box* b = malloc(sizeof(Box));
+  `  b.val = 1;
+  `  Box** pp = malloc(8);
+  `  *pp = b;
+  `  Box*** ppp = malloc(8);
+  `  *ppp = pp;
+  `  printf("%lld\n", ppp.val);
+  `  pp.val = 99;
+  `  printf("%lld\n", b.val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "bare_multi_level_pointer_field_access",
+    "a bare multi-level pointer local's own field access picks the right number of stars"
+  );
+  assert contains(out, "1"), "expected the triple-pointer's own bare field read to resolve through all three levels";
+  assert contains(out, "99"), "expected the bare double-pointer's own field write to resolve through both levels too";
+}
+
 // gap, though not a parity gap: the reference has the identical bug.
 // `Item*[] arr` as a parameter, then `arr[0]->id` in the body, fails
 // with "unknown identifier 'id'" against either compiler, reproduced

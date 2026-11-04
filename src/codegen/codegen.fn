@@ -10233,11 +10233,46 @@ impl Codegen {
   // decide `.`/`->` for the next link in a chain it's emitting inline.
   emit_receiver_and_resolve_type(Node* recv) Option<FieldTypeInfo> {
     let r = self.resolve_field_chain(recv)?;
-    self.state.write(r.text);
+    str recv_text = r.text;
+    Option<DataType> recv_dtype = r.dtype;
+    // A resolved receiver whose own pointer depth is still more than
+    // one level (`Box** pp;` resolving `pp`, or a field/call whose
+    // declared type is itself a multi-level pointer) needs `(depth -
+    // 1)` leading derefs synthesized here before the field access's
+    // own single `->`/`.` picks up the last level - otherwise this
+    // always reads as a single pointer, and the real C compiler
+    // rejects it (`pp->val` on a `Box**` is still a pointer to a
+    // pointer, never a structure). Every other branch of
+    // `resolve_field_chain` (explicit derefs in particular) already
+    // reduces its own result to the true remaining depth before
+    // returning, so this never double-adjusts an already-correct
+    // result - it only ever fires on a raw, unadjusted multi-level
+    // pointer reaching this single, non-recursive top-level call site.
+    if recv_dtype.is_some() {
+      let recv_dt = recv_dtype.unwrap();
+      if recv_dt.pointer_depth > 1 {
+        StringBuilder extra_deref_sb = string_builder_init(
+          len(recv_text) + recv_dt.pointer_depth + 2
+        );
+        extra_deref_sb.append("(");
+        num edi = 0;
+        for edi < recv_dt.pointer_depth - 1 {
+          extra_deref_sb.append("*");
+          edi = edi + 1;
+        }
+        extra_deref_sb.append(recv_text);
+        extra_deref_sb.append(")");
+        recv_text = extra_deref_sb.build();
+        DataType adjusted_dt = recv_dt;
+        adjusted_dt.pointer_depth = 1;
+        recv_dtype = .Some(adjusted_dt);
+      }
+    }
+    self.state.write(recv_text);
     FieldTypeInfo info;
     info.type_name = r.type_name;
     info.is_pointer = r.is_pointer;
-    info.dtype = r.dtype;
+    info.dtype = recv_dtype;
     ret .Some(info);
   }
 
