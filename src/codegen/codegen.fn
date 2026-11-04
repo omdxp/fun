@@ -6506,12 +6506,37 @@ impl Codegen {
             let field_info = self.lookup_compound_field(type_name, f.name);
             let prev_expected_enum = self.expected_enum_type;
             let prev_expected_compound = self.expected_compound_type;
+            flag field_did_shape_coerce = false;
             if field_info.is_some() {
               let finfo = field_info.unwrap();
               if self.enum_names.contains(finfo.type_name) {
                 self.expected_enum_type = finfo.type_name;
               } else {
                 self.expected_compound_type = finfo.type_name;
+              }
+              // A concrete-typed field value where the field is itself
+              // declared as a shape needs the same coercion wrap a
+              // `Variable`/`ret`/call-argument initializer already
+              // gets; without it a concrete pointer is stored directly
+              // where C expects the shape's fat-pointer struct by
+              // value - not a type mismatch the C compiler catches
+              // (both sides are pointer-sized), so it silently reads
+              // garbage as a vtable pointer at the first dynamic
+              // dispatch through it.
+              if self.shape_names.contains(finfo.type_name) {
+                let field_concrete = self.resolve_shape_coerce_concrete_type(f.value);
+                if field_concrete.is_some() {
+                  self.ensure_generic_impl_shape_vtable_instantiated(
+                    field_concrete.unwrap(),
+                    finfo.type_name
+                  );
+                  self.state.write("__fun_coerce_");
+                  self.state.write(field_concrete.unwrap());
+                  self.state.write("_");
+                  self.state.write(finfo.type_name);
+                  self.state.write("(");
+                  field_did_shape_coerce = true;
+                }
               }
             }
             // A field value may itself be an array literal, needing the
@@ -6524,6 +6549,9 @@ impl Codegen {
             self.expected_compound_type = prev_expected_compound;
             if ferr.is_some() {
               ret ferr;
+            }
+            if field_did_shape_coerce {
+              self.state.write(")");
             }
           }
         }

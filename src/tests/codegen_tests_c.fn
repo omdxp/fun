@@ -284,6 +284,45 @@ test "ra3: shape coercion of deref, parenthesized address-of, and pointer-field"
   assert contains(out, "__fun_coerce_Inner_HasV"), "expected the coercion helper";
 }
 
+test "a struct-literal field initializer coercing a concrete value into a shape-typed field" {
+  // A 6th `__fun_coerce_` call site, missed by the 5 already fixed
+  // this session (assignment, call-argument, two ret paths sharing
+  // one computation, variable-declaration): a compound literal's own
+  // `field = value` never wrapped a concrete pointer in the coercion
+  // helper when the field is itself declared as a shape. Not a type
+  // mismatch the C compiler ever catches (both sides are pointer-
+  // sized), so the raw concrete pointer lands directly where the
+  // shape's fat-pointer struct `{void* self; const Shape_vtable*
+  // vtable;}` is expected - a real, deterministic SIGSEGV the moment
+  // anything dispatches dynamically through it, garbage read as a
+  // vtable pointer. Covers both a plain shape field and a doubly-
+  // generic one (`impl Box<T> as Container<T>`, needing the same lazy
+  // vtable trigger the other 5 sites already use).
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret 1; } }
+  `compound Holder { Sized s; }
+  `shape Container<T> { get() T; }
+  `compound GBox<T> { T val; }
+  `impl GBox<T> as Container<T> { get() T { ret self.val; } }
+  `compound GHolder { Container<num> c; }
+  `fun main() num {
+  `  Box b; b.val = 5;
+  `  Holder h = Holder{ s = &b };
+  `  GBox<num> g; g.val = 42;
+  `  GHolder gh = GHolder{ c = &g };
+  `  printf("%lld %lld\n", h.s.len(), gh.c.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "struct_literal_field_shape_coerce",
+    "a struct-literal field initializer coercing a concrete value into a shape-typed field"
+  );
+  assert equals(out, "1 42\n"), "expected both the plain and doubly-generic shape-typed fields to coerce and dispatch correctly";
+}
+
 test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Shape impl callable" {
   str src = `use std.c.io;
   `shape Named { name() str; }
