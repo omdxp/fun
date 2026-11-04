@@ -5956,11 +5956,42 @@ impl Codegen {
       // this hoisted MSVC/wasm form - no GNU statement expressions
       // available - splices as its own extra statement inside the same
       // guard, rather than skipping it outright.
+      // A deferred statement can itself trigger a generic type's
+      // first-use instantiation, which calls `emit_hoisted` - that
+      // needs the same scratch-aware routing the operand's own render
+      // above already sets up (`hoist_scratch_depth`, a cleared
+      // `hoist_insert_pos`/`current_stmt_start_pos`, and
+      // `root_state`/`root_hoist_pos` pinned to the real buffer).
+      // Without it, `emit_hoisted`'s no-scratch fallback wrote straight
+      // into this throwaway scratch buffer inline with the deferred
+      // statement text itself, and splicing that blob into
+      // `try_decl_sb` below then landed a stray typedef in the middle
+      // of a C statement - confirmed directly against a real MSVC
+      // compile, which rejected the result with "missing ';'" and
+      // struct-redefinition errors.
       CodegenState prop_defer_scratch = self.new_scratch_state();
       CodegenState* prop_defer_saved_state = self.state;
+      let prop_defer_saved_hoist_pos = self.hoist_insert_pos;
+      let prop_defer_saved_stmt_pos = self.current_stmt_start_pos;
+      if self.hoist_scratch_depth == 0 {
+        self.root_state = self.state;
+        self.root_hoist_pos = self.hoist_insert_pos;
+        self.root_stmt_start_pos = self.current_stmt_start_pos;
+      }
+      self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
       self.state = &prop_defer_scratch;
+      self.hoist_insert_pos = .None;
+      self.current_stmt_start_pos = .None;
       let prop_dferr2 = self.emit_function_scope_defers();
+      self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
       self.state = prop_defer_saved_state;
+      if self.hoist_scratch_depth == 0 {
+        self.hoist_insert_pos = self.root_hoist_pos;
+        self.current_stmt_start_pos = self.root_stmt_start_pos;
+      } else {
+        self.hoist_insert_pos = prop_defer_saved_hoist_pos;
+        self.current_stmt_start_pos = prop_defer_saved_stmt_pos;
+      }
       if prop_dferr2.is_some() {
         ret prop_dferr2;
       }
