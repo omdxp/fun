@@ -4766,16 +4766,38 @@ impl Checker {
           recon_sb.append("__");
           recon_sb.append(tp);
         }
-        if !equals(recon_sb.build(), type_name) {
-          continue;
+        if equals(recon_sb.build(), type_name) {
+          matched_entry = true;
+          for tp : tps {
+            if !self._is_known_concrete_name(tp) {
+              ret .Generic;
+            }
+          }
+          break;
         }
-        matched_entry = true;
+        // A genuinely unbound template (`impl Box<T> as Sized`, every
+        // `tp` a fresh type param, never a reference to an already-
+        // declared type) has no fixed instantiation to reconstruct and
+        // compare literally - there's nothing to substitute `tp` with
+        // ahead of time, unlike `impl Box<Circle> as Sized` above,
+        // where "Circle" is already the one and only concrete value
+        // `tp` ever takes. An explicit `Box<num>(b)` downcast arm names
+        // its own chosen instantiation directly instead, so it's taken
+        // at face value here: unlike the bare `Box(b)` form (ambiguous
+        // between every instantiation the program happens to
+        // construct, and rejected outright for a template like this
+        // one), naming the instantiation explicitly is never ambiguous.
+        flag all_unbound = true;
         for tp : tps {
-          if !self._is_known_concrete_name(tp) {
-            ret .Generic;
+          if self._is_known_concrete_name(tp) {
+            all_unbound = false;
+            break;
           }
         }
-        break;
+        if all_unbound && starts_with(type_name, format("{str}__", base_name)) {
+          matched_entry = true;
+          break;
+        }
       }
       if !matched_entry {
         continue;

@@ -1263,6 +1263,33 @@ test "a mixed bound list accepts both a concrete type and a shape implementor" {
   );
 }
 
+test "a shape-downcast fit arm naming an explicit instantiation of a genuinely unbound generic impl is accepted" {
+  // `Box<num>(b) -> ...` against a real `impl Box<T> as Sized` (T still
+  // a fresh, unbound type param, never narrowed to one concrete type at
+  // the impl itself) has exactly one, fully disambiguated target - the
+  // caller named it directly - unlike the bare `Box(b)` form, rejected
+  // outright elsewhere as ambiguous between every instantiation the
+  // program happens to construct. `_shape_downcast_target_verdict`'s
+  // own reconstruction loop only ever compared the explicit annotation
+  // against a literal rebuild of the impl's own (unbound) type params,
+  // which can never equal a real argument like "num" - there's nothing
+  // to substitute `T` with ahead of time, so this always reported
+  // "does not implement shape" even though it genuinely does.
+  accepts(
+    `shape Sized { len() num; }
+    `compound Box<T> { T val; }
+    `impl Box<T> as Sized { len() num { ret 1; } }
+    `fun show(Sized c) {
+    `  fit c {
+    `    Box<num>(b) -> { let v = b.val; }
+    `    _ -> { }
+    `  }
+    `}
+    `fun main() { }`,
+    "expected an explicit instantiation of an unbound generic impl accepted"
+  );
+}
+
 test "a bound naming a generic shape's own self-referential instantiation accepts a real implementor" {
   // `T: Steppable<T>` renders its own bound text as the literal,
   // unsubstituted "Steppable<T>" at the point the bound is declared -
