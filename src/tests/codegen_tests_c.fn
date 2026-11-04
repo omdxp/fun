@@ -1462,6 +1462,70 @@ test "a plain (non-generic) function can fit-match and destructure a concrete ge
   assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
 }
 
+test "a generic enum's own variant payload that is itself a further-generic type substitutes correctly" {
+  // `ensure_enum_instantiated`'s own payload resolution only ever
+  // matched a payload against the enum's own self-reference (a bare
+  // check against the template's own name) or a bare type param
+  // directly - a payload that is itself a further-generic type
+  // (`Box<T>*`, generic_args.len > 0) matched neither, so it fell
+  // through completely unsubstituted, leaking the template's own
+  // bare base name ("Box") straight into the generated C instead of
+  // the real monomorphized one ("Box__num") - a real C compiler
+  // rejects it outright with "unknown type name 'Box'".
+  str src = `use std.c.io;
+  `compound Box<T> { T val; }
+  `enum Pair<T> {
+  `  Single(T),
+  `  Boxed(Box<T>*),
+  `}
+  `fun main() num {
+  `  Pair<num> p = Pair.Single(9);
+  `  fit p {
+  `    Pair.Single(v) -> { printf("%lld\n", v); }
+  `    Pair.Boxed(b) -> { printf("boxed\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "enum_payload_further_generic",
+    "a generic enum's own variant payload that is itself a further-generic type substitutes correctly"
+  );
+  assert equals(out, "9\n"), "expected the Single variant's own payload to resolve and run correctly";
+}
+
+test "a generic enum's own variant payload wrapped in a tuple, including a self-referential one, substitutes correctly" {
+  // Same gap as the test above, two further shapes: a tuple-wrapped
+  // further-generic payload (`payload_type_strs`'s own flat name is
+  // always "" for a tuple, matching nothing either, so it mangled to
+  // a completely blank type name instead of merely a wrong one), and
+  // a tuple-wrapped self-referential payload, which also needs the
+  // enum's own forward-declare to trigger through the tuple (checked
+  // structurally now, via `dtype_mentions_type_name`, not just a flat
+  // string match against `payload_type_strs`) - the fork-reported
+  // version of this crashed codegen outright instead of either
+  // working or cleanly failing.
+  str src = `use std.c.io;
+  `enum TreeEnum<T> {
+  `  Leaf(T),
+  `  Node((TreeEnum<T>*, TreeEnum<T>*)),
+  `}
+  `fun main() num {
+  `  TreeEnum<num> t = TreeEnum.Leaf(7);
+  `  fit t {
+  `    TreeEnum.Leaf(v) -> { printf("%lld\n", v); }
+  `    TreeEnum.Node(n) -> { printf("node\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "enum_payload_tuple_self_referential",
+    "a generic enum's own variant payload wrapped in a tuple, including a self-referential one, substitutes correctly"
+  );
+  assert equals(out, "7\n"), "expected the Leaf variant's own payload to resolve and run correctly";
+}
+
 test "a compound self-referential only through a generic enum wrapper (Option<Node<T>*>) still forward-declares itself" {
   // `ensure_compound_instantiated`'s own self-referential check only
   // compared a field's bare top-level type name against the enclosing

@@ -107,12 +107,17 @@ compound OwnParamCallResolution {
 
 // One variant's shape within a generic enum template: its name, whether
 // it carries a payload, and each payload position's declared type before
-// substitution.
+// substitution - both flattened (`payload_type_strs`, a bare type param's
+// own name, or a further-generic payload's bare base name with its own
+// args dropped) and structural (`payload_dtypes`, generic_args/
+// tuple_members intact), the same split a generic compound's own field
+// pass already keeps between its flat names and `field_dtypes`.
 compound GenericEnumVariantTemplate {
   str name;
   flag has_payload;
   Vec<str> payload_type_strs;
   Vec<flag> payload_is_pointer;
+  Vec<DataType*> payload_dtypes;
 }
 
 // Where `fn_proto_splice_pos` chose to splice a lazily-triggered
@@ -2252,11 +2257,21 @@ impl Codegen {
     // Pushed before the enum body is written, and forward-declared when
     // self-referential; see `ensure_compound_instantiated`.
     self.emitted_generic_instantiations.push(mangled_name);
-    let variant_templates = self.generic_enum_variants.get(template_idx);
+    Vec<GenericEnumVariantTemplate> variant_templates = self.generic_enum_variants.get(
+      template_idx
+    );
     flag enum_is_self_referential = false;
     for vt : variant_templates {
-      for pt : vt.payload_type_strs {
-        if equals(pt, dt.type_str) {
+      for pd : vt.payload_dtypes {
+        // Structural, not just `payload_type_strs`'s own flat name:
+        // a tuple-wrapped self-reference (`Node((TreeEnum<T>*,
+        // TreeEnum<T>*))`) has an empty flat name for the tuple
+        // itself, so a plain string-equals check against it could
+        // never see the self-reference nested one level inside -
+        // the exact same gap `ensure_compound_instantiated`'s own
+        // field pass had before this session's earlier fix, here on
+        // the enum side instead.
+        if dtype_mentions_type_name(*pd, dt.type_str) {
           enum_is_self_referential = true;
         }
       }
@@ -2311,6 +2326,79 @@ impl Codegen {
           }
         }
       }
+    }
+
+    // A payload that is itself a further-generic type (`Box<T>*`,
+    // generic_args.len > 0) or a tuple has its own type param one
+    // level deeper than a bare-name match against `type_params`
+    // could ever reach - resolved here, before `self.state` swaps to
+    // `enum_scratch` below, the same reason the bare-type-param pass
+    // just above runs first too: `resolve_type_name` can itself
+    // trigger a nested type's own first-use instantiation, which
+    // needs the real buffer on hand to splice into, not a scratch
+    // one. `emit_tagged_union_enum_instance` reads the result back
+    // out of this rebuilt `variant_templates`, never resolving
+    // anything itself.
+    if is_tagged_union && self.state == self.root_state {
+      let prev_enum_subst_params = self.type_subst_param_names;
+      let prev_enum_subst_arg_names = self.type_subst_arg_type_strs;
+      let prev_enum_subst_arg_ptrs = self.type_subst_arg_is_pointer;
+      let prev_enum_subst_arg_dtypes = self.type_subst_arg_dtypes;
+      self.type_subst_param_names = type_params;
+      self.type_subst_arg_type_strs = arg_type_names;
+      self.type_subst_arg_is_pointer = arg_is_pointer;
+      self.type_subst_arg_dtypes = arg_dtypes;
+      Vec<GenericEnumVariantTemplate> pre_resolved_variants;
+      pre_resolved_variants.init(variant_templates.len);
+      for vt3 : variant_templates {
+        GenericEnumVariantTemplate resolved_vt;
+        resolved_vt.name = vt3.name;
+        resolved_vt.has_payload = vt3.has_payload;
+        Vec<str> resolved_ptypes;
+        resolved_ptypes.init(vt3.payload_type_strs.len);
+        Vec<DataType*> resolved_pdtypes;
+        resolved_pdtypes.init(vt3.payload_dtypes.len);
+        num pti3 = 0;
+        for pti3 < vt3.payload_type_strs.len {
+          str ptype3 = vt3.payload_type_strs.get(pti3);
+          let pdt3 = vt3.payload_dtypes.get(pti3);
+          flag is_self_ref3 = equals(ptype3, dt.type_str);
+          flag matched_bare3 = false;
+          num pi3 = 0;
+          for pi3 < type_params.len {
+            if equals(type_params.get(pi3), ptype3) {
+              matched_bare3 = true;
+            }
+            pi3 = pi3 + 1;
+          }
+          if !is_self_ref3 && !matched_bare3 &&
+            (pdt3.generic_args.len > 0 || pdt3.is_tuple) {
+            let resolved_name3 = self.resolve_type_name(*pdt3);
+            if resolved_name3.is_some() {
+              resolved_ptypes.push(resolved_name3.unwrap());
+              DataType* subst_pdt3 = malloc(sizeof(DataType));
+              *subst_pdt3 = self.resolve_type_subst(*pdt3);
+              resolved_pdtypes.push(subst_pdt3);
+            } else {
+              resolved_ptypes.push(ptype3);
+              resolved_pdtypes.push(pdt3);
+            }
+          } else {
+            resolved_ptypes.push(ptype3);
+            resolved_pdtypes.push(pdt3);
+          }
+          pti3 = pti3 + 1;
+        }
+        resolved_vt.payload_type_strs = resolved_ptypes;
+        resolved_vt.payload_is_pointer = vt3.payload_is_pointer;
+        resolved_vt.payload_dtypes = resolved_pdtypes;
+        pre_resolved_variants.push(resolved_vt);
+      }
+      variant_templates = pre_resolved_variants;
+      self.type_subst_param_names = prev_enum_subst_params;
+      self.type_subst_arg_type_strs = prev_enum_subst_arg_names;
+      self.type_subst_arg_is_pointer = prev_enum_subst_arg_ptrs;
+      self.type_subst_arg_dtypes = prev_enum_subst_arg_dtypes;
     }
 
     Vec<str> variant_names;
@@ -4537,6 +4625,7 @@ impl Codegen {
             resolved_dtype = dtype_new();
             resolved_dtype.type_str = mangled_name;
           } else {
+            flag matched_bare_param = false;
             num pi = 0;
             for pi < type_params.len {
               if equals(type_params.get(pi), ptype) {
@@ -4545,8 +4634,34 @@ impl Codegen {
                 if pi < arg_dtypes.len {
                   resolved_dtype = *arg_dtypes.get(pi);
                 }
+                matched_bare_param = true;
               }
               pi = pi + 1;
+            }
+            // A payload that is itself a further-generic type
+            // (`Box<T>*`, generic_args.len > 0) or a tuple
+            // (`payload_type_strs`'s own flat name is always "" for
+            // one, matching no bare param above) has its own type
+            // param one level deeper than a bare-name match could
+            // ever reach. `ensure_enum_instantiated`'s own pre-pass,
+            // run before `self.state` ever swaps to this function's
+            // scratch buffer, already resolved and substituted this
+            // exact position in place - `ptype`/`payload_dt` read
+            // here are already the result, not the template's own
+            // unsubstituted original. Left unfixed (resolving here
+            // instead, already inside the scratch swap), a nested
+            // type's own first-use instantiation spliced its typedef
+            // straight into this scratch buffer instead of the real
+            // one, landing mid-declaration; resolving before the
+            // swap, the same way a generic compound's own field pass
+            // already does, is what avoids that altogether.
+            if !matched_bare_param && i < vt.payload_dtypes.len {
+              let payload_dt = vt.payload_dtypes.get(i);
+              if payload_dt.generic_args.len > 0 || payload_dt.is_tuple {
+                resolved_type = ptype;
+                resolved_dtype = *payload_dt;
+                resolved_ptr = dtype_is_pointer(*payload_dt) || pptr;
+              }
             }
           }
           self.write_type_name(resolved_type);
@@ -15235,12 +15350,16 @@ impl Codegen {
             payload_type_strs.init(0);
             Vec<flag> payload_is_pointer;
             payload_is_pointer.init(0);
+            Vec<DataType*> payload_dtypes;
+            payload_dtypes.init(0);
             for pt : v.payload {
               payload_type_strs.push(pt.type_str);
               payload_is_pointer.push(dtype_is_pointer(*pt));
+              payload_dtypes.push(pt);
             }
             vt.payload_type_strs = payload_type_strs;
             vt.payload_is_pointer = payload_is_pointer;
+            vt.payload_dtypes = payload_dtypes;
             variant_templates.push(vt);
           }
           self.generic_enum_names.push(e.name);
