@@ -115,10 +115,12 @@ fun _fetch_latest_release() Result<JsonValue, str> {
   }
   let res = r.unwrap();
   if res.exit_code != 0 {
-    ret .Err(format(
+    ret .Err(
+      format(
       "curl exited {num} fetching the latest release (is curl installed, and is there a network connection?)",
       res.exit_code
-    ));
+      )
+    );
   }
   let parsed = parse(res.stdout_text);
   if parsed.is_err() {
@@ -291,7 +293,13 @@ fun _prepare_work_dir(str dir) Option<str> {
   _rm_rf(dir);
   let made = make_dir_all(dir);
   if made.is_err() {
-    ret .Some(format("couldn't create a scratch directory at {str}: {str}", dir, made.unwrap_err().message));
+    ret .Some(
+      format(
+      "couldn't create a scratch directory at {str}: {str}",
+      dir,
+      made.unwrap_err().message
+      )
+    );
   }
   ret .None;
 }
@@ -314,7 +322,9 @@ fun _download(str url, str dest) Option<str> {
     ret .Some(r.unwrap_err());
   }
   if r.unwrap().exit_code != 0 {
-    ret .Some(format("curl exited {num} downloading {str}", r.unwrap().exit_code, url));
+    ret .Some(
+      format("curl exited {num} downloading {str}", r.unwrap().exit_code, url)
+    );
   }
   ret .None;
 }
@@ -335,7 +345,9 @@ fun _extract(str archive, str dest_dir) Option<str> {
     ret .Some(r.unwrap_err());
   }
   if r.unwrap().exit_code != 0 {
-    ret .Some(format("tar exited {num} extracting {str}", r.unwrap().exit_code, archive));
+    ret .Some(
+      format("tar exited {num} extracting {str}", r.unwrap().exit_code, archive)
+    );
   }
   ret .None;
 }
@@ -398,7 +410,9 @@ pub fun upgrade_cli(flag check_only) num {
     ret 0;
   }
 
-  println(format("a new version is available: v{str} -> v{str}", PACKAGE_VERSION, latest_version));
+  println(
+    format("a new version is available: v{str} -> v{str}", PACKAGE_VERSION, latest_version)
+  );
   if check_only {
     println("run `fun upgrade` (without -check) to install it");
     ret 0;
@@ -411,7 +425,10 @@ pub fun upgrade_cli(flag check_only) num {
   }
   str cpu_arch = host_arch_name();
   if equals(cpu_arch, "") {
-    writeln_to(Sink.Stderr, "[Error]\ncouldn't determine the host architecture to pick a release asset");
+    writeln_to(
+      Sink.Stderr,
+      "[Error]\ncouldn't determine the host architecture to pick a release asset"
+    );
     ret 1;
   }
   flag is_windows = equals(os_name, "windows");
@@ -422,7 +439,11 @@ pub fun upgrade_cli(flag check_only) num {
   if asset_url.is_none() {
     writeln_to(
       Sink.Stderr,
-      format("[Error]\nv{str} has no release asset named `{str}` for this platform", latest_version, asset_name)
+      format(
+      "[Error]\nv{str} has no release asset named `{str}` for this platform",
+      latest_version,
+      asset_name
+      )
     );
     ret 1;
   }
@@ -487,14 +508,26 @@ pub fun upgrade_cli(flag check_only) num {
   str fun_dst = path_join(bin_dir, format("fun{str}", exe_ext));
   if !_move_over(fun_src, fun_dst) {
     all_ok = false;
-    pending.push(format("fun{str} is in use - close it (and any editor's fls) and run: {str}", exe_ext, _manual_move_hint(fun_src, fun_dst, is_windows)));
+    pending.push(
+      format(
+      "fun{str} is in use - close it (and any editor's fls) and run: {str}",
+      exe_ext,
+      _manual_move_hint(fun_src, fun_dst, is_windows)
+      )
+    );
   }
 
   str fls_src = path_join(bundle_dir, format("bin/fls{str}", exe_ext));
   str fls_dst = path_join(bin_dir, format("fls{str}", exe_ext));
   if !_move_over(fls_src, fls_dst) {
     all_ok = false;
-    pending.push(format("fls{str} is in use - close your editor's language server and run: {str}", exe_ext, _manual_move_hint(fls_src, fls_dst, is_windows)));
+    pending.push(
+      format(
+      "fls{str} is in use - close your editor's language server and run: {str}",
+      exe_ext,
+      _manual_move_hint(fls_src, fls_dst, is_windows)
+      )
+    );
   }
 
   str share_src = path_join(bundle_dir, "share/fun");
@@ -502,7 +535,13 @@ pub fun upgrade_cli(flag check_only) num {
   _rm_rf(share_dst);
   if !_move_over(share_src, share_dst) {
     all_ok = false;
-    pending.push(format("the standard library at {str} wasn't replaced - run: {str}", share_dst, _manual_move_hint(share_src, share_dst, is_windows)));
+    pending.push(
+      format(
+      "the standard library at {str} wasn't replaced - run: {str}",
+      share_dst,
+      _manual_move_hint(share_src, share_dst, is_windows)
+      )
+    );
   }
 
   _rm_rf(work_dir);
@@ -513,7 +552,13 @@ pub fun upgrade_cli(flag check_only) num {
     ret 0;
   }
 
-  println(format("partially upgraded (v{str} -> v{str}); finish manually:", PACKAGE_VERSION, latest_version));
+  println(
+    format(
+    "partially upgraded (v{str} -> v{str}); finish manually:",
+    PACKAGE_VERSION,
+    latest_version
+    )
+  );
   for line : pending {
     println(format("  {str}", line));
   }
@@ -564,20 +609,31 @@ test "_release_target names the three published platforms" {
 }
 
 test "_release_asset_name matches release.yml's own packaging" {
-  assert equals(_release_asset_name("x86_64-linux-gnu", false, "v1.2.3"), "fun-x86_64-linux-gnu.tar.gz"), "expected a plain unix tarball name";
-  assert equals(_release_asset_name("aarch64-macos", false, "v1.2.3"), "fun-aarch64-macos.tar.gz"), "expected a plain macos tarball name";
-  assert equals(_release_asset_name("x86_64-windows-gnu", true, "v1.2.3"), "fun-x86_64-windows-gnu-1.2.3.zip"), "expected the windows zip to carry the bare tag";
+  assert equals(
+    _release_asset_name("x86_64-linux-gnu", false, "v1.2.3"),
+    "fun-x86_64-linux-gnu.tar.gz"
+  ), "expected a plain unix tarball name";
+  assert equals(
+    _release_asset_name("aarch64-macos", false, "v1.2.3"),
+    "fun-aarch64-macos.tar.gz"
+  ), "expected a plain macos tarball name";
+  assert equals(
+    _release_asset_name("x86_64-windows-gnu", true, "v1.2.3"),
+    "fun-x86_64-windows-gnu-1.2.3.zip"
+  ), "expected the windows zip to carry the bare tag";
 }
 
 test "_find_asset_url matches an asset by exact name" {
-  let parsed = parse(`{
+  let parsed = parse(
+    `{
     `"tag_name": "v1.2.3",
     `"assets": [
     `  {"name": "fun-x86_64-linux-gnu.tar.gz", "browser_download_url": "https://example.com/a.tar.gz"},
     `  {"name": "fun-aarch64-macos.tar.gz", "browser_download_url": "https://example.com/b.tar.gz"}
     `]
   `}
-);
+
+  );
   assert parsed.is_ok(), "expected the sample release JSON to parse";
   JsonValue release = parsed.unwrap();
   defer release.free();

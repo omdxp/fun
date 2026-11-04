@@ -71,11 +71,25 @@ pub fun code_lenses(AnalysisCache* cache, Documents* docs, Document doc) str {
     }
     any = true;
     if is_shape {
-      str impl_lens_text = _implementations_lens(cache, docs, name, n.pos, document_uri, doc.text);
+      str impl_lens_text = _implementations_lens(
+        cache,
+        docs,
+        name,
+        n.pos,
+        document_uri,
+        doc.text
+      );
       b.append(impl_lens_text);
       free(impl_lens_text);
     } else {
-      str ref_lens_text = _references_lens(cache, docs, name, n.pos, document_uri, doc.text);
+      str ref_lens_text = _references_lens(
+        cache,
+        docs,
+        name,
+        n.pos,
+        document_uri,
+        doc.text
+      );
       b.append(ref_lens_text);
       free(ref_lens_text);
     }
@@ -127,7 +141,12 @@ fun _implementations_lens(
 
 // Every `impl X as name { ... }` block, across the documents `docs`
 // holds, regardless of which file declares `name` itself.
-fun _collect_shape_implementations(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
+fun _collect_shape_implementations(
+  AnalysisCache* cache,
+  Documents* docs,
+  str name,
+  Vec<Occurrence>* out
+) {
   Vec<str> uris = docs.all_uris();
   defer uris.free();
   num i = 0;
@@ -167,7 +186,14 @@ fun _collect_shape_implementations(AnalysisCache* cache, Documents* docs, str na
 // span, clicking through `fun.showReferences` to every location in
 // `found` (a reference or an implementation reads the same way to a
 // client - a location list to jump through).
-fun _lens(Vec<Occurrence> found, str noun, Pos decl_pos, num name_len, str document_uri, str decl_text) str {
+fun _lens(
+  Vec<Occurrence> found,
+  str noun,
+  Pos decl_pos,
+  num name_len,
+  str document_uri,
+  str decl_text
+) str {
   StringBuilder locs = string_builder_init(128);
   defer locs.free();
   locs.append("[");

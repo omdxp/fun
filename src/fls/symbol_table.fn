@@ -316,8 +316,16 @@ impl WorkspaceSymbolTable {
       // every string `_scrub_name`/`free()` now frees to balance it.
       entry.decl.name = substr(entry.decl.name, 0, len(entry.decl.name));
       entry.decl.detail = substr(entry.decl.detail, 0, len(entry.decl.detail));
-      entry.decl.container = substr(entry.decl.container, 0, len(entry.decl.container));
-      entry.decl.pos.filename = substr(entry.decl.pos.filename, 0, len(entry.decl.pos.filename));
+      entry.decl.container = substr(
+        entry.decl.container,
+        0,
+        len(entry.decl.container)
+      );
+      entry.decl.pos.filename = substr(
+        entry.decl.pos.filename,
+        0,
+        len(entry.decl.pos.filename)
+      );
       wrapped.push(entry);
 
       let existing = self.by_name.at(entry.decl.name);

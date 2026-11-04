@@ -108,7 +108,13 @@ fun _declares_defaults(Vec<DataType*>* defaults) flag {
 
 // Registers `decl`'s defaults when it declares any, returning the first
 // problem found ("" when none).
-fun _register(str decl, Vec<str>* params, Vec<DataType*>* defaults, Map<str, _DefaultsEntry>* table) str {
+fun _register(
+  str decl,
+  Vec<str>* params,
+  Vec<DataType*>* defaults,
+  Map<str,
+  _DefaultsEntry>* table
+) str {
   if !_declares_defaults(defaults) {
     ret "";
   }

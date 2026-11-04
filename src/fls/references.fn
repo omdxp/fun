@@ -65,7 +65,13 @@ pub fun document_highlights(AnalysisCache* cache, Document doc, num line, num ch
 
 // Every place the name at `line`/`character` is written, as the result a
 // client is sent.
-pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line, num character) str {
+pub fun references(
+  AnalysisCache* cache,
+  Documents* docs,
+  Document doc,
+  num line,
+  num character
+) str {
   str name = name_at(cache, doc, line, character);
   if equals(name, "") {
     ret "[]";
@@ -99,7 +105,12 @@ pub fun references(AnalysisCache* cache, Documents* docs, Document doc, num line
 // per file, so renaming into a name already taken elsewhere in that
 // same program doesn't just shadow it, it breaks the build the moment
 // both declarations sit in one merged program together.
-fun _collides_with_existing(AnalysisCache* cache, Documents* docs, Vec<Occurrence>* found, str new_name) flag {
+fun _collides_with_existing(
+  AnalysisCache* cache,
+  Documents* docs,
+  Vec<Occurrence>* found,
+  str new_name
+) flag {
   Vec<str> checked;
   checked.init(4);
   defer checked.free();
@@ -253,7 +264,12 @@ pub fun is_identifier(str s) flag {
 }
 
 // Every place `name` is written, across the documents a client holds.
-pub fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Vec<Occurrence>* out) {
+pub fun _collect_occurrences(
+  AnalysisCache* cache,
+  Documents* docs,
+  str name,
+  Vec<Occurrence>* out
+) {
   Vec<str> uris = docs.all_uris();
   defer uris.free();
   num i = 0;
@@ -269,7 +285,13 @@ pub fun _collect_occurrences(AnalysisCache* cache, Documents* docs, str name, Ve
 }
 
 // Every place `name` is written in `d` alone.
-fun _occurrences_in_doc(AnalysisCache* cache, Document d, str document_uri, str name, Vec<Occurrence>* out) {
+fun _occurrences_in_doc(
+  AnalysisCache* cache,
+  Document d,
+  str document_uri,
+  str name,
+  Vec<Occurrence>* out
+) {
   Analyzed read = cache.of(d);
   if !read.lexed {
     ret;

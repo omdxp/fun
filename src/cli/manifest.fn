@@ -365,10 +365,12 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.authors = _parse_string_array(pkg.unwrap().get_str("authors"));
   m.min_fun_version = pkg.unwrap().get_str("min_fun_version");
   if !equals(m.min_fun_version, "") && !is_valid_semver(m.min_fun_version) {
-    ret .Err(format(
+    ret .Err(
+      format(
       "[package] `min_fun_version` must be a plain `MAJOR.MINOR.PATCH` version, found `{str}`",
       m.min_fun_version
-    ));
+      )
+    );
   }
 
   num ti = 0;
@@ -449,14 +451,22 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       str borrowed_name = dep_names.get(di);
       str dname = substr(borrowed_name, 0, len(borrowed_name));
       if !is_safe_dep_name(dname) {
-        ret .Err(format(
+        ret .Err(
+          format(
           "[deps] `{str}`: a dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)",
           dname
-        ));
+          )
+        );
       }
       let entry_val = dt.values.get(dname);
       if !entry_val.is_table() {
-        ret .Err(format("[deps] `{str}` must be an inline table: {str} = { git = \"...\" }", dname, dname));
+        ret .Err(
+          format(
+          "[deps] `{str}` must be an inline table: {str} = { git = \"...\" }",
+          dname,
+          dname
+          )
+        );
       }
       str dgit = entry_val.table_field("git");
       str dpath = entry_val.table_field("path");
@@ -469,16 +479,20 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         ret .Err(format("[deps] `{str}` is missing a `git` URL", dname));
       }
       if !is_safe_git_url(dgit) {
-        ret .Err(format(
+        ret .Err(
+          format(
           "[deps] `{str}`: `git` must start with https://, ssh://, git@, or file://",
           dname
-        ));
+          )
+        );
       }
       if !is_safe_dep_path(dpath) {
-        ret .Err(format(
+        ret .Err(
+          format(
           "[deps] `{str}`: `path` must be a relative path with no `..` segments",
           dname
-        ));
+          )
+        );
       }
 
       num spec_count = 0;
@@ -492,7 +506,9 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         spec_count = spec_count + 1;
       }
       if spec_count > 1 {
-        ret .Err(format("[deps] `{str}`: only one of `tag`, `branch`, `rev` may be given", dname));
+        ret .Err(
+          format("[deps] `{str}`: only one of `tag`, `branch`, `rev` may be given", dname)
+        );
       }
 
       DepRef spec = .Auto;
@@ -989,7 +1005,9 @@ test "a non-inline-table [deps] entry is rejected" {
 }
 
 test "[coverage] reads a minimum and a list of excluded paths" {
-  let ok = parse_manifest("[package]\nname = \"demo\"\n\n[coverage]\nmin = 80\nexclude = [\"examples\", \"scripts/tools\"]\n");
+  let ok = parse_manifest(
+    "[package]\nname = \"demo\"\n\n[coverage]\nmin = 80\nexclude = [\"examples\", \"scripts/tools\"]\n"
+  );
   assert ok.is_ok(), "expected a manifest with [coverage] to parse";
   Manifest m = ok.unwrap();
   assert m.has_cover_min && m.cover_min_tenths == 800, "expected 80 to read as 800 tenths";

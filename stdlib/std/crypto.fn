@@ -158,7 +158,14 @@ impl Aes256Gcm as AeadCipher {
     if len(nonce) != 24 {
       ret err_kind(.Invalid, "Aes256Gcm: nonce must be 24 hex chars (12 bytes)", "");
     }
-    let out = __fun_aes256gcm_encrypt(plaintext, len(plaintext), key, nonce, aad, len(aad));
+    let out = __fun_aes256gcm_encrypt(
+      plaintext,
+      len(plaintext),
+      key,
+      nonce,
+      aad,
+      len(aad)
+    );
     if out == nil {
       ret err_kind(.Unexpected, "Aes256Gcm: encryption failed", "");
     }
@@ -178,9 +185,20 @@ impl Aes256Gcm as AeadCipher {
     if len(ciphertext) < 32 {
       ret err_kind(.Invalid, "Aes256Gcm: ciphertext shorter than its own tag", "");
     }
-    let out = __fun_aes256gcm_decrypt(ciphertext, len(ciphertext), key, nonce, aad, len(aad));
+    let out = __fun_aes256gcm_decrypt(
+      ciphertext,
+      len(ciphertext),
+      key,
+      nonce,
+      aad,
+      len(aad)
+    );
     if out == nil {
-      ret err_kind(.Unexpected, "Aes256Gcm: decryption failed (wrong key, or the ciphertext/aad was tampered with)", "");
+      ret err_kind(
+        .Unexpected,
+        "Aes256Gcm: decryption failed (wrong key, or the ciphertext/aad was tampered with)",
+        ""
+      );
     }
     ret .Ok(out);
   }
@@ -223,7 +241,11 @@ pub fun ed25519_generate() Result<(Ed25519PrivateKey, Ed25519PublicKey), Error> 
     empty_sk.hex = "";
     Ed25519PublicKey empty_pk;
     empty_pk.hex = "";
-    ret err_kind(.Unexpected, "ed25519_generate: not supported on this platform", (empty_sk, empty_pk));
+    ret err_kind(
+      .Unexpected,
+      "ed25519_generate: not supported on this platform",
+      (empty_sk, empty_pk)
+    );
   }
   str pub_hex = __fun_ed25519_public_from_private(priv_hex);
   Ed25519PrivateKey sk;

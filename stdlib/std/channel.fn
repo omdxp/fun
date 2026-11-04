@@ -470,7 +470,9 @@ impl Channel<T> {
     if self.mu.initialized == true && self.can_send.initialized == true &&
       self.can_recv.initialized == true {
       self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
-      self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
+      self.select_wait_backoff_steps = channel_sanitize_backoff_steps(
+        self.select_wait_backoff_steps
+      );
       ret CHANNEL_RC_OK;
     }
 
@@ -487,7 +489,9 @@ impl Channel<T> {
       ret rc;
     }
     self.select_wait_slice_ms = channel_sanitize_wait_slice_ms(self.select_wait_slice_ms);
-    self.select_wait_backoff_steps = channel_sanitize_backoff_steps(self.select_wait_backoff_steps);
+    self.select_wait_backoff_steps = channel_sanitize_backoff_steps(
+      self.select_wait_backoff_steps
+    );
     ret CHANNEL_RC_OK;
   }
 
@@ -712,7 +716,11 @@ impl Channel<T> {
   }
 
   // Await-friendly wrapper for send_timeout_with_token.
-  pub async send_timeout_with_token_async(T value, num timeout_ms, ChannelCancelToken* cancel_token) num {
+  pub async send_timeout_with_token_async(
+    T value,
+    num timeout_ms,
+    ChannelCancelToken* cancel_token
+  ) num {
     ret self.send_timeout_with_token(value, timeout_ms, cancel_token);
   }
 
@@ -983,7 +991,10 @@ impl Channel<T> {
   // optional token cancellation. Same return behavior as
   // recv_timeout_with_cancel.
   pub recv_timeout_with_token(num timeout_ms, ChannelCancelToken* cancel_token) T {
-    ret self.recv_timeout_with_cancel(timeout_ms, channel_cancel_token_flag_ptr(cancel_token));
+    ret self.recv_timeout_with_cancel(
+      timeout_ms,
+      channel_cancel_token_flag_ptr(cancel_token)
+    );
   }
 
   // Receives one value, waiting forever while empty, with optional token
@@ -1084,7 +1095,10 @@ impl Channel<T> {
   }
 
   // Await-friendly wrapper for recv_result_timeout_with_token.
-  pub async recv_result_timeout_with_token_async(num timeout_ms, ChannelCancelToken* cancel_token) RecvResult<T> {
+  pub async recv_result_timeout_with_token_async(
+    num timeout_ms,
+    ChannelCancelToken* cancel_token
+  ) RecvResult<T> {
     ret self.recv_result_timeout_with_token(timeout_ms, cancel_token);
   }
 
@@ -1102,8 +1116,14 @@ impl Channel<T> {
 
   // Send within `timeout_ms` with token cancellation, as a SendResult
   // (Ok/Closed/Full/Cancelled/Error).
-  pub send_result_timeout_with_token(T value, num timeout_ms, ChannelCancelToken* cancel_token) SendResult {
-    ret self.send_result_from_rc(self.send_timeout_with_token(value, timeout_ms, cancel_token));
+  pub send_result_timeout_with_token(
+    T value,
+    num timeout_ms,
+    ChannelCancelToken* cancel_token
+  ) SendResult {
+    ret self.send_result_from_rc(
+      self.send_timeout_with_token(value, timeout_ms, cancel_token)
+    );
   }
 
   // Send forever-or-until-cancelled with a token, as a SendResult
@@ -2040,7 +2060,10 @@ test "the result forms name what happened" {
   assert equals(_recv_kind(ch.recv_result_with_token(&token)), "cancelled"), "expected a cancelled receive";
   assert equals(_recv_kind(ch.recv_result_timeout_with_token(2, &token)), "cancelled"), "expected a cancelled timed receive";
   assert equals(_send_kind(ch.send_result_with_token(1, &token)), "cancelled"), "expected a cancelled send";
-  assert equals(_send_kind(ch.send_result_timeout_with_token(1, 2, &token)), "cancelled"), "expected a cancelled timed send";
+  assert equals(
+    _send_kind(ch.send_result_timeout_with_token(1, 2, &token)),
+    "cancelled"
+  ), "expected a cancelled timed send";
   ch.close();
   assert equals(_recv_kind(ch.recv_result()), "closed"), "expected closed";
   assert equals(_recv_kind(ch.try_recv_result()), "closed"), "expected closed from the non-blocking form";
@@ -2095,9 +2118,25 @@ test "select takes from whichever channel has a value, and can fall back to a de
     out == 30, "expected a timed select to find the value";
   assert a.select_recv_timeout_with_tuning_cancel(&b, &out, &which, 3, 1, 2) == CHANNEL_RC_TIMEOUT, "expected a timed select on empty channels to time out";
   num cancelled = 1;
-  assert a.select_recv_timeout_with_tuning_cancel(&b, &out, &which, 20, -1, -1, &cancelled) == CHANNEL_RC_CANCELLED, "expected a set flag to cancel the select";
+  assert a.select_recv_timeout_with_tuning_cancel(
+    &b,
+    &out,
+    &which,
+    20,
+    -1,
+    -1,
+    &cancelled
+  ) == CHANNEL_RC_CANCELLED, "expected a set flag to cancel the select";
   ChannelCancelToken token = channel_cancel_token_cancelled();
-  assert a.select_recv_timeout_with_tuning_token(&b, &out, &which, 20, -1, -1, &token) == CHANNEL_RC_CANCELLED, "expected a cancelled token to cancel the select";
+  assert a.select_recv_timeout_with_tuning_token(
+    &b,
+    &out,
+    &which,
+    20,
+    -1,
+    -1,
+    &token
+  ) == CHANNEL_RC_CANCELLED, "expected a cancelled token to cancel the select";
   a.close();
   b.close();
   assert a.select_try_recv_with(&b, &out, &which) == CHANNEL_RC_CLOSED, "expected both closed to say closed";
@@ -2142,9 +2181,28 @@ test "a three-way select rotates its starting channel" {
   c.send(9);
   assert a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 20) == CHANNEL_RC_OK &&
     out == 9, "expected a timed three-way select to find it";
-  assert a.select_recv_timeout3_rr_with_tuning_cancel(&b, &c, &next, &out, &which, 3, 1, 2) == CHANNEL_RC_TIMEOUT, "expected it to time out on empty channels";
+  assert a.select_recv_timeout3_rr_with_tuning_cancel(
+    &b,
+    &c,
+    &next,
+    &out,
+    &which,
+    3,
+    1,
+    2
+  ) == CHANNEL_RC_TIMEOUT, "expected it to time out on empty channels";
   ChannelCancelToken token = channel_cancel_token_cancelled();
-  assert a.select_recv_timeout3_rr_with_tuning_token(&b, &c, &next, &out, &which, 20, -1, -1, &token) == CHANNEL_RC_CANCELLED, "expected a cancelled token to stop it";
+  assert a.select_recv_timeout3_rr_with_tuning_token(
+    &b,
+    &c,
+    &next,
+    &out,
+    &which,
+    20,
+    -1,
+    -1,
+    &token
+  ) == CHANNEL_RC_CANCELLED, "expected a cancelled token to stop it";
   a.close();
   b.close();
   c.close();
@@ -2194,7 +2252,11 @@ test "a producer and a consumer on separate tasks move every value through a sma
   done.destroy();
 }
 
-async fun _forward_probe(Channel<num>* src, Channel<num>* dst, Channel<num>* report) {
+async fun _forward_probe(
+  Channel<num>* src,
+  Channel<num>* dst,
+  Channel<num>* report
+) {
   _ = await src.send_async(55);
   num rc = await src.forward_one_to_async(dst, 50);
   num moved = await dst.recv_async();

@@ -530,7 +530,11 @@ pub fun parse_program_with_imports(str entry_path, flag parallel_preload = true)
 // The same, with the entry file's source supplied rather than read from
 // disk. An editor holds text the file does not yet contain, and that is
 // the text to judge; everything it imports is still read from disk.
-pub fun parse_program_with_source(str entry_path, str entry_source, flag parallel_preload = true) Result<ProgramMergeResult, str> {
+pub fun parse_program_with_source(
+  str entry_path,
+  str entry_source,
+  flag parallel_preload = true
+) Result<ProgramMergeResult, str> {
   ImportCache cache = import_cache_new();
   defer cache.files.free();
   defer cache.preload_cache.free();
@@ -1112,7 +1116,8 @@ fun _preload_drain_sync(PreloadShared* shared) {
 fun _preload_and_collect_source(
   str path,
   str source,
-  Map<str, GlobalSymbolInfo>* out,
+  Map<str,
+  GlobalSymbolInfo>* out,
   Set<str>* visited,
   Vec<Vec<Token>>* all_tokens,
   flag parallel_preload,
@@ -1180,7 +1185,12 @@ fun _preload_and_collect_source(
 // `out`. Tracks `{`/`}` depth so only a depth-0 (top-level) sequence ever
 // matches. The function case backs `is_known_function`'s cross-file half,
 // the same way the compound case backs `is_known_compound_symbol`'s.
-fun _scan_compound_names(Vec<Token> tokens, num start_idx, str path, Vec<GlobalSymbolInfo>* out) {
+fun _scan_compound_names(
+  Vec<Token> tokens,
+  num start_idx,
+  str path,
+  Vec<GlobalSymbolInfo>* out
+) {
   num i = start_idx;
   num depth = 0;
   flag prev_was_pub = false;
@@ -1246,7 +1256,8 @@ fun _parse_and_merge(
   Vec<Node>* merged,
   Vec<str>* aliases,
   Set<str>* visited,
-  Map<str, GlobalSymbolInfo>* global_symbols,
+  Map<str,
+  GlobalSymbolInfo>* global_symbols,
   str current_alias,
   Vec<str>* rename_keys,
   Vec<str>* rename_targets,
@@ -1274,7 +1285,8 @@ fun _parse_and_merge_source(
   Vec<Node>* merged,
   Vec<str>* aliases,
   Set<str>* visited,
-  Map<str, GlobalSymbolInfo>* global_symbols,
+  Map<str,
+  GlobalSymbolInfo>* global_symbols,
   str current_alias,
   Vec<str>* rename_keys,
   Vec<str>* rename_targets,
@@ -1454,7 +1466,13 @@ fun _parse_and_merge_source(
   // Pass 2: rename any colliding plain function before pushing anything.
   // See `_rename_colliding_functions`.
   if !equals(current_alias, "") {
-    _rename_colliding_functions(&parsed_nodes, merged, current_alias, rename_keys, rename_targets);
+    _rename_colliding_functions(
+      &parsed_nodes,
+      merged,
+      current_alias,
+      rename_keys,
+      rename_targets
+    );
   }
 
   // Pass 3: push every non-import node, now settled. Cloned, not
@@ -1758,7 +1776,10 @@ sequential test "resolve_import_path resolves a 'deps.' import against the depen
   assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
-  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.mylib.some");
+  let resolved = resolve_import_path(
+    path_join(fixture_root, "src/main.fn"),
+    "deps.mylib.some"
+  );
   assert equals(resolved, path_join(cache, "example_com_mylib/abc123/some.fn")), "expected the import resolved against the locked dependency's own cache directory";
 }
 
@@ -1778,7 +1799,10 @@ sequential test "resolve_import_path resolves an unknown 'deps.' name to a never
   assert set_env("FUN_DEPS_CACHE", cache), "expected to set the fixture dependency cache";
   defer clear_env("FUN_DEPS_CACHE");
 
-  let resolved = resolve_import_path(path_join(fixture_root, "src/main.fn"), "deps.nosuchlib.some");
+  let resolved = resolve_import_path(
+    path_join(fixture_root, "src/main.fn"),
+    "deps.nosuchlib.some"
+  );
   assert contains(resolved, "nosuchlib"), "expected the failure to name the missing dependency rather than resolve to something unrelated";
   assert !exists(resolved), "expected an unresolved dependency name to never coincide with a real file";
 }
@@ -1849,7 +1873,9 @@ test "parse_program_with_imports terminates on a diamond import instead of dupli
 }
 
 test "parse_program_with_imports reports an error for a missing import rather than guessing" {
-  let result = parse_program_with_imports("src/parser/import_resolver_fixtures/missing_import.fn");
+  let result = parse_program_with_imports(
+    "src/parser/import_resolver_fixtures/missing_import.fn"
+  );
   assert result.is_err(), "expected a missing import to fail the whole merge, not silently skip it";
 }
 
@@ -1858,7 +1884,9 @@ test "parse_program_with_imports resolves a compound-literal expression whose ty
   // before its real parse begins, so `is_known_compound_symbol` can
   // recognize a compound-literal's type even when it's declared in an
   // imported file rather than the current one.
-  let result = parse_program_with_imports("src/parser/import_resolver_fixtures/cross_file_compound_main.fn");
+  let result = parse_program_with_imports(
+    "src/parser/import_resolver_fixtures/cross_file_compound_main.fn"
+  );
   assert result.is_ok(), "expected the cross-file compound-literal program to resolve and parse cleanly";
   let nodes = result.unwrap().nodes;
   flag saw_main = false;

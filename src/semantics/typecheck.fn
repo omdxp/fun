@@ -127,6 +127,43 @@ pub fun substitute(CheckedType t, Vec<str>* params, Vec<CheckedType>* args) Chec
     }
     i = i + 1;
   }
+  // `t` itself isn't a bare type param, but one can still be nested
+  // further in (`MyOpt<T>`'s own `T`, a tuple's own element type) -
+  // without this, a generic enum/compound's own return type
+  // substituted its outer name just fine but left every nested type-
+  // param argument exactly as written. Confirmed directly as the
+  // reason a generic function's own call-site return type (`wrap<T>(T
+  // v) MyOpt<T>`) never resolved to anything concrete: `MyOpt` isn't
+  // itself `T`, so the loop above never even looks inside its own
+  // generic args. Builds fresh `Vec`s rather than mutating `t`'s own
+  // in place: `t` is frequently a shared template read on every call
+  // to the same generic function (`sig.rtype_template`), never
+  // uniquely owned by this one substitution, so freeing its own
+  // backing arrays here - even to replace them - would corrupt every
+  // other call still holding the same template. The old ones are
+  // simply left unfreed (their own shell abandoned, not uniquely
+  // owned either), the same tradeoff every other CheckedType built
+  // this way already accepts for a short-lived compile process.
+  if t.generic_args.len > 0 {
+    Vec<CheckedType> substituted_args;
+    substituted_args.init(t.generic_args.len);
+    num g = 0;
+    for g < t.generic_args.len {
+      substituted_args.push(substitute(t.generic_args.get(g), params, args));
+      g = g + 1;
+    }
+    t.generic_args = substituted_args;
+  }
+  if t.tuple_members.len > 0 {
+    Vec<CheckedType> substituted_members;
+    substituted_members.init(t.tuple_members.len);
+    num m = 0;
+    for m < t.tuple_members.len {
+      substituted_members.push(substitute(t.tuple_members.get(m), params, args));
+      m = m + 1;
+    }
+    t.tuple_members = substituted_members;
+  }
   ret t;
 }
 
@@ -216,6 +253,25 @@ pub fun type_name(CheckedType t) str {
   ret b.build();
 }
 
+// The written name of a leaf (non-generic) type for mangling purposes.
+// A primitive carries its kind via `base`, never `name` (see
+// `is_unknown`'s own doc), so `t.name` alone is blank for one - this
+// maps it back to the keyword `impl Atomic<num>` itself was written
+// with, matching `_mangled_dtype_name`'s identical mapping over the
+// parser's own `DataType`.
+fun _mangled_leaf_name(CheckedType t) str {
+  fit t.base {
+    .Void -> { ret "void"; }
+    .Raw -> { ret "raw"; }
+    .Chr -> { ret "chr"; }
+    .Str -> { ret "str"; }
+    .Dec -> { ret "dec"; }
+    .Num -> { ret "num"; }
+    .Bin -> { ret "flag"; }
+    .Unknown -> { ret t.name; }
+  }
+}
+
 // The name an instantiation is registered under, which carries its
 // arguments the way an impl on a concrete instantiation is written
 // (`impl Vec<str>` registers as `Vec__str`).
@@ -226,10 +282,10 @@ pub fun type_name(CheckedType t) str {
 // theirs to free - mirrors `canonical_type_name`'s identical contract.
 pub fun mangled_name(CheckedType t) str {
   if t.generic_args.len == 0 {
-    ret t.name;
+    ret _mangled_leaf_name(t);
   }
   StringBuilder b = string_builder_init(len(t.name) + 8);
-  b.append(t.name);
+  b.append(_mangled_leaf_name(t));
   num i = 0;
   for i < t.generic_args.len {
     b.append("__");
@@ -348,6 +404,22 @@ pub compound FnSig {
   Vec<str> type_params;
   Vec<Vec<str>> bounds;
   Vec<str> arg_params;
+  // `rtype` exactly as written, before any erasure - `unwrap(Result<T,
+  // E>* self) T*`'s own `T*`, pointer/array wrapping and all, kept
+  // alongside `rtype` itself rather than instead of it: `rtype` gets
+  // erased to a nameless Unknown the moment the method belongs to a
+  // generic impl (`_erase_signature`), which is right for every OTHER
+  // use of a generic method's signature (nothing but the instantiation
+  // knows what it really is) but leaves no way for a method CALL to
+  // substitute the receiver's own concrete type back into it - this is
+  // that original, always `substitute`-ready regardless of whether
+  // erasure ever touched anything (a non-generic method's own copy is
+  // just `rtype` again, so substituting it is always safe to do
+  // unconditionally). Confirmed directly as the reason `Result<num,
+  // str>.unwrap()`'s own return type reached a `fit` statement (or
+  // anything else needing the REAL type, not just "something") still
+  // Unknown, indistinguishable from a genuinely unresolved expression.
+  CheckedType rtype_template;
 }
 
 // A method call's own resolved signature, alongside the receiver's own
@@ -1128,8 +1200,14 @@ fun _signature_of_shape_method(ShapeMethodSig m) FnSig {
   FnSig sig;
   sig.args.init(m.args.len);
   sig.rtype = checked_unknown();
+  sig.rtype_template = checked_unknown();
   if m.rtype != nil {
+    // Two independent conversions, same reasoning as `_signature_of`'s
+    // own identical pair - no erasure happens here (a shape method
+    // names no type params of its own), but each still needs to own
+    // its own heap content rather than share one value's.
     sig.rtype = checked_from_dtype(m.rtype);
+    sig.rtype_template = checked_from_dtype(m.rtype);
   }
   sig.is_variadic = false;
   sig.is_async = m.is_async;
@@ -1253,6 +1331,14 @@ compound Checker {
   // known to allow also appears in the bound being checked) instead of
   // requiring the bare name to match an alternative by spelling.
   Vec<Vec<str>> active_type_param_bounds;
+  // Every name a `use X as name;` import actually declared. Checked
+  // by `check_alias_qualified_call` before treating a receiver as an
+  // alias-qualified call (`alias.fn(...)`) at all - without this, any
+  // bare name that happened to collide with no local/type, followed
+  // by a dot and a bare function name that exists anywhere in the
+  // whole merged program, read as a valid alias-qualified call
+  // regardless of whether that name was ever declared as one.
+  Set<str> declared_import_aliases;
   flag failed;
   TypeError error;
 }
@@ -1275,6 +1361,7 @@ fun _checker_new() Checker {
   c.enum_type_params.init(16);
   c.compounds.init(16);
   c.methods.init(16);
+  c.declared_import_aliases = set_init("", 8);
   c.current_file = "";
   c.rtype = checked_unknown();
   c.in_async = false;
@@ -1813,6 +1900,12 @@ fun _erase_signature(FnSig sig, Vec<str>* names) FnSig {
     ret sig;
   }
   FnSig out = sig;
+  // `rtype_template` is deliberately left alone here: it already holds
+  // `rtype` exactly as `_signature_of` first declared it, from before
+  // ANY erasure pass (this one, an impl's own type params, or that
+  // one's own, a free function's own) ever touched anything - that is
+  // the whole point of keeping it (see its own field comment), so
+  // there is nothing for this impl-level pass to add to it.
   out.rtype = _erase_named(sig.rtype, names);
   // Same aliasing shape as `_without_self`'s own `out = sig;`: `out.args`
   // is about to point at a fresh backing array, abandoning the one it
@@ -1834,7 +1927,15 @@ fun _signature_of(FunctionNode f) FnSig {
   FnSig sig;
   sig.args.init(f.args.len);
   sig.rtype = checked_unknown();
+  sig.rtype_template = checked_unknown();
   if f.has_rtype {
+    // Two independent conversions, not one shared value and a copy:
+    // `CheckedType` owns heap content of its own (`generic_args`,
+    // `tuple_members`), and `_erase_type_params` below may free `sig.
+    // rtype`'s own copy wholesale the moment it matches - `rtype_
+    // template` needs its own, untouched by whatever happens to the
+    // other one.
+    sig.rtype_template = checked_from_dtype(f.rtype);
     sig.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
   }
   sig.is_variadic = f.is_variadic;
@@ -2601,6 +2702,41 @@ impl Checker {
     if dispatched.is_some() {
       ret dispatched.unwrap();
     }
+    // Neither side owns this operator through an impl, so it falls to
+    // C's own built-in meaning: numeric/decimal/char arithmetic (`'0' -
+    // 'a'`, the lexer's own idiom, is as ordinary as `1 + 2`), or
+    // pointer arithmetic. A named type with no `op_add`/`op_sub`/... of
+    // its own has neither - left unchecked, `"a" + "b"` passed straight
+    // through as `char*` addition, which C itself then rejects with no
+    // real diagnostic at all.
+    flag left_ok = is_unknown(left) || left.pointer_depth > 0 || left.is_array ||
+      left.base == .Num || left.base == .Dec || left.base == .Chr;
+    flag right_ok = is_unknown(right) || right.pointer_depth > 0 || right.is_array ||
+      right.base == .Num || right.base == .Dec || right.base == .Chr;
+    // `str` is itself a pointer at the C level, so offsetting one by a
+    // whole number (`name + sep + 2`, this very file's own idiom) is
+    // ordinary pointer arithmetic - but pairing two of them, as in
+    // `"woof " + "rex"`, is never that: neither commutes to a real
+    // address, and it's almost always a beginner's attempt at the
+    // concatenation this operator never performs.
+    if left.base == .Str && left.pointer_depth == 0 && !left.is_array {
+      left_ok = right.base == .Num || is_unknown(right);
+    }
+    if right.base == .Str && right.pointer_depth == 0 && !right.is_array {
+      right_ok = left.base == .Num || is_unknown(left);
+    }
+    if !left_ok || !right_ok {
+      self.fail(
+        format(
+        "'{str}' is not defined between {str} and {str}",
+        e.op,
+        type_name(left),
+        type_name(right)
+        ),
+        node
+      );
+      ret checked_unknown();
+    }
     // Arithmetic on two numeric kinds widens to the wider one.
     if right.base == .Dec && left.base == .Num {
       ret right;
@@ -2816,18 +2952,21 @@ impl Checker {
   }
 
   // True when the checker has seen what methods a type has, which is
-  // what lets it say a call names none of them.
+  // what lets it say a call names none of them. Every impl block in the
+  // program is collected before method calls are checked, so a type the
+  // checker has fully registered (a compound, shape, or enum) has
+  // already shown it everything it will ever declare - whether or not
+  // `self.methods` ended up with an entry for it - and an entry's
+  // absence then means "this type has no such method," not "unmodeled."
+  // Only a type the checker never registered at all (an opaque or
+  // external one) stays silent.
   knows_methods_of(CheckedType receiver) flag {
     if equals(receiver.name, "") {
       ret false;
     }
-    // An instantiation reaches methods through impls written against the
-    // type parameter, which these tables do not resolve, so only a type
-    // with no arguments of its own is judged.
-    if receiver.generic_args.len > 0 {
-      ret false;
-    }
-    ret self.methods.at(self.canonical_type_name(receiver.name)).is_some();
+    str canonical = self.canonical_type_name(receiver.name);
+    ret self.compounds.at(canonical).is_some() || self.shapes.has(canonical) ||
+      self.enum_names.has(canonical);
   }
 
   // The signature of `method` on `type_name`, if the type declares one.
@@ -2892,7 +3031,13 @@ impl Checker {
 
   // Checks a call written through a receiver, which resolves to a
   // method the receiver's type declares.
-  check_method_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env, flag awaited) CheckedType {
+  check_method_call(
+    Node* node,
+    ExprNode e,
+    Vec<Node*>* args,
+    TypeEnv* env,
+    flag awaited
+  ) CheckedType {
     if !e.has_left {
       ret checked_unknown();
     }
@@ -2939,19 +3084,64 @@ impl Checker {
     // A function-typed parameter naming the enclosing compound's own
     // type param (`Vec<T>.sort_by`'s `T`), not the method's own -
     // `sig.type_params` is empty for a non-generic method like this one.
+    // A generic ENUM's own receiver (`Result<T, E>.unwrap`) needs the
+    // same lookup against `enum_type_params` instead - `self.compounds`
+    // only ever holds compounds, so this used to come back empty for
+    // every enum method, silently skipping substitution below for all
+    // of them (confirmed directly: `Result<num, str>.unwrap()`'s own
+    // return type came back as the literal, unsubstituted `T` with no
+    // way to tell it apart from a genuinely unresolved type - the
+    // reason a `fit` matching its result against `.Ok`/`.Err` reached
+    // codegen instead of getting a real diagnostic).
     Vec<str> receiver_type_params;
     receiver_type_params.init(0);
     // Shallow only: every pushed name below is borrowed straight from
-    // the compound's own declared `type_params`, not a copy of its own.
+    // the compound's or enum's own declared `type_params`, not a copy
+    // of its own.
     defer receiver_type_params.free();
-    let compound_info = self.compounds.at(self.canonical_type_name(found.receiver.name));
+    str receiver_canonical = self.canonical_type_name(found.receiver.name);
+    let compound_info = self.compounds.at(receiver_canonical);
     if compound_info.is_some() {
       for p : compound_info.unwrap().type_params {
         receiver_type_params.push(p);
       }
+    } else {
+      let enum_params = self.enum_type_params.at(receiver_canonical);
+      if enum_params.is_some() {
+        for p : enum_params.unwrap() {
+          receiver_type_params.push(p);
+        }
+      }
     }
-    self.check_arguments(node, method, sig, args, env, &receiver_type_params, &found.receiver.generic_args);
-    ret sig.rtype;
+    self.check_arguments(
+      node,
+      method,
+      sig,
+      args,
+      env,
+      &receiver_type_params,
+      &found.receiver.generic_args
+    );
+    // The method's own declared return type, substituted against the
+    // receiver's own concrete generic arguments the same way an
+    // argument's own type already is just above. `sig.rtype` itself
+    // has nothing left to substitute by the time it gets here - `sig.
+    // rtype_template` (the same return type, as declared, from before
+    // any erasure ever touched it - see its own field comment) stands
+    // in for it. Unconditional, not just for a generic receiver: an
+    // ordinary method's own `rtype_template` is already identical to
+    // `rtype`, and `substitute` itself is a no-op when there is
+    // nothing in `receiver_type_params` to match, so this is exactly
+    // `sig.rtype` again in that case. Without this, a generic method's
+    // return type reached every caller still erased to Unknown (never
+    // even template form), the one case `is_unknown()`'s own "stands
+    // for any type" leniency can't tell apart from a genuinely
+    // unresolved expression.
+    ret substitute(
+      sig.rtype_template,
+      &receiver_type_params,
+      &found.receiver.generic_args
+    );
   }
 
   // A shape-bound alternative's own bare name, with any generic-arg
@@ -3015,7 +3205,10 @@ impl Checker {
         // self-referential one like `T: Steppable<T>`) is handled by
         // `_bare_shape_bound_name` stripping the `<...>` suffix first.
         if equals(bound, supplied_name) ||
-          self.implements_shape(supplied, self.canonical_type_name(self._bare_shape_bound_name(bound))) {
+          self.implements_shape(
+          supplied,
+          self.canonical_type_name(self._bare_shape_bound_name(bound))
+        ) {
           listed = true;
         }
       }
@@ -3028,7 +3221,11 @@ impl Checker {
       // satisfy it no matter what concrete type it's eventually
       // instantiated with, without needing it resolved here first.
       if !listed {
-        listed = self.active_type_param_bound_entails(supplied_name, &holder.bounds, at_param);
+        listed = self.active_type_param_bound_entails(
+          supplied_name,
+          &holder.bounds,
+          at_param
+        );
       }
       if !listed {
         self.fail(
@@ -3135,7 +3332,10 @@ impl Checker {
           // with any generic-arg suffix on the bound itself stripped
           // first.
           if equals(bound, supplied_name) ||
-            self.implements_shape(supplied, self.canonical_type_name(self._bare_shape_bound_name(bound))) {
+            self.implements_shape(
+            supplied,
+            self.canonical_type_name(self._bare_shape_bound_name(bound))
+          ) {
             listed = true;
           }
           a = a + 1;
@@ -3150,6 +3350,39 @@ impl Checker {
         break;
       }
     }
+  }
+
+  // The concrete type each of `sig`'s own type params stands for at
+  // this call, inferred from the arguments the same way `check_type_
+  // bounds` already does for bound-checking: the first argument
+  // written as a given parameter is what it stands for. One entry per
+  // `sig.type_params`, in the same order - `substitute`'s own
+  // contract - `checked_unknown()` for any param no argument's own
+  // declared type ever named (an unconstrained, genuinely
+  // unresolvable position, the same ceiling every other best-effort
+  // inference in this file already accepts).
+  _infer_call_generic_args(FnSig sig, Vec<Node*>* args, TypeEnv* env) Vec<CheckedType> {
+    Vec<CheckedType> out;
+    out.init(sig.type_params.len);
+    num p = 0;
+    for p < sig.type_params.len {
+      str param = sig.type_params.get(p);
+      p = p + 1;
+      CheckedType resolved = checked_unknown();
+      num i = 0;
+      for i < args.len && i < sig.arg_params.len {
+        str written = sig.arg_params.get(i);
+        num at = i;
+        i = i + 1;
+        if !equals(written, param) {
+          continue;
+        }
+        resolved = self.infer(args.get(at), env);
+        break;
+      }
+      out.push(resolved);
+    }
+    ret out;
   }
 
   // Judges `alias.name(...)`, where `alias` names an imported file
@@ -3185,6 +3418,18 @@ impl Checker {
       self.shapes.has(alias) || self.plain_enums.has(alias) {
       ret false;
     }
+    // `alias` must have actually been declared with `use X as alias;`
+    // - without this, any bare name that collides with no local/type
+    // read as a valid module qualifier the instant a method of that
+    // exact name existed anywhere in the whole merged program, even
+    // for a module imported with no alias at all (`use lib2;`, whose
+    // own exports reach this file under their bare names directly,
+    // never through a `lib2.` qualifier - confirmed directly:
+    // `lib2.twice(5)` crashed codegen with no real diagnostic, since
+    // typecheck wrongly accepted it as alias-qualified here).
+    if !self.declared_import_aliases.has(alias) {
+      ret false;
+    }
     let known = self.fns.at(method);
     if known.is_none() {
       ret false;
@@ -3209,6 +3454,32 @@ impl Checker {
         if !equals(callee.op, ".") || !callee.has_left {
           ret;
         }
+        // A receiver written as a bare name that resolves to nothing
+        // at all - not a local, a const, a type, or a still-abstract
+        // type param - is a plain typo or undeclared reference, not a
+        // type the checker merely failed to model. Checked here,
+        // before `infer()` folds it into the same Unknown-with-empty-
+        // name shape a legitimately-unresolvable type gets, which this
+        // function's own silence-on-Unknown rule below would otherwise
+        // never catch: left unchecked, `nonexistent_thing.foo(5)`
+        // passed typecheck outright and crashed codegen instead of a
+        // real diagnostic. `check_alias_qualified_call` already ran
+        // and failed by the time this is reached, so a real module
+        // alias is already ruled out.
+        fit callee.left.kind {
+          .Identifier(bare_name) -> {
+            if env.lookup(bare_name).is_none() &&
+              self.compounds.at(bare_name).is_none() &&
+              !self.shapes.has(bare_name) &&
+              !self.plain_enums.has(bare_name) &&
+              !self.enum_names.has(bare_name) &&
+              !self.active_type_params.contains(bare_name) {
+              self.fail(format("undeclared identifier '{str}'", bare_name), node);
+              ret;
+            }
+          }
+          _ -> {}
+        }
         CheckedType receiver = self.infer(callee.left, env);
         // A pointer or an array is not the receiver itself, so what it
         // reaches is judged elsewhere.
@@ -3226,7 +3497,10 @@ impl Checker {
         if receiver.base == .Unknown && !self.knows_methods_of(receiver) {
           ret;
         }
-        self.fail(format("{str} has no method '{str}'", type_name(receiver), method), node);
+        self.fail(
+          format("{str} has no method '{str}'", type_name(receiver), method),
+          node
+        );
       }
       _ -> {}
     }
@@ -3242,13 +3516,22 @@ impl Checker {
   // (`Vec<T>.sort_by`'s `T`) with the receiver's real one (`Vec<num>`'s
   // `num`) before either side is compared, since `want` is written
   // against the unsubstituted template.
-  _fn_sig_matches(FnTypeSig* want, FnSig got, Vec<str>* type_params, Vec<CheckedType>* generic_args) flag {
+  _fn_sig_matches(
+    FnTypeSig* want,
+    FnSig got,
+    Vec<str>* type_params,
+    Vec<CheckedType>* generic_args
+  ) flag {
     if got.is_variadic || want.params.len != got.args.len {
       ret false;
     }
     num i = 0;
     for i < want.params.len {
-      let want_param = substitute(checked_from_dtype(want.params.get(i)), type_params, generic_args);
+      let want_param = substitute(
+        checked_from_dtype(want.params.get(i)),
+        type_params,
+        generic_args
+      );
       if !self.assignable(want_param, got.args.get(i)) {
         ret false;
       }
@@ -3281,9 +3564,19 @@ impl Checker {
         .Identifier(fname) -> {
           let known = self.fns.at(fname);
           if known.is_some() &&
-            !self._fn_sig_matches(want.fn_sig, known.unwrap(), type_params, generic_args) {
+            !self._fn_sig_matches(
+            want.fn_sig,
+            known.unwrap(),
+            type_params,
+            generic_args
+          ) {
             self.fail(
-              format("argument {num} of '{str}': '{str}' does not match the expected signature", i, name, fname),
+              format(
+              "argument {num} of '{str}': '{str}' does not match the expected signature",
+              i,
+              name,
+              fname
+              ),
               args.get(i - 1)
             );
             ret true;
@@ -3371,7 +3664,14 @@ impl Checker {
   // usual convention every real printf-checker follows, since a
   // format built at runtime can't be reasoned about here - or when
   // the C-style parser meets a spec it doesn't confidently recognize.
-  check_format_args(Node* node, str name, Vec<Node*>* args, num fmt_index, flag c_style, TypeEnv* env) {
+  check_format_args(
+    Node* node,
+    str name,
+    Vec<Node*>* args,
+    num fmt_index,
+    flag c_style,
+    TypeEnv* env
+  ) {
     Node* fmt_node = args.get(fmt_index);
     str fmt_text = "";
     flag is_literal = false;
@@ -3429,7 +3729,12 @@ impl Checker {
       if equals(want_name, "ptr") || equals(want_name, "raw") {
         if got.pointer_depth == 0 && got.base != .Raw {
           self.fail(
-            format("argument {num} of '{str}' expects a pointer, found {str}", arg_position, name, type_name(got)),
+            format(
+            "argument {num} of '{str}' expects a pointer, found {str}",
+            arg_position,
+            name,
+            type_name(got)
+            ),
             arg_node
           );
           ret;
@@ -3581,7 +3886,12 @@ impl Checker {
       let fsig = callee.fn_sig;
       if args.len != fsig.params.len {
         self.fail(
-          format("'{str}' expects {num} arguments, got {num}", name, fsig.params.len, args.len),
+          format(
+          "'{str}' expects {num} arguments, got {num}",
+          name,
+          fsig.params.len,
+          args.len
+          ),
           node
         );
         ret checked_unknown();
@@ -3626,8 +3936,158 @@ impl Checker {
     }
     Vec<CheckedType> no_generic_args;
     no_generic_args.init(0);
-    self.check_arguments(node, name, sig, &args, env, &sig.type_params, &no_generic_args);
-    ret sig.rtype;
+    self.check_arguments(
+      node,
+      name,
+      sig,
+      &args,
+      env,
+      &sig.type_params,
+      &no_generic_args
+    );
+    if !sig.is_generic {
+      ret sig.rtype;
+    }
+    // `sig.rtype` itself is `wrap<T>(T v) MyOpt<T>`'s own return type
+    // with `T` already erased to a nameless Unknown by `_signature_of`
+    // (every generic function's own type params are, regardless of
+    // whether this call even resolves them) - `check_arguments`'
+    // generic branch (`check_type_bounds`) only ever verifies a type
+    // param's own bounds against what was supplied, never substitutes
+    // anything back into the return type at all, so a generic
+    // function's own call-site result reached every caller still
+    // Unknown, confirmed directly as the reason `wrap(5).unwrap()`
+    // (chaining a method call onto a generic function's own result)
+    // reached codegen with no real type to work with. Inferred the
+    // same way `check_type_bounds` already does: the first argument
+    // written as a given type param is what it stands for at this
+    // call - no explicit `<...>` call-site syntax to prefer it over.
+    Vec<CheckedType> inferred_args = self._infer_call_generic_args(sig, &args, env);
+    defer inferred_args.free();
+    // A type param this call could never infer from anything - no
+    // bare argument written as it, nothing nested inside any
+    // argument's own declared type, no mention in the return type
+    // either, and no explicit `<...>` supplied at the call site - is
+    // not a type the checker merely failed to model; it is dead,
+    // unreachable from this call under any circumstance. Left
+    // unchecked, `make_zero<T>(num count) num` (T named nowhere at
+    // all) passed typecheck outright, and codegen's own, separately-
+    // written inference (which this mirrors) silently gave up and
+    // fell back to the bare, unmangled name - a real function this
+    // genuinely is not, since it was declared with its own `<T>`.
+    num tpi = 0;
+    for tpi < sig.type_params.len {
+      if !is_unknown(inferred_args.get(tpi)) {
+        tpi = tpi + 1;
+        continue;
+      }
+      if e.has_generic_args && tpi < e.generic_args.len {
+        tpi = tpi + 1;
+        continue;
+      }
+      str tp = sig.type_params.get(tpi);
+      flag reachable = _checked_type_references_param(sig.rtype_template, tp);
+      num ai = 0;
+      for !reachable && ai < sig.args.len {
+        if _checked_type_references_param(sig.args.get(ai), tp) {
+          reachable = true;
+        }
+        ai = ai + 1;
+      }
+      if !reachable {
+        self.fail(
+          format(
+          "cannot infer type parameter '{str}' for this call to '{str}' - pass it explicitly ('{str}<...>(...)')",
+          tp,
+          name,
+          name
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
+      tpi = tpi + 1;
+    }
+    ret substitute(sig.rtype_template, &sig.type_params, &inferred_args);
+  }
+}
+
+// True when `t`, or anything nested inside it, names `param` -
+// `_erase_type_params` only erases a bare top-level occurrence
+// (`T x`), never one nested further in (`Vec<T> items`), so `t`'s own
+// structural `generic_args`/`tuple_members` still carry a nested
+// occurrence intact even after a signature's own params go through
+// it. Used to tell "this type param genuinely cannot be inferred
+// from anything" apart from "it can, just not by this call's own
+// narrow bare-argument check" - the two read identically as far as
+// `_infer_call_generic_args` alone can tell.
+fun _checked_type_references_param(CheckedType t, str param) flag {
+  if t.is_tuple {
+    for m : t.tuple_members {
+      if _checked_type_references_param(m, param) {
+        ret true;
+      }
+    }
+    ret false;
+  }
+  if equals(t.name, param) {
+    ret true;
+  }
+  for a : t.generic_args {
+    if _checked_type_references_param(a, param) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// True when some subtree of `n` reads the identifier `self` - used to
+// reject it inside a parameter's own default-value expression (see
+// `check_function_with_self`'s own caller for why). Walks only the
+// node kinds an expression can actually be built from; a statement or
+// declaration never appears inside one, so those kinds need no case.
+fun _references_self(Node* n) flag {
+  if n == nil {
+    ret false;
+  }
+  fit n.kind {
+    .Identifier(name) -> { ret equals(name, "self"); }
+    .Expression(e) -> {
+      if e.has_left && _references_self(e.left) {
+        ret true;
+      }
+      ret e.has_right && _references_self(e.right);
+    }
+    .ExpressionParenthesis(inner) -> { ret _references_self(inner); }
+    .Unary(u) -> {
+      if _references_self(u.operand) {
+        ret true;
+      }
+      ret u.has_error_arg && _references_self(u.error_arg);
+    }
+    .Ternary(t) -> {
+      ret _references_self(t.cond) || _references_self(t.then_val) ||
+        _references_self(t.else_val);
+    }
+    .Bracket(inner) -> { ret _references_self(inner); }
+    .CompoundInit(c) -> {
+      for f : c.fields {
+        if _references_self(f.value) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .TupleLiteral(t) -> {
+      for el : t.elements {
+        if _references_self(el) {
+          ret true;
+        }
+      }
+      ret false;
+    }
+    .Panic(inner) -> { ret _references_self(inner); }
+    _ -> { ret false; }
   }
 }
 
@@ -3947,6 +4407,19 @@ impl Checker {
         self.bind_fit_tuple_pattern(branch, subject_type, env);
       } elif !equals(shape_type_name, "") {
         self.bind_fit_shape_pattern(branch, shape_type_name, env);
+      } elif branch.has_bindings {
+        // A plain data-carrying variant pattern (`.Rotating(r)`), not
+        // itself a tuple or shape destructure - its own payload type
+        // isn't modeled here (codegen resolves it independently, the
+        // same split this file already has everywhere else), but the
+        // name itself still needs a real binding: left unbound
+        // entirely, `env.lookup` reported it as not found at all,
+        // indistinguishable from a genuinely undeclared identifier -
+        // exactly what a receiver-existence check added elsewhere in
+        // this file needs to tell apart.
+        for bname : branch.bindings {
+          env.define(bname, checked_unknown());
+        }
       }
       self.check_statement(branch.body, env);
       env.pop();
@@ -4476,7 +4949,10 @@ impl Checker {
     if equals(declared_in, self.current_file) {
       ret;
     }
-    self.fail(format("{str} '{str}' is not public in the file that declares it", what, name), at);
+    self.fail(
+      format("{str} '{str}' is not public in the file that declares it", what, name),
+      at
+    );
   }
 
   // Rejects an assignment to a name declared const, and checks that the
@@ -4697,11 +5173,41 @@ impl Checker {
             ret;
           }
         }
+        // A bare compound literal (`let x = .{ a = 1 };`, no type
+        // written anywhere - unlike `let x = Account{ a = 1 };`, which
+        // `infer_compound_init` already resolves fine) has nothing at
+        // all to infer a type from either. Left unchecked, `declared`
+        // below became Unknown, which this language's `let`-infer
+        // placeholder (`LET_INFER_TYPE`, "__let_infer__") is written
+        // as - codegen then wrote that literal placeholder string into
+        // the generated C as if it were a real type name, confirmed
+        // directly as `error: use of undeclared identifier
+        // '__let_infer__'` from the C compiler, not even a clean Fun-
+        // level diagnostic.
+        fit v.val.kind {
+          .CompoundInit(init) -> {
+            if !init.has_dtype {
+              self.fail(
+                format(
+                "cannot infer a type for '{str}': a bare compound literal needs an explicit declared type",
+                v.name
+                ),
+                stmt
+              );
+              ret;
+            }
+          }
+          _ -> {}
+        }
         // A shape names a contract rather than a type a value can be
         // stored as, so it cannot be what a `let` infers.
         if self.shapes.has(value.name) {
           self.fail(
-            format("cannot infer a type for '{str}': '{str}' is a shape", v.name, value.name),
+            format(
+            "cannot infer a type for '{str}': '{str}' is a shape",
+            v.name,
+            value.name
+            ),
             stmt
           );
           ret;
@@ -4835,11 +5341,79 @@ impl Checker {
       self.check_qualified_variant_against(val, want, env);
       ret;
     }
-    str enum_name = self.canonical_type_name(want.name);
-    if equals(enum_name, "") || !self.enum_names.has(enum_name) {
+    str variant_name = variant.unwrap();
+    // Genuinely nothing to check yet - an unresolved reference (already
+    // reported elsewhere) or a `let` with no declared type, still
+    // carrying its own placeholder (`is_unknown`'s own "a `let` carries
+    // a placeholder until its value is known" case) while a SEPARATE,
+    // dedicated pass resolves a bare shorthand against every enum the
+    // whole program declares, not just this one `want`. Checked first,
+    // ahead of the real-type checks below: without it, that placeholder
+    // read as "a named type that isn't a registered enum" there too,
+    // wrongly failing a `let`-inferred shorthand this file never
+    // intended to flag at all.
+    if is_unknown(want) {
       ret;
     }
-    str variant_name = variant.unwrap();
+    // A resolved builtin scalar (`num`, `flag`, ...) carries its own
+    // kind through `want.base` directly, never through `want.name` -
+    // "the written name of a user-defined type, empty for a builtin"
+    // (see `CheckedType`'s own comment) - so `want.name` being empty
+    // does NOT mean "unresolved" here, the way it does above; `is_
+    // unknown` already ruled that reading out. A tuple or a function-
+    // typed value is the same story: resolved, with no name of its own
+    // either, `base == .Unknown` purely because neither has any other
+    // way to carry its own kind (`is_tuple`/`has_fn_sig` do that
+    // instead) - `is_unknown` already excludes both from its own
+    // "nothing to check" case for exactly this reason. A bare
+    // `.Variant` shorthand names an enum's own variant by definition,
+    // so matching it against any of these is unambiguously wrong:
+    // left unchecked before this, it reached codegen with no enum tag
+    // to switch on at all, crashing there with an opaque "unsupported
+    // node" instead of a real diagnostic at the actual mistake (most
+    // commonly `fit`-ing the result of a stray `.unwrap()` that already
+    // turned the value into its own payload type).
+    if want.base != .Unknown || want.is_tuple || want.has_fn_sig {
+      self.fail(
+        format(
+        "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+        variant_name,
+        type_name(want)
+        ),
+        val
+      );
+      ret;
+    }
+    str enum_name = self.canonical_type_name(want.name);
+    if equals(enum_name, "") {
+      ret;
+    }
+    if !self.enum_names.has(enum_name) {
+      // Still ambiguous even past `is_unknown`: a name that resolves
+      // to nothing registered at all is just as often a generic
+      // method's own still-abstract type parameter (the enclosing
+      // class's own `V`, say, substituted into a nested generic call's
+      // return type correctly - see `check_method_call` - but no
+      // closer to a concrete type for it) as it is a genuine mistake.
+      // Only a name registered as a real COMPOUND is unambiguous: that
+      // one definitely resolved to an actual type, and it definitely
+      // isn't an enum. Confirmed directly as a real regression without
+      // this narrowing: a generic class's own `V` substituted correctly
+      // through `Option<V>.unwrap()` read as "a real resolved type
+      // named 'V' that isn't a registered enum" here, failing code
+      // that was never actually wrong.
+      if self.compounds.at(enum_name).is_some() {
+        self.fail(
+          format(
+          "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+          variant_name,
+          type_name(want)
+          ),
+          val
+        );
+      }
+      ret;
+    }
     flag declared = false;
     let owners = self.variant_owners.at(variant_name);
     if owners.is_some() {
@@ -4914,7 +5488,10 @@ impl Checker {
         str variant_name = "";
         _qualified_variant_names(e.left, &enum_name, &variant_name);
         if equals(enum_name, "") || env.lookup(enum_name).is_some() ||
-          !equals(self.canonical_type_name(enum_name), self.canonical_type_name(want.name)) {
+          !equals(
+          self.canonical_type_name(enum_name),
+          self.canonical_type_name(want.name)
+        ) {
           ret;
         }
         Vec<Node*> written;
@@ -4923,7 +5500,14 @@ impl Checker {
         if e.has_right {
           _call_args(e.right, &written);
         }
-        self.check_variant_args(val, self.canonical_type_name(enum_name), variant_name, &written, want, env);
+        self.check_variant_args(
+          val,
+          self.canonical_type_name(enum_name),
+          variant_name,
+          &written,
+          want,
+          env
+        );
       }
       _ -> {}
     }
@@ -4934,7 +5518,14 @@ impl Checker {
   // enum's own type parameters replaced by what `want` instantiated them as
   // (a parameter `want` does not resolve stands for anything). A shorthand
   // nested in an argument is held to that slot's own enum.
-  check_variant_args(Node* at, str enum_name, str variant_name, Vec<Node*>* written, CheckedType want, TypeEnv* env) {
+  check_variant_args(
+    Node* at,
+    str enum_name,
+    str variant_name,
+    Vec<Node*>* written,
+    CheckedType want,
+    TypeEnv* env
+  ) {
     if self.failed {
       ret;
     }
@@ -4967,7 +5558,11 @@ impl Checker {
     }
     num i = 0;
     for i < written.len {
-      CheckedType slot = substitute(payload_types.get(i), &type_params, &want.generic_args);
+      CheckedType slot = substitute(
+        payload_types.get(i),
+        &type_params,
+        &want.generic_args
+      );
       CheckedType got = self.infer(written.get(i), env);
       if self.failed {
         ret;
@@ -5020,6 +5615,35 @@ impl Checker {
   // Walks the methods an impl block supplies, with the receiver bound to
   // the type they belong to.
   check_impl(ImplNode block, Vec<Node>* nodes) {
+    // A parameter's default is spliced into each call site's own
+    // argument list verbatim (`emit_default_trailing_args`), never
+    // evaluated against a bound receiver the way the method's own body
+    // is - a call through a value with no `self` of its own (an
+    // ordinary top-level statement) has nothing to splice it against.
+    // Checked unconditionally, before the generic skip just below,
+    // since it needs no type substitution at all - only whether the
+    // expression itself mentions `self`. Left unchecked, `self.v`
+    // leaked through as a genuine identifier lookup and crashed
+    // codegen ("unsupported node: unknown identifier 'self'") instead
+    // of a real diagnostic.
+    for m : block.methods {
+      fit m.kind {
+        .Function(f) -> {
+          for pa : f.args {
+            fit pa.kind {
+              .Variable(pv) -> {
+                if pv.has_val && _references_self(pv.val) {
+                  self.fail("a parameter's default value cannot reference 'self'", pa);
+                  ret;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
     // A generic impl's methods are written in terms of type parameters
     // the checker does not substitute, so their bodies are left alone.
     if block.has_type_params && block.type_params.len > 0 {
@@ -5103,7 +5727,10 @@ impl Checker {
           if pv.has_val {
             seen_default_param = true;
           } elif seen_default_param {
-            self.fail("a parameter without a default cannot follow a parameter with a default", pa);
+            self.fail(
+              "a parameter without a default cannot follow a parameter with a default",
+              pa
+            );
             ret;
           }
         }
@@ -5246,6 +5873,29 @@ fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node)
 
 // Checks a whole program, reporting the first type error it finds.
 pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
+  Vec<str> no_aliases;
+  no_aliases.init(0);
+  defer no_aliases.free();
+  ret typecheck_program_with_aliases(nodes, &no_aliases);
+}
+
+// `typecheck_program`, told which names `use X as name;` actually
+// declared across the whole merged program - needed by
+// `check_alias_qualified_call` to tell a real module alias apart from
+// any other bare name that happens to collide with no local/type (see
+// its own doc comment for why). The import merger already tracks this
+// (`ProgramMergeResult.aliases`); the plain `.Import` node it came
+// from does not survive the merge into `nodes` itself (confirmed
+// directly: a scan over `nodes` for `.Import` found none at all, even
+// for a program `use`ing several aliased files), so it has to be
+// threaded in from there rather than rediscovered here. A caller with
+// no merge to draw one from (a single, unimported file, as every test
+// in this file's own suite is) passes an empty list through the
+// plain `typecheck_program` above instead.
+pub fun typecheck_program_with_aliases(
+  Vec<Node>* nodes,
+  Vec<str>* aliases
+) Result<flag, TypeError> {
   Checker checker = _checker_new();
   defer _free_fn_sig_map_borrowed_keys(&checker.fns);
   defer checker.declared_at.free();
@@ -5262,6 +5912,13 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   defer _free_compound_info_map(&checker.compounds);
   defer _free_method_tables(&checker.methods);
   defer checker.active_type_params.free();
+  defer checker.declared_import_aliases.free();
+
+  num ai = 0;
+  for ai < aliases.len {
+    checker.declared_import_aliases.add(aliases.get(ai));
+    ai = ai + 1;
+  }
 
   num i = 0;
   for i < nodes.len {
@@ -5336,7 +5993,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
         // No variants lowers to an empty C `enum`, which is invalid;
         // rejected here rather than left for the C compiler to explain.
         if e.variants.len == 0 {
-          checker.fail(format("enum '{str}' must declare at least one variant", e.name), node);
+          checker.fail(
+            format("enum '{str}' must declare at least one variant", e.name),
+            node
+          );
           ret .Err(checker.error);
         }
         flag carries_data = false;
@@ -5365,7 +6025,10 @@ pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
               payload_types.push(checked_from_dtype(pd));
             }
           }
-          checker.variant_payloads.put(format("{str}.{str}", e.name, v.name), payload_types);
+          checker.variant_payloads.put(
+            format("{str}.{str}", e.name, v.name),
+            payload_types
+          );
         }
         for v : e.variants {
           str owner = substr(e.name, 0, len(e.name));

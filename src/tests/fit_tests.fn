@@ -198,7 +198,10 @@ test "fit tagged-union enum comma-separated arm ORs every alternative's tag comp
   `  }
   `  ret 0;
   `}`;
-  let out = emit_c(src, "fit tagged-union enum comma-separated arm ORs every alternative's tag comparison");
+  let out = emit_c(
+    src,
+    "fit tagged-union enum comma-separated arm ORs every alternative's tag comparison"
+  );
   assert contains(
     out,
     "s.tag == Status_Ok || s.tag == Status_NotFound"

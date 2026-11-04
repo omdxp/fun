@@ -153,7 +153,12 @@ fun _outline_kind_for(Declaration d) OutlineKind {
 // the result a client is sent. Queries the persistent `symbols`
 // table (kept current by `WorkspaceSymbolTable.ensure_all`) rather than
 // re-walking every document's own AST on every request.
-pub fun workspace_symbols(Documents* docs, AnalysisCache* cache, WorkspaceSymbolTable* symbols, str query) str {
+pub fun workspace_symbols(
+  Documents* docs,
+  AnalysisCache* cache,
+  WorkspaceSymbolTable* symbols,
+  str query
+) str {
   symbols.ensure_all(cache, docs);
   str lower_query = to_lower(query);
   Vec<str> names = symbols.by_name.keys();

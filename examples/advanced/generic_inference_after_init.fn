@@ -44,6 +44,12 @@ fun main() {
   let left_str = pick_left(swapped);
 
   printf("nbox=%lld sbox=%s\n", nbox.value, sbox.value);
-  printf("pair=(%lld,%s) swapped=(%s,%lld)\n", pair.left, pair.right, swapped.left, swapped.right);
+  printf(
+    "pair=(%lld,%s) swapped=(%s,%lld)\n",
+    pair.left,
+    pair.right,
+    swapped.left,
+    swapped.right
+  );
   printf("picks=(%lld,%s)\n", left_num, left_str);
 }

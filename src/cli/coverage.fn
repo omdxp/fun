@@ -412,7 +412,13 @@ pub fun cover_to_cobertura(CoverReport* r) str {
       );
       Vec<num> lines = r.lines_of(p);
       for line : lines {
-        sb.append(format("            <line number=\"{num}\" hits=\"{num}\" branch=\"false\"/>\n", line, r.hits_of(p, line)));
+        sb.append(
+          format(
+          "            <line number=\"{num}\" hits=\"{num}\" branch=\"false\"/>\n",
+          line,
+          r.hits_of(p, line)
+          )
+        );
       }
       lines.free();
       sb.append("          </lines>\n        </class>\n");
@@ -527,16 +533,39 @@ pub fun cover_to_html(CoverReport* r) str {
   StringBuilder sb = string_builder_init(4096);
   num total = r.statements();
   num covered = r.covered();
-  sb.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Coverage report</title>\n<style>\n");
-  sb.append(":root{--bg:#ffffff;--fg:#1c2128;--muted:#5b6673;--line:#d7dde4;--hit:#dcf3e2;--miss:#fbdcdc;--gutter:#f3f5f7}\n");
-  sb.append("@media (prefers-color-scheme:dark){:root{--bg:#15191e;--fg:#dde3ea;--muted:#8b96a3;--line:#2b333c;--hit:#173a25;--miss:#4a1f22;--gutter:#1c2128}}\n");
-  sb.append("body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;margin:24px auto;max-width:1100px;padding:0 16px}\n");
-  sb.append("table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:6px 10px;text-align:left}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}\n");
-  sb.append("pre{background:var(--gutter);border:1px solid var(--line);margin:0 0 28px;overflow-x:auto;padding:0}\n");
-  sb.append("pre span{display:block;padding:0 10px;white-space:pre}.hit{background:var(--hit)}.miss{background:var(--miss)}.ln{color:var(--muted);display:inline-block;margin-right:14px;text-align:right;width:4ch}\n");
+  sb.append(
+    "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Coverage report</title>\n<style>\n"
+  );
+  sb.append(
+    ":root{--bg:#ffffff;--fg:#1c2128;--muted:#5b6673;--line:#d7dde4;--hit:#dcf3e2;--miss:#fbdcdc;--gutter:#f3f5f7}\n"
+  );
+  sb.append(
+    "@media (prefers-color-scheme:dark){:root{--bg:#15191e;--fg:#dde3ea;--muted:#8b96a3;--line:#2b333c;--hit:#173a25;--miss:#4a1f22;--gutter:#1c2128}}\n"
+  );
+  sb.append(
+    "body{background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif;margin:24px auto;max-width:1100px;padding:0 16px}\n"
+  );
+  sb.append(
+    "table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:6px 10px;text-align:left}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}\n"
+  );
+  sb.append(
+    "pre{background:var(--gutter);border:1px solid var(--line);margin:0 0 28px;overflow-x:auto;padding:0}\n"
+  );
+  sb.append(
+    "pre span{display:block;padding:0 10px;white-space:pre}.hit{background:var(--hit)}.miss{background:var(--miss)}.ln{color:var(--muted);display:inline-block;margin-right:14px;text-align:right;width:4ch}\n"
+  );
   sb.append("</style>\n</head>\n<body>\n");
-  sb.append(format("<h1>Coverage {str}%</h1>\n<p>{num} of {num} statements covered.</p>\n", percent_text(covered, total), covered, total));
-  sb.append("<table>\n<tr><th>File</th><th class=\"n\">Covered</th><th class=\"n\">Statements</th><th class=\"n\">%</th></tr>\n");
+  sb.append(
+    format(
+    "<h1>Coverage {str}%</h1>\n<p>{num} of {num} statements covered.</p>\n",
+    percent_text(covered, total),
+    covered,
+    total
+    )
+  );
+  sb.append(
+    "<table>\n<tr><th>File</th><th class=\"n\">Covered</th><th class=\"n\">Statements</th><th class=\"n\">%</th></tr>\n"
+  );
   num fi = 0;
   for p : all {
     sb.append(
@@ -574,7 +603,14 @@ pub fun cover_to_html(CoverReport* r) str {
             }
           }
         }
-        sb.append(format("<span{str}><span class=\"ln\">{num}</span>{str}</span>", cls, ln, _html_escape(row)));
+        sb.append(
+          format(
+          "<span{str}><span class=\"ln\">{num}</span>{str}</span>",
+          cls,
+          ln,
+          _html_escape(row)
+          )
+        );
         ln = ln + 1;
       }
       rows.free();
@@ -662,7 +698,10 @@ test "the cobertura report groups files into packages with line hits" {
   CoverReport r = _sample_report();
   str xml = cover_to_cobertura(&r);
   assert contains(xml, "<?xml version=\"1.0\" ?>"), "expected an XML declaration";
-  assert contains(xml, "line-rate=\"0.5000\" branch-rate=\"0\" lines-covered=\"2\" lines-valid=\"4\""), "expected the overall rates";
+  assert contains(
+    xml,
+    "line-rate=\"0.5000\" branch-rate=\"0\" lines-covered=\"2\" lines-valid=\"4\""
+  ), "expected the overall rates";
   assert contains(xml, "<package name=\"src\" line-rate=\"0.6667\""), "expected a package per directory";
   assert contains(xml, "<class name=\"a.fn\" filename=\"src/a.fn\" line-rate=\"0.6667\""), "expected a class per file";
   assert contains(xml, "<line number=\"1\" hits=\"4\" branch=\"false\"/>"), "expected a covered line";
@@ -673,8 +712,14 @@ test "the cobertura report groups files into packages with line hits" {
 test "the json report carries totals and each file's lines with hits" {
   CoverReport r = _sample_report();
   str json = cover_to_json(&r);
-  assert contains(json, "\"format\":\"fun-coverage\",\"version\":1,\"total\":{\"statements\":4,\"covered\":2,\"percent\":50.0}"), "expected the totals";
-  assert contains(json, "{\"path\":\"src/a.fn\",\"statements\":3,\"covered\":2,\"percent\":66.7,\"lines\":[[1,4],[2,0],[3,1]]}"), "expected the file entry with its lines";
+  assert contains(
+    json,
+    "\"format\":\"fun-coverage\",\"version\":1,\"total\":{\"statements\":4,\"covered\":2,\"percent\":50.0}"
+  ), "expected the totals";
+  assert contains(
+    json,
+    "{\"path\":\"src/a.fn\",\"statements\":3,\"covered\":2,\"percent\":66.7,\"lines\":[[1,4],[2,0],[3,1]]}"
+  ), "expected the file entry with its lines";
   free(json);
 }
 

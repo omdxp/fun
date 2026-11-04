@@ -166,7 +166,11 @@ pub fun assert_emits(str src, str needle, str label) {
 // Asserts the emitted C for `src` does not contain `needle`.
 pub fun assert_not_emits(str src, str needle, str label) {
   let out = emit_c(src, label);
-  assert !contains(out, needle), format("{str}: expected C not to contain `{str}`", label, needle);
+  assert !contains(out, needle), format(
+    "{str}: expected C not to contain `{str}`",
+    label,
+    needle
+  );
 }
 
 // Resolves `path`'s import graph and transpiles the merged program.
@@ -427,7 +431,11 @@ pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResu
   cb.append(".c");
   str c_path = cb.build();
 
-  assert write_string(source_path, src), format("{str}: could not stage {str}", label, source_path);
+  assert write_string(source_path, src), format(
+    "{str}: could not stage {str}",
+    label,
+    source_path
+  );
   defer remove_file(source_path);
 
   let emitted = transpile_file_forcing_msvc(source_path);
@@ -506,7 +514,11 @@ fun _run_source_result_mode(str src, str name, str label, flag memcheck) Process
   cb.append(".c");
   str c_path = cb.build();
 
-  assert write_string(source_path, src), format("{str}: could not stage {str}", label, source_path);
+  assert write_string(source_path, src), format(
+    "{str}: could not stage {str}",
+    label,
+    source_path
+  );
   defer remove_file(source_path);
 
   let emitted = memcheck ? transpile_file_memcheck(source_path) : transpile_file(source_path);

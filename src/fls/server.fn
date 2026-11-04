@@ -425,7 +425,10 @@ impl Server {
             // index_from_disk takes ownership of the URI it's given;
             // `document_uri` itself aliases `message`'s own text, so
             // it hands over a copy rather than the field itself.
-            self.docs.index_from_disk(substr(document_uri, 0, len(document_uri)), resolved.unwrap());
+            self.docs.index_from_disk(
+              substr(document_uri, 0, len(document_uri)),
+              resolved.unwrap()
+            );
           }
         }
       }
@@ -534,9 +537,17 @@ impl Server {
         JsonValue end = _field(range, "end");
         Diagnostic d;
         d.line = _number_field(start, "line");
-        d.col = utf16_char_to_byte_col(doc.unwrap().text, d.line, _number_field(start, "character"));
+        d.col = utf16_char_to_byte_col(
+          doc.unwrap().text,
+          d.line,
+          _number_field(start, "character")
+        );
         d.end_line = _number_field(end, "line");
-        d.end_col = utf16_char_to_byte_col(doc.unwrap().text, d.end_line, _number_field(end, "character"));
+        d.end_col = utf16_char_to_byte_col(
+          doc.unwrap().text,
+          d.end_line,
+          _number_field(end, "character")
+        );
         d.severity = _number_field(item, "severity");
         d.message = _string_field(item, "message");
         diags.push(d);
@@ -566,7 +577,14 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    str def_result = definition_workspace_wide(&self.reads, &self.docs, &self.symbols, r.doc, r.line, r.character);
+    str def_result = definition_workspace_wide(
+      &self.reads,
+      &self.docs,
+      &self.symbols,
+      r.doc,
+      r.line,
+      r.character
+    );
     write_message(response(id, def_result));
     _free_result(def_result, "[]");
   }
@@ -611,7 +629,13 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    str completion_result = completion(&self.reads, r.doc, r.line, r.character, self.snippets);
+    str completion_result = completion(
+      &self.reads,
+      r.doc,
+      r.line,
+      r.character,
+      self.snippets
+    );
     write_message(response(id, completion_result));
     _free_result(completion_result, "[]");
   }
@@ -625,7 +649,13 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    str references_result = references(&self.reads, &self.docs, r.doc, r.line, r.character);
+    str references_result = references(
+      &self.reads,
+      &self.docs,
+      r.doc,
+      r.line,
+      r.character
+    );
     write_message(response(id, references_result));
     _free_result(references_result, "[]");
   }
@@ -639,7 +669,12 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    str highlights_result = document_highlights(&self.reads, r.doc, r.line, r.character);
+    str highlights_result = document_highlights(
+      &self.reads,
+      r.doc,
+      r.line,
+      r.character
+    );
     write_message(response(id, highlights_result));
     _free_result(highlights_result, "[]");
   }
@@ -654,7 +689,14 @@ impl Server {
     Request r = asked.unwrap();
     JsonValue params = _field(message, "params");
     str new_name = _string_field(params, "newName");
-    str rename_result = rename_symbol(&self.reads, &self.docs, r.doc, r.line, r.character, new_name);
+    str rename_result = rename_symbol(
+      &self.reads,
+      &self.docs,
+      r.doc,
+      r.line,
+      r.character,
+      new_name
+    );
     write_message(response(id, rename_result));
     _free_result(rename_result, "null");
   }
@@ -769,7 +811,12 @@ impl Server {
       }
       _ -> {}
     }
-    str selection_result = selection_ranges(&self.reads, doc.unwrap(), &lines, &chars);
+    str selection_result = selection_ranges(
+      &self.reads,
+      doc.unwrap(),
+      &lines,
+      &chars
+    );
     write_message(response(id, selection_result));
     _free_result(selection_result, "[]");
   }
@@ -783,7 +830,12 @@ impl Server {
       ret;
     }
     Request r = asked.unwrap();
-    str prepare_result = prepare_call_hierarchy(&self.reads, r.doc, r.line, r.character);
+    str prepare_result = prepare_call_hierarchy(
+      &self.reads,
+      r.doc,
+      r.line,
+      r.character
+    );
     write_message(response(id, prepare_result));
     _free_result(prepare_result, "[]");
   }
@@ -830,7 +882,12 @@ impl Server {
     self._ensure_workspace_symbols_current();
     JsonValue params = _field(message, "params");
     str query = _string_field(params, "query");
-    str wsym_result = workspace_symbols(&self.docs, &self.reads, &self.symbols, query);
+    str wsym_result = workspace_symbols(
+      &self.docs,
+      &self.reads,
+      &self.symbols,
+      query
+    );
     write_message(response(id, wsym_result));
     free(wsym_result);
   }
@@ -887,7 +944,11 @@ impl Server {
     // The client sends a UTF-16 code unit count; everything downstream
     // (token_at, position-based lookups) works in byte columns, matching
     // the lexer's own convention.
-    r.character = utf16_char_to_byte_col(r.doc.text, r.line, _number_field(position, "character"));
+    r.character = utf16_char_to_byte_col(
+      r.doc.text,
+      r.line,
+      _number_field(position, "character")
+    );
     ret .Some(r);
   }
 }

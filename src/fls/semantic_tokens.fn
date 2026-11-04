@@ -233,7 +233,8 @@ fun _token_type_of(
   Vec<Token>* tokens,
   num idx,
   Token t,
-  Map<str, flag>* const_names,
+  Map<str,
+  flag>* const_names,
   Vec<flag>* variant_decl
 ) num {
   fit t.type {
@@ -291,7 +292,8 @@ fun _identifier_token_type(
   Vec<Token>* tokens,
   num idx,
   Token t,
-  Map<str, flag>* const_names,
+  Map<str,
+  flag>* const_names,
   Vec<flag>* variant_decl
 ) num {
   let prev = token_before(tokens, idx);

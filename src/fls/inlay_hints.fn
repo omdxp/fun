@@ -112,7 +112,13 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       _ -> { continue; }
     }
     num name_idx = index_of_token(&tokens, name_tok);
-    str type_part = infer_let_local_type(&tokens, name_idx, &program.nodes, doc.path, src_line);
+    str type_part = infer_let_local_type(
+      &tokens,
+      name_idx,
+      &program.nodes,
+      doc.path,
+      src_line
+    );
     if equals(type_part, "") {
       continue;
     }
@@ -164,7 +170,13 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
     flag is_method = prev.is_some() && token_is_operator(prev.unwrap(), ".");
     Option<Declaration> found = .None;
     if is_method {
-      str type_name = chain_receiver_type(&tokens, t, &program.nodes, doc.path, src_line);
+      str type_name = chain_receiver_type(
+        &tokens,
+        t,
+        &program.nodes,
+        doc.path,
+        src_line
+      );
       if !equals(type_name, "") {
         Vec<str> no_args;
         no_args.init(0);
@@ -247,7 +259,9 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       b.append(`{"position":{"line":`);
       b.append_num(at.pos.line - 1);
       b.append(`,"character":`);
-      b.append_num(byte_col_to_utf16_char(doc.text, at.pos.line - 1, at.pos.start_col - 1));
+      b.append_num(
+        byte_col_to_utf16_char(doc.text, at.pos.line - 1, at.pos.start_col - 1)
+      );
       b.append(`},"label":`);
       str param_label = format("{str}:", pname);
       json_quote_into(&b, param_label);
