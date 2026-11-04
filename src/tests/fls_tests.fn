@@ -4878,14 +4878,74 @@ test "hover and completion resolve a bare generic shape-downcast arm auto-resolv
   `}`;
   doc.version = 1;
 
-  assert contains(hover(&reads, doc, 8, 12), "Wrapper__Circle* w"), "expected the binding site to resolve to the auto-resolved concrete type";
-  assert contains(hover(&reads, doc, 8, 24), "Wrapper__Circle* w"), "expected a use site inside the arm body to resolve the same way";
+  assert contains(hover(&reads, doc, 8, 12), "Wrapper<Circle>* w"), "expected the binding site to resolve to the auto-resolved concrete type";
+  assert contains(hover(&reads, doc, 8, 24), "Wrapper<Circle>* w"), "expected a use site inside the arm body to resolve the same way";
+
+  // The binding's own declaration text round-trips through the same
+  // "<Args>" format an ordinary `Wrapper<Circle> w;` local already
+  // uses, not the flat "Wrapper__Circle" C-mangled form - needed for
+  // `w`'s own field lookup below to resolve at all, since every field/
+  // method lookup here expects a bare type name plus a separately-
+  // parsed generic-args list, never a flat mangled string.
+  assert contains(hover(&reads, doc, 8, 27), "num extra"), "expected the auto-resolved binding's own field hover to resolve, not null";
 
   str scoped = completion(&reads, doc, 8, 24, false);
   assert contains(scoped, `"label":"w"`), "expected the auto-resolved binding offered in scope completion";
 
   str dotted = completion(&reads, doc, 8, 26, false);
   assert contains(dotted, `"label":"extra"`), "expected Wrapper__Circle's own field 'extra' offered through the auto-resolved binding";
+}
+
+test "hover resolves a field through a shape-downcast arm naming an explicit instantiation of an unbound generic impl" {
+  // `Box<num>(b) -> ...` against a genuinely unbound `impl Box<T> as
+  // Sized` (never narrowed to one concrete type at the impl itself,
+  // unlike the bare auto-resolve case above) is pre-mangled by the
+  // parser to the flat identifier text "Box__num" - same underlying
+  // gap as the auto-resolved case: the binding's own declaration
+  // needs the "Box<num>" form, not the flat mangled one, for its
+  // field lookup to resolve at all.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapedowncastexplicit.fn";
+  doc.path = "shapedowncastexplicit.fn";
+  doc.text = `shape Sized { len() num; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Sized { len() num { ret 1; } }
+  `fun show(Sized c) num {
+  `  fit c {
+  `    Box<num>(b) -> { ret b.val; }
+  `    _ -> { ret -1; }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 5, 13), "Box<num>* b"), "expected the binding site to show the explicitly-named instantiation";
+  assert contains(hover(&reads, doc, 5, 27), "num val"), "expected the field hover to resolve through the binding (T substituted against num), not null";
+}
+
+test "hover resolves a doubly-generic shape's own method, substituted against the parameter's concrete instantiation" {
+  // `impl Box<T> as Container<T>` is doubly generic - the shape itself
+  // carries the implementor's own unbound type param. Codegen already
+  // monomorphizes this correctly at the C level (fixed earlier this
+  // session); fls has its own independent, token/AST-based resolution
+  // and never substituted the shape's own type param against the
+  // receiver's declared concrete instantiation, showing the bare
+  // template signature instead of the real one.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///doublygenericshapehover.fn";
+  doc.path = "doublygenericshapehover.fn";
+  doc.text = `shape Container<T> { get() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Container<T> { get() T { ret self.val; } }
+  `fun use_it(Container<num> c) num {
+  `  ret c.get();
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 4, 9), "get() num"), "expected the shape's own method to substitute T against the parameter's real concrete instantiation";
 }
 
 test "hover resolves a shape-typed receiver's own method, not just a concrete one" {

@@ -1691,14 +1691,26 @@ pub fun lookup_method(
   // AsyncCounter`'s own type_name is "Counter"), so the search above
   // always comes back empty for one and needs this fallback to resolve
   // at all.
-  ret shape_method_declaration(program, type_name, method_name);
+  ret shape_method_declaration(program, type_name, method_name, concrete_args);
 }
 
 // The signature `shape_name` requires for `method_name`, as declared
 // in the `shape` block itself (no `self`, no body): what an `impl ...
 // as shape_name` block has to supply. `None` when no such shape or
-// method exists.
-pub fun shape_method_declaration(Vec<Node>* program, str shape_name, str method_name) Option<Declaration> {
+// method exists. When the shape itself is generic (`shape Container<
+// T> { get() T; }`), `concrete_args` substitutes its own type params
+// against the receiver's real instantiation - the receiver might be
+// shape-typed directly (`Container<num> c; c.get()`), with no impl
+// block of its own to specialize against the way `lookup_method`'s
+// concrete-implementor branch above already does, so this needs the
+// identical substitution applied to the shape's own declared
+// signature instead.
+pub fun shape_method_declaration(
+  Vec<Node>* program,
+  str shape_name,
+  str method_name,
+  Vec<str> concrete_args
+) Option<Declaration> {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -1713,12 +1725,17 @@ pub fun shape_method_declaration(Vec<Node>* program, str shape_name, str method_
           ShapeMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
-            Declaration d = _declaration(
-              method_name,
-              .Function,
-              _render_shape_method(ms),
-              ms.pos
-            );
+            str signature = _render_shape_method(ms);
+            if q.has_type_params {
+              Vec<str> filled_args = fill_default_args(
+                &q.type_params,
+                &q.type_param_defaults,
+                concrete_args
+              );
+              signature = specialize_signature(signature, q.type_params, filled_args);
+              free_filled_args(filled_args, concrete_args.len);
+            }
+            Declaration d = _declaration(method_name, .Function, signature, ms.pos);
             d.container = shape_name;
             ret .Some(d);
           }
@@ -7768,6 +7785,46 @@ pub fun _fls_auto_resolve_bare_generic_shape_target(
   ret type_name;
 }
 
+// A shape-downcast arm naming an explicit instantiation of a
+// still-unbound generic template (`Box<num>(b) -> ...` against `impl
+// Box<T> as Sized`) reaches here with `mangled_name` already pre-
+// mangled by the parser to the flat text "Box__num" - correct for
+// display, but opaque to every downstream field/method lookup here,
+// which expects a bare type name plus a separate `generic_args` list
+// (parsed out of a declaration's own "<...>" text by `generic_args_
+// of_detail`, never out of a flat "__"-joined string). Reconstructs
+// the "Box<num>" form so the binding's own declaration round-trips
+// through that same existing machinery instead of needing its own
+// copy of it. Only the single-type-param case is unambiguous to
+// split back out of a flat mangled name this way; a multi-param
+// instantiation passes through unchanged, same residual as every
+// other mangled-name reconstruction in this codebase.
+fun _fls_mangled_instantiation_to_generic_text(Vec<Node>* program, str mangled_name) str {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Compound(c) -> {
+        if !c.has_type_params || c.type_params.len != 1 {
+          continue;
+        }
+        str prefix = format("{str}__", c.name);
+        if !starts_with(mangled_name, prefix) {
+          continue;
+        }
+        str arg = substr(mangled_name, len(prefix), len(mangled_name) - len(prefix));
+        if equals(arg, "") {
+          continue;
+        }
+        ret format("{str}<{str}>", c.name, arg);
+      }
+      _ -> {}
+    }
+  }
+  ret mangled_name;
+}
+
 fun _lookup_fit_binding(
   Vec<Token>* tokens,
   Node* body,
@@ -7870,7 +7927,9 @@ fun _lookup_fit_binding(
             }
             if !equals(shape_type_name, "") && br.body != nil {
               StringBuilder shb = string_builder_init(24);
-              shb.append(shape_type_name);
+              shb.append(
+                _fls_mangled_instantiation_to_generic_text(program, shape_type_name)
+              );
               shb.append("* ");
               shb.append(name);
               Pos shape_decl_pos = body.pos;
