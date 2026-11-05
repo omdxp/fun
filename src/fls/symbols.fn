@@ -4139,10 +4139,10 @@ pub fun chain_receiver(
   } elif first.is_propagation {
     // The propagated operand's own resolved type (`Option`/`Result`,
     // plus its generic args) unwraps one level for the rest of the
-    // chain: `T` out of `Option<T>`, best-effort like every other
-    // token-only resolution in this file (a further-generic `T` isn't
-    // tracked past this point, so `current_args` is cleared rather than
-    // left stale).
+    // chain: `T` out of `Option<T>`. `T` may itself carry a further
+    // generic instantiation (`Box<num>` out of `Option<Box<num>>`),
+    // which `generic_args_of_detail` below preserves the same way
+    // `current_args` is threaded everywhere else in this function.
     ChainReceiver prop_inner = chain_ending_receiver(
       tokens,
       first.tok,
@@ -4152,14 +4152,18 @@ pub fun chain_receiver(
       line,
       depth + 1
     );
+    current_args.init(0);
     if prop_inner.generic_args.len > 0 {
       // The raw generic-arg text carries a pointer star as written
       // (`Node*` for `Option<Node*>`), which a field/method lookup by
       // bare type name doesn't expect - stripped the same way any other
       // pointer-spelled type name is bared elsewhere in this file.
-      current_type = bare_type_expr(prop_inner.generic_args.get(0));
+      str prop_inner_text = prop_inner.generic_args.get(0);
+      current_type = bare_type_expr(prop_inner_text);
+      for arg : generic_args_of_detail(prop_inner_text) {
+        current_args.push(arg);
+      }
     }
-    current_args.init(0);
   } else {
     current_type = type_name_of_local(tokens, program, first.name, file, line);
     current_args = local_generic_args(tokens, program, first.name, file, line);

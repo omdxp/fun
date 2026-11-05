@@ -9033,6 +9033,34 @@ test "dot-completion offers a propagated receiver's own members when the unwrapp
   assert contains(comp, `"label":"y"`), "expected every field, not just the one already written";
 }
 
+test "dot-completion and hover on a propagated receiver substitute a further-generic inner type too" {
+  // `_propagation_receiver_type_before` (completion.fn) and
+  // `chain_receiver`'s own propagation branch (symbols.fn) both
+  // unwrapped `Option<Box<num>>` down to just the bare name "Box",
+  // throwing away "num" instead of threading it through via
+  // `generic_args_of_detail` the way every other segment resolution in
+  // these two functions already does - so a method/field on the
+  // propagated receiver always showed the unbound template param `T`,
+  // not the real concrete instantiation.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///propdoublygeneric.fn";
+  doc.path = "propdoublygeneric.fn";
+  doc.text = `use std.option;
+  `compound Box<T> { T value; }
+  `impl Box<T> { pub get() T { ret self.value; } }
+  `fun make() Option<Box<num>> { ret .None; }
+  `fun main() num { ret make()?.get(); }`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 4, 29, false);
+  assert contains(comp, `"detail":"get(Box<num>* self) num"`), "expected the propagated receiver's own further-generic T substituted to num";
+  assert !contains(comp, `"detail":"get(Box<T>* self) T"`), "expected no unsubstituted template param to leak through";
+
+  assert contains(hover(&reads, doc, 4, 30), "get(Box<num>* self) num"), "expected hover on the propagated receiver's method to substitute T too, through the shared chain_receiver walker";
+}
+
 test "hover on a let-bound '?' propagation shows the unwrapped type, and completion on it is filtered" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

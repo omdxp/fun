@@ -340,24 +340,25 @@ pub fun completion(
     }
   }
 
+  Vec<str> propagation_args;
+  propagation_args.init(0);
   str propagation_type = _propagation_receiver_type_before(
     &tokens,
     line,
     character,
     &program.nodes,
     doc.path,
-    source_line
+    source_line,
+    &propagation_args
   );
   if !equals(propagation_type, "") {
-    Vec<str> no_propagation_args;
-    no_propagation_args.init(0);
     _members_of(
       &program.nodes,
       propagation_type,
       &items,
       snippets,
       doc.path,
-      no_propagation_args
+      propagation_args
     );
     ret _reply(&items);
   }
@@ -2235,14 +2236,20 @@ fun _operand_type_from_tokens(
 // is (the operand's own chain-ending type, unwrapped one level), just
 // entered from the dot position directly rather than from an already-
 // typed token after it, since nothing is typed yet here. "" when the
-// dot isn't preceded by a propagation at all.
+// dot isn't preceded by a propagation at all. Also fills `out_args`
+// with the unwrapped type's own concrete generic args (`num` out of
+// `Option<Box<num>>`), the same way `_receiver_own_type_with_args`
+// does for a plain receiver - without this, a doubly-generic inner
+// type's members come back with the bare, unsubstituted template
+// param instead of the real instantiation.
 fun _propagation_receiver_type_before(
   Vec<Token>* tokens,
   num line,
   num character,
   Vec<Node>* program,
   str file,
-  num src_line
+  num src_line,
+  Vec<str>* out_args
 ) str {
   num source_line = line + 1;
   num source_col = character + 1;
@@ -2332,8 +2339,14 @@ fun _propagation_receiver_type_before(
   }
   // The raw generic-arg text carries a pointer star as written
   // (`Node*` for `Option<Node*>`), which `_members_of`'s own lookup by
-  // bare type name doesn't expect.
-  ret bare_type_expr(inner.generic_args.get(0));
+  // bare type name doesn't expect; and may itself carry a further
+  // generic instantiation (`Box<num>` out of `Option<Box<num>>`),
+  // which `out_args` preserves for the caller to substitute with.
+  str inner_text = inner.generic_args.get(0);
+  for arg : generic_args_of_detail(inner_text) {
+    out_args.push(arg);
+  }
+  ret bare_type_expr(inner_text);
 }
 
 // The name a dot immediately before the cursor is reached through, or
