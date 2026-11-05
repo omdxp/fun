@@ -1068,6 +1068,45 @@ fun is_arithmetic_operator(str op) flag {
 
 // True when `dt` is a pointer of any depth, matching `write_type`'s
 // `ptr_depth`/`flags.is_pointer` check.
+// Splits `s` on literal "__" into exactly `n` pieces, or `.None` when
+// it doesn't split into exactly that many (too few separators, or a
+// nested generic argument's own "__" producing too many) - the one
+// shape this can reconstruct unambiguously from a flat mangled name
+// alone, with no structural type information left to disambiguate a
+// further-generic segment's own internal "__" from a real separator.
+fun _split_double_underscore_exact(str s, num n) Option<Vec<str>> {
+  if equals(s, "") {
+    ret .None;
+  }
+  // A single segment is never ambiguous - the whole string is that
+  // one argument, whatever characters it contains (its own nested
+  // "__", included).
+  if n == 1 {
+    Vec<str> one;
+    one.init(1);
+    one.push(s);
+    ret .Some(one);
+  }
+  Vec<str> parts;
+  parts.init(n);
+  str rest = s;
+  num found = 0;
+  for found < n - 1 {
+    num sep = index_of_str(rest, "__");
+    if sep < 0 {
+      ret .None;
+    }
+    parts.push(substr(rest, 0, sep));
+    rest = substr(rest, sep + 2, len(rest) - sep - 2);
+    found = found + 1;
+  }
+  if equals(rest, "") || index_of_str(rest, "__") >= 0 {
+    ret .None;
+  }
+  parts.push(rest);
+  ret .Some(parts);
+}
+
 fun dtype_is_pointer(DataType dt) flag {
   if dt.pointer_depth > 0 {
     ret true;
@@ -13271,10 +13310,16 @@ impl Codegen {
             // has nothing to reconstruct ahead of time - mirrors the
             // same gap, and the same fix, in `Checker.
             // _shape_downcast_target_verdict`'s own reconstruction
-            // loop: an explicit `Box<num>(b)` arm names its own chosen
-            // instantiation directly, taken at face value here for the
-            // single-type-param case (the only one a flat mangled
-            // suffix can be split back out of unambiguously).
+            // loop: an explicit `Box<num>(b)` arm (or `Pair<str, num>
+            // (p)`, for a multi-param implementor) names its own
+            // chosen instantiation directly, taken at face value here
+            // instead - unambiguous whenever the mangled suffix splits
+            // into exactly as many plain "__"-joined segments as this
+            // template has type params; a segment that's itself
+            // further-generic (nesting its own "__") is the one case
+            // this can't split back out of unambiguously, same
+            // residual as every other mangled-name reconstruction in
+            // this codebase.
             flag all_unbound = true;
             for tp : i.type_params {
               if self._is_known_concrete_type_name(tp) {
@@ -13283,24 +13328,32 @@ impl Codegen {
               }
             }
             str prefix = format("{str}__", i.type_name);
-            if all_unbound && i.type_params.len == 1 &&
-            starts_with(type_name, prefix) {
-              str explicit_arg = substr(
+            if all_unbound && starts_with(type_name, prefix) {
+              str suffix = substr(
                 type_name,
                 len(prefix),
                 len(type_name) - len(prefix)
               );
-              DataType dt = dtype_new();
-              dt.type_str = i.type_name;
-              DataType* argdt = malloc(sizeof(DataType));
-              *argdt = dtype_new();
-              argdt.type_str = explicit_arg;
-              Vec<DataType*> gargs;
-              gargs.init(1);
-              gargs.push(argdt);
-              dt.generic_args = gargs;
-              self._trigger_compound_instantiation_hoisted(dt);
-              ret;
+              let explicit_args_opt = _split_double_underscore_exact(
+                suffix,
+                i.type_params.len
+              );
+              if explicit_args_opt.is_some() {
+                let explicit_args = explicit_args_opt.unwrap();
+                DataType dt = dtype_new();
+                dt.type_str = i.type_name;
+                Vec<DataType*> gargs;
+                gargs.init(explicit_args.len);
+                for explicit_arg : explicit_args {
+                  DataType* argdt = malloc(sizeof(DataType));
+                  *argdt = dtype_new();
+                  argdt.type_str = explicit_arg;
+                  gargs.push(argdt);
+                }
+                dt.generic_args = gargs;
+                self._trigger_compound_instantiation_hoisted(dt);
+                ret;
+              }
             }
           }
         }

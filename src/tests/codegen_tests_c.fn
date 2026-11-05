@@ -404,6 +404,42 @@ test "a shape-downcast fit arm dispatches correctly against a doubly-generic sha
   assert equals(out, "7\n"), "expected the doubly-generic shape-downcast arm to dispatch to the real value";
 }
 
+test "a shape-downcast fit arm dispatches correctly against a multi-type-param implementor of a doubly-generic shape" {
+  // `impl Pair<K, V> as Container<V>` - a multi-type-param implementor
+  // (the shape depends on only its second param) of a doubly-generic
+  // shape. The gate and lazy vtable trigger both already generalize
+  // over this once the implementor's own explicit downcast target
+  // (`Pair<str, num>(p)`, pre-mangled to the flat "Pair__str__num")
+  // can be split back into its real generic args - previously only
+  // ever attempted for a single-type-param implementor, the one case
+  // a flat mangled suffix split back unambiguously without this; a
+  // 2+-param implementor's own instantiation was never force-
+  // triggered, so the vtable this branch's comparison needs was never
+  // built (`use of undeclared identifier '__fun_impl_Pair__str__num_
+  // Container__num_vtable'`).
+  str src = `use std.c.io;
+  `shape Container<T> { get() T; }
+  `compound Pair<K, V> { K k; V v; }
+  `impl Pair<K, V> as Container<V> { get() V { ret self.v; } }
+  `fun use_it(Container<num> c) num {
+  `  fit c {
+  `    Pair<str, num>(p) -> { ret p.v * 2; }
+  `    _ -> { ret -1; }
+  `  }
+  `}
+  `fun main() num {
+  `  Pair<str, num> p; p.k = "hi"; p.v = 21;
+  `  printf("%lld\n", use_it(&p));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_multi_param_implementor",
+    "a shape-downcast fit arm dispatches correctly against a multi-type-param implementor"
+  );
+  assert equals(out, "42\n"), "expected the multi-param implementor's own downcast arm to dispatch to the real value";
+}
+
 test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Shape impl callable" {
   str src = `use std.c.io;
   `shape Named { name() str; }
