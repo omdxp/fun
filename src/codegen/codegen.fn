@@ -16392,6 +16392,11 @@ impl Codegen {
         }
         ret false;
       }
+      .Ternary(t) -> {
+        ret self._global_init_needs_runtime(*t.cond) ||
+          self._global_init_needs_runtime(*t.then_val) ||
+          self._global_init_needs_runtime(*t.else_val);
+      }
       // A bare name in a global's own initializer can only be another
       // global (no locals exist at file scope); a plain function name
       // would be a function pointer, itself a C constant, but that

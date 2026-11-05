@@ -739,6 +739,30 @@ fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str
       }
       ret "";
     }
+    .ExpressionParenthesis(inner) -> {
+      ret _infer_global_const_type_depth(inner, program, depth + 1);
+    }
+    // `let g = Point{x = 1, y = 2};` - the explicit case names its own
+    // type right there; the bare `.{...}` shorthand has no destination
+    // type to resolve against here (nothing above passes one down),
+    // so it's left unresolved, the same limit every other unresolvable
+    // shape below already has.
+    .CompoundInit(c) -> {
+      if c.has_dtype {
+        ret render_type(c.init_dtype);
+      }
+      ret "";
+    }
+    // `let g = cond ? a : b;` - either arm names the same type as a
+    // matter of typechecking, so the first one that resolves to
+    // anything at all is as good as checking both.
+    .Ternary(t) -> {
+      str then_type = _infer_global_const_type_depth(t.then_val, program, depth + 1);
+      if !equals(then_type, "") {
+        ret then_type;
+      }
+      ret _infer_global_const_type_depth(t.else_val, program, depth + 1);
+    }
     _ -> { ret ""; }
   }
 }

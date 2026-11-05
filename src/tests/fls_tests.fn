@@ -10210,3 +10210,29 @@ test "hover and goto-definition resolve a bare variant shorthand in a fit patter
   str def_out = definition(&reads, doc, 10, 7);
   assert contains(def_out, `"line":1`), "expected goto-definition to land on Some's own declaration line";
 }
+
+test "hover on a let-inferred global's own declaration resolves a ternary or compound-literal initializer, not just a literal" {
+  // `_infer_global_const_type_depth` (symbols.fn) is a separate, far
+  // narrower type inferer than the one locals use - it only ever
+  // recognized a plain literal or a bare reference to another
+  // top-level const, falling through to "" (no type at all) for
+  // anything else, a ternary or a compound literal included. Hovering
+  // a let-inferred local's own declaration already resolves both
+  // correctly (via `infer_let_local_type`, a completely different,
+  // more general function only reached for a local) - this was a
+  // global-only gap, confirmed via that exact asymmetry.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letglobalhoverdecl.fn";
+  doc.path = "letglobalhoverdecl.fn";
+  doc.text = `compound Point { num x; num y; }
+  `fun compute() num { ret 5; }
+  `let g1 = true ? compute() : 2;
+  `let g2 = Point{x = 1, y = 2};
+  `fun main() num { ret g1 + g2.x; }`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 2, 5), "num g1"), "expected the ternary-initialized global's own declaration to hover as 'num g1', not a bare name with no type";
+  assert contains(hover(&reads, doc, 3, 5), "Point g2"), "expected the compound-literal-initialized global's own declaration to hover as 'Point g2', not a bare name with no type";
+}

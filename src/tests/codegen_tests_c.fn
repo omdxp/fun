@@ -3419,6 +3419,38 @@ test "a fixed-size array global whose own elements need runtime init is assigned
   );
 }
 
+test "a global/const's own ternary initializer needing runtime init is caught too, not just a bare call" {
+  // `_global_init_needs_runtime` recursed into every other composite
+  // shape an initializer can take (a binary expression, a compound or
+  // tuple literal, a parenthesized group, a unary operator) but never
+  // into `.Ternary` - a call (or a reference to another global) hidden
+  // inside a ternary's condition or either branch went undetected,
+  // leaking the same raw "initializer element is not a compile-time
+  // constant" error this whole feature exists to avoid. Covers a call
+  // in the true branch, a non-constant condition, and the same shape
+  // nested inside a global's own compound-literal field.
+  str src = `use std.c.io;
+  `compound Point { num x; num y; }
+  `fun compute() num { ret 5; }
+  `fun is_ready() flag { ret true; }
+  `let g1 = true ? compute() : 2;
+  `let g2 = is_ready() ? 1 : 2;
+  `let g3 = Point{x = true ? compute() : 2, y = 1};
+  `fun main() num {
+  `  printf("%lld %lld %lld %lld\n", g1, g2, g3.x, g3.y);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init_ternary",
+    "a global/const's own ternary initializer needing runtime init is caught too, not just a bare call"
+  );
+  assert equals(out, "5 1 5 1\n"), format(
+    "expected every ternary-initialized global to resolve correctly, got: {str}",
+    out
+  );
+}
+
 test "a runtime-deferred global's own init call reaches the test runner's entry point too, not just a plain 'main'" {
   str src = `use std.testing;
   `fun compute() num { ret 101; }
