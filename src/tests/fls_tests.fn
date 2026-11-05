@@ -4976,6 +4976,41 @@ test "hover resolves a field through a shape-downcast arm naming an explicit ins
   assert contains(dotted, `"label":"val","kind":5,"detail":"num"`), "expected dot-completion's own field detail to substitute T against num too";
 }
 
+test "hover, goto-def, and completion resolve a shape-downcast arm naming a multi-type-param implementor's explicit instantiation" {
+  // `_fls_mangled_instantiation_to_generic_text` only ever handled a
+  // single-type-param implementor's own flat mangled suffix
+  // ("Box__num") - a multi-param one ("Pair__str__num") passed
+  // through unchanged, so `p`'s own declaration kept the flat form,
+  // and every downstream lookup off it (field hover, goto-def,
+  // completion) broke the same way it did before that helper existed
+  // at all. Generalized the same way the compiler side's own
+  // `_split_double_underscore_exact` already was.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapedowncastmultiparam.fn";
+  doc.path = "shapedowncastmultiparam.fn";
+  doc.text = `shape Container<T> { get() T; }
+  `compound Pair<K, V> { K k; V v; }
+  `impl Pair<K, V> as Container<V> { get() V { ret self.v; } }
+  `fun use_it(Container<num> c) num {
+  `  fit c {
+  `    Pair<str, num>(p) -> { ret p.v; }
+  `    _ -> { ret -1; }
+  `  }
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 5, 19), "Pair<str, num>* p"), "expected the binding site to show the explicitly-named multi-param instantiation";
+  assert contains(hover(&reads, doc, 5, 33), "num v"), "expected the field hover to resolve through the binding, not null";
+
+  str jumped = definition(&reads, doc, 5, 33);
+  assert !equals(jumped, "[]"), "expected goto-definition on the field access to resolve, not an empty result";
+
+  str dotted = completion(&reads, doc, 5, 33, false);
+  assert contains(dotted, `"label":"v","kind":5,"detail":"num"`), "expected dot-completion's own field detail to resolve too, not fall back to every name in the file";
+}
+
 test "hover resolves a doubly-generic shape's own method, substituted against the parameter's concrete instantiation" {
   // `impl Box<T> as Container<T>` is doubly generic - the shape itself
   // carries the implementor's own unbound type param. Codegen already

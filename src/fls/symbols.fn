@@ -7785,20 +7785,60 @@ pub fun _fls_auto_resolve_bare_generic_shape_target(
   ret type_name;
 }
 
+// Splits `s` on literal "__" into exactly `n` pieces, or `.None` when
+// it doesn't split into exactly that many (too few separators, or a
+// nested generic argument's own "__" producing too many) - the one
+// shape this can reconstruct unambiguously from a flat mangled name
+// alone, with no structural type information left to disambiguate a
+// further-generic segment's own internal "__" from a real separator.
+// Mirrors codegen.fn's own identical `_split_double_underscore_exact`
+// (fls and codegen can't share a free function across modules this
+// way, so each keeps its own copy).
+fun _split_double_underscore_exact(str s, num n) Option<Vec<str>> {
+  if equals(s, "") {
+    ret .None;
+  }
+  // A single segment is never ambiguous - the whole string is that
+  // one argument, whatever characters it contains (its own nested
+  // "__", included).
+  if n == 1 {
+    Vec<str> one;
+    one.init(1);
+    one.push(s);
+    ret .Some(one);
+  }
+  Vec<str> parts;
+  parts.init(n);
+  str rest = s;
+  num found = 0;
+  for found < n - 1 {
+    num sep = index_of_str(rest, "__");
+    if sep < 0 {
+      ret .None;
+    }
+    parts.push(substr(rest, 0, sep));
+    rest = substr(rest, sep + 2, len(rest) - sep - 2);
+    found = found + 1;
+  }
+  if equals(rest, "") || index_of_str(rest, "__") >= 0 {
+    ret .None;
+  }
+  parts.push(rest);
+  ret .Some(parts);
+}
+
 // A shape-downcast arm naming an explicit instantiation of a
 // still-unbound generic template (`Box<num>(b) -> ...` against `impl
-// Box<T> as Sized`) reaches here with `mangled_name` already pre-
-// mangled by the parser to the flat text "Box__num" - correct for
-// display, but opaque to every downstream field/method lookup here,
-// which expects a bare type name plus a separate `generic_args` list
-// (parsed out of a declaration's own "<...>" text by `generic_args_
-// of_detail`, never out of a flat "__"-joined string). Reconstructs
-// the "Box<num>" form so the binding's own declaration round-trips
-// through that same existing machinery instead of needing its own
-// copy of it. Only the single-type-param case is unambiguous to
-// split back out of a flat mangled name this way; a multi-param
-// instantiation passes through unchanged, same residual as every
-// other mangled-name reconstruction in this codebase.
+// Box<T> as Sized`, or `Pair<str, num>(p) -> ...` for a multi-param
+// implementor) reaches here with `mangled_name` already pre-mangled
+// by the parser to the flat text "Box__num"/"Pair__str__num" -
+// correct for display, but opaque to every downstream field/method
+// lookup here, which expects a bare type name plus a separate
+// `generic_args` list (parsed out of a declaration's own "<...>"
+// text by `generic_args_of_detail`, never out of a flat "__"-joined
+// string). Reconstructs the "Box<num>"/"Pair<str, num>" form so the
+// binding's own declaration round-trips through that same existing
+// machinery instead of needing its own copy of it.
 pub fun _fls_mangled_instantiation_to_generic_text(Vec<Node>* program, str mangled_name) str {
   num i = 0;
   for i < program.len {
@@ -7806,18 +7846,36 @@ pub fun _fls_mangled_instantiation_to_generic_text(Vec<Node>* program, str mangl
     i = i + 1;
     fit n.kind {
       .Compound(c) -> {
-        if !c.has_type_params || c.type_params.len != 1 {
+        if !c.has_type_params {
           continue;
         }
         str prefix = format("{str}__", c.name);
         if !starts_with(mangled_name, prefix) {
           continue;
         }
-        str arg = substr(mangled_name, len(prefix), len(mangled_name) - len(prefix));
-        if equals(arg, "") {
+        str suffix = substr(
+          mangled_name,
+          len(prefix),
+          len(mangled_name) - len(prefix)
+        );
+        let args_opt = _split_double_underscore_exact(suffix, c.type_params.len);
+        if args_opt.is_none() {
           continue;
         }
-        ret format("{str}<{str}>", c.name, arg);
+        let args = args_opt.unwrap();
+        StringBuilder sb = string_builder_init(16);
+        sb.append(c.name);
+        sb.append("<");
+        num ai = 0;
+        for arg : args {
+          if ai > 0 {
+            sb.append(", ");
+          }
+          sb.append(arg);
+          ai = ai + 1;
+        }
+        sb.append(">");
+        ret sb.build();
       }
       _ -> {}
     }
