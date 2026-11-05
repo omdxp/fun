@@ -3989,11 +3989,14 @@ impl Parser {
   }
 
   // Parses `const <name> = value;` (type-inferred, like `parse_let_declaration`
-  // but immutable) or `const <type> <name> = value;` (explicit type; only a
-  // builtin datatype keyword is accepted, not a user-defined type name).
-  // Always requires an initializer, since a `const` with no value has
-  // nothing to ever be assigned. Valid at both top-level and function-body
-  // scope.
+  // but immutable) or `const <type> <name> = value;` (explicit type - a
+  // builtin datatype keyword, or any user-defined compound/enum/shape
+  // name, generic args/pointer stars/array brackets included, found by
+  // the same `_bare_type_decl_follows` lookahead a bare `Point p;`
+  // statement already uses to tell "a type name, then the declared
+  // name" apart from "just the declared name"). Always requires an
+  // initializer, since a `const` with no value has nothing to ever be
+  // assigned. Valid at both top-level and function-body scope.
   pub parse_const_declaration(flag is_public) Option<ParseErrorKind> {
     let kw_err = self.state.expect_keyword("const");
     if kw_err.is_some() {
@@ -4014,7 +4017,9 @@ impl Parser {
       }
     }
 
-    if t.type == .Keyword && keyword_is_datatype(kw) {
+    flag is_explicit_type = (t.type == .Keyword && keyword_is_datatype(kw)) ||
+      (t.type == .Identifier && self._bare_type_decl_follows(1));
+    if is_explicit_type {
       DataType* dt = malloc(sizeof(DataType));
       *dt = dtype_new();
       let derr = self.state.parse_datatype(dt);
@@ -6902,6 +6907,91 @@ impl Parser {
   // Top-level-only declarations are not dispatched here; a keyword with
   // no other case above reports a clean "not yet supported" error
   // instead of misparsing.
+  // Whether a bare user-defined-type variable declaration follows,
+  // starting `start_off` tokens ahead - the leading type identifier's
+  // own position (already peeked and confirmed an `.Identifier` by
+  // every caller; this only scans what comes after it): optional
+  // qualified segments (`alias.Type name;`), optional `<...>` generic
+  // args, optional pointer stars, optional array brackets, and
+  // finally another `.Identifier` - the declared name itself.
+  // Shared by `_parse_statement_dispatch` (`Point p;` inside a
+  // function body) and `parse_const_declaration` (`const Point p =
+  // ...;`, which only ever recognized a builtin keyword type before
+  // this, never a user-defined one).
+  _bare_type_decl_follows(num start_off) flag {
+    // Optional qualified type segments after the leading identifier:
+    // `alias.Type name;` (a module-alias-qualified type). Reads the
+    // same shape as `parse_datatype`'s `.`-segment loop, once this
+    // lookahead has already committed to the declaration path.
+    num off = start_off;
+    for true {
+      let dot_tok = self.state.token_peek_n(off);
+      if dot_tok.is_none() {
+        break;
+      }
+      flag is_dot = token_is_operator(dot_tok.unwrap(), ".") ||
+        token_is_symbol(
+        dot_tok.unwrap(),
+        '.'
+      );
+      if !is_dot {
+        break;
+      }
+      let seg_tok = self.state.token_peek_n(off + 1);
+      if seg_tok.is_none() || seg_tok.unwrap().type != .Identifier {
+        break;
+      }
+      off = off + 2;
+    }
+    off = self.state.skip_generic_args_tokens(off);
+    for true {
+      let tn = self.state.token_peek_n(off);
+      if tn.is_none() {
+        break;
+      }
+      if token_is_operator(tn.unwrap(), "*") {
+        off = off + 1;
+        continue;
+      }
+      break;
+    }
+    // Optional array brackets after the type name: `T[] xs;` or
+    // `T[64] xs;`. Without skipping these, a local declaration of a
+    // user-defined (or generic-param) array type falls through to
+    // the expression path instead, which doesn't parse.
+    for true {
+      let bn = self.state.token_peek_n(off);
+      if bn.is_none() || !token_is_operator(bn.unwrap(), "[") {
+        break;
+      }
+      off = off + 1; // skip '['
+      flag closed = false;
+      for true {
+        let inn = self.state.token_peek_n(off);
+        if inn.is_none() {
+          break;
+        }
+        let innt = inn.unwrap();
+        if token_is_symbol(innt, ']') {
+          off = off + 1; // skip ']'
+          closed = true;
+          break;
+        }
+        // Hitting a statement terminator before ']' means this
+        // isn't a declaration after all.
+        if token_is_symbol(innt, ';') {
+          break;
+        }
+        off = off + 1;
+      }
+      if !closed {
+        break;
+      }
+    }
+    let t1 = self.state.token_peek_n(off);
+    ret t1.is_some() && t1.unwrap().type == .Identifier;
+  }
+
   _parse_statement_dispatch() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -6997,80 +7087,9 @@ impl Parser {
       // `<Identifier> [<generic args>] [* ...] [[...]] <Identifier>`
       // lookahead, guarded on the name not already being a scope entity so
       // an expression statement like `w * h;` isn't misread as a pointer
-      // declaration. `skip_generic_args_tokens` skips the optional `<...>`
-      // between the type name and any pointer stars.
+      // declaration.
       if self.state.get_scope_entity(name) == nil {
-        // Optional qualified type segments after the leading identifier:
-        // `alias.Type name;` (a module-alias-qualified type). Reads the
-        // same shape as `parse_datatype`'s `.`-segment loop, once this
-        // lookahead has already committed to the declaration path.
-        num off = 1;
-        for true {
-          let dot_tok = self.state.token_peek_n(off);
-          if dot_tok.is_none() {
-            break;
-          }
-          flag is_dot = token_is_operator(dot_tok.unwrap(), ".") ||
-            token_is_symbol(
-            dot_tok.unwrap(),
-            '.'
-          );
-          if !is_dot {
-            break;
-          }
-          let seg_tok = self.state.token_peek_n(off + 1);
-          if seg_tok.is_none() || seg_tok.unwrap().type != .Identifier {
-            break;
-          }
-          off = off + 2;
-        }
-        off = self.state.skip_generic_args_tokens(off);
-        for true {
-          let tn = self.state.token_peek_n(off);
-          if tn.is_none() {
-            break;
-          }
-          if token_is_operator(tn.unwrap(), "*") {
-            off = off + 1;
-            continue;
-          }
-          break;
-        }
-        // Optional array brackets after the type name: `T[] xs;` or
-        // `T[64] xs;`. Without skipping these, a local declaration of a
-        // user-defined (or generic-param) array type falls through to
-        // the expression path instead, which doesn't parse.
-        for true {
-          let bn = self.state.token_peek_n(off);
-          if bn.is_none() || !token_is_operator(bn.unwrap(), "[") {
-            break;
-          }
-          off = off + 1; // skip '['
-          flag closed = false;
-          for true {
-            let inn = self.state.token_peek_n(off);
-            if inn.is_none() {
-              break;
-            }
-            let innt = inn.unwrap();
-            if token_is_symbol(innt, ']') {
-              off = off + 1; // skip ']'
-              closed = true;
-              break;
-            }
-            // Hitting a statement terminator before ']' means this
-            // isn't a declaration after all.
-            if token_is_symbol(innt, ';') {
-              break;
-            }
-            off = off + 1;
-          }
-          if !closed {
-            break;
-          }
-        }
-        let t1 = self.state.token_peek_n(off);
-        if t1.is_some() && t1.unwrap().type == .Identifier {
+        if self._bare_type_decl_follows(1) {
           ret self._parse_bare_type_variable_declaration(false);
         }
       }

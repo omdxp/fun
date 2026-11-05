@@ -403,6 +403,42 @@ test "a top-level global's own compound-literal initializer drops its redundant 
     "expected every nested field/array-element compound literal inside the global's own initializer to drop its cast too";
 }
 
+test "an explicitly-typed const names a user-defined compound, not just a builtin scalar" {
+  // `const <type> <name> = value;` only ever recognized `<type>` as a
+  // builtin datatype keyword (num/str/dec/flag/chr/raw) - a user-
+  // defined compound/enum/shape name is a plain `.Identifier` token,
+  // never a `.Keyword`, so `const Box g = Box{...};` fell through to
+  // the type-inferred form instead, reading "Box" as the const's own
+  // name rather than its type - the real next token ("g") was never
+  // the `=` that form expects, failing with "'let' declarations
+  // require an initializer". Pre-existing, unrelated to anything this
+  // session already touched; fixed generally via the same `<Identifier>
+  // [<generic args>] [* ...] [[...]] <Identifier>` lookahead a bare
+  // `Point p;` statement already uses to tell a type-then-name
+  // sequence apart from a bare name, now shared (`_bare_type_decl_
+  // follows`) rather than only ever reached from statement parsing.
+  // Covers a generic instantiation and a pointer type alongside the
+  // plain case, plus confirms the already-working inferred and
+  // builtin-scalar forms still parse.
+  str src = `use std.c.io;
+  `compound Box<T> { T val; }
+  `fun main() num {
+  `  const num x = 5;
+  `  const y = 7;
+  `  const Box<num> gb = Box<num>{val = 11};
+  `  Box<num> local_box = Box<num>{val = 1};
+  `  const Box<num>* pb = &local_box;
+  `  printf("%lld %lld %lld %lld\n", x, y, gb.val, pb.val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "const_user_defined_type",
+    "an explicitly-typed const names a user-defined compound, not just a builtin scalar"
+  );
+  assert equals(out, "5 7 11 1\n"), "expected every const form to parse and resolve to its own real value";
+}
+
 test "an array literal's own shape-typed elements coerce correctly" {
   // An 8th `__fun_coerce_` site, missed by the 7 already fixed this
   // session: an array literal's own elements never got the coercion
