@@ -323,6 +323,49 @@ test "a struct-literal field initializer coercing a concrete value into a shape-
   assert equals(out, "1 42\n"), "expected both the plain and doubly-generic shape-typed fields to coerce and dispatch correctly";
 }
 
+test "a top-level global's own shape-typed initializer coerces correctly" {
+  // A 7th `__fun_coerce_` site, missed by the 6 already fixed this
+  // session: a shape-typed global's own initializer never got the
+  // coercion wrap at all, leaking a raw concrete pointer where C
+  // expects the shape's fat-pointer struct. Unlike every other site
+  // (all inside a function body, always emitted after `impl`'s own
+  // top-level pass already built its vtable machinery in plain
+  // source order), `pub transpile` deliberately emits every global
+  // first, so even once the coercion itself is wrapped on, the
+  // underlying vtable/coerce-helper this needs doesn't exist yet -
+  // needing its own early, hoisted trigger (`_ensure_plain_shape_
+  // impl_vtable_emitted`, `impl`'s own analog to `ensure_generic_
+  // impl_shape_vtable_instantiated`). And even with the vtable
+  // triggered early, the ordinary `__fun_coerce_` function call every
+  // other site uses is itself invalid here: C requires a global's own
+  // initializer to be a compile-time constant, which a function call
+  // never is, however trivial its body - so a global's own coercion
+  // inlines the identical brace literal directly instead of calling
+  // through to it. Covers a plain shape and a doubly-generic one
+  // side by side.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret self.val; } }
+  `Box g_box = Box{val = 9};
+  `Sized g_shape = &g_box;
+  `shape Container<T> { get() T; }
+  `compound GBox<T> { T val; }
+  `impl GBox<T> as Container<T> { get() T { ret self.val; } }
+  `GBox<num> g_gbox = GBox<num>{val = 77};
+  `Container<num> g_container = &g_gbox;
+  `fun main() num {
+  `  printf("%lld %lld\n", g_shape.len(), g_container.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_shape_coerce",
+    "a top-level global's own shape-typed initializer coerces correctly"
+  );
+  assert equals(out, "9 77\n"), "expected both the plain and doubly-generic shape-typed globals to coerce and dispatch correctly";
+}
+
 test "a shape-downcast fit arm dispatches correctly against a doubly-generic shape" {
   // `impl Box<T> as Container<T>` is doubly generic - the subject's
   // own declared type (`Container<num>`) resolves to its concrete

@@ -13300,6 +13300,50 @@ impl Codegen {
     }
   }
 
+  // Forces a genuinely plain (neither generic nor a forced concrete
+  // instantiation) shape impl's vtable machinery to exist right now,
+  // hoisted to wherever `hoist_insert_pos` currently points - needed
+  // specifically for a shape-typed global's own coercion, the one
+  // coercion site that runs before the ordinary top-level per-impl
+  // pass (`pub transpile` deliberately emits every global first, so a
+  // later-hoisted monomorphized definition still lands before it; see
+  // that pass's own comment). Every other coercion site sits inside a
+  // function body, always emitted after that ordinary pass already
+  // built this same impl's machinery in plain source order, so this
+  // was never needed there. A no-op (not an error) when no such impl
+  // exists, or it's already built - `emit_shape_vtable_machinery`'s
+  // own dedup handles the latter.
+  _ensure_plain_shape_impl_vtable_emitted(str type_name, str shape_name) {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_shape_name || !equals(i.shape_name, shape_name) ||
+          i.has_type_params || i.has_concrete_dtype ||
+          !equals(i.type_name, type_name) {
+            continue;
+          }
+          CodegenState pq_scratch = self.new_scratch_state();
+          CodegenState* saved_pq_state = self.state;
+          let saved_pq_hoist_pos = self.hoist_insert_pos;
+          let saved_pq_scratch_depth = self.hoist_scratch_depth;
+          let saved_pq_stmt_start_pos = self.current_stmt_start_pos;
+          self.state = &pq_scratch;
+          self.hoist_insert_pos = .None;
+          self.hoist_scratch_depth = 0;
+          self.current_stmt_start_pos = .None;
+          self.emit_shape_vtable_machinery(n);
+          self.state = saved_pq_state;
+          self.hoist_insert_pos = saved_pq_hoist_pos;
+          self.hoist_scratch_depth = saved_pq_scratch_depth;
+          self.current_stmt_start_pos = saved_pq_stmt_start_pos;
+          self.emit_hoisted(pq_scratch.out.build());
+          ret;
+        }
+        _ -> {}
+      }
+    }
+  }
+
   // Mirrors `Checker._is_known_concrete_name`: whether `name` is a
   // fixed, real type (a non-generic compound, a non-generic enum, or a
   // builtin scalar), never a still-abstract type-parameter name.
@@ -16167,10 +16211,67 @@ impl Codegen {
           // too; see `Codegen.in_array_initializer`.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
+          // A shape-typed global's initializer needs the same
+          // coercion wrap a local `Variable` declaration's own
+          // initializer already gets - a separate codegen path from
+          // that one, so it never inherited the fix.
+          flag global_did_shape_coerce = false;
+          str global_concrete_name_for_coerce = "";
+          str global_shape_name_for_coerce = "";
+          if !is_let {
+            str global_shape_type = v.var_type.type_str;
+            if !self.shape_names.contains(global_shape_type) &&
+              v.var_type.generic_args.len > 0 {
+              StringBuilder gq_sb = string_builder_init(16);
+              gq_sb.append(v.var_type.type_str);
+              for gqarg : v.var_type.generic_args {
+                gq_sb.append("__");
+                gq_sb.append(gqarg.type_str);
+              }
+              let gq_candidate = gq_sb.build();
+              if self.shape_names.contains(gq_candidate) {
+                global_shape_type = gq_candidate;
+              }
+            }
+            if self.shape_names.contains(global_shape_type) {
+              let global_concrete = self.resolve_shape_coerce_concrete_type(v.val);
+              if global_concrete.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  global_concrete.unwrap(),
+                  global_shape_type
+                );
+                self._ensure_plain_shape_impl_vtable_emitted(
+                  global_concrete.unwrap(),
+                  global_shape_type
+                );
+                // Not the ordinary `__fun_coerce_` function call every
+                // other coercion site uses: C requires a global's own
+                // initializer to be a compile-time constant expression,
+                // which a function call - however trivial its body -
+                // never is. The call's own body is nothing but this
+                // same brace literal already, so it's inlined directly
+                // instead: both `&recv` and the vtable instance's own
+                // address are themselves compile-time constants
+                // (addresses of other statics), so this compiles where
+                // a call wrapping the identical value never could.
+                self.state.write("{ .self = (");
+                global_concrete_name_for_coerce = global_concrete.unwrap();
+                global_shape_name_for_coerce = global_shape_type;
+                global_did_shape_coerce = true;
+              }
+            }
+          }
           let verr = self.emit_expr(*v.val);
           self.in_array_initializer = prev_arr_init;
           if verr.is_some() {
             ret verr;
+          }
+          if global_did_shape_coerce {
+            self.state.write("), .vtable = &__fun_impl_");
+            self.state.write(global_concrete_name_for_coerce);
+            self.state.write("_");
+            self.state.write(global_shape_name_for_coerce);
+            self.state.write("_vtable }");
           }
         }
         self.state.write(";\n");
