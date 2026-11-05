@@ -6827,6 +6827,38 @@ test "code actions implement a shape's missing method with its exact declared si
   assert contains(out, `"start":{"line":9,"character":0}`), "expected the insertion right before the impl's closing brace";
 }
 
+test "code actions implement a concrete shape instantiation's missing method with its substituted signature" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///shapegapgeneric.fn";
+  doc.path = "shapegapgeneric.fn";
+  doc.text = `compound Point {
+  `  num x;
+  `}
+  `shape Container<T> {
+  `  get(T n) T;
+  `}
+  `impl Point as Container<num> {
+  `}`;
+  doc.version = 1;
+
+  Diagnostic d;
+  d.line = 6;
+  d.col = 0;
+  d.end_line = 6;
+  d.end_col = 1;
+  d.severity = DIAG_SEVERITY_ERROR;
+  d.message = "'Point' does not supply 'get', which 'Container' requires";
+  Vec<Diagnostic> diags;
+  diags.init(1);
+  diags.push(d);
+
+  str out = code_actions(&reads, doc, doc.uri, &diags);
+  assert contains(out, `"title":"Implement missing 'Container.get'"`), "expected the shape-method quick fix";
+  assert contains(out, `"newText":"  pub get(num n) num {\n    // TODO: implement\n  }\n"`), "expected the stub substituted against the impl's own concrete instantiation, not the shape's bare type param";
+}
+
 test "code actions insert 'await' right where a missing-await error points" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

@@ -7883,6 +7883,42 @@ pub fun _fls_mangled_instantiation_to_generic_text(Vec<Node>* program, str mangl
   ret mangled_name;
 }
 
+// The concrete args a `shape_name`'s own mangled concrete instantiation
+// ("Container__num", "Pair__str__num") supplies for that shape's type
+// params, split out the same way `_fls_mangled_instantiation_to_generic_
+// text` reconstructs an implementor's. Empty when the shape isn't found,
+// isn't generic, or `mangled` doesn't split cleanly against its param
+// count - callers treat that the same as "no concrete args known" and
+// fall back to the bare, unsubstituted signature.
+pub fun shape_instantiation_args(Vec<Node>* program, str shape_name, str mangled) Vec<str> {
+  Vec<str> empty_args;
+  empty_args.init(0);
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Shape(q) -> {
+        if !equals(q.name, shape_name) || !q.has_type_params {
+          continue;
+        }
+        str prefix = format("{str}__", shape_name);
+        if !starts_with(mangled, prefix) {
+          continue;
+        }
+        str suffix = substr(mangled, len(prefix), len(mangled) - len(prefix));
+        let args_opt = _split_double_underscore_exact(suffix, q.type_params.len);
+        if args_opt.is_none() {
+          continue;
+        }
+        ret args_opt.unwrap();
+      }
+      _ -> {}
+    }
+  }
+  ret empty_args;
+}
+
 fun _lookup_fit_binding(
   Vec<Token>* tokens,
   Node* body,
