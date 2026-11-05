@@ -3105,6 +3105,41 @@ test "operator overloading: a nested index/unary operand dispatches too" {
   assert equals(ran, "101 202 303 / 9 18 27\n"), "expected p[0] + c and -a + b to both componentwise compute correctly";
 }
 
+test "operator overloading: a parenthesized dispatched operand dispatches its own outer operator too" {
+  // `(a + b) == c`: a parenthesized group is its own distinct node
+  // kind (`.ExpressionParenthesis`, never folded into the expression
+  // it wraps), which `resolve_operator_operand` had no case for at
+  // all - unlike `resolve_field_chain`, which already handles it for
+  // every other receiver position. The inner `+` dispatched to
+  // `op_add` correctly on its own either way; only the outer `==`
+  // fell through to plain, invalid C infix on two full compound
+  // values, since it could never even try resolving its own
+  // parenthesized left operand's type.
+  str src = `use std.io;
+  `compound Vec2 { num x; num y; }
+  `impl Vec2 {
+  `  op_add(Vec2 other) Vec2 {
+  `    ret Vec2{x = self.x + other.x, y = self.y + other.y};
+  `  }
+  `  op_eq(Vec2 other) flag { ret self.x == other.x && self.y == other.y; }
+  `}
+  `fun main() {
+  `  Vec2 a = Vec2{x = 1, y = 2};
+  `  Vec2 b = Vec2{x = 3, y = 4};
+  `  flag eq1 = a == b;
+  `  flag sum_eq = (a + b) == Vec2{x = 4, y = 6};
+  `  println_fmt("{flag} {flag}", eq1, sum_eq);
+  `}`;
+  let out = emit_c(src, "op_parenthesized_dispatch");
+  assert contains(out, "Vec2__op_eq"), "expected the outer == to dispatch through op_eq too";
+  let ran = run_source(
+    src,
+    "op_parenthesized_dispatch",
+    "a parenthesized dispatched operand dispatches its own outer operator too"
+  );
+  assert equals(ran, "false true\n"), "expected a == b false and (a + b) == Vec2{4, 6} true";
+}
+
 test "operator overloading: a plain function call's own result as an operand still does not dispatch" {
   // Deliberately NOT fixed, unlike chained/field/index/unary operands:
   // determining a *generic* call's own return type can trigger

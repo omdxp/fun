@@ -5360,6 +5360,15 @@ impl Codegen {
   resolve_operator_operand(Node* operand) Option<ChainResolution> {
     fit operand.kind {
       .Identifier(_) -> { ret self.resolve_field_chain(operand); }
+      // `(a + b) == c`: a parenthesized group is its own node kind
+      // (never folded into the `.Expression` it wraps), so without
+      // this the outer `==` never even tried to resolve its own left
+      // operand's type here - it fell through as plain, unresolved C
+      // infix `==` on two full compound values, even though the
+      // inner `+` dispatched correctly on its own (nothing stopped
+      // `resolve_field_chain`'s own identical arm from already doing
+      // this for every other receiver position).
+      .ExpressionParenthesis(inner) -> { ret self.resolve_operator_operand(inner); }
       .Expression(inner_e) -> {
         // Deliberately no `"()"` case: a plain call result used
         // directly (`get_vec3() + b`, no intermediate `let`) looks
