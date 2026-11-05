@@ -4387,8 +4387,31 @@ pub fun chain_ending_receiver(
       ret empty;
     }
     empty.type_name = type_name_of_local(tokens, program, name, file, line);
-    empty.full_type_name = empty.type_name;
     empty.generic_args = local_generic_args(tokens, program, name, file, line);
+    if empty.generic_args.len == 0 {
+      empty.full_type_name = empty.type_name;
+    } else {
+      // Mirrors the call-return branch above: `type_name` alone is
+      // the bare template name (`type_name_of_local` already strips
+      // generic args via `bare_type_from_detail`), but `full_type_name`
+      // is what a caller displays or splits back apart - a bare local/
+      // parameter's own declared instantiation (`Option<num> o`) needs
+      // its args reconstructed here too, not just scalars/compounds
+      // reached through a call.
+      StringBuilder fb = string_builder_init(32);
+      fb.append(empty.type_name);
+      fb.append("<");
+      num fbi = 0;
+      for fbi < empty.generic_args.len {
+        if fbi > 0 {
+          fb.append(", ");
+        }
+        fb.append(empty.generic_args.get(fbi));
+        fbi = fbi + 1;
+      }
+      fb.append(">");
+      empty.full_type_name = fb.build();
+    }
     ret empty;
   }
   if last_is_call {

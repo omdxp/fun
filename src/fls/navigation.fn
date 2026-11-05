@@ -1293,9 +1293,22 @@ pub fun resolve_at(
       source_line
     );
     if !equals(context_type, "") {
-      Vec<str> no_args;
-      no_args.init(0);
-      let cv = enum_variant_declaration(&program.nodes, context_type, name, no_args);
+      // `context_type` is a rendered "Name<args>" type (same shape
+      // `_param_type_from_piece`/`ChainReceiver.full_type_name`
+      // produce), not a bare name - split it the same way every other
+      // caller of a generic-aware lookup does, rather than handing the
+      // whole thing to `enum_variant_declaration` as if it already
+      // were one (an exact `equals` match against the AST's own bare
+      // enum name, which a generic instantiation's own angle brackets
+      // always failed outright).
+      Vec<str> context_args = generic_args_of_detail(context_type);
+      str bare_context_type = bare_type_expr(context_type);
+      let cv = enum_variant_declaration(
+        &program.nodes,
+        bare_context_type,
+        name,
+        context_args
+      );
       if cv.is_some() {
         ret cv;
       }
@@ -1522,7 +1535,23 @@ pub fun dot_shorthand_context_type_at(
       ret "";
     }
     Token last = operand.unwrap();
-    ret chain_ending_type(tokens, last, token_is_symbol(last, ')'), program, file, line);
+    // `full_type_name`, not `chain_ending_type`'s bare `type_name`
+    // alone: a generic comparison operand (`x == .Some(5)` against an
+    // `Option<num>` operand) needs its own concrete args to reach the
+    // variant/payload lookup below, which `chain_ending_type` always
+    // discarded - `full_type_name` already carries both in the same
+    // "Name<args>" text every other context source here returns, so
+    // every downstream caller can split it the same way regardless of
+    // which branch produced it.
+    ret chain_ending_receiver(
+      tokens,
+      last,
+      token_is_symbol(last, ')'),
+      program,
+      file,
+      line,
+      0
+    ).full_type_name;
   }
 
   if token_is_operator(prev, "(") || token_is_operator(prev, ",") {
@@ -1650,13 +1679,22 @@ fun _call_arg_expected_type(
     // Any other context the outer shorthand itself reads against (a
     // `?!(...)` error slot, another call's parameter, a comparison or
     // assignment operand): resolve that enum first, then take this
-    // variant's own payload at `arg_index`.
+    // variant's own payload at `arg_index`. `owner` is a rendered
+    // "Name<args>" type, same shape `_param_type_from_piece` below
+    // produces - split the same way, rather than handing the whole
+    // thing to `variant_payload_type` as if it were already a bare
+    // name, which only ever matched a non-generic enum.
     str owner = dot_shorthand_context_type_at(tokens, program, callee_idx - 1, file, line);
     if !equals(owner, "") {
-      Vec<str> no_args;
-      no_args.init(0);
-      let payload = variant_payload_type(program, owner, callee_name, arg_index, no_args);
-      no_args.free();
+      Vec<str> owner_args = generic_args_of_detail(owner);
+      str bare_owner = bare_type_expr(owner);
+      let payload = variant_payload_type(
+        program,
+        bare_owner,
+        callee_name,
+        arg_index,
+        owner_args
+      );
       if payload.is_some() {
         ret payload.unwrap();
       }
@@ -1670,21 +1708,22 @@ fun _call_arg_expected_type(
     // A method call: written arguments never include `self`, but the
     // callee's own rendered signature does - shift the index to match.
     arg_index = arg_index + 1;
-    // `chain_receiver_type`, not `chain_ending_type`: the latter needs
+    // `chain_receiver`, not `chain_ending_type`: the latter needs
     // the receiver chain's own last token handed in already correctly
     // isolated, which this call site got wrong for anything beyond a
     // single hop (passing the token right before the connecting dot,
-    // rather than the connecting dot's own far side) - `chain_receiver_type`
+    // rather than the connecting dot's own far side) - `chain_receiver`
     // takes the member name itself and walks its own receiver back,
     // the same way every other hover/completion call site in this file
-    // already does.
-    str receiver_type = chain_receiver_type(tokens, callee, program, file, line);
-    if equals(receiver_type, "") {
+    // already does. Its own `generic_args` (dropped here until now)
+    // specializes a generic method's own parameter types against the
+    // receiver's real instantiation, the same substitution every other
+    // `lookup_method` call site in this file already threads through.
+    let recv = chain_receiver(tokens, callee, program, file, line, 0);
+    if equals(recv.type_name, "") {
       ret "";
     }
-    Vec<str> no_args;
-    no_args.init(0);
-    let method = lookup_method(program, receiver_type, callee_name, no_args);
+    let method = lookup_method(program, recv.type_name, callee_name, recv.generic_args);
     if method.is_none() {
       ret "";
     }

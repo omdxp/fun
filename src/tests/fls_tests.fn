@@ -10236,3 +10236,58 @@ test "hover on a let-inferred global's own declaration resolves a ternary or com
   assert contains(hover(&reads, doc, 2, 5), "num g1"), "expected the ternary-initialized global's own declaration to hover as 'num g1', not a bare name with no type";
   assert contains(hover(&reads, doc, 3, 5), "Point g2"), "expected the compound-literal-initialized global's own declaration to hover as 'Point g2', not a bare name with no type";
 }
+
+test "hover on a bare '.Variant' shorthand substitutes a generic comparison/call-argument context's own concrete args" {
+  // `dot_shorthand_context_type_at`/`_call_arg_expected_type`
+  // (navigation.fn) all rendered the context type as full "Name<args>"
+  // text (the same shape `_param_type_from_piece`/`full_type_name`
+  // produce everywhere else), but handed that whole string straight
+  // to `enum_variant_declaration`/`variant_payload_type` as if it
+  // were already a bare name - an exact `equals` match against the
+  // AST's own bare enum name, which a generic instantiation's own
+  // angle brackets always failed outright (silently returning no
+  // hover at all for a call argument, or the unsubstituted template
+  // for a comparison operand). Three distinct sites, three distinct
+  // repros: a comparison operand, a plain function's call argument,
+  // and a generic method's call argument (which also needs the
+  // receiver's own concrete args threaded into the method lookup
+  // itself, not just the enum lookup afterward).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+
+  Document cmp_doc;
+  cmp_doc.uri = "file:///dotshorthandcmp.fn";
+  cmp_doc.path = "dotshorthandcmp.fn";
+  cmp_doc.text = `use std.option;
+  `fun check(Option<num> o) flag {
+  `  ret o == .Some(5);
+  `}`;
+  cmp_doc.version = 1;
+  assert contains(hover(&reads, cmp_doc, 2, 13), "Some(num)"), "expected the comparison operand's own concrete arg substituted, not the bare template";
+
+  Document call_doc;
+  call_doc.uri = "file:///dotshorthandcall.fn";
+  call_doc.path = "dotshorthandcall.fn";
+  call_doc.text = `use std.option;
+  `fun want(Option<num> o) {}
+  `fun use_it() {
+  `  want(.Some(5));
+  `}`;
+  call_doc.version = 1;
+  assert contains(hover(&reads, call_doc, 3, 9), "Some(num)"), "expected a plain function's own call-argument context to resolve at all, not null";
+
+  Document method_doc;
+  method_doc.uri = "file:///dotshorthandmethod.fn";
+  method_doc.path = "dotshorthandmethod.fn";
+  method_doc.text = `use std.option;
+  `compound Box<T> { T val; }
+  `impl Box<T> {
+  `  pub set(Option<T> v) {}
+  `}
+  `fun use_it() {
+  `  Box<num> b;
+  `  b.set(.Some(5));
+  `}`;
+  method_doc.version = 1;
+  assert contains(hover(&reads, method_doc, 7, 10), "Some(num)"), "expected the generic method's own receiver instantiation substituted into its own parameter type, not the bare T";
+}
