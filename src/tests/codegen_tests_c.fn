@@ -444,6 +444,31 @@ test "a top-level global's own explicitly-typed and let-inferred bare shorthand 
   assert equals(out, "0 1 2 0 5 9\n"), "expected every global form to parse, compile, and resolve to its own real value";
 }
 
+test "a let-inferred global's own compound/enum shorthand drops its leading cast under MSVC too" {
+  // Real Windows CI caught this (C2099 "initializer is not a
+  // constant") where no local MSVC was available to catch it first.
+  // Root cause: a `let`-inferred global's own MSVC branch writes a
+  // real declared type on the LHS once inference succeeds (`Box`, not
+  // `int64_t`) - exactly the shape `in_bare_initializer_context`
+  // exists to drop the cast for - but the guard deciding whether to
+  // drop it only ever checked `!is_let`, never actually asking
+  // whether a real type ended up on the LHS this time.
+  str src = `enum Color { Red, Green, Blue }
+  `compound Box { num val; }
+  `let g_color_let = .Red;
+  `let g_box_let = Box{val = 9};
+  `fun main() num { ret g_color_let.tag_value() + g_box_let.val; }`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "global_let_msvc_bare_cast",
+    "a let-inferred global's own compound/enum shorthand drops its leading cast under MSVC too"
+  );
+  assert !contains(out_c, "g_box_let = (Box)"), "expected no leading cast on a let-inferred compound global's own initializer under MSVC";
+  assert !contains(out_c, "g_color_let = (Color)"), "expected no leading cast on a let-inferred enum-shorthand global's own initializer under MSVC";
+  assert contains(out_c, "Box g_box_let ="), "expected the real inferred type on the LHS, not int64_t";
+  assert contains(out_c, "Color g_color_let ="), "expected the real inferred type on the LHS, not int64_t";
+}
+
 test "an explicitly-typed const names a user-defined compound, not just a builtin scalar" {
   // `const <type> <name> = value;` only ever recognized `<type>` as a
   // builtin datatype keyword (num/str/dec/flag/chr/raw) - a user-
@@ -3277,4 +3302,144 @@ test "memcheck's own quarantine recycles retired guard pages past its budget, wi
     "expected no memcheck report against ordinary alloc/free, got: {str}",
     result.stderr_text
   );
+}
+
+test "a top-level global/const's own initializer runs at startup when it isn't a C compile-time constant" {
+  // C rejects a function call, a generic call, a stdlib constructor
+  // (`some()`/`ok()`), or a copy of another global's own value as a
+  // static-duration initializer outright. Each of these buffers its
+  // real assignment into a generated `__fun_init_globals`, run once
+  // before `main`'s own body - this covers every shape that routes
+  // through it: a plain call, an explicit-type and a let-inferred
+  // global both calling, an implicit const calling, a generic call,
+  // an Option constructor, and a plain cross-global copy (scalar and
+  // compound), chained against an earlier runtime-inited global too.
+  str src = `use std.c.io;
+  `use std.option;
+  `compound Point { num x; num y; }
+  `fun compute() num { ret 7; }
+  `fun identity<T>(T x) T { ret x; }
+  `fun double_it(num x) num { ret x * 2; }
+  `num G1 = compute();
+  `let G2 = compute();
+  `const G3 = compute();
+  `num G4 = identity(42);
+  `Option<num> G5 = some(42);
+  `Point A = Point{x = 1, y = 2};
+  `Point B = A;
+  `const Point C = A;
+  `num G6 = double_it(5);
+  `num G7 = G6 + double_it(1);
+  `fun main() num {
+  `  printf(
+  `    "%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld\n",
+  `    G1, G2, G3, G4, G5.unwrap(), B.x, B.y, C.x, G6, G7
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init",
+    "a top-level global/const's own initializer runs at startup when it isn't a C compile-time constant"
+  );
+  assert equals(out, "7 7 7 42 42 1 2 1 10 12\n"), format(
+    "expected every runtime-deferred global to resolve correctly before main, got: {str}",
+    out
+  );
+}
+
+test "a shape field nested two levels deep inside a global's own literal stays a compile-time constant" {
+  // A shape field nested inside a compound that's itself an array
+  // element inside another compound (`Outer.items[i].inner`) reaches
+  // `CompoundInit`'s own general field-coercion code, which previously
+  // always wrote an ordinary `__fun_coerce_` function call there,
+  // regardless of context - correct for a local (calls are fine), but
+  // never a C compile-time constant, which a global's own initializer
+  // must be. `emit_global_variable`'s own existing inline-as-constant
+  // special case only ever reached the global's own direct type or its
+  // direct array element, one level - never a field nested this deep.
+  str src = `use std.c.io;
+  `shape HasX { getX() num; }
+  `compound Point { num x; }
+  `impl Point as HasX { getX() num { ret self.x; } }
+  `compound Wrapper { HasX inner; }
+  `compound Outer { Wrapper[2] items; }
+  `Point p1;
+  `Point p2;
+  `Outer OG = Outer{items = [Wrapper{inner = &p1}, Wrapper{inner = &p2}]};
+  `fun main() num {
+  `  p1.x = 10;
+  `  p2.x = 20;
+  `  printf(
+  `    "%lld %lld\n",
+  `    OG.items[0].inner.getX(), OG.items[1].inner.getX()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init_shape",
+    "a shape field nested two levels deep inside a global's own literal stays a compile-time constant"
+  );
+  assert equals(out, "10 20\n"), format(
+    "expected the nested shape field to resolve correctly, got: {str}",
+    out
+  );
+}
+
+test "a fixed-size array global whose own elements need runtime init is assigned element by element, both explicit and inferred size" {
+  // A C array type is never assignable as a whole - `arr = {...}` is
+  // illegal regardless of any cast - so an array literal whose own
+  // elements can't be constant (each one a call here) can't route
+  // through the single "name = value" runtime-init path every other
+  // shape does; each element gets its own assignment statement
+  // instead. Covers both an explicit size (`num[3]`) and a size
+  // inferred from the literal itself (`num[]`), since the inferred
+  // case also needs a real compile-time size written into the
+  // declarator where the (runtime-only) value used to supply it.
+  str src = `use std.c.io;
+  `fun compute(num n) num { ret n * 10; }
+  `num[3] arr1 = [compute(1), compute(2), compute(3)];
+  `num[] arr2 = [compute(4), compute(5)];
+  `fun main() num {
+  `  printf(
+  `    "%lld %lld %lld %lld %lld\n",
+  `    arr1[0], arr1[1], arr1[2], arr2[0], arr2[1]
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init_array",
+    "a fixed-size array global whose own elements need runtime init is assigned element by element, both explicit and inferred size"
+  );
+  assert equals(out, "10 20 30 40 50\n"), format(
+    "expected every array element to resolve correctly, got: {str}",
+    out
+  );
+}
+
+test "a runtime-deferred global's own init call reaches the test runner's entry point too, not just a plain 'main'" {
+  str src = `use std.testing;
+  `fun compute() num { ret 101; }
+  `num G = compute();
+  `test "global needing runtime init is visible inside a test" {
+  `  assert G == 101, "expected G to already be initialized";
+  `}`;
+  let in_test_mode = transpile_source_test_mode(src);
+  assert in_test_mode.is_ok(), "expected the program to transpile in test mode";
+  assert contains(in_test_mode.unwrap(), "__fun_init_globals();"), "expected the test runner's own entry point to call the runtime-init function";
+}
+
+test "a runtime-deferred global's own declaration drops 'const' under MSVC codegen too, since its real value lands in a later assignment" {
+  str src = `fun compute() num { ret 7; }
+  `const G = compute();
+  `fun main() num { ret G; }`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "global_runtime_init_msvc_const",
+    "a runtime-deferred global's own declaration drops 'const' under MSVC codegen too"
+  );
+  assert !contains(out_c, "const int64_t G"), "expected no C 'const' on a global whose real value is assigned later, under MSVC mode too";
+  assert contains(out_c, "__fun_init_globals"), "expected the runtime-init function to exist under MSVC mode too";
 }

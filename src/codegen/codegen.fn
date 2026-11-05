@@ -267,6 +267,18 @@ pub compound Codegen {
   // initializer has no such restriction, so it keeps the ordinary
   // function-call form every other local coercion site already uses.
   flag expected_array_elem_shape_coerce_as_constant;
+  // True while emitting a global/const's own initializer value, at any
+  // nesting depth - unlike `in_bare_initializer_context` (which only
+  // says a leading cast is already redundant), this says a function
+  // call is categorically unavailable here, since C requires the
+  // whole tree to be a compile-time constant. A shape-coercion
+  // reached while this is set (a compound literal field nested inside
+  // a global's own initializer, at any depth - `expected_array_elem_
+  // shape_coerce_as_constant` above only ever covers the array's own
+  // direct element, one level) inlines the same constant brace literal
+  // `emit_global_variable`'s own top-level coercion already does,
+  // instead of the ordinary `__fun_coerce_` call every local site uses.
+  flag in_global_constant_initializer;
   // Names of every shape with at least one concrete (non-generic) impl
   // emitted so far, used to recognize a receiver/declared type as a
   // shape (dispatched through a vtable) rather than a concrete compound.
@@ -499,6 +511,16 @@ pub compound Codegen {
   // that would nest a definition inside the function's braces, which is
   // invalid C. `.None` means append at the current tail.
   Option<num> hoist_insert_pos;
+  // `name = value;` statements for a global/const whose own initializer
+  // isn't a C compile-time constant expression (a function call, a
+  // generic call, a stdlib constructor like `some()`/`ok()`, or a copy
+  // of another global's value) - C rejects all of those as file-scope
+  // initializers outright. Each such global instead gets a bare
+  // tentative declaration at its own source position, and its real
+  // assignment is buffered here and flushed into a generated
+  // `__fun_init_globals` function, called once before any of `main`,
+  // the test runner, or the fuzz harness's own body runs.
+  Vec<str> pending_global_runtime_inits;
   // Position right before the currently executing statement, updated
   // before dispatching each statement in a body. Lets a lazily-triggered
   // prototype land as its own declaration right before the current
@@ -763,6 +785,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.shape_inst_override_shape_concrete = "";
   g.loop_defer_marks.init(0);
   g.hoist_insert_pos = .None;
+  g.pending_global_runtime_inits.init(0);
   g.current_stmt_start_pos = .None;
   g.suppress_next_expr_parens = false;
   g.current_fn_body_start_pos = .None;
@@ -806,6 +829,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.in_bare_initializer_context = false;
   g.expected_array_elem_shape_type = "";
   g.expected_array_elem_shape_coerce_as_constant = false;
+  g.in_global_constant_initializer = false;
   g.shape_names.init(0);
   g.emitted_shape_impl_vtables.init(0);
   g.shape_decl_names.init(0);
@@ -6627,6 +6651,9 @@ impl Codegen {
             let prev_expected_enum = self.expected_enum_type;
             let prev_expected_compound = self.expected_compound_type;
             flag field_did_shape_coerce = false;
+            flag field_shape_coerce_inline = false;
+            str field_concrete_name_for_inline = "";
+            str field_shape_name_for_inline = "";
             if field_info.is_some() {
               let finfo = field_info.unwrap();
               if self.enum_names.contains(finfo.type_name) {
@@ -6650,12 +6677,30 @@ impl Codegen {
                     field_concrete.unwrap(),
                     finfo.type_name
                   );
-                  self.state.write("__fun_coerce_");
-                  self.state.write(field_concrete.unwrap());
-                  self.state.write("_");
-                  self.state.write(finfo.type_name);
-                  self.state.write("(");
-                  field_did_shape_coerce = true;
+                  if self.in_global_constant_initializer {
+                    // Reached while emitting a global/const's own
+                    // initializer, however deeply nested - the same
+                    // reasoning as `emit_global_variable`'s own
+                    // top-level coercion: a function call, however
+                    // trivial its body, is never a C constant
+                    // expression, so this inlines the identical brace
+                    // literal instead of a `__fun_coerce_` call.
+                    self._ensure_plain_shape_impl_vtable_emitted(
+                      field_concrete.unwrap(),
+                      finfo.type_name
+                    );
+                    self.state.write("{ .self = (");
+                    field_shape_coerce_inline = true;
+                    field_concrete_name_for_inline = field_concrete.unwrap();
+                    field_shape_name_for_inline = finfo.type_name;
+                  } else {
+                    self.state.write("__fun_coerce_");
+                    self.state.write(field_concrete.unwrap());
+                    self.state.write("_");
+                    self.state.write(finfo.type_name);
+                    self.state.write("(");
+                    field_did_shape_coerce = true;
+                  }
                 }
               }
             }
@@ -6678,6 +6723,13 @@ impl Codegen {
             }
             if field_did_shape_coerce {
               self.state.write(")");
+            }
+            if field_shape_coerce_inline {
+              self.state.write("), .vtable = &__fun_impl_");
+              self.state.write(field_concrete_name_for_inline);
+              self.state.write("_");
+              self.state.write(field_shape_name_for_inline);
+              self.state.write("_vtable }");
             }
           }
         }
@@ -16285,6 +16337,71 @@ impl Codegen {
     }
   }
 
+  // Whether `n`, somewhere inside a global/const's own initializer tree,
+  // forces that initializer to be evaluated at runtime rather than
+  // written as a literal C constant expression. C rejects a function
+  // call of any kind - an ordinary one, a generic one, or a stdlib
+  // constructor like `some()`/`ok()`, all of which parse identically as
+  // `.Expression` with `op == "()"` - as a static-duration initializer,
+  // and likewise rejects a bare reference to another global's own
+  // value (as opposed to a literal or a shape coercion, both already
+  // handled as constants elsewhere in this file). Recurses through
+  // every composite shape an initializer can take; anything not
+  // explicitly handled here is a leaf already safe to emit directly, matching
+  // every initializer form this file already writes as a literal.
+  _global_init_needs_runtime(Node n) flag {
+    fit n.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") {
+          ret true;
+        }
+        if e.has_left && self._global_init_needs_runtime(*e.left) {
+          ret true;
+        }
+        if e.has_right && self._global_init_needs_runtime(*e.right) {
+          ret true;
+        }
+        ret false;
+      }
+      .ExpressionParenthesis(inner) -> { ret self._global_init_needs_runtime(*inner); }
+      .Unary(u) -> {
+        // `&a_global` is always a C constant (the address of a static-
+        // duration object), unlike every other way a global's own
+        // value can be read - this is the one case recursing into the
+        // operand would wrongly flag.
+        if equals(u.op, "&") {
+          ret false;
+        }
+        ret self._global_init_needs_runtime(*u.operand);
+      }
+      .Bracket(inner) -> { ret self._global_init_needs_runtime(*inner); }
+      .Panic(inner) -> { ret self._global_init_needs_runtime(*inner); }
+      .CompoundInit(c) -> {
+        for f : c.fields {
+          if self._global_init_needs_runtime(*f.value) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      .TupleLiteral(t) -> {
+        for el : t.elements {
+          if self._global_init_needs_runtime(*el) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      // A bare name in a global's own initializer can only be another
+      // global (no locals exist at file scope); a plain function name
+      // would be a function pointer, itself a C constant, but that
+      // shape isn't reachable here through any coercion this file
+      // already does, so it's left unflagged.
+      .Identifier(name) -> { ret self._global_var_index(name) >= 0; }
+      _ -> { ret false; }
+    }
+  }
+
   // Emits a top-level `const`/`let` declaration as a C file-scope global.
   // Doesn't reuse the local-`Variable` case's indent and `record_local`
   // bookkeeping, there being no enclosing function scope and no later
@@ -16306,6 +16423,13 @@ impl Codegen {
         // ends.
         str let_inferred_type_name = "";
         Option<DataType> let_inferred_dtype = .None;
+        // Set below, in the `is_let` declarator's own MSVC branch, the
+        // moment a real type (not `int64_t`) actually lands on this
+        // declarator's LHS - read again further down to decide the
+        // same bare-brace cast-dropping an explicitly-typed global
+        // already gets, since a cast is just as redundant, and just as
+        // rejected by real MSVC (C2099), once the LHS is a real type.
+        flag let_msvc_wrote_real_type = false;
         // `pub transpile` emits every global before any plain type's full
         // body, which breaks for a global whose declared type is itself a
         // plain compound or enum. This emits that body first; memoization
@@ -16373,6 +16497,42 @@ impl Codegen {
             }
           }
         }
+        // C rejects a function call (ordinary, generic, or a stdlib
+        // constructor like `some()`/`ok()`) and a bare reference to
+        // another global's own value as a static-duration initializer
+        // outright; see `_global_init_needs_runtime`'s own doc
+        // comment. Computed this early so the `is_let` declarator
+        // below can pick the real resolved type over `__auto_type`
+        // when it applies - `__auto_type` needs an initializer right
+        // there to infer from, which a runtime-deferred global's own
+        // declarator no longer has.
+        flag needs_runtime = v.has_val && self._global_init_needs_runtime(*v.val);
+        // A fixed-size C array can never be assigned as a whole -
+        // `arr = {...}` is illegal regardless of any cast, array
+        // types simply aren't assignable - so a top-level array
+        // literal needing runtime init is instead assigned element by
+        // element inside `__fun_init_globals`, after a declarator with
+        // no initializer here. The element count is still known at
+        // compile time (the literal's own length) even though each
+        // element's own value isn't, so the declarator's bracket size
+        // is unaffected either way.
+        Vec<Node*> ginit_array_elems;
+        ginit_array_elems.init(0);
+        flag is_runtime_array_literal = false;
+        if needs_runtime && !is_let {
+          fit v.val.kind {
+            .Bracket(ginit_arr_inner) -> {
+              if v.var_type.array_depth <= 1 {
+                self.flatten_call_args(ginit_arr_inner, &ginit_array_elems);
+                is_runtime_array_literal = true;
+              } else {
+                self.error_note = "a multi-dimensional array global whose own elements can't be evaluated until runtime isn't supported - write it with explicit compile-time values, or initialize it inside 'main' instead";
+                ret .Some(.UnsupportedNode);
+              }
+            }
+            _ -> {}
+          }
+        }
         // An unsized array global (`T[] buf = malloc(...);`) decays to a
         // pointer, as a local does, unless it's initialized with a
         // bracket array literal, which stays a fixed-size global array.
@@ -16409,19 +16569,52 @@ impl Codegen {
           }
         }
         flag const_is_compound = self.compound_names.contains(const_check_type_name);
-        if v.is_const && !const_is_ptr_binding && !const_is_compound {
+        // A runtime-deferred global's own real assignment lands in
+        // `__fun_init_globals`, after this declaration already exists -
+        // a real C `const` here would make that assignment itself a
+        // compile error, so it's dropped the same way the pointer/
+        // compound cases above already drop it for their own reasons.
+        // Fun's own typechecker already rejects reassigning a const
+        // binding regardless of what C emits, so this loses no safety.
+        if v.is_const && !const_is_ptr_binding && !const_is_compound && !needs_runtime {
           self.state.write("const ");
         }
         if is_let {
-          if self.msvc_mode && v.has_val {
-            let msvc_gdt_opt = self.infer_let_expr_type(v.val);
-            if msvc_gdt_opt.is_some() {
-              let msvc_gdt = msvc_gdt_opt.unwrap();
-              let msvc_gwt = self.write_type(msvc_gdt);
-              if msvc_gwt.is_none() {
-                self.state.write("int64_t");
+          if needs_runtime {
+            // `__auto_type` needs a real initializer right here to
+            // infer from, which this declarator no longer has -
+            // `let_inferred_type_name`/`let_inferred_dtype` were
+            // already resolved above, before any output, the same
+            // values `record_global_typed` reads at the end of this
+            // function.
+            if equals(let_inferred_type_name, "") {
+              self.error_note = "a let-bound global/const whose initializer can't run until main starts needs an inferrable type - write an explicit type instead";
+              ret .Some(.UnsupportedNode);
+            }
+            DataType ginit_decl_dtype = dtype_new();
+            ginit_decl_dtype.type_str = let_inferred_type_name;
+            if let_inferred_dtype.is_some() {
+              ginit_decl_dtype = let_inferred_dtype.unwrap();
+            }
+            self.write_type(ginit_decl_dtype)?!(.UnsupportedNode);
+          } elif self.msvc_mode && v.has_val {
+            // Reuses `let_inferred_type_name`/`let_inferred_dtype`
+            // (already resolved above, before any output) instead of
+            // a second, independent `infer_let_expr_type` call - which
+            // also never recognized a bare enum-variant shorthand
+            // (`let g = .Red;`), since that helper has no case for one
+            // at all; the real type is already known here regardless
+            // of which route resolved it.
+            if !equals(let_inferred_type_name, "") {
+              DataType msvc_ginit_dtype = dtype_new();
+              msvc_ginit_dtype.type_str = let_inferred_type_name;
+              if let_inferred_dtype.is_some() {
+                msvc_ginit_dtype = let_inferred_dtype.unwrap();
               }
-            } else {
+              let msvc_gwt = self.write_type(msvc_ginit_dtype);
+              let_msvc_wrote_real_type = msvc_gwt.is_some();
+            }
+            if !let_msvc_wrote_real_type {
               self.state.write("int64_t");
             }
           } else {
@@ -16493,11 +16686,111 @@ impl Codegen {
                 mdim_d = mdim_d + 1;
               }
             }
+          } elif is_runtime_array_literal {
+            // No explicit size was written, and C requires one for a
+            // tentative declaration with no initializer here - the
+            // literal's own element count is still known at compile
+            // time even though each element's own value isn't.
+            self.state.write("[");
+            self.state.write(format_num(ginit_array_elems.len));
+            self.state.write("]");
           } else {
             self.state.write("[]");
           }
         }
-        if v.has_val {
+        if v.has_val && is_runtime_array_literal {
+          // A fixed-size C array can never be assigned as a whole, so
+          // each element is its own assignment statement inside
+          // `__fun_init_globals` instead of a single "name = value".
+          CodegenState ginit_arr_scratch = self.new_scratch_state();
+          CodegenState* saved_ginit_arr_state = self.state;
+          let saved_ginit_arr_hoist_pos = self.hoist_insert_pos;
+          let saved_ginit_arr_stmt_start_pos = self.current_stmt_start_pos;
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          self.state = &ginit_arr_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          str ginit_arr_elem_shape = self._resolve_shape_type_for_dtype(*v.var_type);
+          num ginit_arr_i = 0;
+          Option<CodegenErrorKind> ginit_arr_err = .None;
+          for ginit_arr_elem : ginit_array_elems {
+            self.state.write(v.name);
+            self.state.write("[");
+            self.state.write(format_num(ginit_arr_i));
+            self.state.write("] = ");
+            flag ginit_arr_elem_coerced = false;
+            if !equals(ginit_arr_elem_shape, "") {
+              let ginit_arr_elem_concrete = self.resolve_shape_coerce_concrete_type(
+                ginit_arr_elem
+              );
+              if ginit_arr_elem_concrete.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  ginit_arr_elem_concrete.unwrap(),
+                  ginit_arr_elem_shape
+                );
+                self.state.write("__fun_coerce_");
+                self.state.write(ginit_arr_elem_concrete.unwrap());
+                self.state.write("_");
+                self.state.write(ginit_arr_elem_shape);
+                self.state.write("(");
+                ginit_arr_elem_coerced = true;
+              }
+            }
+            let ginit_arr_elem_err = self.emit_expr(*ginit_arr_elem);
+            if ginit_arr_elem_coerced {
+              self.state.write(")");
+            }
+            self.state.write(";\n");
+            if ginit_arr_elem_err.is_some() {
+              ginit_arr_err = ginit_arr_elem_err;
+              break;
+            }
+            ginit_arr_i = ginit_arr_i + 1;
+          }
+          self.state = saved_ginit_arr_state;
+          self.hoist_insert_pos = saved_ginit_arr_hoist_pos;
+          self.current_stmt_start_pos = saved_ginit_arr_stmt_start_pos;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.hoist_insert_pos = self.root_hoist_pos;
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+          }
+          if ginit_arr_err.is_some() {
+            ret ginit_arr_err;
+          }
+          self.pending_global_runtime_inits.push(ginit_arr_scratch.out.build());
+        } elif v.has_val {
+          // `needs_runtime` is already resolved above, before the
+          // declarator; such an initializer is buffered into
+          // `__fun_init_globals` below, run once before any of
+          // `main`, the test runner, or the fuzz harness's own body.
+          CodegenState ginit_scratch = self.new_scratch_state();
+          CodegenState* saved_ginit_state = self.state;
+          let saved_ginit_hoist_pos = self.hoist_insert_pos;
+          let saved_ginit_stmt_start_pos = self.current_stmt_start_pos;
+          if needs_runtime {
+            // Shares the `hoist_scratch_depth` nesting counter with
+            // every other scratch-buffer swap: a call in this
+            // initializer can itself trigger a generic function's
+            // own lazy monomorphization, which must land in the real
+            // output (via `root_hoist_pos`), never spliced into the
+            // text being captured for `pending_global_runtime_inits`.
+            if self.hoist_scratch_depth == 0 {
+              self.root_state = self.state;
+              self.root_hoist_pos = self.hoist_insert_pos;
+              self.root_stmt_start_pos = self.current_stmt_start_pos;
+            }
+            self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+            self.state = &ginit_scratch;
+            self.hoist_insert_pos = .None;
+            self.current_stmt_start_pos = .None;
+            self.state.write(v.name);
+          }
           self.state.write(" = ");
           // A bare `.Variant` enum shorthand or `.{...}` compound-
           // literal shorthand in a global's own initializer resolves
@@ -16533,12 +16826,20 @@ impl Codegen {
           // Real MSVC rejects a compound literal's own leading
           // `(Type)` cast as a static-duration initializer outright
           // (C2099); dropping it needs the declared type already
-          // known on the LHS, which an `is_let` global's own
-          // `__auto_type` (or MSVC's `int64_t` fallback) isn't - the
-          // cast is what tells either of those what type to infer,
-          // so this is scoped to an explicitly-typed global only.
+          // known on the LHS. An `is_let` global's own plain
+          // `__auto_type` isn't that - the cast is what tells it what
+          // type to infer - but under MSVC specifically, `let_msvc_
+          // wrote_real_type` means the declarator's own MSVC branch
+          // just wrote a real type instead (confirmed above), making
+          // the cast exactly as redundant, and exactly as rejected,
+          // as it would be for an explicitly-typed global.
           let prev_bare_init = self.in_bare_initializer_context;
-          if !is_let {
+          // A runtime-deferred global is assigned by an ordinary C
+          // assignment statement inside `__fun_init_globals`, not a
+          // declarator - a bare `{...}` is illegal there (C requires
+          // the explicit `(Type){...}` cast outside a declaration),
+          // the opposite of the declaration case right below.
+          if (!is_let || let_msvc_wrote_real_type) && !needs_runtime {
             self.in_bare_initializer_context = true;
           }
           // A shape-typed global's initializer needs the same
@@ -16546,12 +16847,29 @@ impl Codegen {
           // initializer already gets - a separate codegen path from
           // that one, so it never inherited the fix.
           flag global_did_shape_coerce = false;
+          flag global_did_shape_coerce_call = false;
           str global_concrete_name_for_coerce = "";
           str global_shape_name_for_coerce = "";
           let prev_arr_elem_shape = self.expected_array_elem_shape_type;
           let prev_arr_elem_const = self.expected_array_elem_shape_coerce_as_constant;
           self.expected_array_elem_shape_type = "";
           self.expected_array_elem_shape_coerce_as_constant = false;
+          // Covers every nesting depth, not just the global's own
+          // direct type or its direct array element (the two cases
+          // handled explicitly below): a shape-typed field discovered
+          // arbitrarily deep inside this initializer - a compound
+          // nested inside an array nested inside another compound,
+          // say - reaches `CompoundInit`'s own field-coercion code,
+          // which consults this same flag to inline rather than call.
+          let prev_global_const_init = self.in_global_constant_initializer;
+          // Only the still-constant path needs every nested coercion
+          // inlined as a brace literal; once this whole initializer is
+          // already routed to `__fun_init_globals` (an ordinary
+          // function body, where a call is perfectly legal), every
+          // coercion anywhere inside it - this one included - uses the
+          // same plain `__fun_coerce_` call every local site already
+          // does.
+          self.in_global_constant_initializer = !needs_runtime;
           if !is_let && v.var_type.is_array {
             // An array's own element type - `is_array` layers on top
             // of `type_str`/`generic_args` without changing what they
@@ -16561,7 +16879,7 @@ impl Codegen {
             let global_elem_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
             if !equals(global_elem_shape_type, "") {
               self.expected_array_elem_shape_type = global_elem_shape_type;
-              self.expected_array_elem_shape_coerce_as_constant = true;
+              self.expected_array_elem_shape_coerce_as_constant = !needs_runtime;
             }
           } elif !is_let {
             let global_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
@@ -16572,35 +16890,58 @@ impl Codegen {
                   global_concrete.unwrap(),
                   global_shape_type
                 );
-                self._ensure_plain_shape_impl_vtable_emitted(
-                  global_concrete.unwrap(),
-                  global_shape_type
-                );
-                // Not the ordinary `__fun_coerce_` function call every
-                // other coercion site uses: C requires a global's own
-                // initializer to be a compile-time constant expression,
-                // which a function call - however trivial its body -
-                // never is. The call's own body is nothing but this
-                // same brace literal already, so it's inlined directly
-                // instead: both `&recv` and the vtable instance's own
-                // address are themselves compile-time constants
-                // (addresses of other statics), so this compiles where
-                // a call wrapping the identical value never could.
-                self.state.write("{ .self = (");
-                global_concrete_name_for_coerce = global_concrete.unwrap();
-                global_shape_name_for_coerce = global_shape_type;
-                global_did_shape_coerce = true;
+                if needs_runtime {
+                  self.state.write("__fun_coerce_");
+                  self.state.write(global_concrete.unwrap());
+                  self.state.write("_");
+                  self.state.write(global_shape_type);
+                  self.state.write("(");
+                  global_did_shape_coerce_call = true;
+                } else {
+                  self._ensure_plain_shape_impl_vtable_emitted(
+                    global_concrete.unwrap(),
+                    global_shape_type
+                  );
+                  // Not the ordinary `__fun_coerce_` function call every
+                  // other coercion site uses: C requires a global's own
+                  // initializer to be a compile-time constant expression,
+                  // which a function call - however trivial its body -
+                  // never is. The call's own body is nothing but this
+                  // same brace literal already, so it's inlined directly
+                  // instead: both `&recv` and the vtable instance's own
+                  // address are themselves compile-time constants
+                  // (addresses of other statics), so this compiles where
+                  // a call wrapping the identical value never could.
+                  self.state.write("{ .self = (");
+                  global_concrete_name_for_coerce = global_concrete.unwrap();
+                  global_shape_name_for_coerce = global_shape_type;
+                  global_did_shape_coerce = true;
+                }
               }
             }
           }
           let verr = self.emit_expr(*v.val);
           self.in_array_initializer = prev_arr_init;
           self.in_bare_initializer_context = prev_bare_init;
+          self.in_global_constant_initializer = prev_global_const_init;
           self.expected_array_elem_shape_type = prev_arr_elem_shape;
           self.expected_array_elem_shape_coerce_as_constant = prev_arr_elem_const;
           self.expected_enum_type = prev_expected_g;
           self.expected_compound_type = prev_expected_compound_g;
+          if global_did_shape_coerce_call {
+            self.state.write(")");
+          }
           if verr.is_some() {
+            if needs_runtime {
+              self.state = saved_ginit_state;
+              self.hoist_insert_pos = saved_ginit_hoist_pos;
+              self.current_stmt_start_pos = saved_ginit_stmt_start_pos;
+              self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+              if self.hoist_scratch_depth == 0 {
+                self.hoist_insert_pos = self.root_hoist_pos;
+                self.current_stmt_start_pos = self.root_stmt_start_pos;
+              }
+            }
             ret verr;
           }
           if global_did_shape_coerce {
@@ -16609,6 +16950,18 @@ impl Codegen {
             self.state.write("_");
             self.state.write(global_shape_name_for_coerce);
             self.state.write("_vtable }");
+          }
+          if needs_runtime {
+            self.state.write(";\n");
+            self.state = saved_ginit_state;
+            self.hoist_insert_pos = saved_ginit_hoist_pos;
+            self.current_stmt_start_pos = saved_ginit_stmt_start_pos;
+            self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+            if self.hoist_scratch_depth == 0 {
+              self.hoist_insert_pos = self.root_hoist_pos;
+              self.current_stmt_start_pos = self.root_stmt_start_pos;
+            }
+            self.pending_global_runtime_inits.push(ginit_scratch.out.build());
           }
         }
         self.state.write(";\n");
@@ -21264,6 +21617,26 @@ impl Codegen {
       }
     }
 
+    // Every global/const whose own initializer needs a real C function
+    // call - a plain or generic function, a stdlib constructor like
+    // `some()`/`ok()`, or a copy of another global's value - buffered
+    // its real assignment into `pending_global_runtime_inits` instead
+    // of writing it as a (C-illegal) static-duration initializer; see
+    // `_global_init_needs_runtime`. Guarded for idempotency since the
+    // fuzz harness calls its own entry point - where this is also
+    // called - once per input, not once per process.
+    if self.pending_global_runtime_inits.len > 0 {
+      self.state.write("static int __fun_globals_inited = 0;\n");
+      self.state.write("static void __fun_init_globals(void) {\n");
+      self.state.write("  if (__fun_globals_inited) return;\n");
+      self.state.write("  __fun_globals_inited = 1;\n");
+      for stmt : self.pending_global_runtime_inits {
+        self.state.write("  ");
+        self.state.write(stmt);
+      }
+      self.state.write("}\n\n");
+    }
+
     if self.test_mode {
       let runner_err = self.emit_test_runner(nodes);
       if runner_err.is_some() {
@@ -21321,6 +21694,13 @@ impl Codegen {
     if self.memcheck && !self.memcheck_leaks {
       mc_leak_suppress = "  __fun_memcheck_disable_leak_sweep();\n";
     }
+    // Runs once, before any user code: see the matching emission (and
+    // the idempotency guard inside it) right before this function is
+    // called in `pub transpile`.
+    str ginit_call = "";
+    if self.pending_global_runtime_inits.len > 0 {
+      ginit_call = "  __fun_init_globals();\n";
+    }
     if self.emscripten_mode {
       // A browser's own main (document) thread must never block
       // synchronously waiting on another thread - `pthread_join` from
@@ -21334,8 +21714,9 @@ impl Codegen {
       // thread, no wrapper needed at all for this target.
       self.state.write(
         format(
-        "int main(int argc, char** argv) {\n{str}  return {str}(argc, argv);\n}\n",
+        "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
         mc_leak_suppress,
+        ginit_call,
         real_name
         )
       );
@@ -21346,7 +21727,7 @@ impl Codegen {
       `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
       `static void* __fun_main_run(void* __fun_main_p) {
       `  __fun_main_run_args* __fun_main_a = (__fun_main_run_args*)__fun_main_p;
-      `  __fun_main_a->result = {str}(__fun_main_a->argc, __fun_main_a->argv);
+      `{str}  __fun_main_a->result = {str}(__fun_main_a->argc, __fun_main_a->argv);
       `  return 0;
       `}
       `#ifdef _WIN32
@@ -21376,6 +21757,7 @@ impl Codegen {
       `  return __fun_main_a.result;
       `}
       ``,
+      ginit_call,
       real_name,
       mc_leak_suppress
       )
@@ -21587,6 +21969,9 @@ impl Codegen {
     self.state.write("}\n\n");
 
     self.state.write("static void* __fun_test_main_worker(void* __fun_test_argp) {\n");
+    if self.pending_global_runtime_inits.len > 0 {
+      self.state.write("    __fun_init_globals();\n");
+    }
     self.state.write(
       "    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n"
     );
@@ -21900,6 +22285,12 @@ impl Codegen {
         self.state.write(
           "int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n"
         );
+        if self.pending_global_runtime_inits.len > 0 {
+          // Guarded for idempotency inside `__fun_init_globals` itself
+          // (see where it's emitted in `pub transpile`) - this entry
+          // point runs once per fuzzer input, not once per process.
+          self.state.write("  __fun_init_globals();\n");
+        }
         self.state.write(format("  void* {str} = (void*)__fun_fuzz_data;\n", data_name));
         self.state.write(format("  int64_t {str} = (int64_t)__fun_fuzz_size;\n", len_name));
         let berr = self.emit_body(*fd.body);
