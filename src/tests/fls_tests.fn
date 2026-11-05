@@ -10337,3 +10337,32 @@ test "dot-completion on a bare '.Variant' shorthand offers a generic enum's own 
   assert contains(comp, `"label":"Some"`), "expected the generic Option<num> argument's own variants offered, not the generic fallback list";
   assert contains(comp, `"label":"None"`), "expected every variant, not just one";
 }
+
+test "hover on a global/const's own declaration resolves every type-preserving unary operator, and an array literal" {
+  // `_infer_global_const_type_depth`'s own `.Unary` case only ever
+  // special-cased `-` (the round-15 fix) - `+`, `!`, `~`, `++`, and
+  // `--` are just as type-preserving (only `*`/deref and `&`/address-
+  // of actually change the type), so each one left the type half
+  // blank the same way `-` used to. Also adds `.Bracket` (an array
+  // literal), which had no case at all - inferred from its own first
+  // element, the same way the compiler's local inference already
+  // does.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///globalunaryarray.fn";
+  doc.path = "globalunaryarray.fn";
+  doc.text = `const OTHER = 5;
+  `let PLUS = +OTHER;
+  `let NOTTED = ~OTHER;
+  `const BB = true;
+  `let BNOT = !BB;
+  `let ARR = [1, 2, 3];
+  `fun main() num { ret PLUS + NOTTED + ARR[0]; }`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 1, 5), "num PLUS"), "expected unary plus to resolve the operand's own type";
+  assert contains(hover(&reads, doc, 2, 7), "num NOTTED"), "expected bitwise not to resolve the operand's own type";
+  assert contains(hover(&reads, doc, 4, 7), "flag BNOT"), "expected logical not to resolve the operand's own type";
+  assert contains(hover(&reads, doc, 5, 5), "num[] ARR"), "expected an array literal's own element type to resolve, not a blank type";
+}

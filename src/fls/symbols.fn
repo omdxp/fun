@@ -690,6 +690,23 @@ pub fun infer_global_const_type(Node* val, Vec<Node>* program) str {
   ret _infer_global_const_type_depth(val, program, 0);
 }
 
+// An array literal's own elements parse as a left-associative
+// `.Expression{op:","}` chain (the leftmost/first-written element is
+// the deepest `.left`); walks down to it, the same direction
+// `flatten_call_args` (codegen.fn) already flattens the identical
+// shape in left-to-right order.
+fun _first_array_elem(Node* n) Node* {
+  fit n.kind {
+    .Expression(e) -> {
+      if equals(e.op, ",") && e.has_left {
+        ret _first_array_elem(e.left);
+      }
+    }
+    _ -> {}
+  }
+  ret n;
+}
+
 // `infer_global_const_type`'s own recursion, depth-capped the same
 // generous-but-bounded way `_resolve_alias_chain_display` caps its own
 // chase of one alias to the next: a real cycle is already a compile
@@ -763,17 +780,39 @@ fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str
       }
       ret _infer_global_const_type_depth(t.else_val, program, depth + 1);
     }
-    // `const NEG = -5;` - a negative numeric literal parses as a unary
-    // minus over a plain Number node, not folded into the literal
-    // itself; negating a value never changes its own type. Mirrors
-    // `_literal_value_text`'s own identical `-` case right above,
-    // which already renders this shape's value correctly - without
-    // this, the type half stayed blank while the value half didn't.
+    // `const NEG = -5;` - a unary numeric/logical/bitwise operator
+    // parses over its own plain operand node, not folded into the
+    // literal itself. Every one of these leaves the operand's own
+    // type unchanged (negation, unary plus, logical/bitwise not,
+    // pre-inc/dec); only `*` (deref) and `&` (address-of) actually
+    // change the type, so those stay unresolved here, same as any
+    // other shape this function doesn't recognize at all. Mirrors
+    // `_literal_value_text`'s own `-`-only case right above, which
+    // already renders this shape's value correctly for negation -
+    // without this, the type half stayed blank while the value half
+    // didn't, and the same gap applied to every other type-preserving
+    // operator too, not just `-`.
     .Unary(u) -> {
-      if equals(u.op, "-") {
+      if equals(u.op, "-") || equals(u.op, "+") || equals(u.op, "!") ||
+      equals(u.op, "~") || equals(u.op, "++") || equals(u.op, "--") {
         ret _infer_global_const_type_depth(u.operand, program, depth + 1);
       }
       ret "";
+    }
+    // `let g = [1, 2, 3];` - an array literal has no explicit element
+    // type of its own; inferred from its own first element, same as
+    // the compiler's own local-array inference. An empty `[]` has
+    // nothing to infer from, so it stays unresolved.
+    .Bracket(inner) -> {
+      str elem_type = _infer_global_const_type_depth(
+        _first_array_elem(inner),
+        program,
+        depth + 1
+      );
+      if equals(elem_type, "") {
+        ret "";
+      }
+      ret format("{str}[]", elem_type);
     }
     _ -> { ret ""; }
   }

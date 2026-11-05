@@ -8978,11 +8978,32 @@ impl Codegen {
           if rdt_opt.is_some() {
             let rdt = rdt_opt.unwrap();
             if dtype_is_pointer(rdt) {
-              ret .Some(rdt.type_str);
+              // `resolve_type_name`, not the bare `rdt.type_str`: a
+              // call returning a pointer to a generic compound
+              // (`Box<num>*`) needs its mangled identity ("Box__num"),
+              // the same name the vtable/coerce-helper machinery below
+              // is keyed under - the bare template name alone matches
+              // nothing there and silently builds against an
+              // undeclared helper.
+              let rname = self.resolve_type_name(rdt);
+              if rname.is_some() {
+                ret .Some(rname.unwrap());
+              }
             }
           }
         }
       }
+      .Ternary(t) -> {
+        // `HasX h = cond ? &p1 : &p2;` - either arm names the same
+        // concrete type as a matter of typechecking, so the first one
+        // that resolves is as good as checking both.
+        let then_concrete = self.resolve_shape_coerce_concrete_type(t.then_val);
+        if then_concrete.is_some() {
+          ret then_concrete;
+        }
+        ret self.resolve_shape_coerce_concrete_type(t.else_val);
+      }
+      .ExpressionParenthesis(inner) -> { ret self.resolve_shape_coerce_concrete_type(inner); }
       _ -> {}
     }
     ret .None;

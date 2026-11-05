@@ -398,6 +398,46 @@ test "a shape coercion recognizes a function call's own return value, not just a
   assert equals(out, "5 5 5 5\n"), "expected the global, local, ret, and call-argument sites to all coerce the call's own return value correctly";
 }
 
+test "a shape coercion recognizes a generic call's own mangled return type, a ternary, and a parenthesized operand" {
+  // Three more gaps in the same fix round 15 just added: (1) the call
+  // case read `rdt.type_str` directly instead of `resolve_type_name`,
+  // so a call returning a pointer to a generic compound ('Box<num>*')
+  // kept its bare, unmangled template name ("Box") instead of its real
+  // mangled identity ("Box__num") - the vtable/coerce-helper machinery
+  // is keyed under the mangled name, so building against the bare one
+  // silently targets a helper that was never emitted; (2) no case at
+  // all for `.Ternary`, so `cond ? &p1 : &p2` leaked a raw pointer past
+  // the coercion entirely; (3) no case for `.ExpressionParenthesis`,
+  // so wrapping either an already-working `&p` or a call in parens
+  // alone defeated the coercion too.
+  str src = `use std.c.io;
+  `shape HasVal<T> { getVal() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as HasVal<T> { getVal() T { ret self.val; } }
+  `Box<num> b = Box<num>{val = 7};
+  `fun get_box_ref() Box<num>* { ret &b; }
+  `shape HasX { getX() num; }
+  `compound Point { num x; }
+  `impl Point as HasX { getX() num { ret self.x; } }
+  `Point p1 = Point{x = 1};
+  `Point p2 = Point{x = 2};
+  `fun get_ref() Point* { ret &p1; }
+  `fun main() num {
+  `  HasVal<num> hv = get_box_ref();
+  `  HasX ht = true ? &p1 : &p2;
+  `  HasX hp1 = (&p1);
+  `  HasX hp2 = (get_ref());
+  `  printf("%lld %lld %lld %lld\n", hv.getVal(), ht.getX(), hp1.getX(), hp2.getX());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_coerce_generic_ternary_paren",
+    "a shape coercion recognizes a generic call's own mangled return type, a ternary, and a parenthesized operand"
+  );
+  assert equals(out, "7 1 1 1\n"), "expected the generic call, ternary, and parenthesized operand to all coerce correctly";
+}
+
 test "a top-level global's own compound-literal initializer drops its redundant cast under MSVC" {
   // Found investigating a REAL Windows CI failure on the test just
   // above, not locally reproducible (real MSVC isn't available
