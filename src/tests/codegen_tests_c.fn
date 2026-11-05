@@ -366,6 +366,90 @@ test "a top-level global's own shape-typed initializer coerces correctly" {
   assert equals(out, "9 77\n"), "expected both the plain and doubly-generic shape-typed globals to coerce and dispatch correctly";
 }
 
+test "a top-level global's own compound-literal initializer drops its redundant cast under MSVC" {
+  // Found investigating a REAL Windows CI failure on the test just
+  // above, not locally reproducible (real MSVC isn't available
+  // locally, and this project's own clang/gcc both silently tolerate
+  // the redundant cast as a GNU extension, same as the test harness
+  // used everywhere else in this suite): `Box g_box = Box{val = 9};`
+  // - an ordinary global with a compound-literal initializer, no
+  // shape involved at all - compiles to `Box g_box = (Box){.val =
+  // 9};`, and real MSVC's C front end rejects the leading `(Box)`
+  // cast outright for a static-duration object's own initializer
+  // (C2099: "initializer is not a constant" - a compound-literal
+  // cast is itself a non-constant expression under the C standard,
+  // tolerated by GCC/clang only as a non-conforming extension).
+  // Every compound literal anywhere in a global's own initializer
+  // tree needs the bare `{...}` form instead, never just the
+  // outermost one - a nested field/array-element slot is a second,
+  // separate compound literal with its own redundant cast otherwise.
+  str src = `compound Box { num val; }
+  `compound Holder { Box inner; Box[2] arr; }
+  `Box g_box = Box{val = 9};
+  `Holder g_holder = Holder{
+  `  inner = Box{val = 1},
+  `  arr = [Box{val = 2}, Box{val = 3}]
+  `};
+  `fun main() num { ret 0; }`;
+  let out = emit_c_with_imports_forcing_msvc(
+    src,
+    "global_compound_cast",
+    "a top-level global's own compound-literal initializer drops its redundant cast"
+  );
+  assert contains(out, "Box g_box = {.val = 9};"),
+  "expected the global's own top-level compound literal to drop its leading (Box) cast";
+  assert !contains(out, "(Box){.val = 1}") && !contains(out, "(Box){.val = 2}") &&
+    !contains(out, "(Box){.val = 3}"),
+    "expected every nested field/array-element compound literal inside the global's own initializer to drop its cast too";
+}
+
+test "an array literal's own shape-typed elements coerce correctly" {
+  // An 8th `__fun_coerce_` site, missed by the 7 already fixed this
+  // session: an array literal's own elements never got the coercion
+  // wrap at all when the array's declared element type is a shape -
+  // a raw concrete pointer landed directly where each element needs
+  // the fat-pointer struct, compiling fine (both sides are pointer-
+  // sized) but crashing the moment anything dispatches dynamically
+  // through it, garbage read as a vtable pointer. Covers a global
+  // array (needing the same compile-time-constant brace-literal
+  // inlining the scalar global fix above already does, per element
+  // this time) and a local array (the ordinary function-call form,
+  // same as every other local coercion site) side by side, plus a
+  // doubly-generic shape's own array to confirm the lazy vtable
+  // trigger still fires per element.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret self.val; } }
+  `Box g_box1 = Box{val = 5};
+  `Box g_box2 = Box{val = 6};
+  `Sized[2] g_arr = [&g_box1, &g_box2];
+  `shape Container<T> { get() T; }
+  `compound GBox<T> { T val; }
+  `impl GBox<T> as Container<T> { get() T { ret self.val; } }
+  `GBox<num> g_gb1 = GBox<num>{val = 3};
+  `GBox<num> g_gb2 = GBox<num>{val = 4};
+  `Container<num>[2] g_garr = [&g_gb1, &g_gb2];
+  `fun main() num {
+  `  Box b1 = Box{val = 9};
+  `  Box b2 = Box{val = 11};
+  `  Sized[2] arr = [&b1, &b2];
+  `  printf(
+  `    "%lld %lld %lld %lld %lld %lld\n",
+  `    g_arr[0].len(), g_arr[1].len(),
+  `    g_garr[0].get(), g_garr[1].get(),
+  `    arr[0].len(), arr[1].len()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "array_literal_shape_coerce",
+    "an array literal's own shape-typed elements coerce correctly"
+  );
+  assert equals(out, "5 6 3 4 9 11\n"), "expected every array's own shape-typed elements to coerce and dispatch correctly";
+}
+
 test "a shape-downcast fit arm dispatches correctly against a doubly-generic shape" {
   // `impl Box<T> as Container<T>` is doubly generic - the subject's
   // own declared type (`Container<num>`) resolves to its concrete

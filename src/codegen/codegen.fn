@@ -238,6 +238,35 @@ pub compound Codegen {
   // nested row, or a compound-init field value. When false, a bare array
   // literal is rejected outright rather than emitting invalid C.
   flag in_array_initializer;
+  // True in that exact same declaration context, for a compound
+  // literal instead of an array one - a `Type{...}`/`.{...}`
+  // initializer's own leading `(Type)` cast is likewise only needed
+  // where the value is used as a standalone rvalue (a call argument,
+  // say); directly initializing an already-declared variable, or
+  // filling a nested field/array-element slot inside one, never
+  // needs it, and real MSVC - unlike GCC/clang, which merely tolerate
+  // the redundant cast as a GNU extension - rejects it outright for a
+  // global specifically ("C2099: initializer is not a constant": a
+  // compound-literal cast is itself a non-constant expression under
+  // the C standard, so MSVC's strict front end refuses it wherever a
+  // static-duration object's own initializer must be a compile-time
+  // constant). Threaded through the exact same declaration-context
+  // sites `in_array_initializer` already is.
+  flag in_bare_initializer_context;
+  // Non-empty while emitting an array literal whose own declared
+  // element type is a shape (`Sized[2] arr = [&a, &b];`) - the shape's
+  // own resolved identity, consulted by `.Bracket`'s own per-element
+  // loop to wrap each element in the same coercion every other shape-
+  // typed destination already gets. "" means no coercion is needed.
+  str expected_array_elem_shape_type;
+  // True only for a global array (set alongside `expected_array_elem_
+  // shape_type` above): each element's own coercion is inlined as a
+  // constant brace literal rather than a `__fun_coerce_` function
+  // call, since C requires a global's own initializer - every
+  // element included - to be a compile-time constant. A local array's
+  // initializer has no such restriction, so it keeps the ordinary
+  // function-call form every other local coercion site already uses.
+  flag expected_array_elem_shape_coerce_as_constant;
   // Names of every shape with at least one concrete (non-generic) impl
   // emitted so far, used to recognize a receiver/declared type as a
   // shape (dispatched through a vtable) rather than a concrete compound.
@@ -774,6 +803,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.has_expected_tuple_type = false;
   g.expected_tuple_type = dtype_new();
   g.in_array_initializer = false;
+  g.in_bare_initializer_context = false;
+  g.expected_array_elem_shape_type = "";
+  g.expected_array_elem_shape_coerce_as_constant = false;
   g.shape_names.init(0);
   g.emitted_shape_impl_vtables.init(0);
   g.shape_decl_names.init(0);
@@ -6533,9 +6565,12 @@ impl Codegen {
         } else {
           ret .Some(.UnsupportedNode);
         }
-        self.state.write("(");
-        self.state.write(type_name);
-        self.state.write("){");
+        if !self.in_bare_initializer_context {
+          self.state.write("(");
+          self.state.write(type_name);
+          self.state.write(")");
+        }
+        self.state.write("{");
         if ci.fields.len == 0 {
           self.state.write("0");
         } else {
@@ -6587,12 +6622,18 @@ impl Codegen {
                 }
               }
             }
-            // A field value may itself be an array literal, needing the
-            // bare-brace-list form.
+            // A field value may itself be an array or compound
+            // literal, needing the same bare form - once inside a
+            // `{...}` body, every nested sub-object slot is always
+            // bare-eligible in C, regardless of whether the outer
+            // literal itself needed a leading cast.
             let prev_arr_init = self.in_array_initializer;
+            let prev_bare_init = self.in_bare_initializer_context;
             self.in_array_initializer = true;
+            self.in_bare_initializer_context = true;
             let ferr = self.emit_expr(*f.value);
             self.in_array_initializer = prev_arr_init;
+            self.in_bare_initializer_context = prev_bare_init;
             self.expected_enum_type = prev_expected_enum;
             self.expected_compound_type = prev_expected_compound;
             if ferr.is_some() {
@@ -6684,6 +6725,19 @@ impl Codegen {
           self.state.write(self.infer_array_literal_elem_c_type(inner));
           self.state.write("[])");
         }
+        // An array literal whose own declared element type is a
+        // shape (`Sized[2] arr = [&a, &b];`) needs the identical
+        // coercion wrap every other shape-typed destination already
+        // gets, applied to each element here - the array's own
+        // declaration site set this before emitting the literal; see
+        // `Codegen.expected_array_elem_shape_type`'s own doc comment.
+        // Cleared while recursing into each element so a nested
+        // bracket (a 2D array's own inner row) never wrongly inherits
+        // it.
+        str bracket_elem_shape = self.expected_array_elem_shape_type;
+        flag bracket_elem_shape_const = self.expected_array_elem_shape_coerce_as_constant;
+        self.expected_array_elem_shape_type = "";
+        self.expected_array_elem_shape_coerce_as_constant = false;
         Vec<Node*> elems;
         elems.init(0);
         self.flatten_call_args(inner, &elems);
@@ -6694,7 +6748,44 @@ impl Codegen {
             self.state.write(", ");
           }
           first = false;
+          flag elem_did_shape_coerce = false;
+          str elem_concrete_for_coerce = "";
+          if !equals(bracket_elem_shape, "") {
+            let elem_concrete = self.resolve_shape_coerce_concrete_type(elem);
+            if elem_concrete.is_some() {
+              self.ensure_generic_impl_shape_vtable_instantiated(
+                elem_concrete.unwrap(),
+                bracket_elem_shape
+              );
+              if bracket_elem_shape_const {
+                self._ensure_plain_shape_impl_vtable_emitted(
+                  elem_concrete.unwrap(),
+                  bracket_elem_shape
+                );
+                self.state.write("{ .self = (");
+              } else {
+                self.state.write("__fun_coerce_");
+                self.state.write(elem_concrete.unwrap());
+                self.state.write("_");
+                self.state.write(bracket_elem_shape);
+                self.state.write("(");
+              }
+              elem_concrete_for_coerce = elem_concrete.unwrap();
+              elem_did_shape_coerce = true;
+            }
+          }
           let eerr = self.emit_expr(*elem);
+          if elem_did_shape_coerce {
+            if bracket_elem_shape_const {
+              self.state.write("), .vtable = &__fun_impl_");
+              self.state.write(elem_concrete_for_coerce);
+              self.state.write("_");
+              self.state.write(bracket_elem_shape);
+              self.state.write("_vtable }");
+            } else {
+              self.state.write(")");
+            }
+          }
           if eerr.is_some() {
             ret eerr;
           }
@@ -11202,34 +11293,39 @@ impl Codegen {
           // A shape-typed declaration's initializer needs a coercion call
           // wrapped around the RHS.
           flag did_shape_coerce = false;
-          // A concrete shape instantiation is registered under its
-          // mangled identity (`To__num`), not `v.var_type.type_str`.
-          str var_shape_type = v.var_type.type_str;
-          if !self.shape_names.contains(var_shape_type) && v.var_type.generic_args.len > 0 {
-            StringBuilder vq_sb = string_builder_init(16);
-            vq_sb.append(v.var_type.type_str);
-            for vqarg : v.var_type.generic_args {
-              vq_sb.append("__");
-              vq_sb.append(vqarg.type_str);
+          let prev_local_arr_elem_shape = self.expected_array_elem_shape_type;
+          let prev_local_arr_elem_const = self.expected_array_elem_shape_coerce_as_constant;
+          self.expected_array_elem_shape_type = "";
+          self.expected_array_elem_shape_coerce_as_constant = false;
+          if v.var_type.is_array {
+            // Mirrors the matching branch in `emit_global_variable` -
+            // each element gets the coercion wrap inside `.Bracket`'s
+            // own per-element loop instead of around the whole
+            // initializer. A local array's own initializer isn't
+            // bound by C's compile-time-constant restriction on
+            // globals, so this keeps the ordinary function-call form.
+            let local_elem_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(local_elem_shape_type, "") {
+              self.expected_array_elem_shape_type = local_elem_shape_type;
             }
-            let vq_candidate = vq_sb.build();
-            if self.shape_names.contains(vq_candidate) {
-              var_shape_type = vq_candidate;
-            }
-          }
-          if self.shape_names.contains(var_shape_type) {
-            let concrete = self.resolve_shape_coerce_concrete_type(v.val);
-            if concrete.is_some() {
-              self.ensure_generic_impl_shape_vtable_instantiated(
-                concrete.unwrap(),
-                var_shape_type
-              );
-              self.state.write("__fun_coerce_");
-              self.state.write(concrete.unwrap());
-              self.state.write("_");
-              self.state.write(var_shape_type);
-              self.state.write("(");
-              did_shape_coerce = true;
+          } else {
+            // A concrete shape instantiation is registered under its
+            // mangled identity (`To__num`), not `v.var_type.type_str`.
+            let var_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(var_shape_type, "") {
+              let concrete = self.resolve_shape_coerce_concrete_type(v.val);
+              if concrete.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  concrete.unwrap(),
+                  var_shape_type
+                );
+                self.state.write("__fun_coerce_");
+                self.state.write(concrete.unwrap());
+                self.state.write("_");
+                self.state.write(var_shape_type);
+                self.state.write("(");
+                did_shape_coerce = true;
+              }
             }
           }
           // `let_is_bracket_literal` already declared an explicitly-typed
@@ -11258,6 +11354,8 @@ impl Codegen {
           if did_shape_coerce {
             self.state.write(")");
           }
+          self.expected_array_elem_shape_type = prev_local_arr_elem_shape;
+          self.expected_array_elem_shape_coerce_as_constant = prev_local_arr_elem_const;
           self.in_array_initializer = prev_arr_init;
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
@@ -13375,6 +13473,34 @@ impl Codegen {
   // was never needed there. A no-op (not an error) when no such impl
   // exists, or it's already built - `emit_shape_vtable_machinery`'s
   // own dedup handles the latter.
+  // `dt`'s own resolved shape identity, when `dt` names a shape at
+  // all ("" otherwise) - shared by every declaration site that needs
+  // to know whether its own declared type (scalar or, with `is_array`
+  // set, an array's element type either way: `is_array` layers on
+  // top without changing `type_str`/`generic_args`) is a shape
+  // needing the coercion wrap. A concrete instantiation of a generic
+  // shape is registered under its mangled identity (`To__num`), never
+  // `dt.type_str` alone.
+  _resolve_shape_type_for_dtype(DataType dt) str {
+    str shape_type = dt.type_str;
+    if !self.shape_names.contains(shape_type) && dt.generic_args.len > 0 {
+      StringBuilder sq_sb = string_builder_init(16);
+      sq_sb.append(dt.type_str);
+      for sqarg : dt.generic_args {
+        sq_sb.append("__");
+        sq_sb.append(sqarg.type_str);
+      }
+      let sq_candidate = sq_sb.build();
+      if self.shape_names.contains(sq_candidate) {
+        shape_type = sq_candidate;
+      }
+    }
+    if self.shape_names.contains(shape_type) {
+      ret shape_type;
+    }
+    ret "";
+  }
+
   _ensure_plain_shape_impl_vtable_emitted(str type_name, str shape_name) {
     for n : self.all_nodes {
       fit n.kind {
@@ -16273,6 +16399,17 @@ impl Codegen {
           // too; see `Codegen.in_array_initializer`.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
+          // Real MSVC rejects a compound literal's own leading
+          // `(Type)` cast as a static-duration initializer outright
+          // (C2099); dropping it needs the declared type already
+          // known on the LHS, which an `is_let` global's own
+          // `__auto_type` (or MSVC's `int64_t` fallback) isn't - the
+          // cast is what tells either of those what type to infer,
+          // so this is scoped to an explicitly-typed global only.
+          let prev_bare_init = self.in_bare_initializer_context;
+          if !is_let {
+            self.in_bare_initializer_context = true;
+          }
           // A shape-typed global's initializer needs the same
           // coercion wrap a local `Variable` declaration's own
           // initializer already gets - a separate codegen path from
@@ -16280,22 +16417,24 @@ impl Codegen {
           flag global_did_shape_coerce = false;
           str global_concrete_name_for_coerce = "";
           str global_shape_name_for_coerce = "";
-          if !is_let {
-            str global_shape_type = v.var_type.type_str;
-            if !self.shape_names.contains(global_shape_type) &&
-              v.var_type.generic_args.len > 0 {
-              StringBuilder gq_sb = string_builder_init(16);
-              gq_sb.append(v.var_type.type_str);
-              for gqarg : v.var_type.generic_args {
-                gq_sb.append("__");
-                gq_sb.append(gqarg.type_str);
-              }
-              let gq_candidate = gq_sb.build();
-              if self.shape_names.contains(gq_candidate) {
-                global_shape_type = gq_candidate;
-              }
+          let prev_arr_elem_shape = self.expected_array_elem_shape_type;
+          let prev_arr_elem_const = self.expected_array_elem_shape_coerce_as_constant;
+          self.expected_array_elem_shape_type = "";
+          self.expected_array_elem_shape_coerce_as_constant = false;
+          if !is_let && v.var_type.is_array {
+            // An array's own element type - `is_array` layers on top
+            // of `type_str`/`generic_args` without changing what they
+            // name - needs the identical coercion wrap on each
+            // element, applied inside `.Bracket`'s own per-element
+            // loop instead of around the whole initializer.
+            let global_elem_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(global_elem_shape_type, "") {
+              self.expected_array_elem_shape_type = global_elem_shape_type;
+              self.expected_array_elem_shape_coerce_as_constant = true;
             }
-            if self.shape_names.contains(global_shape_type) {
+          } elif !is_let {
+            let global_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(global_shape_type, "") {
               let global_concrete = self.resolve_shape_coerce_concrete_type(v.val);
               if global_concrete.is_some() {
                 self.ensure_generic_impl_shape_vtable_instantiated(
@@ -16325,6 +16464,9 @@ impl Codegen {
           }
           let verr = self.emit_expr(*v.val);
           self.in_array_initializer = prev_arr_init;
+          self.in_bare_initializer_context = prev_bare_init;
+          self.expected_array_elem_shape_type = prev_arr_elem_shape;
+          self.expected_array_elem_shape_coerce_as_constant = prev_arr_elem_const;
           if verr.is_some() {
             ret verr;
           }
