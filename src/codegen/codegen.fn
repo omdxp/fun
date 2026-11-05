@@ -5093,6 +5093,43 @@ impl Codegen {
     ret .None;
   }
 
+  // `resolve_unique_enum_for_variant`'s own registry (`enum_names`/
+  // `enum_variant_names`) only gains an entry once an enum is
+  // actually emitted - too late for a `let`-inferred global's own
+  // bare shorthand (`let g = .Red;`), since `pub transpile`
+  // deliberately emits every global before any type, on the
+  // assumption a global is a plain literal with nothing to depend on
+  // yet (see that pass's own comment). Scans the whole program's AST
+  // directly instead, which needs no prior emission at all - correct
+  // for this one caller, not a general replacement for the registry-
+  // based version (which also covers a generic enum's own concrete
+  // instantiations, never visible from the template declaration
+  // alone).
+  _resolve_unique_plain_enum_for_variant_from_ast(str variant_name) Option<str> {
+    str found_name = "";
+    num found_count = 0;
+    for n : self.all_nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          if e.has_type_params {
+            continue;
+          }
+          for v : e.variants {
+            if equals(v.name, variant_name) {
+              found_name = e.name;
+              found_count = found_count + 1;
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    if found_count == 1 {
+      ret .Some(found_name);
+    }
+    ret .None;
+  }
+
   // True if `enum_name` is a known enum with a variant named
   // `variant_name`.
   enum_has_variant(str enum_name, str variant_name) flag {
@@ -16261,6 +16298,14 @@ impl Codegen {
     fit node.kind {
       .Variable(v) -> {
         flag is_let = equals(v.var_type.type_str, "__let_infer__");
+        // Captured at function scope so the type-recording step at
+        // the end of this function can still read it after the
+        // `if v.has_val { ... }` block below (where `let_inferred_
+        // type_name` also gets read a second time, to set the
+        // expected-type context a bare `.Variant` shorthand needs)
+        // ends.
+        str let_inferred_type_name = "";
+        Option<DataType> let_inferred_dtype = .None;
         // `pub transpile` emits every global before any plain type's full
         // body, which breaks for a global whose declared type is itself a
         // plain compound or enum. This emits that body first; memoization
@@ -16268,6 +16313,65 @@ impl Codegen {
         let gt_err = self.ensure_plain_type_emitted(v.var_type.type_str);
         if gt_err.is_some() {
           ret gt_err;
+        }
+        // A `let`-inferred global's own real type - a bare `.Variant`
+        // enum shorthand (`let g = .Red;`) needs the same global-
+        // uniqueness fallback a `let`-inferred local already gets,
+        // and any other inferrable initializer (a compound literal, a
+        // plain identifier, ...) goes through `infer_let_expr_type`,
+        // the exact same helper the local site uses - needs its own
+        // real type forced into existence this early too, mirroring
+        // the explicitly-typed branch's own call just above (which
+        // `v.var_type.type_str` - always the `__let_infer__` sentinel
+        // here - never reaches). Must happen before any other output
+        // for this declaration: `ensure_plain_type_emitted` writes
+        // directly at the current tail rather than hoisting, so
+        // calling it any later (once "name = " has already been
+        // written) corrupts the declaration it's meant to precede.
+        if is_let && v.has_val {
+          flag resolved_via_shorthand = false;
+          fit v.val.kind {
+            .Expression(ve_shorthand) -> {
+              if equals(ve_shorthand.op, ".") && ve_shorthand.has_left &&
+                ve_shorthand.has_right {
+                fit ve_shorthand.left.kind {
+                  .Blank -> {
+                    fit ve_shorthand.right.kind {
+                      .Identifier(vname_shorthand) -> {
+                        let unique_shorthand = self._resolve_unique_plain_enum_for_variant_from_ast(
+                          vname_shorthand
+                        );
+                        if unique_shorthand.is_some() {
+                          let_inferred_type_name = unique_shorthand.unwrap();
+                          resolved_via_shorthand = true;
+                        }
+                      }
+                      _ -> {}
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+            }
+            _ -> {}
+          }
+          if !resolved_via_shorthand {
+            let ginferred = self.infer_let_expr_type(v.val);
+            if ginferred.is_some() {
+              let gidt = ginferred.unwrap();
+              let gresolved = self.resolve_type_name(gidt);
+              if gresolved.is_some() {
+                let_inferred_type_name = gresolved.unwrap();
+                let_inferred_dtype = .Some(self.resolve_type_subst(gidt));
+              }
+            }
+          }
+          if !equals(let_inferred_type_name, "") {
+            let letg_err = self.ensure_plain_type_emitted(let_inferred_type_name);
+            if letg_err.is_some() {
+              ret letg_err;
+            }
+          }
         }
         // An unsized array global (`T[] buf = malloc(...);`) decays to a
         // pointer, as a local does, unless it's initialized with a
@@ -16395,6 +16499,33 @@ impl Codegen {
         }
         if v.has_val {
           self.state.write(" = ");
+          // A bare `.Variant` enum shorthand or `.{...}` compound-
+          // literal shorthand in a global's own initializer resolves
+          // against the declared type, the same way a local
+          // `Variable` declaration's own initializer already does -
+          // a separate codegen path from that one, so it never
+          // inherited this either. An `is_let` global has no declared
+          // type to resolve a bare shorthand against, falling back to
+          // global uniqueness the same way a `let`-inferred local does.
+          let prev_expected_g = self.expected_enum_type;
+          let prev_expected_compound_g = self.expected_compound_type;
+          if !is_let {
+            let resolved_decl_type_g = self.resolve_type_name(*v.var_type);
+            if resolved_decl_type_g.is_some() {
+              self.expected_enum_type = resolved_decl_type_g.unwrap();
+            } else {
+              self.expected_enum_type = v.var_type.type_str;
+            }
+            self.expected_compound_type = self.expected_enum_type;
+          } elif !equals(let_inferred_type_name, "") {
+            // Already resolved, and already forced into existence,
+            // by the early top-of-function check (`let_inferred_
+            // type_name`, function-scoped) - reused here only to set
+            // the expected type `emit_expr`'s own bare-shorthand
+            // handling reads.
+            self.expected_enum_type = let_inferred_type_name;
+            self.expected_compound_type = let_inferred_type_name;
+          }
           // A top-level global's initializer is a declaration context
           // too; see `Codegen.in_array_initializer`.
           let prev_arr_init = self.in_array_initializer;
@@ -16467,6 +16598,8 @@ impl Codegen {
           self.in_bare_initializer_context = prev_bare_init;
           self.expected_array_elem_shape_type = prev_arr_elem_shape;
           self.expected_array_elem_shape_coerce_as_constant = prev_arr_elem_const;
+          self.expected_enum_type = prev_expected_g;
+          self.expected_compound_type = prev_expected_compound_g;
           if verr.is_some() {
             ret verr;
           }
@@ -16479,6 +16612,32 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
+        // Mirrors the local-variable declaration site's own identical
+        // step: a `let`-inferred global is emitted correctly (its own
+        // `__auto_type`/MSVC-fallback declarator included) but, with
+        // no declared type of its own to read, stays invisible to
+        // `resolve_field_chain` as a receiver - `_global.field`/
+        // `_global.method()` anywhere in any function body fails with
+        // an unsupported-node codegen error otherwise. `let_inferred_
+        // type_name`/`let_inferred_dtype` were already fully resolved
+        // (and their own type already forced into existence) by the
+        // early top-of-function check - nothing left to do here but
+        // record them. Stays empty (a no-op) for an initializer
+        // `infer_let_expr_type` can't resolve, exactly as it already
+        // does for a local.
+        if is_let && !equals(let_inferred_type_name, "") {
+          DataType g_dtype = dtype_new();
+          g_dtype.type_str = let_inferred_type_name;
+          if let_inferred_dtype.is_some() {
+            g_dtype = let_inferred_dtype.unwrap();
+          }
+          self.record_global_typed(
+            v.name,
+            let_inferred_type_name,
+            dtype_is_pointer(g_dtype),
+            g_dtype
+          );
+        }
         ret .None;
       }
       _ -> { ret .Some(.InvalidNode); }

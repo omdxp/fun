@@ -403,6 +403,47 @@ test "a top-level global's own compound-literal initializer drops its redundant 
     "expected every nested field/array-element compound literal inside the global's own initializer to drop its cast too";
 }
 
+test "a top-level global's own explicitly-typed and let-inferred bare shorthand initializers both resolve" {
+  // `emit_global_variable` never set `expected_enum_type`/`expected_
+  // compound_type` before emitting its own initializer at all - a
+  // bare `.Variant` enum shorthand (`Color g = .Red;`) or `.{...}`
+  // compound shorthand failed outright ("unsupported node"), unlike
+  // the identical shorthand in a local `Variable` declaration, which
+  // already resolves correctly. A `let`-inferred global compounds the
+  // gap further: nothing ever recorded its own inferred type at all
+  // (enum shorthand, compound literal, or otherwise), so even past
+  // getting the declaration itself to compile, any later field/method
+  // access on it failed with "unknown identifier" - the same
+  // underlying problem `record_global_typed` already solves for an
+  // explicitly-typed global, needed here too via `infer_let_expr_
+  // type`, the exact helper a `let`-inferred local already uses.
+  // Covers both forms, plus a plain scalar and plain compound `let`
+  // global alongside the enum-shorthand ones, side by side.
+  str src = `use std.c.io;
+  `enum Color { Red, Green, Blue }
+  `compound Point { num x; num y; }
+  `compound Box { num val; }
+  `Color g_color = .Red;
+  `Point g_point = .{x = 1, y = 2};
+  `let g_color_let = .Red;
+  `let g_num_let = 5;
+  `let g_box_let = Box{val = 9};
+  `fun main() num {
+  `  printf(
+  `    "%lld %lld %lld %lld %lld %lld\n",
+  `    g_color.tag_value(), g_point.x, g_point.y,
+  `    g_color_let.tag_value(), g_num_let, g_box_let.val
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_bare_shorthand",
+    "a top-level global's own explicitly-typed and let-inferred bare shorthand initializers both resolve"
+  );
+  assert equals(out, "0 1 2 0 5 9\n"), "expected every global form to parse, compile, and resolve to its own real value";
+}
+
 test "an explicitly-typed const names a user-defined compound, not just a builtin scalar" {
   // `const <type> <name> = value;` only ever recognized `<type>` as a
   // builtin datatype keyword (num/str/dec/flag/chr/raw) - a user-
