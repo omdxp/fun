@@ -8953,8 +8953,12 @@ impl Codegen {
   // Resolves the concrete type an expression's value coerces from, for a
   // shape-typed destination such as a `Variable` initializer or a `ret`
   // from a shape-returning function; the `__fun_coerce_<Type>_<Shape>`
-  // helper needs `<Type>` by name. Handles `&identifier` and a bare
-  // identifier that's already a pointer; `.None` for anything else.
+  // helper needs `<Type>` by name. Handles `&identifier`, a bare
+  // identifier that's already a pointer, and a call whose own declared
+  // return type is a concrete pointer (a plain function, a method, or a
+  // generic instantiation - whatever `infer_let_expr_type` already
+  // resolves a call's return type as, reused rather than duplicated);
+  // `.None` for anything else.
   resolve_shape_coerce_concrete_type(Node* exp) Option<str> {
     fit exp.kind {
       .Unary(u) -> {
@@ -8966,6 +8970,17 @@ impl Codegen {
         let is_ptr = self.lookup_local_is_pointer(name);
         if is_ptr.is_some() && is_ptr.unwrap() {
           ret self.lookup_local_type_name(name);
+        }
+      }
+      .Expression(e) -> {
+        if equals(e.op, "()") {
+          let rdt_opt = self.infer_let_expr_type(exp);
+          if rdt_opt.is_some() {
+            let rdt = rdt_opt.unwrap();
+            if dtype_is_pointer(rdt) {
+              ret .Some(rdt.type_str);
+            }
+          }
         }
       }
       _ -> {}

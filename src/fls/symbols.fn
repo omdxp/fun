@@ -763,6 +763,18 @@ fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str
       }
       ret _infer_global_const_type_depth(t.else_val, program, depth + 1);
     }
+    // `const NEG = -5;` - a negative numeric literal parses as a unary
+    // minus over a plain Number node, not folded into the literal
+    // itself; negating a value never changes its own type. Mirrors
+    // `_literal_value_text`'s own identical `-` case right above,
+    // which already renders this shape's value correctly - without
+    // this, the type half stayed blank while the value half didn't.
+    .Unary(u) -> {
+      if equals(u.op, "-") {
+        ret _infer_global_const_type_depth(u.operand, program, depth + 1);
+      }
+      ret "";
+    }
     _ -> { ret ""; }
   }
 }

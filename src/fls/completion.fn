@@ -1437,7 +1437,17 @@ pub fun _dot_shorthand_enum_type(
       ret rdt.unwrap().type_str;
     }
   }
-  ret dot_shorthand_context_type_at(tokens, program, dot_idx, file, line);
+  // `dot_shorthand_context_type_at` renders a combined "Name<args>"
+  // type (a comparison/assignment operand's own `full_type_name`, or
+  // a call argument's own rendered parameter piece) - `_enum_variant_
+  // completions` below matches by an exact `equals` against the AST's
+  // bare enum name, which a generic instantiation's own angle brackets
+  // always failed outright, so this was silently returning zero
+  // suggestions for any generic enum (`Option<num>`, not just `Color`)
+  // in this position. Same root cause, same fix shape, as every other
+  // caller of `dot_shorthand_context_type_at`'s own result this
+  // session.
+  ret bare_type_expr(dot_shorthand_context_type_at(tokens, program, dot_idx, file, line));
 }
 
 // `_dot_shorthand_enum_type`'s own four shapes (a fit's subject, a

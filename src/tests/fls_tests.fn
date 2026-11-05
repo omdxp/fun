@@ -10291,3 +10291,49 @@ test "hover on a bare '.Variant' shorthand substitutes a generic comparison/call
   method_doc.version = 1;
   assert contains(hover(&reads, method_doc, 7, 10), "Some(num)"), "expected the generic method's own receiver instantiation substituted into its own parameter type, not the bare T";
 }
+
+test "hover on a negative-literal const's own declaration resolves its type too, not just its value" {
+  // `_infer_global_const_type_depth` had no `.Unary` case at all, so a
+  // negative numeric literal (`-5`, parsed as a unary minus over a
+  // plain Number, not folded into the literal itself) fell through to
+  // "" - the sibling function rendering the const's own value already
+  // special-cased this shape, so the hover showed the value correctly
+  // but the type slot stayed blank right next to it.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///negconsthover.fn";
+  doc.path = "negconsthover.fn";
+  doc.text = `const NEG = -5;
+  `fun main() num { ret NEG; }`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 0, 6), "const num NEG"), "expected the negative literal's own type ('num') to resolve, not a blank type slot next to its correctly-rendered value";
+}
+
+test "dot-completion on a bare '.Variant' shorthand offers a generic enum's own variants, not zero suggestions" {
+  // `_dot_shorthand_enum_type`'s own fallback returned `dot_shorthand_
+  // context_type_at`'s combined "Name<args>" text straight through as
+  // if it were already a bare enum name - `_enum_variant_completions`
+  // matches by an exact `equals` against the AST's own bare declared
+  // name, which a generic instantiation's own angle brackets always
+  // failed outright, silently falling through to the generic top-
+  // level/keyword completion list instead of offering any variant at
+  // all. A non-generic enum (`Color`) never exposed this, since there
+  // are no angle brackets to strip there in the first place.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///dotshorthandgenericcomp.fn";
+  doc.path = "dotshorthandgenericcomp.fn";
+  doc.text = `use std.option;
+  `fun takes(Option<num> o) num { ret 0; }
+  `fun main() num {
+  `  ret takes(.S);
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 3, 14, false);
+  assert contains(comp, `"label":"Some"`), "expected the generic Option<num> argument's own variants offered, not the generic fallback list";
+  assert contains(comp, `"label":"None"`), "expected every variant, not just one";
+}

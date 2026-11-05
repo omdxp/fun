@@ -366,6 +366,38 @@ test "a top-level global's own shape-typed initializer coerces correctly" {
   assert equals(out, "9 77\n"), "expected both the plain and doubly-generic shape-typed globals to coerce and dispatch correctly";
 }
 
+test "a shape coercion recognizes a function call's own return value, not just an address-of expression" {
+  // `resolve_shape_coerce_concrete_type` only ever recognized a
+  // `&identifier`-shaped operand or a bare already-pointer local - a
+  // call whose own declared return type is a concrete pointer
+  // implementing the destination shape (`fun get() Point* { ... }`
+  // coerced into `HasX`) fell through to `.None`, so the coercion
+  // wrap never ran at all and the raw concrete pointer leaked through
+  // where C expects the shape's fat-pointer struct. Covers all four
+  // sites that share this helper: a global initializer, a local
+  // initializer, a `ret`, and a call argument.
+  str src = `use std.c.io;
+  `shape HasX { getX() num; }
+  `compound Point { num x; }
+  `impl Point as HasX { getX() num { ret self.x; } }
+  `Point p = Point{x = 5};
+  `fun get_ref() Point* { ret &p; }
+  `HasX g = get_ref();
+  `fun wrap() HasX { ret get_ref(); }
+  `fun take(HasX h) num { ret h.getX(); }
+  `fun main() num {
+  `  HasX h = get_ref();
+  `  printf("%lld %lld %lld %lld\n", g.getX(), h.getX(), wrap().getX(), take(get_ref()));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_coerce_from_call",
+    "a shape coercion recognizes a function call's own return value, not just an address-of expression"
+  );
+  assert equals(out, "5 5 5 5\n"), "expected the global, local, ret, and call-argument sites to all coerce the call's own return value correctly";
+}
+
 test "a top-level global's own compound-literal initializer drops its redundant cast under MSVC" {
   // Found investigating a REAL Windows CI failure on the test just
   // above, not locally reproducible (real MSVC isn't available
