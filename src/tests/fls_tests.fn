@@ -10576,3 +10576,41 @@ test "signature help resolves a method called through an array-indexed receiver,
     out
   );
 }
+
+test "a let local inferred from an array-indexed field access gets the field's own type, not the array's" {
+  // `_infer_type_primary`'s own `name[...]` special case resolved
+  // `name`'s bare declared type directly, but only ever noticed a
+  // bare unsized array (`ends_with(base_type, "[]")` - literally
+  // those two characters, never a real size like `[3]`), and always
+  // returned immediately even when it matched, with no way to
+  // continue past the index into a further `.field` at all. A sized
+  // array (`Point[3] pts;`) fell through this whole block untouched,
+  // then matched nothing else either, since the general chain-walk
+  // loop right below only ever looked for a `.`/`(` immediately
+  // after the base identifier - never a `[` - so `pts[0].x` inferred
+  // as `pts`'s own raw declared type (`Point[3]`) instead of `x`'s
+  // real type (`num`).
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///letarrayindex.fn";
+  doc.path = "letarrayindex.fn";
+  doc.text = `compound Point { num x; num y; }
+  `fun main() num {
+  `  Point[3] pts;
+  `  pts[0].x = 1;
+  `  let v = pts[0].x;
+  `  ret v;
+  `}`;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 6);
+  assert contains(hints, `"label":": num"`), format(
+    "expected 'v' to infer 'num' (the field's own type), got: {str}",
+    hints
+  );
+  assert !contains(hints, "Point["), format(
+    "expected the array's own declared type to never leak through, got: {str}",
+    hints
+  );
+}
