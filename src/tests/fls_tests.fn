@@ -10390,3 +10390,62 @@ test "diagnose does not crash on a bound-list type alias ('num | dec')" {
   Vec<Diagnostic> diags = diagnose(&reads, &dcache, doc);
   assert diags.len == 0, "expected a used, otherwise-valid bound-list alias to diagnose cleanly";
 }
+
+test "dot-completion on 'self.' narrows correctly when typed as an unclosed call's own argument" {
+  // `_receiver_before`'s own paren-skip logic exists to preserve a
+  // call's own name as the receiver for a chain ending in it
+  // (`l.debug_r("msg").` reads back as "the receiver is `debug_r`",
+  // not something from inside its own already-closed arguments) -
+  // but it skipped identically even when the outer call never closes
+  // before the cursor at all, because the cursor sits inside that
+  // call's own still-open argument list (`format("...", self.)`,
+  // typing `self.` as format's own second argument). In that shape
+  // the skip is wrong: nothing about `format`'s own name is what a
+  // reader typing one of its arguments wants completed, but the scan
+  // had no way to tell the two shapes apart, so this fell through to
+  // dumping every keyword and top-level name instead of narrowing to
+  // `self`'s own members.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///selfcompletefmt.fn";
+  doc.path = "selfcompletefmt.fn";
+  doc.text = `compound Node { num value; Node* next; }
+  `impl Node {
+  `  to_string() str {
+  `    ret format("value = {}", self.);
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 3, 34, false);
+  assert contains(comp, `"label":"value"`), "expected Node's own field 'value' to be offered";
+  assert contains(comp, `"label":"next"`), "expected every field, not just one";
+  assert !contains(comp, `"label":"format"`), "expected Node's own members, not the generic fallback list";
+}
+
+test "dot-completion on a chained-call receiver narrows correctly as an unclosed outer call's own argument too" {
+  // Same root cause as the `self.` case right above, through
+  // `_receiver_identifier_index_before`'s own identical sibling scan
+  // (used for a chained-call receiver specifically, like
+  // `o.get_inner().` here) rather than `_receiver_before`'s.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chainedcallfmt.fn";
+  doc.path = "chainedcallfmt.fn";
+  doc.text = `compound Inner { num value; }
+  `compound Outer { Inner i; }
+  `impl Outer {
+  `  get_inner() Inner { ret self.i; }
+  `}
+  `fun main() num {
+  `  Outer o;
+  `  ret format("{}", o.get_inner().);
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 7, 33, false);
+  assert contains(comp, `"label":"value"`), "expected Inner's own field 'value' (get_inner's own return type) to be offered";
+  assert !contains(comp, `"label":"format"`), "expected Inner's own members, not the generic fallback list";
+}

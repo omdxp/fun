@@ -2366,6 +2366,22 @@ fun _propagation_receiver_type_before(
 // is always whichever segment sits right before the cursor's own
 // dot, not the chain's first segment.
 fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
+  ret _receiver_before_from(tokens, line, character, 0);
+}
+
+// `_receiver_before`'s own scan, startable anywhere in `tokens` rather
+// than always from the beginning - what lets it recover when the
+// scan below reaches the cursor with an open call never closed (the
+// cursor sits inside that call's own argument list, typing `self.`
+// as one of its arguments, say - `format("...", self.)`), which the
+// plain forward scan alone reads as "inside an opaque call's
+// arguments, receiver stays whatever it was before the call" (the
+// right answer for the different, already-closed shape this skip
+// logic exists for - `l.debug_r("msg").`, receiver `debug_r`) - here
+// it is instead the wrong answer, since nothing about the call's own
+// name is what a reader typing one of its still-open arguments wants
+// completed.
+fun _receiver_before_from(Vec<Token>* tokens, num line, num character, num start_idx) str {
   num source_line = line + 1;
   num source_col = character + 1;
   str receiver = "";
@@ -2377,9 +2393,14 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
   // `debug_r`", the same as a plain field would, instead of resetting
   // to "no receiver at all" the instant the call's own `(` is seen.
   num paren_depth = 0;
-  num i = 0;
+  // The token index right after the most recent argument boundary (an
+  // opening `(` or a comma at this scan's own outermost open depth) -
+  // consulted only when the scan ends with `paren_depth > 0` below.
+  num arg_start_idx = -1;
+  num i = start_idx;
   for i < tokens.len {
     Token t = tokens.get(i);
+    num this_idx = i;
     i = i + 1;
     // A `NewLine` token's own `end_col` restarts near the left margin
     // rather than continuing the line's own column count, which would
@@ -2396,11 +2417,14 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
         paren_depth = paren_depth + 1;
       } elif token_is_symbol(t, ')') {
         paren_depth = paren_depth - 1;
+      } elif paren_depth == 1 && token_is_operator(t, ",") {
+        arg_start_idx = this_idx + 1;
       }
       continue;
     }
     if token_is_operator(t, "(") {
       paren_depth = 1;
+      arg_start_idx = this_idx + 1;
       continue;
     }
     if token_is_dot_like(t) {
@@ -2429,6 +2453,12 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
       }
     }
   }
+  if paren_depth > 0 {
+    if arg_start_idx >= 0 && arg_start_idx > start_idx {
+      ret _receiver_before_from(tokens, line, character, arg_start_idx);
+    }
+    ret "";
+  }
   if !last_was_dot {
     ret "";
   }
@@ -2442,12 +2472,26 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
 // not just the name. -1 for the same cases `_receiver_before` itself
 // returns "" for.
 fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num character) num {
+  ret _receiver_identifier_index_before_from(tokens, line, character, 0);
+}
+
+// `_receiver_identifier_index_before`'s own scan, startable anywhere
+// in `tokens` - the same recovery `_receiver_before_from` needs when
+// the cursor sits inside a call that never closes before it (typing
+// one of its own arguments, a chained-call receiver included).
+fun _receiver_identifier_index_before_from(
+  Vec<Token>* tokens,
+  num line,
+  num character,
+  num start_idx
+) num {
   num source_line = line + 1;
   num source_col = character + 1;
   num receiver_idx = -1;
   flag last_was_dot = false;
   num paren_depth = 0;
-  num i = 0;
+  num arg_start_idx = -1;
+  num i = start_idx;
   for i < tokens.len {
     Token t = tokens.get(i);
     num this_idx = i;
@@ -2463,11 +2507,14 @@ fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num characte
         paren_depth = paren_depth + 1;
       } elif token_is_symbol(t, ')') {
         paren_depth = paren_depth - 1;
+      } elif paren_depth == 1 && token_is_operator(t, ",") {
+        arg_start_idx = this_idx + 1;
       }
       continue;
     }
     if token_is_operator(t, "(") {
       paren_depth = 1;
+      arg_start_idx = this_idx + 1;
       continue;
     }
     if token_is_dot_like(t) {
@@ -2490,6 +2537,12 @@ fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num characte
         last_was_dot = false;
       }
     }
+  }
+  if paren_depth > 0 {
+    if arg_start_idx >= 0 && arg_start_idx > start_idx {
+      ret _receiver_identifier_index_before_from(tokens, line, character, arg_start_idx);
+    }
+    ret -1;
   }
   if !last_was_dot {
     ret -1;
