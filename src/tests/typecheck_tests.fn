@@ -3750,6 +3750,43 @@ test "a multi-dimensional array with every dimension consistently sized or consi
   );
 }
 
+test "a compound field mixing a sized and a bare array dimension is rejected too" {
+  // The local-variable check right above closes this gap for a
+  // local's own declaration, but a field's `DataType` went through
+  // no check of its own at all - the identical codegen bug (a bare
+  // dimension silently dropped, leaking a raw C subscript error for
+  // any index through it) still reached codegen uncaught through a
+  // compound field.
+  str msg = check(
+    `compound Grid { num[3][] rows; }
+    `fun main() {
+    `  Grid g;
+    `  g.rows[0][0] = 5;
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "every dimension") || contains(msg, "mix"),
+  "expected the error to explain the mixed sized/bare dimensions, not something unrelated";
+}
+
+test "a function parameter mixing a sized and a bare array dimension is rejected too" {
+  // Same gap as the field case right above, for a parameter's own
+  // `DataType` instead - worse in practice, since codegen collapsed
+  // the parameter to a bare scalar outright rather than keeping even
+  // one real dimension, leaking both a subscript error and an
+  // incompatible-argument error at every call site.
+  str msg = check(
+    `fun f(num[3][] arr) num { ret arr[0][0]; }
+    `fun main() {
+    `  num[3][2] a;
+    `  num v = f(a);
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "every dimension") || contains(msg, "mix"),
+  "expected the error to explain the mixed sized/bare dimensions, not something unrelated";
+}
+
 test "operator overloading: a plain array's own [] assignment keeps today's behavior" {
   accepts(
     `fun main() {

@@ -5987,6 +5987,22 @@ impl Checker {
     for pa : f.args {
       fit pa.kind {
         .Variable(pv) -> {
+          // Same gap `check_variable`'s own identical guard closes for
+          // a local (see its own comment) - a parameter's own
+          // `DataType` goes through no other check at all, so a mixed
+          // sized/bare array parameter (`num[3][] arr`) reached
+          // codegen unchecked, which collapsed it to a bare scalar
+          // parameter outright (worse than the local case: not even
+          // one dimension survives), leaking both a subscript error
+          // and an incompatible-argument error at every call site.
+          if pv.var_type.is_array && pv.var_type.array_brackets.len > 0 &&
+            pv.var_type.array_brackets.len != pv.var_type.array_depth {
+            self.fail(
+              "an array type's own size must be written for every dimension or none at all, not a mix of the two",
+              pa
+            );
+            ret;
+          }
           if pv.has_val {
             seen_default_param = true;
           } elif seen_default_param {
@@ -6333,6 +6349,19 @@ pub fun typecheck_program_with_aliases(
           }
         }
         for field : c.fields {
+          // Same gap `check_variable`'s own identical guard closes for
+          // a local (see its own comment) - a field's own `DataType`
+          // goes through no other check at all, so a mixed sized/bare
+          // array field (`num[3][] rows;`) reached codegen unchecked,
+          // leaking a raw C subscript error for any index through it.
+          if field.dtype.is_array && field.dtype.array_brackets.len > 0 &&
+            field.dtype.array_brackets.len != field.dtype.array_depth {
+            checker.fail(
+              "an array type's own size must be written for every dimension or none at all, not a mix of the two",
+              node
+            );
+            ret .Err(checker.error);
+          }
           info.fields.put(field.name, checked_from_dtype(field.dtype));
         }
         checker.compounds.put(c.name, info);
