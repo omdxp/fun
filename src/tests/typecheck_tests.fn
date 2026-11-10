@@ -3787,6 +3787,45 @@ test "a function parameter mixing a sized and a bare array dimension is rejected
   "expected the error to explain the mixed sized/bare dimensions, not something unrelated";
 }
 
+test "a function's own return type mixing a sized and a bare array dimension is rejected too" {
+  // Same gap as the field/parameter cases right above, for a
+  // function's own return `DataType` instead - none of the three
+  // existing checks touch it, so it still leaked raw C errors
+  // (incompatible pointer-to-integer conversion, then a subscript on
+  // a scalar) for any caller that went on to index the result.
+  str msg = check(
+    `fun f() num[3][] {
+    `  num[3][2] a;
+    `  ret a;
+    `}
+    `fun main() {
+    `  let r = f();
+    `  num v = r[0][0];
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "every dimension") || contains(msg, "mix"),
+  "expected the error to explain the mixed sized/bare dimensions, not something unrelated";
+}
+
+test "an enum variant's own payload type mixing a sized and a bare array dimension is rejected too" {
+  // Same gap again, for an enum variant's own payload `DataType` -
+  // reaching codegen unchecked malformed the payload literal's own
+  // emission outright (a raw syntax-level C error, not just a
+  // subscript mismatch).
+  str msg = check(
+    `enum Shape {
+    `  Grid(num[3][]),
+    `}
+    `fun main() {
+    `  Shape s = .Grid([[1, 2], [3, 4], [5, 6]]);
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "every dimension") || contains(msg, "mix"),
+  "expected the error to explain the mixed sized/bare dimensions, not something unrelated";
+}
+
 test "operator overloading: a plain array's own [] assignment keeps today's behavior" {
   accepts(
     `fun main() {
