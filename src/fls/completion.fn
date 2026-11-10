@@ -1199,7 +1199,23 @@ fun _variant_payload_type_from_tokens(
 // a name that never appears this way simply adds nothing, the same
 // safe no-op `_bare_type_name` gets from an AST that resolves it.
 fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
-  if equals(type_name, "") {
+  // An array's own declared type (`Point[3]`, or `_base_type_before`'s
+  // synthetic `Point[]` marker for the same shape) has no members of
+  // its own in this language - what a reader actually wants here is
+  // always the element type's members, whether reached directly
+  // (`pts.`, a rare, otherwise-empty completion) or through an index
+  // (`pts[0].`, the common one): stripped unconditionally, the same
+  // "look through to the element" `_apply_chain_index_unwraps` and
+  // `render_type` both already give a fixed-size array elsewhere.
+  str base_type = type_name;
+  for len(base_type) > 0 && base_type[len(base_type) - 1] == ']' {
+    num lb = last_index_of_char(base_type, '[');
+    if lb < 0 {
+      break;
+    }
+    base_type = substr(base_type, 0, lb);
+  }
+  if equals(base_type, "") {
     ret;
   }
   num i = 0;
@@ -1217,7 +1233,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
       continue;
     }
     if i >= tokens.len || tokens.get(i).type != .Identifier ||
-      !equals(token_word(tokens.get(i)), type_name) {
+      !equals(token_word(tokens.get(i)), base_type) {
       continue;
     }
     num j = i + 1;
@@ -2427,6 +2443,20 @@ fun _receiver_before_from(Vec<Token>* tokens, num line, num character, num start
       arg_start_idx = this_idx + 1;
       continue;
     }
+    // An index (`pts[0].field`) sits directly on the receiver the
+    // same way a call's own `()` already does - skipped wholesale
+    // over its own matching `]` (nesting included, `arr[i][j]`), so
+    // `receiver` still reads as `pts` right after it, instead of
+    // being wiped the instant `[` is seen (the same "anything else
+    // resets" fallback every other unrecognized token already hits
+    // below).
+    if token_is_operator(t, "[") {
+      let close = _matching_rbracket_forward(tokens, this_idx);
+      if close.is_some() {
+        i = close.unwrap() + 1;
+        continue;
+      }
+    }
     if token_is_dot_like(t) {
       last_was_dot = true;
       continue;
@@ -2516,6 +2546,16 @@ fun _receiver_identifier_index_before_from(
       paren_depth = 1;
       arg_start_idx = this_idx + 1;
       continue;
+    }
+    // Same index-skip as `_receiver_before_from`'s own identical scan
+    // (see its comment): an index on the receiver must not wipe
+    // `receiver_idx` either.
+    if token_is_operator(t, "[") {
+      let close = _matching_rbracket_forward(tokens, this_idx);
+      if close.is_some() {
+        i = close.unwrap() + 1;
+        continue;
+      }
     }
     if token_is_dot_like(t) {
       last_was_dot = true;

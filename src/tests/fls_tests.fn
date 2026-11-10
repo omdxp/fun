@@ -10510,3 +10510,69 @@ test "hover on a custom op_index receiver resolves its own return type's field" 
   );
   assert contains(h, "num x"), format("expected Point's own field 'x', got: {str}", h);
 }
+
+test "dot-completion right after typing an array-indexed field receiver narrows correctly too" {
+  // This document doesn't parse with a bare trailing dot and nothing
+  // typed after it yet - exactly the moment completion is actually
+  // triggered - so it goes through completion.fn's own token-only
+  // fallback, not `chain_receiver`. `self.items[0].` reads `items`
+  // as the receiver through that fallback's own bare-name field case
+  // (its own pre-existing, name-only tracking - `self.` itself is
+  // dropped, a separate, already-accepted imprecision), whose own
+  // field declaration is array-bracketed (`Node[2] items;`) - a
+  // shape `_base_type_before` (symbols.fn) couldn't read past at
+  // all, and `_members_from_tokens` had no bracket-stripping of its
+  // own either, together leaving this fall through to the generic
+  // keyword dump instead of Node's own members.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///arrayindexfield.fn";
+  doc.path = "arrayindexfield.fn";
+  doc.text = `compound Node { num value; Node* next; }
+  `compound Holder { Node[2] items; }
+  `impl Holder {
+  `  describe() str {
+  `    ret format("value = {}", self.items[0].)
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str comp = completion(&reads, doc, 4, 43, false);
+  assert contains(comp, `"label":"value"`), "expected Node's own field 'value' to be offered right after typing the index";
+  assert contains(comp, `"label":"next"`), "expected every field, not just one";
+  assert !contains(comp, `"label":"format"`), "expected Node's own members, not the generic fallback list";
+}
+
+test "signature help resolves a method called through an array-indexed receiver, mid-argument" {
+  // `c.has_receiver`'s own token-only branch (signature_help.fn, for
+  // a document that doesn't parse yet - exactly the state while a
+  // call's own parens are still open) resolves its receiver through
+  // `chain_receiver_identifier_index_from_tokens`, whose own doc
+  // comment used to say outright that an index expression was one of
+  // the shapes this tier never chases, returning -1 and NO_SIGNATURE
+  // for any array-indexed receiver (`pts[0].set_x(`) - even though
+  // the identical, non-indexed shape (`pt.set_x(`) already resolved
+  // correctly.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///sighelp_array_index.fn";
+  doc.path = "sighelp_array_index.fn";
+  doc.text = `compound Point { num x; num y; }
+  `impl Point {
+  `  set_x(num v) { self.x = v; }
+  `}
+  `fun main() num {
+  `  Point[3] pts;
+  `  pts[0].set_x(
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str out = signature_help(&reads, doc, 6, 15);
+  assert contains(out, `"label":"set_x(Point* self, num v)"`), format(
+    "expected set_x's own signature through the array index, got: {str}",
+    out
+  );
+}

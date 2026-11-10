@@ -1017,6 +1017,39 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
   if j < 0 {
     ret "";
   }
+  // `Type[N] name`/`Type[N][M] name`: one or more trailing `[...]`
+  // groups sit directly before the name, outermost-written last per
+  // `render_type`'s own ordering - skipped back over here (each
+  // pair's own nesting depth-tracked, same as `_matching_lbracket`),
+  // before anything else, so the real base type underneath still
+  // resolves the same way a plain `Type name` already does. `had_
+  // array` marks the result as an array's own declared type with a
+  // synthetic `[]` suffix below, rather than the base name bare -
+  // what lets a caller resolving a member through an index
+  // (`pts[0].field`) tell this shape apart from an ordinary one.
+  flag had_array = false;
+  for j >= 0 && token_is_symbol(tokens.get(j), ']') {
+    had_array = true;
+    num depth = 1;
+    j = _prev_real_index(tokens, j);
+    for j >= 0 && depth > 0 {
+      if token_is_symbol(tokens.get(j), ']') {
+        depth = depth + 1;
+      } elif token_is_operator(tokens.get(j), "[") {
+        depth = depth - 1;
+      }
+      if depth > 0 {
+        j = _prev_real_index(tokens, j);
+      }
+    }
+    if depth != 0 {
+      ret "";
+    }
+    j = _prev_real_index(tokens, j);
+  }
+  if j < 0 {
+    ret "";
+  }
   if token_is_operator(tokens.get(j), "*") {
     j = _prev_real_index(tokens, j);
     if j < 0 {
@@ -1046,6 +1079,9 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
     }
   }
   if tokens.get(j).type == .Identifier {
+    if had_array {
+      ret format("{str}[]", token_word(tokens.get(j)));
+    }
     ret token_word(tokens.get(j));
   }
   // A builtin scalar (`num x = 5;`) lexes its own type name as a
@@ -1054,6 +1090,9 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
   // compound/enum name) read as having no declared type at all here.
   if tokens.get(j).type == .Keyword &&
     _is_builtin_scalar_type_word(token_word(tokens.get(j))) {
+    if had_array {
+      ret format("{str}[]", token_word(tokens.get(j)));
+    }
     ret token_word(tokens.get(j));
   }
   ret "";
@@ -3002,13 +3041,27 @@ pub fun local_method_signature_from_tokens(
   str type_name,
   str method_name
 ) str {
+  // Same "look through to the element" `_members_from_tokens`/
+  // `member_declaration_from_tokens` already give an array's own
+  // declared type - no `impl` block is ever named after an array
+  // type itself, only its element (`impl Point`, never `impl
+  // Point[]`), so a method called through an index (`pts[0].
+  // set_x(`) still finds its own `impl` block here.
+  str base_type_name = type_name;
+  for len(base_type_name) > 0 && base_type_name[len(base_type_name) - 1] == ']' {
+    num lb = last_index_of_char(base_type_name, '[');
+    if lb < 0 {
+      break;
+    }
+    base_type_name = substr(base_type_name, 0, lb);
+  }
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
     if token_is_keyword(t, "impl") {
       let name_tok = token_after(tokens, i + 1);
       if name_tok.is_some() && name_tok.unwrap().type == .Identifier &&
-        equals(token_word(name_tok.unwrap()), type_name) {
+        equals(token_word(name_tok.unwrap()), base_type_name) {
         // Skip past any generic params/shape clause to the impl
         // block's own opening brace.
         num j = index_of_token(tokens, name_tok.unwrap()) + 1;
@@ -3057,10 +3110,10 @@ pub fun local_method_signature_from_tokens(
                     free(params_text);
                     str new_params;
                     if equals(rest, ")") {
-                      new_params = format("({str}* self)", type_name);
+                      new_params = format("({str}* self)", base_type_name);
                       free(rest);
                     } else {
-                      new_params = format("({str}* self, {str}", type_name, rest);
+                      new_params = format("({str}* self, {str}", base_type_name, rest);
                       free(rest);
                     }
                     num k2 = m;
@@ -3189,6 +3242,22 @@ pub fun member_declaration_from_tokens(
   str type_name,
   str member_name
 ) Option<Declaration> {
+  // Same "look through to the element" `_members_from_tokens`
+  // (completion.fn) already gives an array's own declared type
+  // (`_base_type_before`'s own synthetic `Point[]` marker, same
+  // shape) - an array has no members of its own here, so a method
+  // called through an index (`pts[0].set_x(`) resolves `set_x`
+  // against the element type the exact same way, not the bare name
+  // `lookup_field`/`lookup_method` below would never find a compound
+  // declaration for.
+  str base_type_name = type_name;
+  for len(base_type_name) > 0 && base_type_name[len(base_type_name) - 1] == ']' {
+    num lb = last_index_of_char(base_type_name, '[');
+    if lb < 0 {
+      break;
+    }
+    base_type_name = substr(base_type_name, 0, lb);
+  }
   Vec<str> no_args;
   no_args.init(0);
   defer no_args.free();
@@ -3200,11 +3269,11 @@ pub fun member_declaration_from_tokens(
   let parse_failed = p.parse();
   Option<Declaration> local_found = .None;
   if parse_failed.is_none() {
-    let field = lookup_field(&state.nodes, type_name, member_name, no_args);
+    let field = lookup_field(&state.nodes, base_type_name, member_name, no_args);
     if field.is_some() {
       local_found = field;
     } else {
-      let method = lookup_method(&state.nodes, type_name, member_name, no_args);
+      let method = lookup_method(&state.nodes, base_type_name, member_name, no_args);
       if method.is_some() {
         local_found = method;
       }
@@ -3245,12 +3314,12 @@ pub fun member_declaration_from_tokens(
       continue;
     }
     ProgramMergeResult target = merged.unwrap();
-    let field = lookup_field(&target.nodes, type_name, member_name, no_args);
+    let field = lookup_field(&target.nodes, base_type_name, member_name, no_args);
     if field.is_some() {
       free(text);
       ret field;
     }
-    let method = lookup_method(&target.nodes, type_name, member_name, no_args);
+    let method = lookup_method(&target.nodes, base_type_name, member_name, no_args);
     if method.is_some() {
       free(text);
       ret method;
@@ -3370,6 +3439,28 @@ fun _matching_lbracket(Vec<Token>* tokens, num rbracket_idx) Option<num> {
   ret .None;
 }
 
+// The index of the `]` matching the `[` at `lbracket_idx`, scanning
+// forward, depth-tracked - `_matching_lbracket`'s own forward-
+// direction sibling, for a token-only scan walking toward the cursor
+// rather than backward from it (completion.fn's own receiver scans).
+pub fun _matching_rbracket_forward(Vec<Token>* tokens, num lbracket_idx) Option<num> {
+  num depth = 0;
+  num i = lbracket_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_operator(t, "[") {
+      depth = depth + 1;
+    } elif token_is_symbol(t, ']') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret .Some(i);
+      }
+    }
+    i = i + 1;
+  }
+  ret .None;
+}
+
 // Walks backward over one or more trailing `[...]` index ops directly
 // before `tok` (`arr[i][j]`'s own two brackets), returning the token
 // right before the first `[` - the base expression actually being
@@ -3450,9 +3541,17 @@ fun _apply_chain_index_unwraps(
 // from_tokens` (completion.fn) takes it from there, recursing on
 // that identifier's own preceding dot for a chain of any length.
 // -1 when the receiver segment is anything else this tier doesn't
-// chase (an index expression, a `?`/`!`-propagated operand, a
-// parenthesized group) - the same ceiling every other fallback here
-// already accepts.
+// chase (a `?`/`!`-propagated operand, a parenthesized group) - the
+// same ceiling every other fallback here already accepts. An index
+// (`arr[i].member`) is chased, not one of these: stripped via `_strip_
+// index_ops` (the same helper `chain_receiver`'s own backward scan
+// uses) down to the base identifier it indexes, since that base's
+// own declared type is all this tier - or `chain_tail_type_from_
+// tokens`, the only caller - ever reads back out of the index it
+// returns; what the index actually narrowed to (the element type,
+// not the array) is resolved downstream instead, the same way
+// `_members_from_tokens`/`member_declaration_from_tokens` already
+// look through an array's own declared type to its element.
 pub fun chain_receiver_identifier_index_from_tokens(Vec<Token>* tokens, num member_idx) num {
   let dot = token_before(tokens, member_idx);
   if dot.is_none() || !token_is_operator(dot.unwrap(), ".") {
@@ -3464,6 +3563,14 @@ pub fun chain_receiver_identifier_index_from_tokens(Vec<Token>* tokens, num memb
     ret -1;
   }
   Token bd = before_dot.unwrap();
+  if token_is_symbol(bd, ']') {
+    num stripped_count = 0;
+    let unindexed = _strip_index_ops(tokens, bd, &stripped_count);
+    if unindexed.is_none() {
+      ret -1;
+    }
+    bd = unindexed.unwrap();
+  }
   fit bd.type {
     .Identifier -> { ret index_of_token(tokens, bd); }
     _ -> {}
