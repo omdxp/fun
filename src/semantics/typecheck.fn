@@ -4990,6 +4990,31 @@ impl Checker {
     );
   }
 
+  // The name of the const binding a field-assignment's own receiver
+  // chain is rooted at, walking left through consecutive `.field`
+  // hops (`a.b.c = v;`'s own root is `a`) - `.None` when the root
+  // isn't a bare identifier at all (a call's own result, an index,
+  // ...) or names a binding that isn't const.
+  _field_assignment_const_root(Node* target, TypeEnv* env) Option<str> {
+    fit target.kind {
+      .Identifier(name) -> {
+        let bound = env.binding(name);
+        if bound.is_some() && bound.unwrap().is_const {
+          ret .Some(name);
+        }
+        ret .None;
+      }
+      .Expression(e) -> {
+        if equals(e.op, ".") && e.has_left {
+          ret self._field_assignment_const_root(e.left, env);
+        }
+        ret .None;
+      }
+      .ExpressionParenthesis(inner) -> { ret self._field_assignment_const_root(inner, env); }
+      _ -> { ret .None; }
+    }
+  }
+
   // Rejects an assignment to a name declared const, and checks that the
   // value assigned fits what the name holds.
   check_assignment(Node* node, ExprNode e, TypeEnv* env) {
@@ -5003,6 +5028,28 @@ impl Checker {
           ret;
         }
         if !equals(target.op, ".") || !equals(e.op, "=") || !e.has_right {
+          ret;
+        }
+        // `head.next = v;` reaches a field through a chain whose own
+        // root may be a const binding (`const head = ...;`) - rejected
+        // the same way a direct `head = v;` already is just below,
+        // since mutating a field is reassigning data the const binding
+        // is supposed to own just as much as the binding itself.
+        // `*head.next = v;` (writing through the pointer `next` holds,
+        // not to the field itself) is a different assignment target
+        // altogether - a `.Unary` dereference, never reaches this
+        // `.Expression` arm at all - and stays allowed, matching C's
+        // own shallow `const` for a pointer field exactly: the pointer
+        // is fixed, not what it points to.
+        let const_root = self._field_assignment_const_root(target.left, env);
+        if const_root.is_some() {
+          self.fail(
+            format(
+            "cannot assign to a field of '{str}', which is const",
+            const_root.unwrap()
+          ),
+            node
+          );
           ret;
         }
         CheckedType field = self.infer_field(node, target, env);

@@ -469,6 +469,44 @@ test "a bare ternary used as its own statement, for its side effects, lowers to 
   );
 }
 
+test "a const-bound generic compound, local or global, skips the real C 'const' a plain one already does" {
+  // `const_is_compound`'s own check (both the local-variable and the
+  // global-variable declaration sites) read a `let`-inferred const's
+  // bare, unmangled type name - for a plain compound that already
+  // matches `compound_names`' own registered key, but a generic
+  // compound's inferred type still names the bare template ("Node",
+  // `generic_args` carrying its own `[num]` separately) at this
+  // point, never the mangled identity ("Node__num") that registry is
+  // actually keyed under. The bare name never matched, so a const-
+  // bound generic compound kept the real C `const` every other
+  // compound here is deliberately excluded from (to keep a mutating
+  // method's own plain, non-const `self` pointer working) - breaking
+  // the exact same method call a plain compound already handles fine.
+  str src = `use std.c.io;
+  `compound Counter<T> { T n; }
+  `impl Counter<T> {
+  `  pub bump(T amount) { self.n = self.n + amount; }
+  `  pub get() T { ret self.n; }
+  `}
+  `const c_local_check = Counter<num>{n = 5};
+  `fun main() num {
+  `  c_local_check.bump(1);
+  `  const c = Counter<num>{n = 10};
+  `  c.bump(2);
+  `  printf("%lld %lld\n", c_local_check.get(), c.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "generic_const_no_c_const",
+    "a const-bound generic compound, local or global, skips the real C 'const' a plain one already does"
+  );
+  assert equals(out, "6 12\n"), format(
+    "expected a mutating method call to work on both the global and local generic const, got: {str}",
+    out
+  );
+}
+
 test "a top-level global's own compound-literal initializer drops its redundant cast under MSVC" {
   // Found investigating a REAL Windows CI failure on the test just
   // above, not locally reproducible (real MSVC isn't available

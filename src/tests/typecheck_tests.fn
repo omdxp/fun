@@ -60,6 +60,71 @@ test "a value must fit the type it initializes" {
   );
 }
 
+test "assigning to a field through a const-bound receiver is rejected the same way reassigning the binding itself already is" {
+  // `check_assignment` already rejected `head = other;` (reassigning
+  // the binding itself) but had no check at all for `head.next = v;`
+  // (mutating a field reached through it) - real C does reject this
+  // once a global/local compound const is actually given the real C
+  // `const` qualifier, but compounds are deliberately excluded from
+  // that (so a mutating method's own plain, non-const `self` pointer
+  // still works), which left this gap entirely unenforced by either
+  // side: silently accepted by Fun, and - for everything except a
+  // mismatched edge case - by the generated C too.
+  rejects(
+    `compound Node { num value; Node* next; }
+    `fun main() {
+    `  const head = Node{value = 1, next = nil};
+    `  head.next = nil;
+    `}`,
+    "expected assigning to a field of a const-bound receiver to be rejected"
+  );
+  rejects(
+    `compound Node<T> { T value; Node<T>* next; }
+    `fun main() {
+    `  const head = Node<num>{value = 1, next = nil};
+    `  head.next = nil;
+    `}`,
+    "expected the same rejection for a generic compound's own const binding too"
+  );
+  // A chain deeper than one hop still roots at the same const binding.
+  rejects(
+    `compound Inner { num v; }
+    `compound Outer { Inner inner; }
+    `fun main() {
+    `  const o = Outer{inner = Inner{v = 1}};
+    `  o.inner.v = 2;
+    `}`,
+    "expected a field two hops deep to still reject through its own const root"
+  );
+  // Calling a mutating method on a const-bound receiver is a
+  // different thing entirely - the method's own `self` is a plain,
+  // non-const pointer regardless, and this was always allowed; this
+  // check must not start rejecting it.
+  accepts(
+    `compound Counter { num n; }
+    `impl Counter {
+    `  pub bump() { self.n = self.n + 1; }
+    `}
+    `fun main() {
+    `  const c = Counter{n = 5};
+    `  c.bump();
+    `}`,
+    "expected a mutating method call on a const receiver to stay allowed"
+  );
+  // Writing through a pointer field's own value (not reassigning the
+  // field itself) is real C's own shallow-const behavior exactly: the
+  // pointer is fixed, not what it points to - must stay allowed too.
+  accepts(
+    `compound Node { num value; Node* next; }
+    `fun main() {
+    `  Node second = Node{value = 2, next = nil};
+    `  const head = Node{value = 1, next = &second};
+    `  *head.next = Node{value = 3, next = nil};
+    `}`,
+    "expected writing through a const-bound receiver's own pointer field to stay allowed"
+  );
+}
+
 test "a top-level const must fit its own declared type, not just a local variable" {
   rejects(
     `const str NAME = 1;

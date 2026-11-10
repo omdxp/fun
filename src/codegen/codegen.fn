@@ -11200,7 +11200,24 @@ impl Codegen {
         if is_let && v.is_const && v.has_val {
           let const_idt_opt = self.infer_let_expr_type(v.val);
           if const_idt_opt.is_some() {
-            const_check_type_name = const_idt_opt.unwrap().type_str;
+            let const_idt = const_idt_opt.unwrap();
+            // `resolve_type_name`, not the bare `type_str`: a generic
+            // compound's own inferred type still names the template
+            // ("Node", `generic_args` carrying `[num]` separately) at
+            // this point, never the mangled identity ("Node__num")
+            // `compound_names` is actually keyed under - checking the
+            // bare name against that registry always missed, so a
+            // `const`-bound generic compound kept the real C `const`
+            // every other compound here is deliberately excluded from
+            // (see this check's own sibling comment on why: Fun's own
+            // typechecker is supposed to be the one rejecting a
+            // reassignment, not C's).
+            let const_resolved_name = self.resolve_type_name(const_idt);
+            if const_resolved_name.is_some() {
+              const_check_type_name = const_resolved_name.unwrap();
+            } else {
+              const_check_type_name = const_idt.type_str;
+            }
           }
         }
         flag const_is_compound = self.compound_names.contains(const_check_type_name);
@@ -16633,7 +16650,17 @@ impl Codegen {
         if is_let && v.is_const && v.has_val {
           let const_gdt_opt = self.infer_let_expr_type(v.val);
           if const_gdt_opt.is_some() {
-            const_check_type_name = const_gdt_opt.unwrap().type_str;
+            let const_gdt = const_gdt_opt.unwrap();
+            // `resolve_type_name`, not the bare `type_str` - see the
+            // identical fix on the local-variable site's own matching
+            // check for why a generic compound's bare template name
+            // never matches `compound_names`' own mangled keys.
+            let const_gresolved_name = self.resolve_type_name(const_gdt);
+            if const_gresolved_name.is_some() {
+              const_check_type_name = const_gresolved_name.unwrap();
+            } else {
+              const_check_type_name = const_gdt.type_str;
+            }
           }
         }
         flag const_is_compound = self.compound_names.contains(const_check_type_name);
