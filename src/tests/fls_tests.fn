@@ -10449,3 +10449,64 @@ test "dot-completion on a chained-call receiver narrows correctly as an unclosed
   assert contains(comp, `"label":"value"`), "expected Inner's own field 'value' (get_inner's own return type) to be offered";
   assert !contains(comp, `"label":"format"`), "expected Inner's own members, not the generic fallback list";
 }
+
+test "hover on a fixed-size array index resolves the element type's own field" {
+  // `chain_receiver`'s backward segment-scan had no case for a `]`
+  // token at all - the token right before the dot in `arr[i].field` -
+  // so it fell straight to the "anything else this tier doesn't
+  // chase" dead end and returned nothing, leaving hover blank for
+  // any array-indexed receiver.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///arrayindexhover.fn";
+  doc.path = "arrayindexhover.fn";
+  doc.text = `compound Point { num x; num y; }
+  `fun main() num {
+  `  Point[3] pts;
+  `  pts[0].x = 1;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str h = hover(&reads, doc, 3, 9);
+  assert !equals(h, "null"), format(
+    "expected hover on 'x' through the array index to resolve, got: {str}",
+    h
+  );
+  assert contains(h, "num x"), format("expected Point's own field 'x', got: {str}", h);
+}
+
+test "hover on a custom op_index receiver resolves its own return type's field" {
+  // Same root cause as the fixed-size array case right above: an
+  // index through a user-defined `op_index` method (`g[0].field`)
+  // resolves to the method's own concrete return type now, the same
+  // way an ordinary `.method().field` call already does.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///opindexhover.fn";
+  doc.path = "opindexhover.fn";
+  doc.text = `compound Point { num x; num y; }
+  `compound Grid { num dummy; }
+  `impl Grid {
+  `  pub op_index(num i) Point {
+  `    Point p;
+  `    p.x = i;
+  `    ret p;
+  `  }
+  `}
+  `fun main() num {
+  `  Grid g;
+  `  g[0].x = 1;
+  `  ret 0;
+  `}`;
+  doc.version = 1;
+
+  str h = hover(&reads, doc, 11, 7);
+  assert !equals(h, "null"), format(
+    "expected hover on 'x' through op_index to resolve, got: {str}",
+    h
+  );
+  assert contains(h, "num x"), format("expected Point's own field 'x', got: {str}", h);
+}
