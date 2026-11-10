@@ -382,6 +382,34 @@ fun _move_over(str src, str dst) flag {
   ret r.unwrap().exit_code == 0;
 }
 
+// Replaces the installed stdlib directory with the freshly-downloaded
+// bundle's own copy, then (POSIX only) regenerates `env.sh` inside it.
+// `install.sh` writes that snippet once, right after its own initial
+// extraction - a release tarball never carries it, since it's
+// generated at install time, not a tracked asset. Without
+// regenerating it here, the `_rm_rf` below deletes the previous
+// install's own copy along with the rest of the old share dir on
+// every single upgrade, silently breaking every shell that sources it
+// (`.zshrc`/`.bashrc`'s own `. "$env_snippet"` line, written once by
+// `install.sh` and never revisited) from that upgrade on. `false` when
+// the move itself failed (most often the destination still open in
+// another process); the caller already has its own manual-recovery
+// hint for that case.
+fun _replace_share_dir(str share_src, str share_dst, flag is_windows) flag {
+  _rm_rf(share_dst);
+  if !_move_over(share_src, share_dst) {
+    ret false;
+  }
+  if !is_windows {
+    str env_snippet = path_join(share_dst, "env.sh");
+    write_string(
+      env_snippet,
+      format("# Fun environment\nexport FUN_STDLIB_DIR=\"{str}\"\n", share_dst)
+    );
+  }
+  ret true;
+}
+
 // `fun upgrade [-check]`. With `-check`, only reports whether a newer
 // release exists - nothing is downloaded or installed.
 pub fun upgrade_cli(flag check_only) num {
@@ -532,8 +560,7 @@ pub fun upgrade_cli(flag check_only) num {
 
   str share_src = path_join(bundle_dir, "share/fun");
   str share_dst = path_join(prefix, "share/fun");
-  _rm_rf(share_dst);
-  if !_move_over(share_src, share_dst) {
+  if !_replace_share_dir(share_src, share_dst, is_windows) {
     all_ok = false;
     pending.push(
       format(
@@ -769,6 +796,44 @@ sequential test "_rm_rf removes a directory tree" {
   assert exists(dir), "expected the directory to exist before removal";
   _rm_rf(dir);
   assert !exists(dir), "expected the directory to be gone after _rm_rf";
+}
+
+sequential test "_replace_share_dir regenerates env.sh after replacing the share dir" {
+  // A release bundle's own 'share/fun' never carries 'env.sh' - it's
+  // generated at install time, not a tracked asset - so wiping the
+  // old share dir and moving the bundle's copy over it, with nothing
+  // regenerating that file, silently broke every shell that sources
+  // it from that upgrade on.
+  str dir = "fun-out/upgrade_test_share";
+  str share_src = path_join(dir, "bundle_share");
+  str share_dst = path_join(dir, "installed_share");
+  make_dir_all(path_join(share_src, "std"));
+  write_string(path_join(share_src, "std/io.fn"), "pub fun x() num { ret 1; }");
+  make_dir_all(path_join(share_dst, "std"));
+  write_string(path_join(share_dst, "env.sh"), "export FUN_STDLIB_DIR=\"stale\"\n");
+  write_string(path_join(share_dst, "std/old.fn"), "leftover from a previous install");
+
+  assert _replace_share_dir(share_src, share_dst, false), "expected the share dir to be replaced";
+  assert exists(path_join(share_dst, "std/io.fn")), "expected the bundle's own stdlib to be in place";
+  assert !exists(path_join(share_dst, "std/old.fn")), "expected the previous install's own stale files to be gone";
+  str env_text = read_to_string(path_join(share_dst, "env.sh"));
+  assert contains(env_text, format("FUN_STDLIB_DIR=\"{str}\"", share_dst)), format(
+    "expected a fresh env.sh pointing at the new share dir, got: {str}",
+    env_text
+  );
+  _rm_rf(dir);
+}
+
+sequential test "_replace_share_dir skips regenerating env.sh on windows" {
+  str dir = "fun-out/upgrade_test_share_win";
+  str share_src = path_join(dir, "bundle_share");
+  str share_dst = path_join(dir, "installed_share");
+  make_dir_all(path_join(share_src, "std"));
+  write_string(path_join(share_src, "std/io.fn"), "pub fun x() num { ret 1; }");
+
+  assert _replace_share_dir(share_src, share_dst, true), "expected the share dir to be replaced";
+  assert !exists(path_join(share_dst, "env.sh")), "expected no POSIX env snippet on windows";
+  _rm_rf(dir);
 }
 
 sequential test "_prepare_work_dir clears a stale directory and makes a fresh one" {
