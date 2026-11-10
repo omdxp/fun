@@ -3707,6 +3707,49 @@ test "an array declared without a size at every dimension is left unchecked" {
   );
 }
 
+test "a multi-dimensional array mixing a sized and a bare dimension is rejected, not left to crash codegen" {
+  // `array_brackets` only ever records a dimension that was written
+  // with its own size (`parse_array_brackets` skips pushing anything
+  // for a bare `[]`), so `num[3][] arr;`'s own `array_brackets` holds
+  // just the one sized dimension while `array_depth` says two -
+  // codegen's own bracket-declarator loop read that mismatch as "this
+  // is a one-dimensional array", emitting only `[3]` and silently
+  // dropping the second dimension outright. Every later index through
+  // it (`arr[0][0]`) then subscripted a plain scalar a second time,
+  // leaking a raw C "subscripted value is not an array" error -
+  // confirmed with and without an initializer supplying the missing
+  // dimension's own shape, since neither ever worked.
+  str msg = check(
+    `fun main() {
+    `  num[3][] arr;
+    `  num v = arr[0][0];
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "every dimension") || contains(msg, "mix"),
+  "expected the error to explain the mixed sized/bare dimensions, not something unrelated";
+
+  str msg2 = check(
+    `fun main() {
+    `  num[3][] arr = [[1, 2], [3, 4], [5, 6]];
+    `  num v = arr[0][1];
+    `}`
+  );
+  assert !equals(msg2, ""), "expected a type error even with an initializer supplying the missing dimension's shape";
+}
+
+test "a multi-dimensional array with every dimension consistently sized or consistently bare still works" {
+  accepts(
+    `fun main() {
+    `  num[3][4] full;
+    `  full[1][2] = 7;
+    `  num[][] bare = [[1, 2], [3, 4]];
+    `  num v = full[1][2] + bare[0][1];
+    `}`,
+    "expected an array whose own dimensions are all sized, or all bare, to keep working"
+  );
+}
+
 test "operator overloading: a plain array's own [] assignment keeps today's behavior" {
   accepts(
     `fun main() {
