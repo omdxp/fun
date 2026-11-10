@@ -167,6 +167,38 @@ test "a dereferenced assignment target's own value must fit what it writes into,
   );
 }
 
+test "a chained double dereference infers its own type two pointer levels shallower, not one" {
+  // A run of consecutive `*`s parses as a single `Unary` node with
+  // `indirection_depth` holding the whole run, not as nested `Unary`
+  // nodes (`parse_for_indirection_unary`) - but `infer_unary`'s own
+  // `"*"` case always subtracted exactly 1 from the operand's pointer
+  // depth, ignoring `indirection_depth` entirely. `**pp` on a
+  // `num**` therefore inferred as `num*`, one level short, rejecting
+  // both a read (`num r = **pp;`) and - through the dereferenced-
+  // assignment check right above, which infers through the same
+  // path - a write (`**pp = 42;`) that both fit their real target
+  // type perfectly well.
+  accepts(
+    `fun main() {
+    `  num v = 5;
+    `  num* p = &v;
+    `  num** pp = &p;
+    `  num r = **pp;
+    `  **pp = 42;
+    `}`,
+    "expected a double dereference to resolve its own real two-levels-shallower type, not one level short"
+  );
+  rejects(
+    `fun main() {
+    `  num v = 5;
+    `  num* p = &v;
+    `  num** pp = &p;
+    `  str s = **pp;
+    `}`,
+    "expected a double dereference's own real type to still be checked, not waved through as unknown"
+  );
+}
+
 test "a top-level const must fit its own declared type, not just a local variable" {
   rejects(
     `const str NAME = 1;

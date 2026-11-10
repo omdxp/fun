@@ -2496,11 +2496,23 @@ impl Checker {
       ret t;
     }
     if equals(u.op, "*") {
-      if operand.pointer_depth == 0 {
+      // A run of consecutive `*`s (`**pp`) parses as one `Unary` node
+      // with `indirection_depth` holding the whole run
+      // (`parse_for_indirection_unary`), not as nested `Unary` nodes -
+      // dereferencing by just 1 regardless of how many stars were
+      // written left this one pointer level short every time, the
+      // same wrong type whether reading `**pp` or assigning through
+      // it (`check_assignment`'s own `.Unary` case infers through
+      // here too).
+      num depth = 1;
+      if u.has_indirection && u.indirection_depth > 0 {
+        depth = u.indirection_depth;
+      }
+      if operand.pointer_depth < depth {
         ret checked_unknown();
       }
       CheckedType t = operand;
-      t.pointer_depth = operand.pointer_depth - 1;
+      t.pointer_depth = operand.pointer_depth - depth;
       ret t;
     }
     if equals(u.op, "-") {
