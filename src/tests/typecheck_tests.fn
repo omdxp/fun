@@ -5,6 +5,7 @@ use ..parser.parse_state;
 use ..parser.parser;
 use ..semantics.typecheck;
 use ..semantics.alias_expand;
+use ..ast.ast;
 use std.string;
 use std.result;
 
@@ -3822,4 +3823,36 @@ test "a generic method's own pointer-typed return substitutes without losing its
     `}`,
     "expected assigning a T* result to a non-pointer num to be rejected, not leniently accepted as Unknown"
   );
+}
+
+test "expand_type_aliases does not double-free a bound-list alias's own alternatives" {
+  // `_expand_bound_alternatives` (alias_expand.fn) unconditionally
+  // frees and reallocates a bound-list alias's own `bound_alternatives`
+  // every round, even when nothing in it actually needed expanding -
+  // but it only ever mutated `raw_aliases`'s own detached copy of the
+  // node, never the real one in `nodes`. The real node kept pointing
+  // at the backing array that detached copy had already freed, so
+  // freeing the real node afterward (exactly what a disposable-clone
+  // caller like fls's own `diagnose()` does on every edit) double-
+  // freed it - a real crash, not just a leak, confirmed via a real
+  // SIGABRT before this fix synced the resolved alternatives back onto
+  // the real node too.
+  str src = `als Numeric = num | dec;
+  `fun main() num { ret 0; }`;
+  let tokens = tokenize(src, "t.fn");
+  assert tokens.is_ok(), "expected this program to lex";
+  ParseState state = parse_state_new("t.fn", src);
+  state.tokens = tokens.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  assert perr.is_none(), "expected this program to parse";
+  let alias_err = expand_type_aliases(&state.nodes);
+  assert alias_err.is_none(), "expected the bound-list alias to expand cleanly";
+  // The crash this guards against only shows up on the real free, not
+  // on expansion alone - reaching this line at all is the assertion.
+  free_node_tree(&state.nodes);
+  state.tokens.free();
+  state.global_symbols.free();
+  free_parse_state_internal(&state);
 }

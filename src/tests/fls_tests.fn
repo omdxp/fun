@@ -10366,3 +10366,27 @@ test "hover on a global/const's own declaration resolves every type-preserving u
   assert contains(hover(&reads, doc, 4, 7), "flag BNOT"), "expected logical not to resolve the operand's own type";
   assert contains(hover(&reads, doc, 5, 5), "num[] ARR"), "expected an array literal's own element type to resolve, not a blank type";
 }
+
+test "diagnose does not crash on a bound-list type alias ('num | dec')" {
+  // `diagnose()` clones the program, runs `expand_type_aliases` on the
+  // clone, then frees it - the exact sequence that used to crash with
+  // SIGABRT on any bound-list alias (`als Numeric = num | dec;`), real
+  // root cause fixed in `alias_expand.fn` itself (see that fix's own
+  // commit). Exercised here through the real fls entry point, not
+  // just the lower-level helper, since this is what an editor actually
+  // calls on every edit.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  DiagnosticsCache dcache = diagnostics_cache_new();
+  defer dcache.free();
+  Document doc;
+  doc.uri = "file:///uniontypefull.fn";
+  doc.path = "uniontypefull.fn";
+  doc.text = `als Numeric = num | dec;
+  `fun square<T: Numeric>(T x) T { ret x * x; }
+  `fun main() num { ret square(2); }`;
+  doc.version = 1;
+
+  Vec<Diagnostic> diags = diagnose(&reads, &dcache, doc);
+  assert diags.len == 0, "expected a used, otherwise-valid bound-list alias to diagnose cleanly";
+}

@@ -722,6 +722,21 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
   // declaration node now, while `resolved` still has it, so the
   // `unused_type_alias` warning (which runs after this pass) has
   // something to check.
+  //
+  // A bound-list alias's own `bound_alternatives` also needs syncing
+  // back here, for a reason `body` (an ordinary alias's own DataType)
+  // never has to worry about: `_expand_dtype` mutates `body` in place
+  // through the same pointer the real node already holds, so the real
+  // node sees every update automatically. `bound_alternatives` is a
+  // plain `Vec<str>` value, not a pointer - `_expand_bound_
+  // alternatives` (called above, per round, on `raw_aliases`'s own
+  // detached copy of this node) unconditionally frees its old backing
+  // array and replaces it with a fresh one, even when nothing actually
+  // needed expanding. That reassignment only ever reached the detached
+  // copy; the real node kept pointing at the backing array already
+  // freed out from under it, so freeing the real node later (this
+  // whole tree is a disposable clone - see `diagnose()`'s own comment
+  // on why) double-freed it.
   num wi = 0;
   for wi < nodes.len {
     Node* node = &nodes.data[wi];
@@ -730,7 +745,11 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
       .TypeAlias(a) -> {
         let ra = resolved.at(a.name);
         if ra.is_some() {
-          a.was_used = ra.unwrap().is_used;
+          let resolved_alias = ra.unwrap();
+          a.was_used = resolved_alias.is_used;
+          if a.is_bound_list {
+            a.bound_alternatives = resolved_alias.bound_alternatives;
+          }
           node.kind = .TypeAlias(a);
         }
       }
