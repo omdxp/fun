@@ -213,7 +213,10 @@ test "long type name with shape impl does not overflow mangled C identifiers" {
   `  g.x = 1;
   `  ret 0;
   `}`;
-  let out = emit_c(src, "long type name with shape impl does not overflow mangled C identifiers");
+  let out = emit_c(
+    src,
+    "long type name with shape impl does not overflow mangled C identifiers"
+  );
   assert contains(out, "AAAAAAAAAA__Greeter__greet"), "expected the mangled impl method";
 }
 
@@ -353,6 +356,116 @@ test "double pointer dereference emits two stars" {
   let out = emit_c(src, "double pointer dereference emits two stars");
   assert contains(out, "int64_t** pp"), "expected a double pointer type";
   assert contains(out, "**pp"), "expected a double dereference";
+}
+
+test "a field access through a dereferenced multi-level pointer picks '.' or '->' correctly at every remaining level" {
+  // `resolve_field_chain`'s own dereference branch hardcoded
+  // `is_pointer = false` on its result regardless of how many levels
+  // of pointer the operand actually had - correct for a single-level
+  // pointer (fully dereferenced to a plain value), but wrong for a
+  // multi-level one: `(*pp).field` on `Box** pp` still yields a
+  // `Box*`, which needs `->` for its own next field read, not `.`.
+  // The same hardcoded branch also only ever matched exactly one `*`
+  // (`u.indirection_depth != 1`), so `(**pp).field` - the fully
+  // correct double-deref - crashed codegen outright instead of
+  // working at all.
+  str src = `use std.c.io;
+  `use std.c.mem;
+  `compound Box { num val; }
+  `fun main() num {
+  `  Box* p = malloc(sizeof(Box));
+  `  Box** pp = malloc(8);
+  `  p.val = 42;
+  `  *pp = p;
+  `  printf("%lld\n", (*pp).val);
+  `  printf("%lld\n", (**pp).val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "multi_level_pointer_field_access",
+    "a field access through a dereferenced multi-level pointer picks '.' or '->' correctly at every remaining level"
+  );
+  assert contains(out, "42"), "expected both the single- and double-deref field reads to actually compile and run correctly";
+}
+
+test "a bare multi-level pointer local's own field access (no explicit deref at all) picks the right number of stars" {
+  // Same gap as the test above, one layer further: `resolve_field_
+  // chain`'s own bare-identifier branch (no `*` written by the
+  // reader at all - `pp.val`, not `(*pp).val`) only ever read a
+  // local's own `is_pointer` as a plain boolean, never its real
+  // `pointer_depth` - so a `Box** pp;` local's bare `pp.val` always
+  // emitted exactly one `->`, still a pointer to a pointer in C,
+  // never a structure. Covers a read, a write, and three levels deep.
+  str src = `use std.c.io;
+  `use std.c.mem;
+  `compound Box { num val; }
+  `fun main() num {
+  `  Box* b = malloc(sizeof(Box));
+  `  b.val = 1;
+  `  Box** pp = malloc(8);
+  `  *pp = b;
+  `  Box*** ppp = malloc(8);
+  `  *ppp = pp;
+  `  printf("%lld\n", ppp.val);
+  `  pp.val = 99;
+  `  printf("%lld\n", b.val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "bare_multi_level_pointer_field_access",
+    "a bare multi-level pointer local's own field access picks the right number of stars"
+  );
+  assert contains(out, "1"), "expected the triple-pointer's own bare field read to resolve through all three levels";
+  assert contains(out, "99"), "expected the bare double-pointer's own field write to resolve through both levels too";
+}
+
+test "indexing a multi-level pointer as a field-access receiver doesn't double-deref" {
+  // Regression from the fix just above: `resolve_field_chain`'s own
+  // `[]`-indexed-receiver branch correctly computed `elem_is_pointer`
+  // (`edt.pointer_depth > 1` for a raw pointer indexed like an array)
+  // but stored the base array's own unmodified `dtype` into the
+  // element's `r.dtype` - still at the base's own full depth, one
+  // level too deep, since indexing itself consumes exactly one level.
+  // Harmless while nothing read `dtype.pointer_depth` directly; once
+  // `emit_receiver_and_resolve_type` started synthesizing `(depth-1)`
+  // leading derefs from it (the fix just above), this stale depth
+  // meant one extra, wrong deref on top of the one indexing already
+  // performed - `(*arr[0])->val` instead of `arr[0]->val`, a real C
+  // error. Covers a read and a write through a double pointer, three
+  // levels deep, and a real array of pointers (unaffected, the
+  // control case) side by side.
+  str src = `use std.c.io;
+  `use std.c.mem;
+  `compound Box { num val; }
+  `fun main() num {
+  `  Box* b = malloc(sizeof(Box));
+  `  b.val = 88;
+  `  Box** arr = malloc(16);
+  `  arr[0] = b;
+  `  printf("%lld\n", arr[0].val);
+  `  arr[0].val = 42;
+  `  printf("%lld\n", b.val);
+  `  Box* bb = malloc(sizeof(Box));
+  `  bb.val = 7;
+  `  Box** pp = malloc(8);
+  `  *pp = bb;
+  `  Box*** arr3 = malloc(16);
+  `  arr3[0] = pp;
+  `  printf("%lld\n", arr3[0].val);
+  `  Box b1 = Box{val = 1};
+  `  Box b2 = Box{val = 2};
+  `  Box*[2] parr = [&b1, &b2];
+  `  printf("%lld %lld\n", parr[0].val, parr[1].val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "indexed_multi_level_pointer_field_access",
+    "indexing a multi-level pointer as a field-access receiver doesn't double-deref"
+  );
+  assert equals(out, "88\n42\n7\n1 2\n"), "expected every indexed receiver to resolve through exactly the right number of levels";
 }
 
 // gap, though not a parity gap: the reference has the identical bug.
@@ -725,7 +838,10 @@ test "data-carrying enum: shorthand construction in typed var-init and return" {
   `  num c = get(mk(42));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "data-carrying enum: shorthand construction in typed var-init and return");
+  let out = emit_c(
+    src,
+    "data-carrying enum: shorthand construction in typed var-init and return"
+  );
   assert contains(out, ".tag = Opt_Some"), "expected the shorthand to resolve its enum";
   assert contains(out, ".tag = Opt_None"), "expected the payload-free shorthand";
 }
@@ -767,7 +883,10 @@ test "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce" 
   `  describe(7, &d, "hi");
   `  ret 0;
   `}`;
-  let out = emit_c(src, "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce");
+  let out = emit_c(
+    src,
+    "direct call-site shape coercion: callee(&concrete) wraps in __fun_coerce"
+  );
   assert contains(out, "describe(7, __fun_coerce_Dog_"), "expected the shape argument to be wrapped";
   assert contains(out, "int64_t plain(int64_t a, int64_t b)"), "expected the non-shape callee untouched";
 }
@@ -899,7 +1018,10 @@ test "P0: block comment is lexed; unterminated and stray token error cleanly" {
   `  printf("ok\n");
   `  ret 0;
   `}`;
-  let out = emit_c(src, "P0: block comment is lexed; unterminated and stray token error cleanly");
+  let out = emit_c(
+    src,
+    "P0: block comment is lexed; unterminated and stray token error cleanly"
+  );
   assert contains(out, "printf(\"ok"), "expected the surviving statement";
   assert !contains(out, "block comment"), "expected the comment to be skipped";
 
@@ -1089,7 +1211,11 @@ test "a hex string escape is bounded to two digits" {
   `  printf("%s\n", s);
   `  ret 0;
   `}`;
-  str out = run_source(src, "hex_escape_bounded", "a hex string escape is bounded to two digits");
+  str out = run_source(
+    src,
+    "hex_escape_bounded",
+    "a hex string escape is bounded to two digits"
+  );
   assert equals(out, "BC\n"), "expected the escape read as one byte, followed by a literal C";
 }
 
@@ -1188,6 +1314,37 @@ test "a function value works as a local, a function's own return type, and a com
   assert contains(out, "13"), "expected the compound field's own call, not a method dispatch, to add correctly";
 }
 
+test "a zero-parameter function-pointer type writes a real (void) parameter list everywhere, not a bare ()" {
+  // Five independent declarator sites each wrote a function pointer's
+  // own parameter list as a bare `()` for a zero-parameter signature
+  // instead of `(void)` - a plain `()` means "unspecified arguments"
+  // in C, not "no arguments", which a strict (non-GNU) compiler
+  // rejects outright with "a function declaration without a prototype
+  // is deprecated". GNU/clang's default mode stays silent about it,
+  // so this slipped past every other test in this file; only a real
+  // strict compile (`run_source_forcing_msvc`) catches it. Covers a
+  // local (`mangled_fn_type_name`'s own typedef, `write_named_type`),
+  // a plain function's own return type (`emit_function_named`), and a
+  // parameter (`emit_function_param`).
+  str src = `use std.io;
+  `fun cleanup_action() num { println("cleanup ran"); ret 0; }
+  `fun get_action() fun() num { ret cleanup_action; }
+  `fun call_it(fun() num f) num { ret f(); }
+  `fun main() num {
+  `  fun() num action = cleanup_action;
+  `  println_fmt("{num}", action());
+  `  fun() num g = get_action();
+  `  println_fmt("{num}", call_it(g));
+  `  ret 0;
+  `}`;
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fnptr_zero_param_void",
+    "a zero-parameter function-pointer type writes (void), not a bare () (strict MSVC-shaped compile)"
+  );
+  assert count(out_msvc, "cleanup ran") == 2, "expected both calls through a zero-parameter function pointer to actually run under the strict compile";
+}
+
 test "postfix '?' unwraps a let-bound Option and propagates '.None', both observed at runtime" {
   str src = `use std.c.io;
   `use std.option;
@@ -1236,6 +1393,87 @@ test "postfix '!' unwraps a let-bound Result and propagates '.Err', both observe
     "postfix '!' unwraps a let-bound Result and propagates '.Err'"
   );
   assert contains(out, "104 odd"), "expected the '.Ok' path unwrapped and the '.Err' path propagated";
+}
+
+test "a '?' propagation's own early return still runs the enclosing function's pending defer" {
+  // `emit_propagation` wrote a raw C `return <early-return value>;`
+  // directly, on both its GNU statement-expression path and its
+  // MSVC/hoisted path, without the `emit_function_scope_defers()` call
+  // the ordinary `StatementRet` codegen path already makes - a
+  // deferred cleanup silently never ran on the `.None`/`.Err`
+  // short-circuit, while the equivalent hand-written `if ... { ret
+  // .None; }` form ran it correctly.
+  str src = `use std.c.io;
+  `use std.option;
+  `fun half(num x) Option<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) Option<num> {
+  `  defer printf("cleanup\n");
+  `  num v = half(x)?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num {
+  `  describe(8);
+  `  describe(7);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "propagation_defer_runs",
+    "a '?' propagation's own early return still runs the enclosing function's pending defer"
+  );
+  assert count(out, "cleanup") == 2, "expected the defer to run on both the propagated-through path and the early-returned path";
+
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "propagation_defer_runs_strict",
+    "a '?' propagation's own early return still runs the enclosing function's pending defer (strict MSVC-shaped compile)"
+  );
+  assert count(out_msvc, "cleanup") == 2, "expected the hoisted MSVC-shaped form to run the defer on both paths too";
+}
+
+test "a '?' propagation's own early return still emits valid C under debug info, on both the GNU and MSVC paths" {
+  // The fix for the test above wrote the deferred statement's own
+  // replay with a bare `"; "` separator on both paths - fine for an
+  // ordinary build, but under `-g`/debug info (which `-memcheck`
+  // forces on), the first replayed statement's own `write_indent`
+  // flushes a pending `#line N "file"` directive the instant it
+  // starts writing, landing it stray mid-line right after that `;`
+  // with no newline before it (a `#line` directive only ever ends
+  // with its own trailing newline, never starts with one). A real,
+  // non-GNU-extension-tolerant C compiler rejects that outright with
+  // "stray '#' in program" - confirmed directly against a real
+  // `-memcheck` run under GCC, not a hypothetical. A local enum and
+  // function, not `std.option`/`std.c.io`: `emit_c_with_debug_info`'s
+  // own `transpile_source_with_debug_info` never resolves real
+  // imports at all, the same harness limitation other tests in this
+  // file already work around the same way.
+  str src = `enum MyOpt<T> { Some(T), None }
+  `fun mark() num { ret 0; }
+  `fun half(num x) MyOpt<num> {
+  `  if x % 2 == 1 { ret .None; }
+  `  ret .Some(x / 2);
+  `}
+  `fun describe(num x) MyOpt<num> {
+  `  defer mark();
+  `  num v = half(x)?;
+  `  ret .Some(v + 100);
+  `}
+  `fun main() num { ret 0; }`;
+  str out = emit_c_with_debug_info(
+    src,
+    "a '?' propagation's own early return still emits valid C under debug info (GNU path)"
+  );
+  assert !contains(out, "; #line"), "expected the deferred statement's own #line directive to start on a fresh line, not stray mid-statement";
+
+  str out_msvc = emit_c_with_imports_forcing_msvc_with_debug_info(
+    src,
+    "propagation_defer_debug_info_msvc",
+    "a '?' propagation's own early return still emits valid C under debug info (MSVC path)"
+  );
+  assert !contains(out_msvc, "; #line"), "expected the same fix to hold on the hoisted MSVC path too";
 }
 
 test "'?!(err)' unwraps a let-bound Option and propagates err as .Err(err) into an enclosing Result" {
@@ -1812,7 +2050,11 @@ test "a method dispatches on a global compound variable, not just a local" {
   `  printf("%lld\n", _b.get());
   `  ret 0;
   `}`;
-  str out = run_source(src, "global_compound_method", "a method dispatches on a global compound variable");
+  str out = run_source(
+    src,
+    "global_compound_method",
+    "a method dispatches on a global compound variable"
+  );
   assert contains(out, "5"), "expected the global's own method call to dispatch and mutate correctly";
 }
 
@@ -1831,7 +2073,11 @@ test "a method dispatches on a global generic compound instantiation" {
   `  printf("%lld\n", _seen.len);
   `  ret 0;
   `}`;
-  str out = run_source(src, "global_generic_method", "a method dispatches on a global generic compound instantiation");
+  str out = run_source(
+    src,
+    "global_generic_method",
+    "a method dispatches on a global generic compound instantiation"
+  );
   assert contains(out, "1"), "expected 'init'/'put' to dispatch on the global Map instantiation and 'len' to read back correctly";
 }
 
@@ -1871,7 +2117,11 @@ test "chaining a field access directly onto a Vec<T*>.get(...) call uses '->', n
   `  printf("%lld\n", items.get(0).v);
   `  ret 0;
   `}`;
-  str out = run_source(src, "vec_ptr_get_field_chain", "chaining a field access directly onto a Vec<T*>.get(...) call");
+  str out = run_source(
+    src,
+    "vec_ptr_get_field_chain",
+    "chaining a field access directly onto a Vec<T*>.get(...) call"
+  );
   assert contains(out, "5"), "expected the field read through the pointer-typed Vec element to work directly";
 }
 
@@ -2449,7 +2699,11 @@ test "a generic method that calls through a call result keeps its temp in its ow
   `  Set<num> copy = a.clone();
   `  println_fmt("{num}", copy.len());
   `}`;
-  str out = run_source(src, "generic_method_call_result_temp", "Set.clone reads Map.clone, which calls through self.at(k).unwrap()");
+  str out = run_source(
+    src,
+    "generic_method_call_result_temp",
+    "Set.clone reads Map.clone, which calls through self.at(k).unwrap()"
+  );
   assert contains(out, "2"), "expected the clone to compile, run and hold both elements";
 }
 
@@ -2478,7 +2732,11 @@ test "a call-result receiver on the right of && or || only runs when it is reach
   `  if always && c.bump().is_some() { println("ran"); }
   `  println_fmt("calls={num}", c.calls);
   `}`;
-  str out = run_source(src, "short_circuit_call_result", "the right operand of && and || is skipped when the left decides");
+  str out = run_source(
+    src,
+    "short_circuit_call_result",
+    "the right operand of && and || is skipped when the left decides"
+  );
   assert contains(out, "yes"), "expected the || branch to be taken";
   assert !contains(out, "no\n"), "expected the && branch not to be taken";
   assert contains(out, "calls=0\n"), "expected neither skipped call to have run";
@@ -2504,7 +2762,11 @@ test "a call-result receiver in a loop condition runs on every iteration" {
   `  }
   `  println_fmt("turns={num} calls={num}", turns, c.calls);
   `}`;
-  str out = run_source(src, "loop_condition_call_result", "a loop condition is re-evaluated each pass");
+  str out = run_source(
+    src,
+    "loop_condition_call_result",
+    "a loop condition is re-evaluated each pass"
+  );
   assert contains(out, "turns=3 calls=4"), "expected the condition to be re-evaluated until it failed";
 }
 
@@ -2536,7 +2798,11 @@ test "a call-result receiver in an elif condition only runs when the earlier bra
   `  }
   `  println_fmt("calls={num}", c.calls);
   `}`;
-  str out = run_source(src, "elif_call_result", "an elif condition is only evaluated when reached");
+  str out = run_source(
+    src,
+    "elif_call_result",
+    "an elif condition is only evaluated when reached"
+  );
   assert contains(out, "first\ncalls=0\n"), "expected the elif not to run when the if was taken";
   assert contains(out, "second\ncalls=1\n"), "expected it to run once when reached";
 }
@@ -2548,7 +2814,11 @@ test "a {flag} placeholder prints true or false for a literal, a comparison and 
   `  num n = 5;
   `  println_fmt("{flag} {flag} {flag} {flag}", true, n > 3, known, n == 4);
   `}`;
-  str out = run_source(src, "flag_placeholder_bool", "a flag is a bool for formatting, whatever its C type");
+  str out = run_source(
+    src,
+    "flag_placeholder_bool",
+    "a flag is a bool for formatting, whatever its C type"
+  );
   assert contains(out, "true true false false"), "expected the words, not 1 and 0";
 }
 
@@ -2584,8 +2854,14 @@ test "a program function named like a C math builtin is renamed so it does not r
 test "the prelude turns off the MS CRT's deprecation warnings on Windows only" {
   let out = transpile_source("fun main() {}");
   assert out.is_ok(), "expected the program to transpile";
-  assert contains(out.unwrap(), "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"), "expected the define";
-  assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(out.unwrap(), "#include <stdio.h>"), "expected the define before the first include, where it takes effect";
+  assert contains(
+    out.unwrap(),
+    "#ifndef _CRT_SECURE_NO_WARNINGS\n#define _CRT_SECURE_NO_WARNINGS"
+  ), "expected the define";
+  assert index_of_str(out.unwrap(), "_CRT_SECURE_NO_WARNINGS") < index_of_str(
+    out.unwrap(),
+    "#include <stdio.h>"
+  ), "expected the define before the first include, where it takes effect";
 }
 
 test "operator overloading: op_add dispatches to the impl method, not raw C +" {
@@ -2605,7 +2881,11 @@ test "operator overloading: op_add dispatches to the impl method, not raw C +" {
   let out = emit_c(src, "op_add dispatch");
   assert contains(out, "Vec3__op_add(&a, b)"), "expected the + to compile to a direct call to the impl method";
   assert !contains(out, "(a + b)"), "expected no raw C + between two structs";
-  let ran = run_source(src, "op_add_dispatch", "op_add dispatches to the impl method, not raw C +");
+  let ran = run_source(
+    src,
+    "op_add_dispatch",
+    "op_add dispatches to the impl method, not raw C +"
+  );
   assert equals(ran, "11 22 33\n"), "expected componentwise addition";
 }
 
@@ -2711,7 +2991,11 @@ test "operator overloading: op_index_set dispatches a[i] = v, not raw C []=" {
   `}`;
   let out = emit_c(src, "op_index_set dispatch");
   assert contains(out, "Grid__op_index_set(&g, "), "expected the assignment to compile to a direct call to the setter";
-  let ran = run_source(src, "op_index_set_dispatch", "op_index_set dispatches a[i] = v, not raw C []=");
+  let ran = run_source(
+    src,
+    "op_index_set_dispatch",
+    "op_index_set dispatches a[i] = v, not raw C []="
+  );
   assert equals(ran, "10 20 30\n"), "expected every index write to land on the right field";
 }
 
@@ -2750,7 +3034,11 @@ test "operator overloading: a chained operand (a * 2 + b) dispatches both operat
   let out = emit_c(src, "chained operand dispatch");
   assert contains(out, "Vec3__op_mul(&a, 2)"), "expected the inner * to compile to a direct call";
   assert contains(out, "Vec3__op_add(&"), "expected the outer + to compile to a direct call too, not raw C + on the inner call's result";
-  let ran = run_source(src, "op_chained_dispatch", "a chained operand (a * 2 + b) dispatches both operators");
+  let ran = run_source(
+    src,
+    "op_chained_dispatch",
+    "a chained operand (a * 2 + b) dispatches both operators"
+  );
   assert equals(ran, "12 24 36\n"), "expected a * 2 + b to componentwise compute (a*2) + b";
 }
 
@@ -2774,7 +3062,11 @@ test "operator overloading: a field-access operand (self.pos + other.pos) dispat
   `}`;
   let out = emit_c(src, "field-access operand dispatch");
   assert contains(out, "Vec3__op_add(&"), "expected self.pos + other.pos to compile to a direct call, not raw C + on two structs";
-  let ran = run_source(src, "op_field_dispatch", "a field-access operand (self.pos + other.pos) dispatches");
+  let ran = run_source(
+    src,
+    "op_field_dispatch",
+    "a field-access operand (self.pos + other.pos) dispatches"
+  );
   assert equals(ran, "11 22 33\n"), "expected componentwise addition across two different receivers' own fields";
 }
 
@@ -2805,8 +3097,47 @@ test "operator overloading: a nested index/unary operand dispatches too" {
   let out = emit_c(src, "nested index/unary operand dispatch");
   assert contains(out, "Pair__op_index"), "expected p[0] to compile through op_index";
   assert contains(out, "Vec3__op_neg"), "expected -a to compile through op_neg";
-  let ran = run_source(src, "op_nested_idx_unary", "a nested index/unary operand dispatches too");
+  let ran = run_source(
+    src,
+    "op_nested_idx_unary",
+    "a nested index/unary operand dispatches too"
+  );
   assert equals(ran, "101 202 303 / 9 18 27\n"), "expected p[0] + c and -a + b to both componentwise compute correctly";
+}
+
+test "operator overloading: a parenthesized dispatched operand dispatches its own outer operator too" {
+  // `(a + b) == c`: a parenthesized group is its own distinct node
+  // kind (`.ExpressionParenthesis`, never folded into the expression
+  // it wraps), which `resolve_operator_operand` had no case for at
+  // all - unlike `resolve_field_chain`, which already handles it for
+  // every other receiver position. The inner `+` dispatched to
+  // `op_add` correctly on its own either way; only the outer `==`
+  // fell through to plain, invalid C infix on two full compound
+  // values, since it could never even try resolving its own
+  // parenthesized left operand's type.
+  str src = `use std.io;
+  `compound Vec2 { num x; num y; }
+  `impl Vec2 {
+  `  op_add(Vec2 other) Vec2 {
+  `    ret Vec2{x = self.x + other.x, y = self.y + other.y};
+  `  }
+  `  op_eq(Vec2 other) flag { ret self.x == other.x && self.y == other.y; }
+  `}
+  `fun main() {
+  `  Vec2 a = Vec2{x = 1, y = 2};
+  `  Vec2 b = Vec2{x = 3, y = 4};
+  `  flag eq1 = a == b;
+  `  flag sum_eq = (a + b) == Vec2{x = 4, y = 6};
+  `  println_fmt("{flag} {flag}", eq1, sum_eq);
+  `}`;
+  let out = emit_c(src, "op_parenthesized_dispatch");
+  assert contains(out, "Vec2__op_eq"), "expected the outer == to dispatch through op_eq too";
+  let ran = run_source(
+    src,
+    "op_parenthesized_dispatch",
+    "a parenthesized dispatched operand dispatches its own outer operator too"
+  );
+  assert equals(ran, "false true\n"), "expected a == b false and (a + b) == Vec2{4, 6} true";
 }
 
 test "operator overloading: a plain function call's own result as an operand still does not dispatch" {

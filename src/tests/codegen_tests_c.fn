@@ -6,6 +6,42 @@ use harness;
 use std.sys;
 use std.fs;
 use std.string;
+use ..lexer.lexer;
+use ..parser.parse_state;
+use ..parser.parser;
+use ..semantics.alias_expand;
+use ..codegen.codegen;
+use ..codegen.codegen_state;
+
+// `transpile_source`, with the real `error_note` instead of the
+// generic "codegen error" string it collapses every codegen failure
+// to - needed to tell a genuine crash (an `UnsupportedNode` with no
+// real explanation) apart from a deliberate, informative rejection.
+fun transpile_source_with_detail(str src) Result<str, str> {
+  let tok_result = tokenize(src, "test.fn");
+  if tok_result.is_err() {
+    ret .Err("lex error");
+  }
+  ParseState state = parse_state_new("test.fn", src);
+  state.tokens = tok_result.unwrap();
+  state.emit_stderr = false;
+  Parser p = parser_new(&state);
+  let perr = p.parse();
+  if perr.is_some() {
+    ret .Err("parse error");
+  }
+  let alias_err = expand_type_aliases(&state.nodes);
+  if alias_err.is_some() {
+    ret .Err(alias_err.unwrap());
+  }
+  CodegenState cst = codegen_state_new();
+  Codegen g = codegen_new(&cst);
+  let cerr = g.transpile(state.nodes);
+  if cerr.is_some() {
+    ret .Err(g.error_note);
+  }
+  ret .Ok(cst.out.build());
+}
 
 test "ra3: no crash on field access of a generic-impl method returning a compound" {
   str src = `use std.c.io;
@@ -87,6 +123,142 @@ test "two instantiations of the same generic implementing the same shape dispatc
   assert equals(out, "5 70\n"), "expected each instantiation's own len() to dispatch correctly, not the first-declared one's";
 }
 
+test "an empty shape's own early-built struct still gets MSVC's dummy field, not just the impl-triggered one" {
+  // `shape Empty { }` is explicitly documented as valid (examples/
+  // sizeof_all_types.fn). The struct built the moment any non-generic
+  // shape is now forward-declared early (so a parameter of that shape
+  // works regardless of file order) never carried the same MSVC
+  // empty-struct guard `emit_shape_vtable_machinery`'s own, later,
+  // impl-triggered struct build already has - a real MSVC C2016 ("a
+  // struct or union have at least one member"), caught on this
+  // project's own Windows CI, not locally reproducible without a real
+  // MSVC compiler, so asserted here directly against the generated
+  // text instead.
+  str src = `shape Empty { }
+  `fun main() { }`;
+  let out = emit_c_with_imports_forcing_msvc(
+    src,
+    "shape_empty_msvc_dummy",
+    "an empty shape's struct carries MSVC's dummy field"
+  );
+  assert contains(out, "struct Empty_vtable {\n  int __fun_dummy;\n};"),
+  "expected the empty shape's vtable struct to get MSVC's dummy field";
+}
+
+test "a plain shape-typed parameter works regardless of where its sole implementor's impl appears in the file" {
+  // A shape used by value as a parameter or return type needs its
+  // complete struct definition in scope at that point, not just an
+  // opaque forward tag - unlike a plain compound/enum, which already
+  // gets exactly that treatment in an early, source-order-independent
+  // pass. A shape's own vtable struct previously only ever got built
+  // as a side effect of emitting its first impl in plain source order,
+  // or (for a generic implementor) that implementor's first real
+  // instantiation - either of which can be textually later than a
+  // function already declaring a parameter of that shape, a real,
+  // deterministic "unknown type name" C error, not a flake. Covers
+  // both a non-generic implementor declared after its own user, and a
+  // generic implementor whose first instantiation is triggered later
+  // still (from inside `main`, itself declared last).
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `fun show_a(Sized c) num { ret c.len(); }
+  `compound Circle { num r; }
+  `impl Circle as Sized { len() num { ret 1; } }
+  `shape Named { label() str; }
+  `fun show_b(Named c) str { ret c.label(); }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Named { label() str { ret "box"; } }
+  `fun main() num {
+  `  Circle c;
+  `  printf("%lld\n", show_a(&c));
+  `  Box<num> b; b.val = 1;
+  `  printf("%s\n", show_b(&b));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_param_order_independent",
+    "a plain shape-typed parameter works regardless of its implementor's own position in the file"
+  );
+  assert equals(out, "1\nbox\n"), "expected both the non-generic and generic implementor's shape dispatch to work despite appearing after their own user";
+}
+
+test "a shape impl's own extra pub method beyond the shape's declared contract doesn't corrupt its vtable" {
+  // `impl Vec<T> as Sized { pub len()... pub is_empty()... pub
+  // capacity()... }` is a real stdlib pattern (`capacity` isn't part of
+  // `Sized`'s own declared contract, called statically wherever a
+  // concrete `Vec<T>` needs it, never through the vtable). The vtable
+  // struct and every instance's own initializer used to derive their
+  // fields from the impl's full method list rather than the shape's
+  // own declared one, so whichever impl of a shape happened to run
+  // first silently decided the shared vtable struct's real shape - an
+  // extra method on one impl, built before the shape's own struct is
+  // otherwise forced into existence, made every other impl's own
+  // instance literal fail to compile (`field designator does not refer
+  // to any field`) the moment this extra field wasn't there to begin
+  // with.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Bag<T> { T val; num extra; }
+  `impl Bag<T> as Sized { pub len() num { ret 1; } pub capacity() num { ret self.extra; } }
+  `compound Circle { num r; }
+  `impl Circle as Sized { len() num { ret 2; } }
+  `fun main() num {
+  `  Bag<num> bg; bg.val = 1; bg.extra = 9;
+  `  Circle c;
+  `  Sized a = &bg;
+  `  Sized b = &c;
+  `  printf("%lld %lld %lld\n", a.len(), b.len(), bg.capacity());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_extra_method_vtable",
+    "an extra pub method beyond a shape's own contract doesn't corrupt the shared vtable"
+  );
+  assert equals(out, "1 2 9\n"), "expected both implementors' own len() to dispatch correctly, and the extra method to still work statically";
+}
+
+test "a generic compound implementing a shape that is itself generic dispatches correctly, keyed per instantiation" {
+  // `impl Box<T> as Container<T>` is doubly generic: both the
+  // implementor and the shape it implements still carry the
+  // implementor's own unbound type param. The eager, per-instantiation
+  // vtable-building pass that already handles a plain generic
+  // implementor of a non-generic shape (`impl Box<T> as Sized`)
+  // unconditionally skipped this combination outright - the coercion
+  // from a concrete `Box<num>` into a `Container<num>`-typed parameter
+  // referenced a `__fun_coerce_Box__num_Container__num` helper that was
+  // never emitted, a real C compile error, no fit involved. Fixed
+  // lazily instead of eagerly: eagerly building this for every generic
+  // compound implementing every generic shape corrupts something as
+  // ubiquitous as `impl Vec<T> as Iterator<T>`, built the moment any
+  // `Vec<T>` is instantiated whether or not the program ever dispatches
+  // through it dynamically. Covers two different instantiations of the
+  // same doubly-generic impl side by side, and a multi-type-param
+  // implementor where the shape's own argument names only one of them.
+  str src = `use std.c.io;
+  `shape Container<T> { get() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Container<T> { get() T { ret self.val; } }
+  `compound Pair<K, V> { K k; V v; }
+  `impl Pair<K, V> as Container<K> { get() K { ret self.k; } }
+  `fun show_num(Container<num> c) num { ret c.get(); }
+  `fun show_str(Container<str> c) str { ret c.get(); }
+  `fun main() num {
+  `  Box<num> bn; bn.val = 42;
+  `  Box<str> bs; bs.val = "hi";
+  `  Pair<str, num> p; p.k = "paired"; p.v = 7;
+  `  printf("%lld %s %s\n", show_num(&bn), show_str(&bs), show_str(&p));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "doubly_generic_shape_dispatch",
+    "a generic compound implementing a generic shape dispatches correctly"
+  );
+  assert equals(out, "42 hi paired\n"), "expected each instantiation's own get() to dispatch through its own vtable";
+}
+
 test "ra3: shape coercion of deref, parenthesized address-of, and pointer-field" {
   str src = `use std.c.io;
   `compound Inner { num v; }
@@ -110,6 +282,489 @@ test "ra3: shape coercion of deref, parenthesized address-of, and pointer-field"
   );
   assert contains(out, "Inner__HasV__getV"), "expected the shape implementation";
   assert contains(out, "__fun_coerce_Inner_HasV"), "expected the coercion helper";
+}
+
+test "a struct-literal field initializer coercing a concrete value into a shape-typed field" {
+  // A 6th `__fun_coerce_` call site, missed by the 5 already fixed
+  // this session (assignment, call-argument, two ret paths sharing
+  // one computation, variable-declaration): a compound literal's own
+  // `field = value` never wrapped a concrete pointer in the coercion
+  // helper when the field is itself declared as a shape. Not a type
+  // mismatch the C compiler ever catches (both sides are pointer-
+  // sized), so the raw concrete pointer lands directly where the
+  // shape's fat-pointer struct `{void* self; const Shape_vtable*
+  // vtable;}` is expected - a real, deterministic SIGSEGV the moment
+  // anything dispatches dynamically through it, garbage read as a
+  // vtable pointer. Covers both a plain shape field and a doubly-
+  // generic one (`impl Box<T> as Container<T>`, needing the same lazy
+  // vtable trigger the other 5 sites already use).
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret 1; } }
+  `compound Holder { Sized s; }
+  `shape Container<T> { get() T; }
+  `compound GBox<T> { T val; }
+  `impl GBox<T> as Container<T> { get() T { ret self.val; } }
+  `compound GHolder { Container<num> c; }
+  `fun main() num {
+  `  Box b; b.val = 5;
+  `  Holder h = Holder{ s = &b };
+  `  GBox<num> g; g.val = 42;
+  `  GHolder gh = GHolder{ c = &g };
+  `  printf("%lld %lld\n", h.s.len(), gh.c.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "struct_literal_field_shape_coerce",
+    "a struct-literal field initializer coercing a concrete value into a shape-typed field"
+  );
+  assert equals(out, "1 42\n"), "expected both the plain and doubly-generic shape-typed fields to coerce and dispatch correctly";
+}
+
+test "a top-level global's own shape-typed initializer coerces correctly" {
+  // A 7th `__fun_coerce_` site, missed by the 6 already fixed this
+  // session: a shape-typed global's own initializer never got the
+  // coercion wrap at all, leaking a raw concrete pointer where C
+  // expects the shape's fat-pointer struct. Unlike every other site
+  // (all inside a function body, always emitted after `impl`'s own
+  // top-level pass already built its vtable machinery in plain
+  // source order), `pub transpile` deliberately emits every global
+  // first, so even once the coercion itself is wrapped on, the
+  // underlying vtable/coerce-helper this needs doesn't exist yet -
+  // needing its own early, hoisted trigger (`_ensure_plain_shape_
+  // impl_vtable_emitted`, `impl`'s own analog to `ensure_generic_
+  // impl_shape_vtable_instantiated`). And even with the vtable
+  // triggered early, the ordinary `__fun_coerce_` function call every
+  // other site uses is itself invalid here: C requires a global's own
+  // initializer to be a compile-time constant, which a function call
+  // never is, however trivial its body - so a global's own coercion
+  // inlines the identical brace literal directly instead of calling
+  // through to it. Covers a plain shape and a doubly-generic one
+  // side by side.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret self.val; } }
+  `Box g_box = Box{val = 9};
+  `Sized g_shape = &g_box;
+  `shape Container<T> { get() T; }
+  `compound GBox<T> { T val; }
+  `impl GBox<T> as Container<T> { get() T { ret self.val; } }
+  `GBox<num> g_gbox = GBox<num>{val = 77};
+  `Container<num> g_container = &g_gbox;
+  `fun main() num {
+  `  printf("%lld %lld\n", g_shape.len(), g_container.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_shape_coerce",
+    "a top-level global's own shape-typed initializer coerces correctly"
+  );
+  assert equals(out, "9 77\n"), "expected both the plain and doubly-generic shape-typed globals to coerce and dispatch correctly";
+}
+
+test "a shape coercion recognizes a function call's own return value, not just an address-of expression" {
+  // `resolve_shape_coerce_concrete_type` only ever recognized a
+  // `&identifier`-shaped operand or a bare already-pointer local - a
+  // call whose own declared return type is a concrete pointer
+  // implementing the destination shape (`fun get() Point* { ... }`
+  // coerced into `HasX`) fell through to `.None`, so the coercion
+  // wrap never ran at all and the raw concrete pointer leaked through
+  // where C expects the shape's fat-pointer struct. Covers all four
+  // sites that share this helper: a global initializer, a local
+  // initializer, a `ret`, and a call argument.
+  str src = `use std.c.io;
+  `shape HasX { getX() num; }
+  `compound Point { num x; }
+  `impl Point as HasX { getX() num { ret self.x; } }
+  `Point p = Point{x = 5};
+  `fun get_ref() Point* { ret &p; }
+  `HasX g = get_ref();
+  `fun wrap() HasX { ret get_ref(); }
+  `fun take(HasX h) num { ret h.getX(); }
+  `fun main() num {
+  `  HasX h = get_ref();
+  `  printf("%lld %lld %lld %lld\n", g.getX(), h.getX(), wrap().getX(), take(get_ref()));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_coerce_from_call",
+    "a shape coercion recognizes a function call's own return value, not just an address-of expression"
+  );
+  assert equals(out, "5 5 5 5\n"), "expected the global, local, ret, and call-argument sites to all coerce the call's own return value correctly";
+}
+
+test "a shape coercion recognizes a generic call's own mangled return type, a ternary, and a parenthesized operand" {
+  // Three more gaps in the same fix round 15 just added: (1) the call
+  // case read `rdt.type_str` directly instead of `resolve_type_name`,
+  // so a call returning a pointer to a generic compound ('Box<num>*')
+  // kept its bare, unmangled template name ("Box") instead of its real
+  // mangled identity ("Box__num") - the vtable/coerce-helper machinery
+  // is keyed under the mangled name, so building against the bare one
+  // silently targets a helper that was never emitted; (2) no case at
+  // all for `.Ternary`, so `cond ? &p1 : &p2` leaked a raw pointer past
+  // the coercion entirely; (3) no case for `.ExpressionParenthesis`,
+  // so wrapping either an already-working `&p` or a call in parens
+  // alone defeated the coercion too.
+  str src = `use std.c.io;
+  `shape HasVal<T> { getVal() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as HasVal<T> { getVal() T { ret self.val; } }
+  `Box<num> b = Box<num>{val = 7};
+  `fun get_box_ref() Box<num>* { ret &b; }
+  `shape HasX { getX() num; }
+  `compound Point { num x; }
+  `impl Point as HasX { getX() num { ret self.x; } }
+  `Point p1 = Point{x = 1};
+  `Point p2 = Point{x = 2};
+  `fun get_ref() Point* { ret &p1; }
+  `fun main() num {
+  `  HasVal<num> hv = get_box_ref();
+  `  HasX ht = true ? &p1 : &p2;
+  `  HasX hp1 = (&p1);
+  `  HasX hp2 = (get_ref());
+  `  printf("%lld %lld %lld %lld\n", hv.getVal(), ht.getX(), hp1.getX(), hp2.getX());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_coerce_generic_ternary_paren",
+    "a shape coercion recognizes a generic call's own mangled return type, a ternary, and a parenthesized operand"
+  );
+  assert equals(out, "7 1 1 1\n"), "expected the generic call, ternary, and parenthesized operand to all coerce correctly";
+}
+
+test "a bare ternary used as its own statement, for its side effects, lowers to if/else" {
+  // `emit_statement` had no `.Ternary` case at all - a ternary never
+  // assigned, returned, or passed anywhere (`cond ? a() : b();`, both
+  // branches used only for their own side effect) fell straight to
+  // "unsupported node", since this file's own `.Expression`/`.Unary`/
+  // `.Panic` cases cover every other bare-expression-statement shape
+  // but this one. Emitting a raw C ternary statement here instead
+  // would need the GNU void-expression extension real MSVC doesn't
+  // support (both branches here return nothing used), so this lowers
+  // to the equivalent if/else, which needs no such extension.
+  str src = `use std.c.io;
+  `fun main() num {
+  `  flag full_mode = false;
+  `  num i = 0;
+  `  for i < 2 {
+  `    full_mode ? printf("true %lld\n", i) : printf("false %lld\n", i);
+  `    i = i + 1;
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "ternary_statement",
+    "a bare ternary used as its own statement, for its side effects, lowers to if/else"
+  );
+  assert equals(out, "false 0\nfalse 1\n"), format(
+    "expected both loop iterations to take the false branch, got: {str}",
+    out
+  );
+}
+
+test "a const-bound generic compound, local or global, skips the real C 'const' a plain one already does" {
+  // `const_is_compound`'s own check (both the local-variable and the
+  // global-variable declaration sites) read a `let`-inferred const's
+  // bare, unmangled type name - for a plain compound that already
+  // matches `compound_names`' own registered key, but a generic
+  // compound's inferred type still names the bare template ("Node",
+  // `generic_args` carrying its own `[num]` separately) at this
+  // point, never the mangled identity ("Node__num") that registry is
+  // actually keyed under. The bare name never matched, so a const-
+  // bound generic compound kept the real C `const` every other
+  // compound here is deliberately excluded from (to keep a mutating
+  // method's own plain, non-const `self` pointer working) - breaking
+  // the exact same method call a plain compound already handles fine.
+  str src = `use std.c.io;
+  `compound Counter<T> { T n; }
+  `impl Counter<T> {
+  `  pub bump(T amount) { self.n = self.n + amount; }
+  `  pub get() T { ret self.n; }
+  `}
+  `const c_local_check = Counter<num>{n = 5};
+  `fun main() num {
+  `  c_local_check.bump(1);
+  `  const c = Counter<num>{n = 10};
+  `  c.bump(2);
+  `  printf("%lld %lld\n", c_local_check.get(), c.get());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "generic_const_no_c_const",
+    "a const-bound generic compound, local or global, skips the real C 'const' a plain one already does"
+  );
+  assert equals(out, "6 12\n"), format(
+    "expected a mutating method call to work on both the global and local generic const, got: {str}",
+    out
+  );
+}
+
+test "a top-level global's own compound-literal initializer drops its redundant cast under MSVC" {
+  // Found investigating a REAL Windows CI failure on the test just
+  // above, not locally reproducible (real MSVC isn't available
+  // locally, and this project's own clang/gcc both silently tolerate
+  // the redundant cast as a GNU extension, same as the test harness
+  // used everywhere else in this suite): `Box g_box = Box{val = 9};`
+  // - an ordinary global with a compound-literal initializer, no
+  // shape involved at all - compiles to `Box g_box = (Box){.val =
+  // 9};`, and real MSVC's C front end rejects the leading `(Box)`
+  // cast outright for a static-duration object's own initializer
+  // (C2099: "initializer is not a constant" - a compound-literal
+  // cast is itself a non-constant expression under the C standard,
+  // tolerated by GCC/clang only as a non-conforming extension).
+  // Every compound literal anywhere in a global's own initializer
+  // tree needs the bare `{...}` form instead, never just the
+  // outermost one - a nested field/array-element slot is a second,
+  // separate compound literal with its own redundant cast otherwise.
+  str src = `compound Box { num val; }
+  `compound Holder { Box inner; Box[2] arr; }
+  `Box g_box = Box{val = 9};
+  `Holder g_holder = Holder{
+  `  inner = Box{val = 1},
+  `  arr = [Box{val = 2}, Box{val = 3}]
+  `};
+  `fun main() num { ret 0; }`;
+  let out = emit_c_with_imports_forcing_msvc(
+    src,
+    "global_compound_cast",
+    "a top-level global's own compound-literal initializer drops its redundant cast"
+  );
+  assert contains(out, "Box g_box = {.val = 9};"),
+  "expected the global's own top-level compound literal to drop its leading (Box) cast";
+  assert !contains(out, "(Box){.val = 1}") && !contains(out, "(Box){.val = 2}") &&
+    !contains(out, "(Box){.val = 3}"),
+    "expected every nested field/array-element compound literal inside the global's own initializer to drop its cast too";
+}
+
+test "a top-level global's own explicitly-typed and let-inferred bare shorthand initializers both resolve" {
+  // `emit_global_variable` never set `expected_enum_type`/`expected_
+  // compound_type` before emitting its own initializer at all - a
+  // bare `.Variant` enum shorthand (`Color g = .Red;`) or `.{...}`
+  // compound shorthand failed outright ("unsupported node"), unlike
+  // the identical shorthand in a local `Variable` declaration, which
+  // already resolves correctly. A `let`-inferred global compounds the
+  // gap further: nothing ever recorded its own inferred type at all
+  // (enum shorthand, compound literal, or otherwise), so even past
+  // getting the declaration itself to compile, any later field/method
+  // access on it failed with "unknown identifier" - the same
+  // underlying problem `record_global_typed` already solves for an
+  // explicitly-typed global, needed here too via `infer_let_expr_
+  // type`, the exact helper a `let`-inferred local already uses.
+  // Covers both forms, plus a plain scalar and plain compound `let`
+  // global alongside the enum-shorthand ones, side by side.
+  str src = `use std.c.io;
+  `enum Color { Red, Green, Blue }
+  `compound Point { num x; num y; }
+  `compound Box { num val; }
+  `Color g_color = .Red;
+  `Point g_point = .{x = 1, y = 2};
+  `let g_color_let = .Red;
+  `let g_num_let = 5;
+  `let g_box_let = Box{val = 9};
+  `fun main() num {
+  `  printf(
+  `    "%lld %lld %lld %lld %lld %lld\n",
+  `    g_color.tag_value(), g_point.x, g_point.y,
+  `    g_color_let.tag_value(), g_num_let, g_box_let.val
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_bare_shorthand",
+    "a top-level global's own explicitly-typed and let-inferred bare shorthand initializers both resolve"
+  );
+  assert equals(out, "0 1 2 0 5 9\n"), "expected every global form to parse, compile, and resolve to its own real value";
+}
+
+test "a let-inferred global's own compound/enum shorthand drops its leading cast under MSVC too" {
+  // Real Windows CI caught this (C2099 "initializer is not a
+  // constant") where no local MSVC was available to catch it first.
+  // Root cause: a `let`-inferred global's own MSVC branch writes a
+  // real declared type on the LHS once inference succeeds (`Box`, not
+  // `int64_t`) - exactly the shape `in_bare_initializer_context`
+  // exists to drop the cast for - but the guard deciding whether to
+  // drop it only ever checked `!is_let`, never actually asking
+  // whether a real type ended up on the LHS this time.
+  str src = `enum Color { Red, Green, Blue }
+  `compound Box { num val; }
+  `let g_color_let = .Red;
+  `let g_box_let = Box{val = 9};
+  `fun main() num { ret g_color_let.tag_value() + g_box_let.val; }`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "global_let_msvc_bare_cast",
+    "a let-inferred global's own compound/enum shorthand drops its leading cast under MSVC too"
+  );
+  assert !contains(out_c, "g_box_let = (Box)"), "expected no leading cast on a let-inferred compound global's own initializer under MSVC";
+  assert !contains(out_c, "g_color_let = (Color)"), "expected no leading cast on a let-inferred enum-shorthand global's own initializer under MSVC";
+  assert contains(out_c, "Box g_box_let ="), "expected the real inferred type on the LHS, not int64_t";
+  assert contains(out_c, "Color g_color_let ="), "expected the real inferred type on the LHS, not int64_t";
+}
+
+test "an explicitly-typed const names a user-defined compound, not just a builtin scalar" {
+  // `const <type> <name> = value;` only ever recognized `<type>` as a
+  // builtin datatype keyword (num/str/dec/flag/chr/raw) - a user-
+  // defined compound/enum/shape name is a plain `.Identifier` token,
+  // never a `.Keyword`, so `const Box g = Box{...};` fell through to
+  // the type-inferred form instead, reading "Box" as the const's own
+  // name rather than its type - the real next token ("g") was never
+  // the `=` that form expects, failing with "'let' declarations
+  // require an initializer". Pre-existing, unrelated to anything this
+  // session already touched; fixed generally via the same `<Identifier>
+  // [<generic args>] [* ...] [[...]] <Identifier>` lookahead a bare
+  // `Point p;` statement already uses to tell a type-then-name
+  // sequence apart from a bare name, now shared (`_bare_type_decl_
+  // follows`) rather than only ever reached from statement parsing.
+  // Covers a generic instantiation and a pointer type alongside the
+  // plain case, plus confirms the already-working inferred and
+  // builtin-scalar forms still parse.
+  str src = `use std.c.io;
+  `compound Box<T> { T val; }
+  `fun main() num {
+  `  const num x = 5;
+  `  const y = 7;
+  `  const Box<num> gb = Box<num>{val = 11};
+  `  Box<num> local_box = Box<num>{val = 1};
+  `  const Box<num>* pb = &local_box;
+  `  printf("%lld %lld %lld %lld\n", x, y, gb.val, pb.val);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "const_user_defined_type",
+    "an explicitly-typed const names a user-defined compound, not just a builtin scalar"
+  );
+  assert equals(out, "5 7 11 1\n"), "expected every const form to parse and resolve to its own real value";
+}
+
+test "an array literal's own shape-typed elements coerce correctly" {
+  // An 8th `__fun_coerce_` site, missed by the 7 already fixed this
+  // session: an array literal's own elements never got the coercion
+  // wrap at all when the array's declared element type is a shape -
+  // a raw concrete pointer landed directly where each element needs
+  // the fat-pointer struct, compiling fine (both sides are pointer-
+  // sized) but crashing the moment anything dispatches dynamically
+  // through it, garbage read as a vtable pointer. Covers a global
+  // array (needing the same compile-time-constant brace-literal
+  // inlining the scalar global fix above already does, per element
+  // this time) and a local array (the ordinary function-call form,
+  // same as every other local coercion site) side by side, plus a
+  // doubly-generic shape's own array to confirm the lazy vtable
+  // trigger still fires per element.
+  str src = `use std.c.io;
+  `shape Sized { len() num; }
+  `compound Box { num val; }
+  `impl Box as Sized { len() num { ret self.val; } }
+  `Box g_box1 = Box{val = 5};
+  `Box g_box2 = Box{val = 6};
+  `Sized[2] g_arr = [&g_box1, &g_box2];
+  `shape Container<T> { get() T; }
+  `compound GBox<T> { T val; }
+  `impl GBox<T> as Container<T> { get() T { ret self.val; } }
+  `GBox<num> g_gb1 = GBox<num>{val = 3};
+  `GBox<num> g_gb2 = GBox<num>{val = 4};
+  `Container<num>[2] g_garr = [&g_gb1, &g_gb2];
+  `fun main() num {
+  `  Box b1 = Box{val = 9};
+  `  Box b2 = Box{val = 11};
+  `  Sized[2] arr = [&b1, &b2];
+  `  printf(
+  `    "%lld %lld %lld %lld %lld %lld\n",
+  `    g_arr[0].len(), g_arr[1].len(),
+  `    g_garr[0].get(), g_garr[1].get(),
+  `    arr[0].len(), arr[1].len()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "array_literal_shape_coerce",
+    "an array literal's own shape-typed elements coerce correctly"
+  );
+  assert equals(out, "5 6 3 4 9 11\n"), "expected every array's own shape-typed elements to coerce and dispatch correctly";
+}
+
+test "a shape-downcast fit arm dispatches correctly against a doubly-generic shape" {
+  // `impl Box<T> as Container<T>` is doubly generic - the subject's
+  // own declared type (`Container<num>`) resolves to its concrete
+  // per-instantiation identity ("Container__num"), which `shape_decl_
+  // names` never registers directly (only the template's bare
+  // declaration is) - the gate guarding this whole branch rejected it
+  // outright, falling through to the ordinary (non-shape) fit path,
+  // which has no idea what to do with a `Type<Args>(binding)` pattern
+  // at all (`[Error] codegen failed: unsupported node: function`).
+  // Fixed generally: the gate now recognizes a mangled instantiation
+  // of a declared generic shape too, and the vtable comparison this
+  // branch emits needs its own lazy trigger (the same one every
+  // `__fun_coerce_` call site already uses), since the ordinary
+  // eager per-instantiation trigger deliberately skips a doubly-
+  // generic shape.
+  str src = `use std.c.io;
+  `shape Container<T> { get() T; }
+  `compound Box<T> { T val; }
+  `impl Box<T> as Container<T> { get() T { ret self.val; } }
+  `fun show(Container<num> c) num {
+  `  fit c {
+  `    Box<num>(b) -> { ret b.val; }
+  `    _ -> { ret -1; }
+  `  }
+  `}
+  `fun main() num {
+  `  Box<num> b; b.val = 7;
+  `  printf("%lld\n", show(&b));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_doubly_generic",
+    "a shape-downcast fit arm dispatches correctly against a doubly-generic shape"
+  );
+  assert equals(out, "7\n"), "expected the doubly-generic shape-downcast arm to dispatch to the real value";
+}
+
+test "a shape-downcast fit arm dispatches correctly against a multi-type-param implementor of a doubly-generic shape" {
+  // `impl Pair<K, V> as Container<V>` - a multi-type-param implementor
+  // (the shape depends on only its second param) of a doubly-generic
+  // shape. The gate and lazy vtable trigger both already generalize
+  // over this once the implementor's own explicit downcast target
+  // (`Pair<str, num>(p)`, pre-mangled to the flat "Pair__str__num")
+  // can be split back into its real generic args - previously only
+  // ever attempted for a single-type-param implementor, the one case
+  // a flat mangled suffix split back unambiguously without this; a
+  // 2+-param implementor's own instantiation was never force-
+  // triggered, so the vtable this branch's comparison needs was never
+  // built (`use of undeclared identifier '__fun_impl_Pair__str__num_
+  // Container__num_vtable'`).
+  str src = `use std.c.io;
+  `shape Container<T> { get() T; }
+  `compound Pair<K, V> { K k; V v; }
+  `impl Pair<K, V> as Container<V> { get() V { ret self.v; } }
+  `fun use_it(Container<num> c) num {
+  `  fit c {
+  `    Pair<str, num>(p) -> { ret p.v * 2; }
+  `    _ -> { ret -1; }
+  `  }
+  `}
+  `fun main() num {
+  `  Pair<str, num> p; p.k = "hi"; p.v = 21;
+  `  printf("%lld\n", use_it(&p));
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shape_fit_multi_param_implementor",
+    "a shape-downcast fit arm dispatches correctly against a multi-type-param implementor"
+  );
+  assert equals(out, "42\n"), "expected the multi-param implementor's own downcast arm to dispatch to the real value";
 }
 
 test "ra3: generic T[] param accepts a concrete array arg; extra pub method in as-Shape impl callable" {
@@ -284,7 +939,10 @@ test "generic data enum: Result<T, E> with two type params and mixed payloads" {
   `  }
   `  ret 0;
   `}`;
-  let out = emit_c(src, "generic data enum: Result<T, E> with two type params and mixed payloads");
+  let out = emit_c(
+    src,
+    "generic data enum: Result<T, E> with two type params and mixed payloads"
+  );
   assert contains(out, "Res__num__str"), "expected the two-parameter monomorphization";
 }
 
@@ -599,7 +1257,10 @@ test "a method chain's own second-innermost call is not evaluated twice" {
   `}`;
   let out = emit_c(src, "a method chain's own second-innermost call is not evaluated twice");
   num make_box_calls = count(out, "= make_box()");
-  assert make_box_calls == 1, format("expected make_box()'s own call emitted exactly once, found {num}", make_box_calls);
+  assert make_box_calls == 1, format(
+    "expected make_box()'s own call emitted exactly once, found {num}",
+    make_box_calls
+  );
 }
 
 test "a const local's own compound value never gets a conflicting C const qualifier" {
@@ -623,7 +1284,10 @@ test "a const local's own compound value never gets a conflicting C const qualif
   `  x.show();
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a const local's own compound value never gets a conflicting C const qualifier");
+  let out = emit_c(
+    src,
+    "a const local's own compound value never gets a conflicting C const qualifier"
+  );
   assert !contains(out, "const Box x"), "expected no C const qualifier on a const-bound compound local";
 }
 
@@ -1344,7 +2008,10 @@ test "sizeof accepts a user-defined type name with a trailing pointer suffix" {
   `  printf("%lld %lld %lld\n", sizeof(Node), sizeof(Node*), sizeof(Node**));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "sizeof accepts a user-defined type name with a trailing pointer suffix");
+  let out = emit_c(
+    src,
+    "sizeof accepts a user-defined type name with a trailing pointer suffix"
+  );
   assert contains(out, "sizeof(Node*)"), "expected the pointer suffix to be folded into the operand";
 }
 
@@ -1412,6 +2079,101 @@ test "a plain (non-generic) function can fit-match and destructure a concrete ge
     "a plain (non-generic) function can fit-match a concrete generic-enum instantiation"
   );
   assert contains(out, "List__dec* _1;"), "expected the self-referential payload at the monomorphized type";
+}
+
+test "a generic enum's own variant payload that is itself a further-generic type substitutes correctly" {
+  // `ensure_enum_instantiated`'s own payload resolution only ever
+  // matched a payload against the enum's own self-reference (a bare
+  // check against the template's own name) or a bare type param
+  // directly - a payload that is itself a further-generic type
+  // (`Box<T>*`, generic_args.len > 0) matched neither, so it fell
+  // through completely unsubstituted, leaking the template's own
+  // bare base name ("Box") straight into the generated C instead of
+  // the real monomorphized one ("Box__num") - a real C compiler
+  // rejects it outright with "unknown type name 'Box'".
+  str src = `use std.c.io;
+  `compound Box<T> { T val; }
+  `enum Pair<T> {
+  `  Single(T),
+  `  Boxed(Box<T>*),
+  `}
+  `fun main() num {
+  `  Pair<num> p = Pair.Single(9);
+  `  fit p {
+  `    Pair.Single(v) -> { printf("%lld\n", v); }
+  `    Pair.Boxed(b) -> { printf("boxed\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "enum_payload_further_generic",
+    "a generic enum's own variant payload that is itself a further-generic type substitutes correctly"
+  );
+  assert equals(out, "9\n"), "expected the Single variant's own payload to resolve and run correctly";
+}
+
+test "a generic enum's own variant payload wrapped in a tuple, including a self-referential one, substitutes correctly" {
+  // Same gap as the test above, two further shapes: a tuple-wrapped
+  // further-generic payload (`payload_type_strs`'s own flat name is
+  // always "" for a tuple, matching nothing either, so it mangled to
+  // a completely blank type name instead of merely a wrong one), and
+  // a tuple-wrapped self-referential payload, which also needs the
+  // enum's own forward-declare to trigger through the tuple (checked
+  // structurally now, via `dtype_mentions_type_name`, not just a flat
+  // string match against `payload_type_strs`) - the fork-reported
+  // version of this crashed codegen outright instead of either
+  // working or cleanly failing.
+  str src = `use std.c.io;
+  `enum TreeEnum<T> {
+  `  Leaf(T),
+  `  Node((TreeEnum<T>*, TreeEnum<T>*)),
+  `}
+  `fun main() num {
+  `  TreeEnum<num> t = TreeEnum.Leaf(7);
+  `  fit t {
+  `    TreeEnum.Leaf(v) -> { printf("%lld\n", v); }
+  `    TreeEnum.Node(n) -> { printf("node\n"); }
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "enum_payload_tuple_self_referential",
+    "a generic enum's own variant payload wrapped in a tuple, including a self-referential one, substitutes correctly"
+  );
+  assert equals(out, "7\n"), "expected the Leaf variant's own payload to resolve and run correctly";
+}
+
+test "a compound self-referential only through a generic enum wrapper (Option<Node<T>*>) still forward-declares itself" {
+  // `ensure_compound_instantiated`'s own self-referential check only
+  // compared a field's bare top-level type name against the enclosing
+  // template's own name - missing a field like `Option<Node<T>*> next;`,
+  // where the self-reference sits nested inside another generic type's
+  // own argument instead of being the field's own direct type. With no
+  // forward declaration, instantiating `Option<Node<T>*>` reached for
+  // `Node__num` before it had been declared at all, and the real C
+  // compiler rejected the generated program outright with "unknown type
+  // name 'Node__num'".
+  str src = `use std.c.io;
+  `use std.option;
+  `compound Node<T> {
+  `  T value;
+  `  Option<Node<T>*> next;
+  `}
+  `fun main() num {
+  `  Node<num> n;
+  `  n.value = 1;
+  `  n.next = Option.None;
+  `  printf("%lld\n", n.value);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "self_ref_through_generic_wrapper",
+    "a compound self-referential only through a generic enum wrapper still forward-declares itself"
+  );
+  assert contains(out, "1"), "expected the program to compile and run correctly end to end";
 }
 
 // Resolved: constructing and destructuring a self-referential recursive
@@ -1614,7 +2376,10 @@ test "a generic function-type alias emits the real callback signature, not the a
   `  printf("%lld\n", apply(square, 4));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a generic function-type alias emits the real callback signature, not the alias name");
+  let out = emit_c(
+    src,
+    "a generic function-type alias emits the real callback signature, not the alias name"
+  );
   assert !contains(out, "Callback"), "expected the alias name to never reach emitted C";
 }
 
@@ -1638,7 +2403,10 @@ test "a type alias naming a shape still dispatches dynamically through the alias
   `  printf("%lld\n", describe(d));
   `  ret 0;
   `}`;
-  let out = emit_c(src, "a type alias naming a shape still dispatches dynamically through the alias");
+  let out = emit_c(
+    src,
+    "a type alias naming a shape still dispatches dynamically through the alias"
+  );
   assert !contains(out, "Drawable"), "expected the alias name to never reach emitted C";
   assert contains(out, "Shape"), "expected the real shape type to reach emitted C";
 }
@@ -1712,7 +2480,11 @@ test "a shape-bounded generic impl monomorphizes for a real implementor" {
   `  printf("%s\n", w.describe());
   `  ret 0;
   `}`;
-  assert_emits(src, "Wrapper__Point__describe", "expected the shape-implementor instantiation to monomorphize");
+  assert_emits(
+    src,
+    "Wrapper__Point__describe",
+    "expected the shape-implementor instantiation to monomorphize"
+  );
 }
 
 test "a shape-bounded generic impl does not monomorphize for a non-implementor" {
@@ -1810,7 +2582,11 @@ test "a self-referential generic-shape bound (T: Shape<T>) monomorphizes for a r
   `  printf("%lld\n", n.v);
   `  ret 0;
   `}`;
-  let out = run_source(src, "self_ref_shape_bound", "a self-referential shape bound monomorphizes for a real implementor");
+  let out = run_source(
+    src,
+    "self_ref_shape_bound",
+    "a self-referential shape bound monomorphizes for a real implementor"
+  );
   assert equals(out, "2\n"), "expected Box<Counter>.advance() to call Counter's own Steppable succ() and return the incremented value";
 }
 
@@ -1855,7 +2631,11 @@ test "a generic user type implementing Iterator<T> directly on itself works in a
   `  printf("%lld\n", total);
   `  ret 0;
   `}`;
-  let out = run_source(src, "generic_user_type_iterator", "a generic user type's own Iterator<T> impl works in a for loop");
+  let out = run_source(
+    src,
+    "generic_user_type_iterator",
+    "a generic user type's own Iterator<T> impl works in a for loop"
+  );
   assert equals(out, "6\n"), "expected 1+2+3 over [1, 4) through the user's own generic Iterator<T> impl";
 }
 
@@ -2094,6 +2874,430 @@ test "constructing a generic enum from a method's own type param does not cross-
   assert contains(out, "tag == Maybe__str_Has"), "expected the arm to test the substituted tag";
 }
 
+test "a method's own type param inferred from a function-typed argument's return type monomorphizes" {
+  // `map<U>(fun(T) U f)` never matches the bare `v.var_type.type_str
+  // == tp` check `maybe_instantiate_generic_impl_method_own_params`
+  // uses to infer `U` - `f`'s own declared type is a function
+  // signature, not literally `U` - so `U` leaked through as a real C
+  // type name at the call site. A `let`-inferred local's own return
+  // type carried the same gap through a second, independent path
+  // (`infer_let_expr_type`'s own method-call case, which fell all the
+  // way to `lookup_impl_method_rtype`'s flat, unsubstituted table).
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `impl MyOpt<T> {
+  `  pub map<U>(fun(T) U f) MyOpt<U> {
+  `    fit self {
+  `      .Some(v) -> { ret .Some(f(v)); }
+  `      .None -> { ret .None; }
+  `    }
+  `  }
+  `}
+  `fun doubleit(num x) num {
+  `  ret x * 2;
+  `}
+  `fun main() {
+  `  MyOpt<num> o = .Some(5);
+  `  let r = o.map(doubleit);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a method's own type param inferred from a function-typed argument's return type"
+  );
+  assert contains(out, "MyOpt__num__map__num"), "expected the call site monomorphized on the inferred return type";
+  assert contains(out, "MyOpt__num r ="), "expected the let-inferred local substituted, not left as the template's bare MyOpt__U";
+}
+
+test "a generic function's own type param infers from an argument that is itself a call to another generic function" {
+  // `infer_arg_type_name`'s own `()`-call case resolved the callee's
+  // return type only through `lookup_function_rtype`'s flat,
+  // non-generic registry - a generic callee (`identity<T>`) isn't in
+  // it at all, so `?` propagated `.None` straight out instead of
+  // falling back to `maybe_instantiate_generic_function` the way
+  // `_resolve_call_rtype` already does for the same gap elsewhere.
+  // `wrap`'s own `T` never got inferred from `identity(5)`'s result,
+  // so the call site emitted the bare, unmangled `wrap(...)` instead
+  // of `wrap__num(...)`.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun identity<T>(T v) T {
+  `  ret v;
+  `}
+  `fun wrap<T>(T v) MyOpt<T> {
+  `  ret .Some(v);
+  `}
+  `fun main() {
+  `  let outer = wrap(identity(5));
+  `  fit outer {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's own type param infers from a call to another generic function"
+  );
+  assert contains(out, "wrap__num(identity__num(5))"), "expected wrap's own call site monomorphized on the inner generic call's inferred return type";
+}
+
+test "a generic function's own type param infers from the enclosing let's own declared type" {
+  // `maybe_instantiate_generic_function`'s own per-param inference
+  // already fell back to the enclosing function's own return type
+  // when a call's arguments reveal nothing - but a type param that
+  // appears in neither (`make_empty<T>()` takes no arguments at all)
+  // still has the enclosing let's own declared type to infer from
+  // (`Vec<num> v = make_empty();`), which nothing read before this
+  // fix: the call fell back to the bare, unmangled name instead of
+  // `make_empty__num`.
+  str src = `use std.io;
+  `compound Box2<T> {
+  `  T v;
+  `}
+  `fun make_zero_box<T>() Box2<T> {
+  `  ret .{ v = 0 };
+  `}
+  `fun main() {
+  `  Box2<num> b = make_zero_box();
+  `  println_fmt("{num}", b.v);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's own type param infers from the enclosing let's own declared type"
+  );
+  assert contains(out, "Box2__num b = make_zero_box__num();"), "expected make_zero_box's own call site monomorphized on the declared local's own type";
+}
+
+test "a generic impl's operator method monomorphizes through operator syntax, not just an explicit .method() call" {
+  // `emit_operator_call`'s three callers (binary, unary, `[]`/`[]=`)
+  // never triggered `ensure_generic_impl_method_emitted` the way an
+  // ordinary `.method()` call site already does - `p1 + p2` resolved
+  // the right mangled name (`Pair__num__op_add`) but never caused it
+  // to actually be emitted, while `p1.op_add(p2)` on the identical
+  // type worked, since only the latter went through the ordinary
+  // method-call path.
+  str src = `use std.io;
+  `compound Pair<T: num | flag> {
+  `  T a;
+  `  T b;
+  `}
+  `impl Pair<T> {
+  `  pub op_add(Pair<T> other) Pair<T> {
+  `    ret .{ a = self.a + other.a, b = self.b + other.b };
+  `  }
+  `}
+  `fun main() {
+  `  Pair<num> p1 = .{ a = 1, b = 2 };
+  `  Pair<num> p2 = .{ a = 3, b = 4 };
+  `  Pair<num> p3 = p1 + p2;
+  `  println_fmt("{num} {num}", p3.a, p3.b);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl's operator method monomorphizes through operator syntax"
+  );
+  assert contains(out, "Pair__num Pair__num__op_add(Pair__num* self, Pair__num other)"), "expected op_add's own body emitted, not just referenced";
+}
+
+test "operator dispatch resolves a dereferenced-pointer left operand, not just a plain value" {
+  // `resolve_operator_operand`'s own `.Unary` case rejected any
+  // dereference outright (`u.has_indirection` being true was itself
+  // disqualifying, before even checking which operator) - only
+  // `op_neg`/`op_not` through a plain value ever matched. `*ptr1 +
+  // p2` silently fell through to raw infix `+` on two full compound
+  // values instead of dispatching to `op_add`, while the identical
+  // dereference through an explicit `.op_add()` call already worked.
+  str src = `use std.io;
+  `compound Pair<T: num | flag> {
+  `  T a;
+  `  T b;
+  `}
+  `impl Pair<T> {
+  `  pub op_add(Pair<T> other) Pair<T> {
+  `    ret .{ a = self.a + other.a, b = self.b + other.b };
+  `  }
+  `}
+  `fun main() {
+  `  Pair<num> p1 = .{ a = 1, b = 2 };
+  `  Pair<num> p2 = .{ a = 3, b = 4 };
+  `  Pair<num>* ptr1 = &p1;
+  `  Pair<num> p3 = *ptr1 + p2;
+  `  println_fmt("{num} {num}", p3.a, p3.b);
+  `}`;
+  let out = emit_c(src, "operator dispatch resolves a dereferenced-pointer left operand");
+  assert contains(out, "Pair__num__op_add(&(*ptr1), p2)"), "expected the dereferenced operand dispatched through op_add, not raw infix +";
+}
+
+test "a generic impl's op_index/op_index_set monomorphize through [] syntax, not just an explicit call" {
+  str src = `use std.io;
+  `compound Grid<T> {
+  `  T v;
+  `}
+  `impl Grid<T> {
+  `  pub op_index(num i) T {
+  `    ret self.v;
+  `  }
+  `  pub op_index_set(num i, T val) {
+  `    self.v = val;
+  `  }
+  `}
+  `fun main() {
+  `  Grid<num> g = .{ v = 1 };
+  `  g[0] = 9;
+  `  println_fmt("{num}", g[0]);
+  `}`;
+  let out = emit_c(src, "a generic impl's op_index/op_index_set monomorphize through [] syntax");
+  assert contains(
+    out,
+    "void Grid__num__op_index_set(Grid__num* self, int64_t i, int64_t val) {"
+  ), "expected op_index_set's own body emitted";
+  assert contains(out, "int64_t Grid__num__op_index(Grid__num* self, int64_t i) {"), "expected op_index's own body emitted";
+}
+
+test "a let-bound await result on an enum-returning async function resolves for a later fit" {
+  // `infer_let_expr_type` had no case for `await` at all - it fell
+  // straight to `.None`, which left `r` registered with no real Fun
+  // type (fine for a plain value, since the GNU `__auto_type` fallback
+  // still gets the right native C type, but a later `fit r { .Variant
+  // -> ... }` has nothing to resolve r's own tag/variants against).
+  // Not generic-specific: reproduces with a plain, non-generic async
+  // function returning a plain, non-generic enum.
+  str src = `use std.io;
+  `enum MyOpt {
+  `  Some(num),
+  `  None,
+  `}
+  `async fun fetch(num v) MyOpt {
+  `  ret .Some(v);
+  `}
+  `async fun main() {
+  `  let r = await fetch(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a let-bound await result on an enum-returning async function");
+  assert contains(out, "tag == MyOpt_Some"), "expected the fit arm to test the real tag, not crash or fall back to an unresolved type";
+}
+
+test "a let-bound await result on a generic enum-returning async function resolves for a later fit" {
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `async fun fetch<T>(T v) MyOpt<T> {
+  `  ret .Some(v);
+  `}
+  `async fun main() {
+  `  let r = await fetch(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a let-bound await result on a generic enum-returning async function");
+  assert contains(out, "tag == MyOpt__num_Some"), "expected the fit arm to test the real, substituted tag";
+}
+
+test "a let-bound array index of a user-defined element type resolves, not just a pointer-decayed one" {
+  // `infer_let_expr_type`'s own `[]` case only covered a pointer-typed
+  // receiver indexing to its pointee (`f[0]` where `f` is a real
+  // pointer, C's own `pointer[0]` being `*pointer`) or a plain `str`
+  // indexing to `chr` - a genuinely array-typed local (`Box[] arr`,
+  // `is_pointer` false the same way it is for `str`) matched neither
+  // case and fell through to the unconditional `.None`, so `x` in
+  // `let x = arr[0];` was never recorded with any type at all and
+  // crashed as "unknown identifier 'x'" on its very next use.
+  // Reproduces identically for a compound or a plain enum element -
+  // not generics-specific.
+  str src = `use std.io;
+  `compound Box {
+  `  num v;
+  `}
+  `fun main() {
+  `  Box[] arr = [.{v=1}, .{v=2}];
+  `  let x = arr[0];
+  `  println_fmt("{num}", x.v);
+  `}`;
+  let out = emit_c(src, "a let-bound array index of a user-defined element type");
+  assert contains(out, "x.v"), "expected x's own field access to resolve, not leak an unknown identifier";
+}
+
+test "a bare compound literal as a function's own ret value resolves its type, not just a let's" {
+  // `ret`'s own context-setup set `expected_enum_type` (for a bare
+  // enum-variant shorthand, `ret .Some(x);`) but never
+  // `expected_compound_type` - so a bare `.{ field = value, ... }`
+  // return value had nothing to resolve its own type from and
+  // crashed codegen outright, with nothing generics-specific about
+  // it at all. The explicitly-typed form (`ret Pair{ ... };`) always
+  // worked; this is the one gap in `ret` specifically. Reproduces
+  // identically for an impl method's own `ret .{ ... };`, since both
+  // share the same emission path.
+  str src = `use std.io;
+  `compound Pair {
+  `  num first;
+  `  num second;
+  `}
+  `fun make_pair() Pair {
+  `  ret .{ first = 1, second = 2 };
+  `}
+  `fun main() {
+  `  let p = make_pair();
+  `  println_fmt("{num} {num}", p.first, p.second);
+  `}`;
+  let out = emit_c(
+    src,
+    "a bare compound literal as a function's own ret value resolves its type"
+  );
+  assert contains(out, "return (Pair){.first = 1, .second = 2};"), "expected the bare literal resolved to a real Pair compound literal, not an unsupported node";
+}
+
+test "a generic function's result passed directly as another call's argument infers its own type param" {
+  // `maybe_instantiate_generic_function`'s own per-param fallback
+  // chain had bare-arg match, enclosing-function-return-type, and
+  // enclosing-let-declared-type - but a generic call passed directly
+  // as an argument to another call, with no intermediate `let` at
+  // all (`take_box(make_zero_box())`), had none of those: the
+  // argument-emission loop never set `expected_let_dt` from the
+  // outer call's own declared parameter type the way a `let`
+  // statement's own declared type already does.
+  str src = `use std.io;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `fun make_zero_box<T>() Box<T> {
+  `  ret .{ v = 0 };
+  `}
+  `fun take_box(Box<num> b) num {
+  `  ret b.v;
+  `}
+  `fun main() {
+  `  num r = take_box(make_zero_box());
+  `  println_fmt("{num}", r);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic function's result passed directly as another call's argument"
+  );
+  assert contains(out, "take_box(make_zero_box__num())"), "expected make_zero_box's own call site monomorphized on the outer call's own declared parameter type";
+}
+
+test "a generic impl method's own additional type param falls back to the enclosing let's own declared type" {
+  // `maybe_instantiate_generic_impl_method_own_params`'s own per-
+  // param inference had bare-arg match, a function-typed argument's
+  // return type, and a declared default - but no enclosing-let-
+  // declared-type fallback at all, the one a plain generic function's
+  // own type param already got fixed earlier this session. A method
+  // with its own additional type param that takes no arguments at
+  // all (`make_other<U>()`) had nothing else to infer `U` from.
+  str src = `use std.io;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> {
+  `  pub make_other<U>() Box<U> {
+  `    ret .{ v = 0 };
+  `  }
+  `}
+  `fun main() {
+  `  Box<num> b1 = .{ v = 1 };
+  `  Box<num> b2 = b1.make_other();
+  `  println_fmt("{num}", b2.v);
+  `}`;
+  let out = emit_c(
+    src,
+    "a generic impl method's own additional type param falls back to the enclosing let's own declared type"
+  );
+  assert contains(out, "Box__num b2 = Box__num__make_other__num(&b1);"), "expected make_other's own call site monomorphized on the enclosing let's own declared type";
+}
+
+test "a bare qualified enum-variant reference with no declared type and no payload is rejected, not left to leak into codegen" {
+  // `let opt = Option.None;` (no declared type, no function-call
+  // argument/return context, and `None` itself carries no payload to
+  // infer from) left the generic enum's own type argument completely
+  // unresolvable - `emit_field_access`'s own fallback (checking
+  // `expected_enum_type` for a mangled match) found nothing, and fell
+  // through to emitting `Option` as a plain, undeclared C identifier
+  // instead of a real diagnostic.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun main() {
+  `  let opt = MyOpt.None;
+  `  println("built");
+  `}`;
+  let r = transpile_source_with_detail(src);
+  assert r.is_err(), "expected the unresolvable instantiation rejected";
+  assert contains(r.unwrap_err(), "cannot infer"), "expected a real, informative diagnostic, not a generic crash";
+}
+
+test "a qualified enum-variant reference still resolves once the enclosing let declares its own concrete type" {
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `fun main() {
+  `  MyOpt<num> opt = MyOpt.None;
+  `  fit opt {
+  `    .Some(v) -> { println_fmt("{num}", v); }
+  `    .None -> { println("none"); }
+  `  }
+  `}`;
+  let out = emit_c(
+    src,
+    "a qualified enum-variant reference once the enclosing let declares its own concrete type"
+  );
+  assert contains(out, "MyOpt__num_None"), "expected the let's own declared type to resolve the instantiation";
+}
+
+test "a doubly-nested generic return type substitutes at every level, not just the outer one" {
+  // `resolve_type_subst`'s own generic_args loop only matched a bare
+  // param (`a.generic_args.len == 0`) - a nested argument that is
+  // itself generic (`Box2<T>`, inside `MyOpt<Box2<T>>`) matched
+  // neither that case nor any other, so it was pushed through
+  // completely unsubstituted. The same shape of gap `substitute()` had
+  // on the typecheck side this session, one level further in: the
+  // outer `MyOpt` substituted to `num` fine, but the inner `Box2<T>`
+  // stayed `Box2<T>` verbatim in the generated C.
+  str src = `use std.io;
+  `enum MyOpt<T> {
+  `  Some(T),
+  `  None,
+  `}
+  `compound Box2<T> {
+  `  T v;
+  `}
+  `fun wrap<T>(T v) MyOpt<Box2<T>> {
+  `  Box2<T> b;
+  `  b.v = v;
+  `  ret .Some(b);
+  `}
+  `fun main() {
+  `  let r = wrap(5);
+  `  fit r {
+  `    .Some(v) -> { println_fmt("{num}", v.v); }
+  `    .None -> {}
+  `  }
+  `}`;
+  let out = emit_c(src, "a doubly-nested generic return type substitutes at every level");
+  assert contains(out, "MyOpt__Box2__num r = wrap__num(5);"), "expected the let-inferred local fully substituted at both levels";
+  assert contains(out, "tag == MyOpt__Box2__num_Some"), "expected the fit arm to test the fully-substituted tag";
+}
+
 test "fork is a CONTEXTUAL keyword: usable as an ordinary function" {
   str src = `use std.c.io;
   `pub fun fork() num {
@@ -2239,4 +3443,176 @@ test "memcheck's own quarantine recycles retired guard pages past its budget, wi
     "expected no memcheck report against ordinary alloc/free, got: {str}",
     result.stderr_text
   );
+}
+
+test "a top-level global/const's own initializer runs at startup when it isn't a C compile-time constant" {
+  // C rejects a function call, a generic call, a stdlib constructor
+  // (`some()`/`ok()`), or a copy of another global's own value as a
+  // static-duration initializer outright. Each of these buffers its
+  // real assignment into a generated `__fun_init_globals`, run once
+  // before `main`'s own body - this covers every shape that routes
+  // through it: a plain call, an explicit-type and a let-inferred
+  // global both calling, an implicit const calling, a generic call,
+  // an Option constructor, and a plain cross-global copy (scalar and
+  // compound), chained against an earlier runtime-inited global too.
+  str src = `use std.c.io;
+  `use std.option;
+  `compound Point { num x; num y; }
+  `fun compute() num { ret 7; }
+  `fun identity<T>(T x) T { ret x; }
+  `fun double_it(num x) num { ret x * 2; }
+  `num G1 = compute();
+  `let G2 = compute();
+  `const G3 = compute();
+  `num G4 = identity(42);
+  `Option<num> G5 = some(42);
+  `Point A = Point{x = 1, y = 2};
+  `Point B = A;
+  `const Point C = A;
+  `num G6 = double_it(5);
+  `num G7 = G6 + double_it(1);
+  `fun main() num {
+  `  printf(
+  `    "%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld\n",
+  `    G1, G2, G3, G4, G5.unwrap(), B.x, B.y, C.x, G6, G7
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init",
+    "a top-level global/const's own initializer runs at startup when it isn't a C compile-time constant"
+  );
+  assert equals(out, "7 7 7 42 42 1 2 1 10 12\n"), format(
+    "expected every runtime-deferred global to resolve correctly before main, got: {str}",
+    out
+  );
+}
+
+test "a shape field nested two levels deep inside a global's own literal stays a compile-time constant" {
+  // A shape field nested inside a compound that's itself an array
+  // element inside another compound (`Outer.items[i].inner`) reaches
+  // `CompoundInit`'s own general field-coercion code, which previously
+  // always wrote an ordinary `__fun_coerce_` function call there,
+  // regardless of context - correct for a local (calls are fine), but
+  // never a C compile-time constant, which a global's own initializer
+  // must be. `emit_global_variable`'s own existing inline-as-constant
+  // special case only ever reached the global's own direct type or its
+  // direct array element, one level - never a field nested this deep.
+  str src = `use std.c.io;
+  `shape HasX { getX() num; }
+  `compound Point { num x; }
+  `impl Point as HasX { getX() num { ret self.x; } }
+  `compound Wrapper { HasX inner; }
+  `compound Outer { Wrapper[2] items; }
+  `Point p1;
+  `Point p2;
+  `Outer OG = Outer{items = [Wrapper{inner = &p1}, Wrapper{inner = &p2}]};
+  `fun main() num {
+  `  p1.x = 10;
+  `  p2.x = 20;
+  `  printf(
+  `    "%lld %lld\n",
+  `    OG.items[0].inner.getX(), OG.items[1].inner.getX()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init_shape",
+    "a shape field nested two levels deep inside a global's own literal stays a compile-time constant"
+  );
+  assert equals(out, "10 20\n"), format(
+    "expected the nested shape field to resolve correctly, got: {str}",
+    out
+  );
+}
+
+test "a fixed-size array global whose own elements need runtime init is assigned element by element, both explicit and inferred size" {
+  // A C array type is never assignable as a whole - `arr = {...}` is
+  // illegal regardless of any cast - so an array literal whose own
+  // elements can't be constant (each one a call here) can't route
+  // through the single "name = value" runtime-init path every other
+  // shape does; each element gets its own assignment statement
+  // instead. Covers both an explicit size (`num[3]`) and a size
+  // inferred from the literal itself (`num[]`), since the inferred
+  // case also needs a real compile-time size written into the
+  // declarator where the (runtime-only) value used to supply it.
+  str src = `use std.c.io;
+  `fun compute(num n) num { ret n * 10; }
+  `num[3] arr1 = [compute(1), compute(2), compute(3)];
+  `num[] arr2 = [compute(4), compute(5)];
+  `fun main() num {
+  `  printf(
+  `    "%lld %lld %lld %lld %lld\n",
+  `    arr1[0], arr1[1], arr1[2], arr2[0], arr2[1]
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init_array",
+    "a fixed-size array global whose own elements need runtime init is assigned element by element, both explicit and inferred size"
+  );
+  assert equals(out, "10 20 30 40 50\n"), format(
+    "expected every array element to resolve correctly, got: {str}",
+    out
+  );
+}
+
+test "a global/const's own ternary initializer needing runtime init is caught too, not just a bare call" {
+  // `_global_init_needs_runtime` recursed into every other composite
+  // shape an initializer can take (a binary expression, a compound or
+  // tuple literal, a parenthesized group, a unary operator) but never
+  // into `.Ternary` - a call (or a reference to another global) hidden
+  // inside a ternary's condition or either branch went undetected,
+  // leaking the same raw "initializer element is not a compile-time
+  // constant" error this whole feature exists to avoid. Covers a call
+  // in the true branch, a non-constant condition, and the same shape
+  // nested inside a global's own compound-literal field.
+  str src = `use std.c.io;
+  `compound Point { num x; num y; }
+  `fun compute() num { ret 5; }
+  `fun is_ready() flag { ret true; }
+  `let g1 = true ? compute() : 2;
+  `let g2 = is_ready() ? 1 : 2;
+  `let g3 = Point{x = true ? compute() : 2, y = 1};
+  `fun main() num {
+  `  printf("%lld %lld %lld %lld\n", g1, g2, g3.x, g3.y);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_runtime_init_ternary",
+    "a global/const's own ternary initializer needing runtime init is caught too, not just a bare call"
+  );
+  assert equals(out, "5 1 5 1\n"), format(
+    "expected every ternary-initialized global to resolve correctly, got: {str}",
+    out
+  );
+}
+
+test "a runtime-deferred global's own init call reaches the test runner's entry point too, not just a plain 'main'" {
+  str src = `use std.testing;
+  `fun compute() num { ret 101; }
+  `num G = compute();
+  `test "global needing runtime init is visible inside a test" {
+  `  assert G == 101, "expected G to already be initialized";
+  `}`;
+  let in_test_mode = transpile_source_test_mode(src);
+  assert in_test_mode.is_ok(), "expected the program to transpile in test mode";
+  assert contains(in_test_mode.unwrap(), "__fun_init_globals();"), "expected the test runner's own entry point to call the runtime-init function";
+}
+
+test "a runtime-deferred global's own declaration drops 'const' under MSVC codegen too, since its real value lands in a later assignment" {
+  str src = `fun compute() num { ret 7; }
+  `const G = compute();
+  `fun main() num { ret G; }`;
+  str out_c = emit_c_with_imports_forcing_msvc(
+    src,
+    "global_runtime_init_msvc_const",
+    "a runtime-deferred global's own declaration drops 'const' under MSVC codegen too"
+  );
+  assert !contains(out_c, "const int64_t G"), "expected no C 'const' on a global whose real value is assigned later, under MSVC mode too";
+  assert contains(out_c, "__fun_init_globals"), "expected the runtime-init function to exist under MSVC mode too";
 }

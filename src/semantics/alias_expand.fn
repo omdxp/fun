@@ -212,7 +212,12 @@ fun _substitute_params(
 // name names a registered alias not yet resolved this round - used
 // during the alias table's own self-resolution rounds to know when
 // another round is still needed.
-fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_unresolved) {
+fun _expand_dtype(
+  DataType* dt,
+  Map<str,
+  _ResolvedAlias>* resolved,
+  flag* saw_unresolved
+) {
   if dt == nil {
     ret;
   }
@@ -258,7 +263,12 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
 
   DataType expanded = _cloned_value(ra.body);
   if ra.type_params.len > 0 {
-    _substitute_params(&expanded, &ra.type_params, &dt.generic_args, &ra.type_param_is_spread);
+    _substitute_params(
+      &expanded,
+      &ra.type_params,
+      &dt.generic_args,
+      &ra.type_param_is_spread
+    );
   }
   // A pointer applied at the reference site stacks onto whatever the
   // alias's own body already carries (`als P = num*; P* x;` -> num**).
@@ -272,7 +282,12 @@ fun _expand_dtype(DataType* dt, Map<str, _ResolvedAlias>* resolved, flag* saw_un
 // text; leaves anything not naming a registered alias (a concrete type,
 // a shape name) untouched. Sets `*saw_unresolved` when an alternative
 // names a registered alias not yet resolved this round.
-fun _expand_bound_alternatives(Vec<str>* alternatives, Map<str, _ResolvedAlias>* resolved, flag* saw_unresolved) {
+fun _expand_bound_alternatives(
+  Vec<str>* alternatives,
+  Map<str,
+  _ResolvedAlias>* resolved,
+  flag* saw_unresolved
+) {
   Vec<str> out;
   out.init(alternatives.len);
   num i = 0;
@@ -388,7 +403,12 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
   }
 }
 
-fun _expand_function_shaped(FunctionNode* f, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+fun _expand_function_shaped(
+  FunctionNode* f,
+  Map<str,
+  _ResolvedAlias>* resolved,
+  flag* unused
+) {
   if f.has_rtype {
     _expand_dtype(f.rtype, resolved, unused);
   }
@@ -468,7 +488,12 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
 // cross-product, mirroring the same Cartesian-product idiom
 // `parse_type_params_with_constraints` itself already uses to build these
 // rows in the first place.
-fun _expand_forced_insts(Vec<Vec<str>>* insts, Map<str, _ResolvedAlias>* resolved, flag* unused) {
+fun _expand_forced_insts(
+  Vec<Vec<str>>* insts,
+  Map<str,
+  _ResolvedAlias>* resolved,
+  flag* unused
+) {
   Vec<Vec<str>> out;
   out.init(insts.len);
   num c = 0;
@@ -489,7 +514,13 @@ fun _expand_forced_insts(Vec<Vec<str>>* insts, Map<str, _ResolvedAlias>* resolve
 // place this decision is made), then cross-products across positions so
 // every combination of an expanded position's own alternatives becomes
 // its own row in `out`.
-fun _expand_combo_into(Vec<str>* combo, Map<str, _ResolvedAlias>* resolved, flag* unused, Vec<Vec<str>>* out) {
+fun _expand_combo_into(
+  Vec<str>* combo,
+  Map<str,
+  _ResolvedAlias>* resolved,
+  flag* unused,
+  Vec<Vec<str>>* out
+) {
   Vec<Vec<str>> per_position;
   per_position.init(combo.len);
   num i = 0;
@@ -691,6 +722,21 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
   // declaration node now, while `resolved` still has it, so the
   // `unused_type_alias` warning (which runs after this pass) has
   // something to check.
+  //
+  // A bound-list alias's own `bound_alternatives` also needs syncing
+  // back here, for a reason `body` (an ordinary alias's own DataType)
+  // never has to worry about: `_expand_dtype` mutates `body` in place
+  // through the same pointer the real node already holds, so the real
+  // node sees every update automatically. `bound_alternatives` is a
+  // plain `Vec<str>` value, not a pointer - `_expand_bound_
+  // alternatives` (called above, per round, on `raw_aliases`'s own
+  // detached copy of this node) unconditionally frees its old backing
+  // array and replaces it with a fresh one, even when nothing actually
+  // needed expanding. That reassignment only ever reached the detached
+  // copy; the real node kept pointing at the backing array already
+  // freed out from under it, so freeing the real node later (this
+  // whole tree is a disposable clone - see `diagnose()`'s own comment
+  // on why) double-freed it.
   num wi = 0;
   for wi < nodes.len {
     Node* node = &nodes.data[wi];
@@ -699,7 +745,11 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
       .TypeAlias(a) -> {
         let ra = resolved.at(a.name);
         if ra.is_some() {
-          a.was_used = ra.unwrap().is_used;
+          let resolved_alias = ra.unwrap();
+          a.was_used = resolved_alias.is_used;
+          if a.is_bound_list {
+            a.bound_alternatives = resolved_alias.bound_alternatives;
+          }
           node.kind = .TypeAlias(a);
         }
       }

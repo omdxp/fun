@@ -1,0 +1,3 @@
+pub fun twice(num x) num {
+  ret x * 2;
+}

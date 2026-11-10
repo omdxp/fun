@@ -79,7 +79,9 @@ fun main(str[] args) num {
   }
   if equals(opts.subcommand, "deps") {
     if !equals(opts.deps_action, "update") {
-      ret _fail(format("unknown `fun deps` action `{str}` (expected `update`)", opts.deps_action));
+      ret _fail(
+        format("unknown `fun deps` action `{str}` (expected `update`)", opts.deps_action)
+      );
     }
     ret deps_update_command(opts.input);
   }
@@ -114,9 +116,31 @@ fun main(str[] args) num {
       if runtime_backend_is_windows() && equals(env_or("FUN_TEST_INTRA_JOBS", ""), "") {
         set_env("FUN_TEST_INTRA_JOBS", "2");
       }
-      ret run_test_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
+      ret run_test_suite(
+        root,
+        opts.debug_info,
+        opts.warn_unused,
+        opts.warn_unused_lenient,
+        &opts.defines,
+        &opts.cover,
+        opts.memcheck,
+        opts.memcheck_leaks
+      );
     }
-    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
+    ret run_tests(
+      opts.input,
+      &opts.program_args,
+      opts.debug_info,
+      opts.no_exec,
+      opts.output,
+      opts.warn_unused,
+      opts.warn_unused_lenient,
+      opts.keep_c,
+      &opts.defines,
+      &opts.cover,
+      opts.memcheck,
+      opts.memcheck_leaks
+    );
   }
   if equals(opts.subcommand, "fuzz") {
     // No path, or a path that names a directory rather than a `.fn`
@@ -131,18 +155,59 @@ fun main(str[] args) num {
       if equals(root, "") {
         root = ".";
       }
-      ret run_fuzz_suite(root, opts.debug_info, opts.warn_unused, opts.warn_unused_lenient, &opts.defines);
+      ret run_fuzz_suite(
+        root,
+        opts.debug_info,
+        opts.warn_unused,
+        opts.warn_unused_lenient,
+        &opts.defines
+      );
     }
-    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
+    ret run_fuzz(
+      opts.input,
+      opts.fuzz_target,
+      &opts.program_args,
+      opts.debug_info,
+      opts.no_exec,
+      opts.output,
+      opts.warn_unused,
+      opts.warn_unused_lenient,
+      opts.keep_c,
+      &opts.defines
+    );
   }
   // `-test`/`-fuzz` given directly alongside `-in`, rather than through
   // the `test`/`fuzz` subcommand spellings above.
   if opts.test_flag {
     apply_manifest_coverage(&opts.cover);
-    ret run_tests(opts.input, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines, &opts.cover, opts.memcheck, opts.memcheck_leaks);
+    ret run_tests(
+      opts.input,
+      &opts.program_args,
+      opts.debug_info,
+      opts.no_exec,
+      opts.output,
+      opts.warn_unused,
+      opts.warn_unused_lenient,
+      opts.keep_c,
+      &opts.defines,
+      &opts.cover,
+      opts.memcheck,
+      opts.memcheck_leaks
+    );
   }
   if opts.fuzz_flag {
-    ret run_fuzz(opts.input, opts.fuzz_target, &opts.program_args, opts.debug_info, opts.no_exec, opts.output, opts.warn_unused, opts.warn_unused_lenient, opts.keep_c, &opts.defines);
+    ret run_fuzz(
+      opts.input,
+      opts.fuzz_target,
+      &opts.program_args,
+      opts.debug_info,
+      opts.no_exec,
+      opts.output,
+      opts.warn_unused,
+      opts.warn_unused_lenient,
+      opts.keep_c,
+      &opts.defines
+    );
   }
   // Scanning a tree needs no input file: the working directory is the
   // root when none is named.

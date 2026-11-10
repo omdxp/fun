@@ -64,7 +64,13 @@ compound Item {
 
 // Everything worth offering at `line`/`character` in `doc`, as the
 // result a client is sent.
-pub fun completion(AnalysisCache* cache, Document doc, num line, num character, flag snippets) str {
+pub fun completion(
+  AnalysisCache* cache,
+  Document doc,
+  num line,
+  num character,
+  flag snippets
+) str {
   Vec<Item> items;
   items.init(64);
   defer items.free();
@@ -117,7 +123,12 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     // completion.
     num shorthand_dot = _bare_dot_shorthand_index(&tokens, line, character);
     if shorthand_dot >= 0 {
-      str enum_name = _dot_shorthand_enum_type_from_tokens(&tokens, shorthand_dot, doc.path, cache);
+      str enum_name = _dot_shorthand_enum_type_from_tokens(
+        &tokens,
+        shorthand_dot,
+        doc.path,
+        cache
+      );
       if !equals(enum_name, "") {
         _members_from_tokens(&tokens, enum_name, &items);
         if items.len == 0 {
@@ -131,7 +142,8 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     if equals(receiver, "") {
       Vec<Node> no_program;
       no_program.init(0);
-      if _in_type_param_bound_position(&tokens, line, character) {
+      if _in_type_param_bound_position(&tokens, line, character) ||
+        _in_generic_type_arg_position(&tokens, line, character) {
         _type_and_shape_bound_completions(&no_program, &items);
         ret _reply(&items);
       }
@@ -213,7 +225,12 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
           // name with its own declaration to find.
           num receiver_idx = _receiver_identifier_index_before(&tokens, line, character);
           if receiver_idx >= 0 {
-            local_type = chain_tail_type_from_tokens(&tokens, doc.path, cache, receiver_idx);
+            local_type = chain_tail_type_from_tokens(
+              &tokens,
+              doc.path,
+              cache,
+              receiver_idx
+            );
             local_type_owned = !equals(local_type, "");
           }
         }
@@ -242,14 +259,28 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
             // internally - this loop's own to free once `_members_of`
             // has copied whatever it needs out of `target.nodes`' own
             // AST (which stays retained by the caching layer).
-            let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+            let merged = parse_program_cached(
+              path,
+              text,
+              &cache.imports,
+              cache.imports.parallel_preload
+            );
             if merged.is_err() {
               free(merged.unwrap_err());
               free(text);
               continue;
             }
             ProgramMergeResult target = merged.unwrap();
-            _members_of(&target.nodes, local_type, &items, snippets, doc.path);
+            Vec<str> no_cross_import_args;
+            no_cross_import_args.init(0);
+            _members_of(
+              &target.nodes,
+              local_type,
+              &items,
+              snippets,
+              doc.path,
+              no_cross_import_args
+            );
             free(text);
           }
         }
@@ -281,7 +312,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   // actually be written there. Checked first, before that fallback.
   num shorthand_dot = _bare_dot_shorthand_index(&tokens, line, character);
   if shorthand_dot >= 0 {
-    str enum_name = _dot_shorthand_enum_type(&tokens, &program.nodes, shorthand_dot, doc.path, source_line);
+    str enum_name = _dot_shorthand_enum_type(
+      &tokens,
+      &program.nodes,
+      shorthand_dot,
+      doc.path,
+      source_line
+    );
     if !equals(enum_name, "") {
       _enum_variant_completions(&program.nodes, enum_name, &items);
       if items.len > 0 {
@@ -291,7 +328,8 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
   }
 
   if equals(receiver, "") {
-    if _in_type_param_bound_position(&tokens, line, character) {
+    if _in_type_param_bound_position(&tokens, line, character) ||
+      _in_generic_type_arg_position(&tokens, line, character) {
       _type_and_shape_bound_completions(&program.nodes, &items);
       ret _reply(&items);
     }
@@ -302,16 +340,26 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     }
   }
 
+  Vec<str> propagation_args;
+  propagation_args.init(0);
   str propagation_type = _propagation_receiver_type_before(
     &tokens,
     line,
     character,
     &program.nodes,
     doc.path,
-    source_line
+    source_line,
+    &propagation_args
   );
   if !equals(propagation_type, "") {
-    _members_of(&program.nodes, propagation_type, &items, snippets, doc.path);
+    _members_of(
+      &program.nodes,
+      propagation_type,
+      &items,
+      snippets,
+      doc.path,
+      propagation_args
+    );
     ret _reply(&items);
   }
 
@@ -321,14 +369,17 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
     // chain, not just the immediate receiver segment, the same way
     // hover/definition do.
     str type_name = "";
+    Vec<str> receiver_args;
+    receiver_args.init(0);
     let receiver_tok = _receiver_token_before(&tokens, line, character);
     if receiver_tok.is_some() {
-      type_name = _receiver_own_type(
+      type_name = _receiver_own_type_with_args(
         &tokens,
         receiver_tok.unwrap(),
         &program.nodes,
         doc.path,
-        source_line
+        source_line,
+        &receiver_args
       );
     }
     if starts_with(type_name, "(") {
@@ -339,7 +390,14 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       ret _reply(&items);
     }
     if !equals(type_name, "") {
-      _members_of(&program.nodes, type_name, &items, snippets, doc.path);
+      _members_of(
+        &program.nodes,
+        type_name,
+        &items,
+        snippets,
+        doc.path,
+        receiver_args
+      );
     } else {
       // `receiver` may be an import alias (`use std.c.math as cmath;`)
       // rather than a value at all. `cmath.` names a module, not a
@@ -347,7 +405,11 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
       // module contributes is already merged into `program.nodes`, so
       // this offers its top-level functions the same way `cmath.sqrt`
       // would actually resolve at compile time.
-      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, receiver);
+      str alias_target = import_alias_target(
+        &read.program.entry_nodes,
+        doc.path,
+        receiver
+      );
       if !equals(alias_target, "") {
         _alias_module_completions(&program.nodes, alias_target, &items, snippets);
       }
@@ -370,7 +432,13 @@ pub fun completion(AnalysisCache* cache, Document doc, num line, num character, 
 // sits in one at all (even with zero matches), worked out purely
 // from the current line's own text, independent of tokens or a
 // parsed program, so it still answers while the path is unfinished.
-fun _try_import_completions(Vec<Item>* items, str current_file, str text, num line, num character) flag {
+fun _try_import_completions(
+  Vec<Item>* items,
+  str current_file,
+  str text,
+  num line,
+  num character
+) flag {
   Vec<str> lines = split_lines(text);
   if line < 0 || line >= lines.len {
     ret false;
@@ -674,137 +742,102 @@ fun _abbreviations(Vec<Item>* items, flag snippets) {
   if !snippets {
     ret;
   }
-  items.push(_snippet_item(
+  items.push(
+    _snippet_item(
     "main",
     .Snippet,
     "a program's entry point",
     "fun main() num {\n  $0\n  ret 0;\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "mainio",
     .Snippet,
     "an entry point that prints",
     "use std.c.io;\n\nfun main() num {\n  printf(\"${1:hello}\\n\");\n  ret 0;\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "fore",
     .Snippet,
     "for each item",
     "for ${1:item} : ${2:items} {\n  $0\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "fori",
     .Snippet,
     "for each item, with its index",
     "for ${1:i}, ${2:item} :: ${3:items} {\n  $0\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "forw",
     .Snippet,
     "for while a condition holds",
     "for ${1:i} < ${2:n} {\n  $0\n  ${1:i} = ${1:i} + 1;\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "impls",
     .Snippet,
     "implement a shape for a type",
     "impl ${1:Type} as ${2:Shape} {\n  pub ${3:method}() ${4:num} {\n    $0\n  }\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "iferr",
     .Snippet,
     "return early when a result failed",
     "if ${1:r}.is_err() {\n  ret .Err(${1:r}.unwrap_err());\n}\n$0"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "ifnone",
     .Snippet,
     "return early when an option is empty",
     "if ${1:found}.is_none() {\n  ret ${2:.None};\n}\n$0"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "fitr",
     .Snippet,
     "match a result",
     "fit ${1:r} {\n  .Ok(${2:value}) -> { $0 }\n  .Err(${3:e}) -> {}\n}"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "vecnew",
     .Snippet,
     "a vector, initialized and freed",
     "Vec<${1:num}> ${2:items};\n${2:items}.init(${3:0});\ndefer ${2:items}.free();\n$0"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "mapnew",
     .Snippet,
     "a map, initialized and freed",
     "Map<${1:str}, ${2:num}> ${3:m};\n${3:m}.init(${4:8});\ndefer ${3:m}.free();\n$0"
-  ));
-  items.push(_snippet_item(
+    )
+  );
+  items.push(
+    _snippet_item(
     "fito",
     .Snippet,
     "match an option",
     "fit ${1:o} {\n  .Some(${2:value}) -> { $0 }\n  .None -> {}\n}"
-  ));
-}
-
-// The token right before `i`, skipping comments and newlines.
-fun _prev_real_token(Vec<Token>* tokens, num i) Option<Token> {
-  num j = i - 1;
-  for j >= 0 {
-    Token t = tokens.get(j);
-    if t.type == .Comment || t.type == .NewLine {
-      j = j - 1;
-      continue;
-    }
-    ret .Some(t);
-  }
-  ret .None;
-}
-
-// The token right after `i`, skipping comments and newlines.
-fun _next_real_token(Vec<Token>* tokens, num i) Option<Token> {
-  num j = i + 1;
-  for j < tokens.len {
-    Token t = tokens.get(j);
-    if t.type == .Comment || t.type == .NewLine {
-      j = j + 1;
-      continue;
-    }
-    ret .Some(t);
-  }
-  ret .None;
-}
-
-// `_prev_real_token`'s own index, or -1 when there is none. Needed
-// wherever more than one step back is taken (walking past a generic
-// argument list), where an `Option<Token>` alone would lose the
-// position to keep stepping from.
-fun _prev_real_index(Vec<Token>* tokens, num i) num {
-  num j = i - 1;
-  for j >= 0 {
-    Token t = tokens.get(j);
-    if t.type == .Comment || t.type == .NewLine {
-      j = j - 1;
-      continue;
-    }
-    ret j;
-  }
-  ret -1;
-}
-
-// `_prev_real_index`'s own mirror, walking forward.
-fun _next_real_index(Vec<Token>* tokens, num i) num {
-  num j = i + 1;
-  for j < tokens.len {
-    Token t = tokens.get(j);
-    if t.type == .Comment || t.type == .NewLine {
-      j = j + 1;
-      continue;
-    }
-    ret j;
-  }
-  ret -1;
+    )
+  );
 }
 
 // `name`'s own declared type, read straight off the raw tokens rather
@@ -945,8 +978,16 @@ fun _tuple_receiver_type_text(Vec<Token>* tokens, str source_text, str name) str
         if open >= 0 {
           Token open_tok = tokens.get(open);
           Token close_tok = tokens.get(j);
-          num start_off = _byte_offset_of(source_text, open_tok.pos.line, open_tok.pos.start_col);
-          num end_off = _byte_offset_of(source_text, close_tok.pos.line, close_tok.pos.end_col);
+          num start_off = _byte_offset_of(
+            source_text,
+            open_tok.pos.line,
+            open_tok.pos.start_col
+          );
+          num end_off = _byte_offset_of(
+            source_text,
+            close_tok.pos.line,
+            close_tok.pos.end_col
+          );
           if start_off >= 0 && end_off > start_off {
             ret substr(source_text, start_off, end_off - start_off);
           }
@@ -954,118 +995,6 @@ fun _tuple_receiver_type_text(Vec<Token>* tokens, str source_text, str name) str
       }
     }
     i = i + 1;
-  }
-  ret "";
-}
-
-fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
-  num i = 0;
-  for i < tokens.len {
-    Token t = tokens.get(i);
-    if t.type == .Identifier && equals(token_word(t), name) {
-      str base = _base_type_before(tokens, i);
-      if !equals(base, "") {
-        ret base;
-      }
-    }
-    i = i + 1;
-  }
-  ret "";
-}
-
-// Walks back from just before token `i` over an optional pointer
-// star and an optional balanced `<...>` generic argument list, to
-// the base type identifier that starts it. "" when what sits there
-// isn't shaped like a type at all.
-fun _base_type_before(Vec<Token>* tokens, num i) str {
-  num j = _prev_real_index(tokens, i);
-  if j < 0 {
-    ret "";
-  }
-  if token_is_operator(tokens.get(j), "*") {
-    j = _prev_real_index(tokens, j);
-    if j < 0 {
-      ret "";
-    }
-  }
-  if token_is_operator(tokens.get(j), ">") {
-    num depth = 1;
-    j = _prev_real_index(tokens, j);
-    for j >= 0 && depth > 0 {
-      if token_is_operator(tokens.get(j), ">") {
-        depth = depth + 1;
-      } elif token_is_operator(tokens.get(j), "<") {
-        depth = depth - 1;
-        if depth == 0 {
-          break;
-        }
-      }
-      j = _prev_real_index(tokens, j);
-    }
-    if depth != 0 || j < 0 {
-      ret "";
-    }
-    j = _prev_real_index(tokens, j);
-    if j < 0 {
-      ret "";
-    }
-  }
-  if tokens.get(j).type == .Identifier {
-    ret token_word(tokens.get(j));
-  }
-  ret "";
-}
-
-// `type_name`'s own declared field named `field_name`, resolved to
-// its own type, token-only: `_receiver_type_from_tokens`'s own
-// backward-from-a-name-token walk answers "what declares this name
-// as `Type name`", but a compound's fields are declared inside its
-// own body, not wherever `field_name` happens to be read elsewhere,
-// so this is a forward, brace-depth-tracked scan instead, the same
-// shape `_members_from_tokens` below already walks a compound's body
-// with.
-fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) str {
-  num i = 0;
-  for i < tokens.len {
-    Token t = tokens.get(i);
-    i = i + 1;
-    if t.type != .Keyword || !equals(token_word(t), "compound") {
-      continue;
-    }
-    if i >= tokens.len || tokens.get(i).type != .Identifier ||
-      !equals(token_word(tokens.get(i)), type_name) {
-      continue;
-    }
-    num j = i + 1;
-    for j < tokens.len && !token_is_symbol(tokens.get(j), '{') {
-      j = j + 1;
-    }
-    if j >= tokens.len {
-      continue;
-    }
-    num depth = 1;
-    j = j + 1;
-    for j < tokens.len && depth > 0 {
-      Token bt = tokens.get(j);
-      if token_is_symbol(bt, '{') {
-        depth = depth + 1;
-        j = j + 1;
-        continue;
-      }
-      if token_is_symbol(bt, '}') {
-        depth = depth - 1;
-        j = j + 1;
-        continue;
-      }
-      if depth == 1 && bt.type == .Identifier &&
-      equals(token_word(bt), field_name) {
-        let after = _next_real_token(tokens, j);
-        if after.is_some() && token_is_symbol(after.unwrap(), ';') {
-          ret _base_type_before(tokens, j);
-        }
-      }
-      j = j + 1;
-    }
   }
   ret "";
 }
@@ -1079,7 +1008,13 @@ fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) s
 // searches them, and the field's own declared type is read back
 // through the real AST this time (`lookup_field`), since a fresh
 // parse gives one for free.
-fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str type_name, str field_name) str {
+fun _field_type_from_imports(
+  Vec<Token>* tokens,
+  str current_file,
+  AnalysisCache* cache,
+  str type_name,
+  str field_name
+) str {
   Vec<str> import_paths = resolved_import_paths(tokens, current_file);
   defer import_paths.free();
   num k = 0;
@@ -1092,7 +1027,12 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     }
     // `text` is this call's own entry source, never cached internally
     // - this loop's own to free once the lookup below is done.
-    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    let merged = parse_program_cached(
+      path,
+      text,
+      &cache.imports,
+      cache.imports.parallel_preload
+    );
     if merged.is_err() {
       free(merged.unwrap_err());
       free(text);
@@ -1114,7 +1054,13 @@ fun _field_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
 // The same cross-file fallback, for the final step: `type_name`
 // itself (an enum, not just one of its fields) may be declared in an
 // import rather than the current document.
-fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str type_name, Vec<Item>* items) {
+fun _enum_variants_from_imports(
+  Vec<Token>* tokens,
+  str current_file,
+  AnalysisCache* cache,
+  str type_name,
+  Vec<Item>* items
+) {
   Vec<str> import_paths = resolved_import_paths(tokens, current_file);
   defer import_paths.free();
   num k = 0;
@@ -1128,7 +1074,12 @@ fun _enum_variants_from_imports(Vec<Token>* tokens, str current_file, AnalysisCa
     // `text` is this call's own entry source, never cached internally
     // - this loop's own to free once `_enum_variant_completions` has
     // copied whatever it needs out of `target.nodes`' own AST.
-    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    let merged = parse_program_cached(
+      path,
+      text,
+      &cache.imports,
+      cache.imports.parallel_preload
+    );
     if merged.is_err() {
       free(merged.unwrap_err());
       free(text);
@@ -1183,7 +1134,12 @@ fun _variant_detail_from_tokens(Vec<Token>* tokens, num name_idx, str variant_na
 // slot (a bare enum or compound name, which is all a nested bare
 // `.Variant` can read against). "" when the enum, the variant, or the
 // slot is not found.
-fun _variant_payload_type_from_tokens(Vec<Token>* tokens, str enum_name, str variant_name, num idx) str {
+fun _variant_payload_type_from_tokens(
+  Vec<Token>* tokens,
+  str enum_name,
+  str variant_name,
+  num idx
+) str {
   num i = 0;
   for i + 1 < tokens.len {
     Token t = tokens.get(i);
@@ -1243,7 +1199,23 @@ fun _variant_payload_type_from_tokens(Vec<Token>* tokens, str enum_name, str var
 // a name that never appears this way simply adds nothing, the same
 // safe no-op `_bare_type_name` gets from an AST that resolves it.
 fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
-  if equals(type_name, "") {
+  // An array's own declared type (`Point[3]`, or `_base_type_before`'s
+  // synthetic `Point[]` marker for the same shape) has no members of
+  // its own in this language - what a reader actually wants here is
+  // always the element type's members, whether reached directly
+  // (`pts.`, a rare, otherwise-empty completion) or through an index
+  // (`pts[0].`, the common one): stripped unconditionally, the same
+  // "look through to the element" `_apply_chain_index_unwraps` and
+  // `render_type` both already give a fixed-size array elsewhere.
+  str base_type = type_name;
+  for len(base_type) > 0 && base_type[len(base_type) - 1] == ']' {
+    num lb = last_index_of_char(base_type, '[');
+    if lb < 0 {
+      break;
+    }
+    base_type = substr(base_type, 0, lb);
+  }
+  if equals(base_type, "") {
     ret;
   }
   num i = 0;
@@ -1261,7 +1233,7 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
       continue;
     }
     if i >= tokens.len || tokens.get(i).type != .Identifier ||
-      !equals(token_word(tokens.get(i)), type_name) {
+      !equals(token_word(tokens.get(i)), base_type) {
       continue;
     }
     num j = i + 1;
@@ -1290,8 +1262,17 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
         if is_enum {
           let before = _prev_real_token(tokens, j);
           if before.is_some() &&
-            (token_is_symbol(before.unwrap(), '{') || token_is_operator(before.unwrap(), ",")) {
-            items.push(_item(member_name, .EnumMember, _variant_detail_from_tokens(tokens, j, member_name)));
+            (token_is_symbol(before.unwrap(), '{') || token_is_operator(
+            before.unwrap(),
+            ","
+          )) {
+            items.push(
+              _item(
+              member_name,
+              .EnumMember,
+              _variant_detail_from_tokens(tokens, j, member_name)
+              )
+            );
           }
         } elif is_compound {
           let after = _next_real_token(tokens, j);
@@ -1393,27 +1374,42 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
 fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
   num source_line = line + 1;
   num source_col = character + 1;
-  num dot_idx = -1;
+  // The last real token at or before the cursor - either the dot
+  // itself (nothing typed after it yet) or a partial identifier being
+  // typed/retyped after it. A reader renaming an existing shorthand
+  // (`.Text` -> `.Json`, retyping just the variant name with the dot
+  // left in place) triggers completion with the cursor sitting after
+  // that partial word, not immediately after the dot - the original
+  // version of this scan reset on the very first non-dot token,
+  // recognizing only the instant right after the dot was typed and
+  // nothing past it.
+  num last_idx = -1;
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
-    if t.type == .NewLine || t.type == .Comment {
-      i = i + 1;
-      continue;
-    }
-    if t.pos.line != source_line || t.pos.end_col > source_col {
-      i = i + 1;
-      continue;
-    }
-    if token_is_operator(t, ".") {
-      dot_idx = i;
-    } else {
-      dot_idx = -1;
-    }
     i = i + 1;
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if t.pos.line != source_line || t.pos.start_col >= source_col {
+      continue;
+    }
+    last_idx = i - 1;
   }
-  if dot_idx < 0 {
+  if last_idx < 0 {
     ret -1;
+  }
+  Token last = tokens.get(last_idx);
+  num dot_idx = last_idx;
+  if !token_is_operator(last, ".") {
+    if last.type != .Identifier {
+      ret -1;
+    }
+    let maybe_dot = _prev_real_token(tokens, last_idx);
+    if maybe_dot.is_none() || !token_is_operator(maybe_dot.unwrap(), ".") {
+      ret -1;
+    }
+    dot_idx = index_of_token(tokens, maybe_dot.unwrap());
   }
   let before = _prev_real_token(tokens, dot_idx);
   if before.is_none() {
@@ -1432,7 +1428,13 @@ fun _bare_dot_shorthand_index(Vec<Token>* tokens, num line, num character) num {
 // every other shape (comparison, assignment, call argument)
 // `dot_shorthand_context_type_at` already covers for hover. "" when
 // none apply.
-fun _dot_shorthand_enum_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx, str file, num line) str {
+pub fun _dot_shorthand_enum_type(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  num dot_idx,
+  str file,
+  num line
+) str {
   let fit_node = covering_fit(program, file, line);
   if fit_node.is_some() {
     fit fit_node.unwrap().kind {
@@ -1451,7 +1453,17 @@ fun _dot_shorthand_enum_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx
       ret rdt.unwrap().type_str;
     }
   }
-  ret dot_shorthand_context_type_at(tokens, program, dot_idx, file, line);
+  // `dot_shorthand_context_type_at` renders a combined "Name<args>"
+  // type (a comparison/assignment operand's own `full_type_name`, or
+  // a call argument's own rendered parameter piece) - `_enum_variant_
+  // completions` below matches by an exact `equals` against the AST's
+  // bare enum name, which a generic instantiation's own angle brackets
+  // always failed outright, so this was silently returning zero
+  // suggestions for any generic enum (`Option<num>`, not just `Color`)
+  // in this position. Same root cause, same fix shape, as every other
+  // caller of `dot_shorthand_context_type_at`'s own result this
+  // session.
+  ret bare_type_expr(dot_shorthand_context_type_at(tokens, program, dot_idx, file, line));
 }
 
 // `_dot_shorthand_enum_type`'s own four shapes (a fit's subject, a
@@ -1462,7 +1474,12 @@ fun _dot_shorthand_enum_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx
 // always fails to parse (`if c == .` and `fit c { .` are not valid
 // statements on their own), so there is no tree to read any of them
 // from.
-fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
+fun _dot_shorthand_enum_type_from_tokens(
+  Vec<Token>* tokens,
+  num dot_idx,
+  str current_file,
+  AnalysisCache* cache
+) str {
   str fit_type = _enclosing_fit_subject_type_from_tokens(tokens, dot_idx, current_file, cache);
   if !equals(fit_type, "") {
     ret fit_type;
@@ -1504,7 +1521,12 @@ fun _dot_shorthand_enum_type_from_tokens(Vec<Token>* tokens, num dot_idx, str cu
 // (`err_kind(.Parse, ...)`) only, not a method call, which would also
 // need the receiver's own type resolved first, a further layer of
 // the same problem `_receiver_type_from_tokens` doesn't reach.
-fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
+fun _call_arg_type_from_tokens(
+  Vec<Token>* tokens,
+  num dot_idx,
+  str current_file,
+  AnalysisCache* cache
+) str {
   num depth = 0;
   num open_idx = -1;
   num j = dot_idx - 1;
@@ -1558,7 +1580,10 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
       ret "";
     }
     if outer_before >= 0 &&
-      (tokens.get(outer_before).type == .Identifier || token_is_symbol(tokens.get(outer_before), ')')) {
+      (tokens.get(outer_before).type == .Identifier || token_is_symbol(
+      tokens.get(outer_before),
+      ')'
+    )) {
       // A real method call (`recv.method(.`, `recv.a().method(.`):
       // the receiver is resolved through the same whole-chain
       // resolver dot-completion already uses, then `callee_name` is
@@ -1569,7 +1594,13 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
       if recv_idx >= 0 {
         str recv_type = chain_tail_type_from_tokens(tokens, current_file, cache, recv_idx);
         if !equals(recv_type, "") {
-          let method_decl = member_declaration_from_tokens(tokens, current_file, cache, recv_type, callee_name);
+          let method_decl = member_declaration_from_tokens(
+            tokens,
+            current_file,
+            cache,
+            recv_type,
+            callee_name
+          );
           free(recv_type);
           if method_decl.is_some() {
             Vec<str> method_params = split_signature_params(method_decl.unwrap().detail);
@@ -1586,7 +1617,12 @@ fun _call_arg_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file
       }
       ret "";
     }
-    str owner = _dot_shorthand_enum_type_from_tokens(tokens, before_callee, current_file, cache);
+    str owner = _dot_shorthand_enum_type_from_tokens(
+      tokens,
+      before_callee,
+      current_file,
+      cache
+    );
     if equals(owner, "") {
       ret "";
     }
@@ -1680,7 +1716,13 @@ fun _param_type_from_tokens(Vec<Token>* tokens, str callee_name, num arg_index) 
 // document (`err_kind`, reached only through `use std.result;`, the
 // exact real-world shape this reproduced on). Each import is parsed
 // fresh and searched via the real AST this time.
-fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache* cache, str callee_name, num arg_index) str {
+fun _param_type_from_imports(
+  Vec<Token>* tokens,
+  str current_file,
+  AnalysisCache* cache,
+  str callee_name,
+  num arg_index
+) str {
   Vec<str> import_paths = resolved_import_paths(tokens, current_file);
   defer import_paths.free();
   num k = 0;
@@ -1693,7 +1735,12 @@ fun _param_type_from_imports(Vec<Token>* tokens, str current_file, AnalysisCache
     }
     // `text` is this call's own entry source, never cached internally
     // - this loop's own to free, on every exit out of this iteration.
-    let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
+    let merged = parse_program_cached(
+      path,
+      text,
+      &cache.imports,
+      cache.imports.parallel_preload
+    );
     if merged.is_err() {
       free(merged.unwrap_err());
       free(text);
@@ -1886,7 +1933,12 @@ fun _function_header_return_type(Vec<Token>* tokens, num brace_idx) str {
 // at a time (an ordinary `if`/`for`/function body along the way is
 // simply not a fit, and the search continues past it to whatever
 // encloses that instead), token-only.
-fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx, str current_file, AnalysisCache* cache) str {
+fun _enclosing_fit_subject_type_from_tokens(
+  Vec<Token>* tokens,
+  num dot_idx,
+  str current_file,
+  AnalysisCache* cache
+) str {
   num depth = 0;
   num j = dot_idx - 1;
   for j >= 0 {
@@ -1926,7 +1978,12 @@ fun _enclosing_fit_subject_type_from_tokens(Vec<Token>* tokens, num dot_idx, str
 // `ch.recv()` at parse time - `fit_subject_type`, the AST-driven
 // equivalent, resolves the same shape). "" when this `{` isn't a
 // fit's own, or the subject is something deeper than these three.
-fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file, AnalysisCache* cache) str {
+fun _fit_header_subject_type(
+  Vec<Token>* tokens,
+  num brace_idx,
+  str current_file,
+  AnalysisCache* cache
+) str {
   num a = _prev_real_index(tokens, brace_idx);
   if a < 0 {
     ret "";
@@ -1982,7 +2039,10 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
       if call_fit_kw < 0 || !token_is_keyword(tokens.get(call_fit_kw), "fit") {
         ret "";
       }
-      ret _first_generic_arg_of_function_from_tokens(tokens, token_word(tokens.get(callee_idx)));
+      ret _first_generic_arg_of_function_from_tokens(
+        tokens,
+        token_word(tokens.get(callee_idx))
+      );
     }
     if tokens.get(prop_subj).type != .Identifier {
       ret "";
@@ -1991,7 +2051,10 @@ fun _fit_header_subject_type(Vec<Token>* tokens, num brace_idx, str current_file
     if prop_fit_kw < 0 || !token_is_keyword(tokens.get(prop_fit_kw), "fit") {
       ret "";
     }
-    ret _first_generic_arg_of_local_from_tokens(tokens, token_word(tokens.get(prop_subj)));
+    ret _first_generic_arg_of_local_from_tokens(
+      tokens,
+      token_word(tokens.get(prop_subj))
+    );
   }
   if tokens.get(a).type != .Identifier {
     ret "";
@@ -2157,7 +2220,12 @@ fun _first_generic_arg_before(Vec<Token>* tokens, num i) str {
 // it is. Shared by every dot-shorthand context that names an
 // existing expression as "the other side" of the shorthand - a fit's
 // own subject, a comparison's or assignment's other operand.
-fun _operand_type_from_tokens(Vec<Token>* tokens, num end_idx, str current_file, AnalysisCache* cache) str {
+fun _operand_type_from_tokens(
+  Vec<Token>* tokens,
+  num end_idx,
+  str current_file,
+  AnalysisCache* cache
+) str {
   if tokens.get(end_idx).type != .Identifier {
     ret "";
   }
@@ -2194,14 +2262,20 @@ fun _operand_type_from_tokens(Vec<Token>* tokens, num end_idx, str current_file,
 // is (the operand's own chain-ending type, unwrapped one level), just
 // entered from the dot position directly rather than from an already-
 // typed token after it, since nothing is typed yet here. "" when the
-// dot isn't preceded by a propagation at all.
+// dot isn't preceded by a propagation at all. Also fills `out_args`
+// with the unwrapped type's own concrete generic args (`num` out of
+// `Option<Box<num>>`), the same way `_receiver_own_type_with_args`
+// does for a plain receiver - without this, a doubly-generic inner
+// type's members come back with the bare, unsubstituted template
+// param instead of the real instantiation.
 fun _propagation_receiver_type_before(
   Vec<Token>* tokens,
   num line,
   num character,
   Vec<Node>* program,
   str file,
-  num src_line
+  num src_line,
+  Vec<str>* out_args
 ) str {
   num source_line = line + 1;
   num source_col = character + 1;
@@ -2277,14 +2351,28 @@ fun _propagation_receiver_type_before(
       }
     }
   }
-  let inner = chain_ending_receiver(tokens, op_tail, op_is_call, program, file, src_line, 0);
+  let inner = chain_ending_receiver(
+    tokens,
+    op_tail,
+    op_is_call,
+    program,
+    file,
+    src_line,
+    0
+  );
   if inner.generic_args.len == 0 {
     ret "";
   }
   // The raw generic-arg text carries a pointer star as written
   // (`Node*` for `Option<Node*>`), which `_members_of`'s own lookup by
-  // bare type name doesn't expect.
-  ret bare_type_expr(inner.generic_args.get(0));
+  // bare type name doesn't expect; and may itself carry a further
+  // generic instantiation (`Box<num>` out of `Option<Box<num>>`),
+  // which `out_args` preserves for the caller to substitute with.
+  str inner_text = inner.generic_args.get(0);
+  for arg : generic_args_of_detail(inner_text) {
+    out_args.push(arg);
+  }
+  ret bare_type_expr(inner_text);
 }
 
 // The name a dot immediately before the cursor is reached through, or
@@ -2294,6 +2382,22 @@ fun _propagation_receiver_type_before(
 // is always whichever segment sits right before the cursor's own
 // dot, not the chain's first segment.
 fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
+  ret _receiver_before_from(tokens, line, character, 0);
+}
+
+// `_receiver_before`'s own scan, startable anywhere in `tokens` rather
+// than always from the beginning - what lets it recover when the
+// scan below reaches the cursor with an open call never closed (the
+// cursor sits inside that call's own argument list, typing `self.`
+// as one of its arguments, say - `format("...", self.)`), which the
+// plain forward scan alone reads as "inside an opaque call's
+// arguments, receiver stays whatever it was before the call" (the
+// right answer for the different, already-closed shape this skip
+// logic exists for - `l.debug_r("msg").`, receiver `debug_r`) - here
+// it is instead the wrong answer, since nothing about the call's own
+// name is what a reader typing one of its still-open arguments wants
+// completed.
+fun _receiver_before_from(Vec<Token>* tokens, num line, num character, num start_idx) str {
   num source_line = line + 1;
   num source_col = character + 1;
   str receiver = "";
@@ -2305,9 +2409,14 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
   // `debug_r`", the same as a plain field would, instead of resetting
   // to "no receiver at all" the instant the call's own `(` is seen.
   num paren_depth = 0;
-  num i = 0;
+  // The token index right after the most recent argument boundary (an
+  // opening `(` or a comma at this scan's own outermost open depth) -
+  // consulted only when the scan ends with `paren_depth > 0` below.
+  num arg_start_idx = -1;
+  num i = start_idx;
   for i < tokens.len {
     Token t = tokens.get(i);
+    num this_idx = i;
     i = i + 1;
     // A `NewLine` token's own `end_col` restarts near the left margin
     // rather than continuing the line's own column count, which would
@@ -2324,15 +2433,43 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
         paren_depth = paren_depth + 1;
       } elif token_is_symbol(t, ')') {
         paren_depth = paren_depth - 1;
+      } elif paren_depth == 1 && token_is_operator(t, ",") {
+        arg_start_idx = this_idx + 1;
       }
       continue;
     }
     if token_is_operator(t, "(") {
       paren_depth = 1;
+      arg_start_idx = this_idx + 1;
       continue;
+    }
+    // An index (`pts[0].field`) sits directly on the receiver the
+    // same way a call's own `()` already does - skipped wholesale
+    // over its own matching `]` (nesting included, `arr[i][j]`), so
+    // `receiver` still reads as `pts` right after it, instead of
+    // being wiped the instant `[` is seen (the same "anything else
+    // resets" fallback every other unrecognized token already hits
+    // below).
+    if token_is_operator(t, "[") {
+      let close = _matching_rbracket_forward(tokens, this_idx);
+      if close.is_some() {
+        i = close.unwrap() + 1;
+        continue;
+      }
     }
     if token_is_dot_like(t) {
       last_was_dot = true;
+      continue;
+    }
+    // The partial word still being typed right after the dot
+    // (`l.debug_r("msg").un|`, mid-keystroke) is its own identifier
+    // token, touching the cursor the same way a real, separate
+    // receiver would - without this, it overwrites `receiver` with
+    // itself and clears `last_was_dot`, so a second character typed
+    // after any dot reads back as "no receiver at all" and completion
+    // falls through to dumping every top-level name in scope instead
+    // of narrowing the member list it was already offering.
+    if last_was_dot && t.type == .Identifier && t.pos.end_col == source_col {
       continue;
     }
     fit t.type {
@@ -2345,6 +2482,12 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
         last_was_dot = false;
       }
     }
+  }
+  if paren_depth > 0 {
+    if arg_start_idx >= 0 && arg_start_idx > start_idx {
+      ret _receiver_before_from(tokens, line, character, arg_start_idx);
+    }
+    ret "";
   }
   if !last_was_dot {
     ret "";
@@ -2359,12 +2502,26 @@ fun _receiver_before(Vec<Token>* tokens, num line, num character) str {
 // not just the name. -1 for the same cases `_receiver_before` itself
 // returns "" for.
 fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num character) num {
+  ret _receiver_identifier_index_before_from(tokens, line, character, 0);
+}
+
+// `_receiver_identifier_index_before`'s own scan, startable anywhere
+// in `tokens` - the same recovery `_receiver_before_from` needs when
+// the cursor sits inside a call that never closes before it (typing
+// one of its own arguments, a chained-call receiver included).
+fun _receiver_identifier_index_before_from(
+  Vec<Token>* tokens,
+  num line,
+  num character,
+  num start_idx
+) num {
   num source_line = line + 1;
   num source_col = character + 1;
   num receiver_idx = -1;
   flag last_was_dot = false;
   num paren_depth = 0;
-  num i = 0;
+  num arg_start_idx = -1;
+  num i = start_idx;
   for i < tokens.len {
     Token t = tokens.get(i);
     num this_idx = i;
@@ -2380,15 +2537,34 @@ fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num characte
         paren_depth = paren_depth + 1;
       } elif token_is_symbol(t, ')') {
         paren_depth = paren_depth - 1;
+      } elif paren_depth == 1 && token_is_operator(t, ",") {
+        arg_start_idx = this_idx + 1;
       }
       continue;
     }
     if token_is_operator(t, "(") {
       paren_depth = 1;
+      arg_start_idx = this_idx + 1;
       continue;
+    }
+    // Same index-skip as `_receiver_before_from`'s own identical scan
+    // (see its comment): an index on the receiver must not wipe
+    // `receiver_idx` either.
+    if token_is_operator(t, "[") {
+      let close = _matching_rbracket_forward(tokens, this_idx);
+      if close.is_some() {
+        i = close.unwrap() + 1;
+        continue;
+      }
     }
     if token_is_dot_like(t) {
       last_was_dot = true;
+      continue;
+    }
+    // Same partial-word gap as `_receiver_before`'s own identical scan
+    // (see its comment): the word still being typed right after the
+    // dot must not overwrite `receiver_idx` or clear `last_was_dot`.
+    if last_was_dot && t.type == .Identifier && t.pos.end_col == source_col {
       continue;
     }
     fit t.type {
@@ -2402,189 +2578,16 @@ fun _receiver_identifier_index_before(Vec<Token>* tokens, num line, num characte
       }
     }
   }
+  if paren_depth > 0 {
+    if arg_start_idx >= 0 && arg_start_idx > start_idx {
+      ret _receiver_identifier_index_before_from(tokens, line, character, arg_start_idx);
+    }
+    ret -1;
+  }
   if !last_was_dot {
     ret -1;
   }
   ret receiver_idx;
-}
-
-// `idx`'s own identifier: itself, when `tokens[idx]` already is one,
-// or the callee's own index when it's instead the closing `)` of a
-// call (`debug_r("msg")` -> `debug_r`'s index), walking back through
-// the call's own argument list depth-tracked (so a nested call inside
-// an argument is never mistaken for the one actually ending here).
-// -1 when neither shape applies.
-fun _skip_back_over_call(Vec<Token>* tokens, num idx) num {
-  if idx < 0 {
-    ret -1;
-  }
-  Token t = tokens.get(idx);
-  if !token_is_symbol(t, ')') {
-    if t.type == .Identifier {
-      ret idx;
-    }
-    ret -1;
-  }
-  num depth = 1;
-  num j = idx - 1;
-  for j >= 0 && depth > 0 {
-    Token jt = tokens.get(j);
-    if token_is_symbol(jt, ')') {
-      depth = depth + 1;
-    } elif token_is_operator(jt, "(") {
-      depth = depth - 1;
-    }
-    if depth == 0 {
-      break;
-    }
-    j = j - 1;
-  }
-  if depth != 0 {
-    ret -1;
-  }
-  let callee = token_before(tokens, j);
-  if callee.is_none() {
-    ret -1;
-  }
-  ret index_of_token(tokens, callee.unwrap());
-}
-
-// The type of whatever sits at `tokens[idx]`, walking back through
-// the *whole* dotted chain leading to it, token-only: resolved
-// without a real parse of `doc_path`, the same tier `let_call_return_
-// type_from_tokens`/`member_declaration_from_tokens` already occupy,
-// needed for exactly the shape neither of those covers - a method (or
-// field) read directly off a chained call's own result
-// (`l.debug_r("msg").`), with no intervening `let` binding to hang a
-// lookup off of. Mirrors `chain_receiver`/`chain_ending_receiver`'s
-// own real-AST algorithm (recurse on the prefix, then look the tail
-// segment up as a method when it's itself a call, a field otherwise)
-// but one token-only hop at a time. "" when any hop can't be resolved
-// this way - the same realistic ceiling every fallback in this tier
-// already accepts (an import this document's own broken parse can't
-// see through, a generic whose concrete type needs more than a bare
-// name, an index expression `x[0].` ending the chain, `self` as a
-// chain's own base - each already unresolved before this existed, not
-// newly so).
-fun chain_tail_type_from_tokens(Vec<Token>* tokens, str doc_path, AnalysisCache* cache, num idx) str {
-  Token tok = tokens.get(idx);
-  if tok.type != .Identifier {
-    ret "";
-  }
-  str name = token_word(tok);
-  let after = token_after(tokens, idx + 1);
-  flag is_call = after.is_some() && token_is_operator(after.unwrap(), "(");
-  let before = token_before(tokens, idx);
-  flag has_dot_prefix = before.is_some() && token_is_dot_like(before.unwrap());
-
-  if !has_dot_prefix {
-    if !is_call {
-      // A plain local/param base, nothing chained onto it at all - the
-      // same explicit-type-then-let/const-inferred order every other
-      // base-case lookup in this tier already uses. Lets a caller
-      // resolving a whole receiver expression (which may or may not
-      // itself involve any chaining) always go through this one
-      // function rather than needing to also special-case "what if
-      // there's no chain at all" itself.
-      str plain_type = _receiver_type_from_tokens(tokens, name);
-      if !equals(plain_type, "") {
-        // Every other `ret` in this function hands back a fresh
-        // allocation (callers free it uniformly) - `_receiver_type_
-        // from_tokens`'s own result is borrowed straight out of
-        // `tokens`, so a plain copy keeps that contract true here too.
-        ret substr(plain_type, 0, len(plain_type));
-      }
-      ret let_call_return_type_from_tokens(tokens, doc_path, cache, name);
-    }
-    // A bare top-level call used directly, no receiver of its own
-    // (`make_logger().debug(...)`): same local-then-imports order
-    // `let_call_return_type_from_tokens` already uses once it has a
-    // callee name, just reached without a `let` binding to find one
-    // through first.
-    str local_rtype = _local_fn_return_type_from_tokens(tokens, name);
-    if !equals(local_rtype, "") {
-      ret local_rtype;
-    }
-    Vec<str> import_paths = resolved_import_paths(tokens, doc_path);
-    defer import_paths.free();
-    num k = 0;
-    for k < import_paths.len {
-      str path = import_paths.get(k);
-      k = k + 1;
-      str text = read_to_string(path);
-      if text == nil {
-        continue;
-      }
-      let merged = parse_program_cached(path, text, &cache.imports, cache.imports.parallel_preload);
-      if merged.is_err() {
-        free(merged.unwrap_err());
-        free(text);
-        continue;
-      }
-      ProgramMergeResult target = merged.unwrap();
-      let f = lookup_top_level(&target.nodes, name);
-      if f.is_some() {
-        str rtype = return_type_from_detail(f.unwrap().detail);
-        if !equals(rtype, "") {
-          free(text);
-          ret rtype;
-        }
-      }
-      free(text);
-    }
-    ret "";
-  }
-
-  num dot_idx = index_of_token(tokens, before.unwrap());
-  num prev_idx = _skip_back_over_call(tokens, dot_idx - 1);
-  if prev_idx < 0 {
-    ret "";
-  }
-  Token prev_tok = tokens.get(prev_idx);
-  let prev_before = token_before(tokens, prev_idx);
-  flag prev_has_dot = prev_before.is_some() &&
-  token_is_dot_like(prev_before.unwrap());
-  let prev_after = token_after(tokens, prev_idx + 1);
-  flag prev_is_call = prev_after.is_some() && token_is_operator(prev_after.unwrap(), "(");
-  // `_receiver_type_from_tokens`'s own result is borrowed (a `token_
-  // word` straight out of `tokens`, never freed by any of its other
-  // callers either); the recursive call's is this same function's
-  // own fresh allocation, same as every other `ret` below - tracked
-  // so the one case that owns it actually gets freed.
-  str prefix_type = "";
-  flag prefix_type_owned = false;
-  if !prev_has_dot && !prev_is_call {
-    prefix_type = _receiver_type_from_tokens(tokens, token_word(prev_tok));
-    if equals(prefix_type, "") {
-      // `_receiver_type_from_tokens` only reads an *explicit* "Type
-      // name" declaration - `let l = logger_init(...)` has no such
-      // token for "l" at all, its type purely inferred from the call.
-      // Same fallback the ordinary (non-chained) receiver dispatch
-      // already tries for exactly this shape.
-      prefix_type = let_call_return_type_from_tokens(tokens, doc_path, cache, token_word(prev_tok));
-      prefix_type_owned = !equals(prefix_type, "");
-    }
-  } else {
-    prefix_type = chain_tail_type_from_tokens(tokens, doc_path, cache, prev_idx);
-    prefix_type_owned = !equals(prefix_type, "");
-  }
-  if equals(prefix_type, "") {
-    ret "";
-  }
-
-  let decl = member_declaration_from_tokens(tokens, doc_path, cache, prefix_type, name);
-  str result = "";
-  if decl.is_some() {
-    if is_call {
-      result = return_type_from_detail(decl.unwrap().detail);
-    } else {
-      result = bare_type_from_detail(decl.unwrap().detail);
-    }
-  }
-  if prefix_type_owned {
-    free(prefix_type);
-  }
-  ret result;
 }
 
 // The identifier touching `line`/`character`, dot or no dot before it
@@ -2653,6 +2656,12 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
       last_was_dot = true;
       continue;
     }
+    // Same partial-word gap as `_receiver_before`'s own identical scan
+    // (see its comment): the word still being typed right after the
+    // dot must not overwrite `receiver` or clear `last_was_dot`.
+    if last_was_dot && t.type == .Identifier && t.pos.end_col == source_col {
+      continue;
+    }
     fit t.type {
       .Identifier -> {
         receiver = .Some(t);
@@ -2676,17 +2685,61 @@ fun _receiver_token_before(Vec<Token>* tokens, num line, num character) Option<T
 // everything *before* the token it's handed). When there's no dotted
 // chain ahead of `receiver_tok` at all, it's a bare local/global
 // itself.
-fun _receiver_own_type(
+// Resolves the receiver's own type for a dot-completion request,
+// additionally filling `out_args` with the receiver's own concrete
+// generic args when it's a bare local or
+// parameter (`Box<num> c` -> `["num"]`) - needed for `_members_of`'s
+// own field/method substitution, the same way `lookup_field`/
+// `lookup_method` already substitute given a real `concrete_args`
+// list. Every other receiver shape (a chained call/field result)
+// leaves `out_args` empty for now; nothing yet threads a concrete
+// instantiation through more than one hop of a chain for completion
+// specifically, matching this function's own prior behavior there -
+// not a regression, a bounded scope decision.
+fun _receiver_own_type_with_args(
   Vec<Token>* tokens,
   Token receiver_tok,
   Vec<Node>* program,
   str file,
-  num line
+  num line,
+  Vec<str>* out_args
 ) str {
   str prefix_type = chain_receiver_type(tokens, receiver_tok, program, file, line);
   if equals(prefix_type, "") {
-    str local_type = type_name_of_local(tokens, program, token_word(receiver_tok), file, line);
+    // A bare top-level call with no receiver of its own
+    // (`compute(10, 2).`) needs the FUNCTION's own declared return
+    // type, not whatever `type_name_of_local`/`_bare_type_name` would
+    // say about `receiver_tok` read as a plain value - mirrors
+    // `chain_tail_type_from_tokens`'s own identical `is_call` check
+    // for this exact shape, token-only. Checked first: a call is
+    // unambiguous (nothing here is both a local and parenthesized),
+    // but a local sharing this name would otherwise be read as plain
+    // data, never as whatever calling it returns.
+    let after_name = token_after(tokens, index_of_token(tokens, receiver_tok) + 1);
+    if after_name.is_some() && token_is_operator(after_name.unwrap(), "(") {
+      let top_level_fn = lookup_top_level(program, token_word(receiver_tok));
+      if top_level_fn.is_some() {
+        str rtype = return_type_from_detail(top_level_fn.unwrap().detail);
+        if !equals(rtype, "") {
+          ret rtype;
+        }
+      }
+    }
+    str local_type = type_name_of_local(
+      tokens,
+      program,
+      token_word(receiver_tok),
+      file,
+      line
+    );
     if !equals(local_type, "") {
+      *out_args = local_generic_args(
+        tokens,
+        program,
+        token_word(receiver_tok),
+        file,
+        line
+      );
       ret local_type;
     }
     // Not a value at all: `Color.Green` names the enum itself as its
@@ -2702,7 +2755,12 @@ fun _receiver_own_type(
   if receiver_after.is_some() && token_is_operator(receiver_after.unwrap(), "(") {
     Vec<str> no_method_args;
     no_method_args.init(0);
-    let method = lookup_method(program, prefix_type, token_word(receiver_tok), no_method_args);
+    let method = lookup_method(
+      program,
+      prefix_type,
+      token_word(receiver_tok),
+      no_method_args
+    );
     if method.is_none() {
       ret "";
     }
@@ -2830,6 +2888,67 @@ fun _in_type_param_bound_position(Vec<Token>* tokens, num line, num character) f
   ret depth > 0 && after_boundary;
 }
 
+// True when the cursor sits right after `<` or `,` inside an unclosed
+// `<...>` generic argument list (`Vec<n|>`, `Map<str, n|>`) - a type-
+// argument position, where only a type name is legal, same shape as
+// `_in_type_param_bound_position`'s own depth-tracking just above but
+// boundaried on `<`/`,` (a type argument always starts right after
+// one of those) rather than a bound alternative's `:`/`|`. Confirmed
+// as a real gap, not just a hypothetical: without this, typing a type
+// argument offered every keyword and every declared name in the whole
+// program - not wrong, just an unfiltered dump, since nothing there
+// could actually be completed to anything but a type.
+fun _in_generic_type_arg_position(Vec<Token>* tokens, num line, num character) flag {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num depth = 0;
+  flag after_boundary = false;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if t.pos.line > source_line ||
+      (t.pos.line == source_line && t.pos.start_col >= source_col) {
+      break;
+    }
+    if t.type == .NewLine || t.type == .Comment {
+      continue;
+    }
+    if token_is_symbol(t, ';') || token_is_symbol(t, '{') || token_is_symbol(t, '}') {
+      depth = 0;
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, "<") {
+      depth = depth + 1;
+      after_boundary = true;
+      continue;
+    }
+    if token_is_operator(t, ">") {
+      if depth > 0 {
+        depth = depth - 1;
+      }
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ">>") {
+      depth = depth - 2;
+      if depth < 0 {
+        depth = 0;
+      }
+      after_boundary = false;
+      continue;
+    }
+    if token_is_operator(t, ",") {
+      after_boundary = true;
+      continue;
+    }
+    // Any other token (an identifier/keyword mid-typed for the
+    // current argument) leaves `after_boundary` exactly as it was.
+  }
+  ret depth > 0 && after_boundary;
+}
+
 // Completions legal inside a bound-list constraint alternative: every
 // builtin scalar type keyword, plus every declared compound/enum/shape
 // name - never a function, variable, or local, none of which are valid
@@ -2860,7 +2979,12 @@ fun _type_and_shape_bound_completions(Vec<Node>* program, Vec<Item>* items) {
   }
 }
 
-fun _compound_init_type_at(Vec<Token>* tokens, Vec<Node>* program, num line, num character) str {
+fun _compound_init_type_at(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  num line,
+  num character
+) str {
   num source_line = line + 1;
   num source_col = character + 1;
   Vec<str> stack;
@@ -2966,7 +3090,12 @@ fun _visible_from(Node n, str current_file) flag {
 // file rather than by type name the way `_members_of` does. Every
 // declaration reached through the alias's own import is already
 // merged into `program`, cross-alias name collisions aside.
-fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* items, flag snippets) {
+fun _alias_module_completions(
+  Vec<Node>* program,
+  str module_path,
+  Vec<Item>* items,
+  flag snippets
+) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -2994,18 +3123,51 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
       }
       .Compound(c) -> {
         items.push(
-          _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, &c.type_param_defaults, snippets))
+          _snippet_item(
+          c.name,
+          .Struct,
+          "compound",
+          _generic_type_snippet(
+          c.name,
+          &c.type_params,
+          &c.type_param_defaults,
+          snippets
+          )
+          )
         );
       }
       .Enum(e) -> {
         items.push(
-          _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
+          _snippet_item(
+          e.name,
+          .Enumeration,
+          "enum",
+          _generic_type_snippet(
+          e.name,
+          &e.type_params,
+          &e.type_param_defaults,
+          snippets
+          )
+          )
         );
       }
       .Shape(q) -> { items.push(_item(q.name, .Interface, "shape")); }
       .TypeAlias(a) -> { items.push(_item(a.name, .Struct, "als")); }
       .Variable(v) -> {
         str decl_type_text = render_type(v.var_type);
+        // An untyped top-level `const`/`let` never resolves its own
+        // declared type in the parsed tree - the parser leaves it as
+        // the permanent `__let_infer__` sentinel - so this falls back
+        // to the same literal-initializer inference `lookup_top_level`
+        // already runs for the exact same shape, the same way hovering
+        // this same const through its own `use`-site already resolves
+        // correctly; without it, an aliased module's own untyped const
+        // showed the raw sentinel verbatim in its completion detail.
+        if equals(decl_type_text, "__let_infer__") && v.has_val {
+          free(decl_type_text);
+          str inferred = infer_global_const_type(v.val, program);
+          decl_type_text = substr(inferred, 0, len(inferred));
+        }
         items.push(_item(v.name, .Variable, decl_type_text));
         free(decl_type_text);
       }
@@ -3020,7 +3182,12 @@ fun _alias_module_completions(Vec<Node>* program, str module_path, Vec<Item>* it
 // file, almost always still valid on its own, so it is read and
 // parsed fresh rather than giving up on alias completion entirely
 // just because the document being typed into is momentarily broken.
-fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<Item>* items, flag snippets) {
+fun _alias_module_completions_fresh(
+  str module_path,
+  AnalysisCache* cache,
+  Vec<Item>* items,
+  flag snippets
+) {
   str text = read_to_string(module_path);
   if text == nil {
     ret;
@@ -3031,7 +3198,12 @@ fun _alias_module_completions_fresh(str module_path, AnalysisCache* cache, Vec<I
   // token's own text is already its own fresh allocation from
   // lexing, never an alias into the original source buffer, so
   // freeing `text` here never touches anything still in use).
-  let merged = parse_program_cached(module_path, text, &cache.imports, cache.imports.parallel_preload);
+  let merged = parse_program_cached(
+    module_path,
+    text,
+    &cache.imports,
+    cache.imports.parallel_preload
+  );
   if merged.is_err() {
     free(merged.unwrap_err());
     free(text);
@@ -3140,7 +3312,14 @@ fun _tuple_element_completions(str rendered_type, Vec<Item>* items) {
   members.free();
 }
 
-fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippets, str current_file) {
+fun _members_of(
+  Vec<Node>* program,
+  str type_name,
+  Vec<Item>* items,
+  flag snippets,
+  str current_file,
+  Vec<str> concrete_args
+) {
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -3155,6 +3334,19 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippe
           CompoundField cf = c.fields.get(f);
           f = f + 1;
           str field_type_text2 = render_type(cf.dtype);
+          if c.has_type_params {
+            Vec<str> filled_field_args = fill_default_args(
+              &c.type_params,
+              &c.type_param_defaults,
+              concrete_args
+            );
+            field_type_text2 = specialize_signature(
+              field_type_text2,
+              c.type_params,
+              filled_field_args
+            );
+            free_filled_args(filled_field_args, concrete_args.len);
+          }
           items.push(_item(cf.name, .Field, field_type_text2));
           free(field_type_text2);
         }
@@ -3175,12 +3367,14 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippe
         // declaration, not from a real method lookup.
         if equals(e.name, type_name) {
           str tv_detail = "tag_value() num";
-          items.push(_snippet_item(
+          items.push(
+            _snippet_item(
             "tag_value",
             .Method,
             tv_detail,
             _call_snippet("tag_value", tv_detail, true, snippets)
-          ));
+            )
+          );
         }
       }
       .Impl(block) -> {
@@ -3204,8 +3398,23 @@ fun _members_of(Vec<Node>* program, str type_name, Vec<Item>* items, flag snippe
               }
               str method_name = bare_method_name(f.name);
               str method_detail = render_function_named(f, method_name, false);
+              if block.has_type_params {
+                Vec<str> filled_method_args = fill_default_args_for_type(
+                  program,
+                  type_name,
+                  concrete_args
+                );
+                method_detail = specialize_signature(
+                  method_detail,
+                  block.type_params,
+                  filled_method_args
+                );
+                free_filled_args(filled_method_args, concrete_args.len);
+              }
               str method_snippet = _call_snippet(method_name, method_detail, true, snippets);
-              items.push(_snippet_item(method_name, .Method, method_detail, method_snippet));
+              items.push(
+                _snippet_item(method_name, .Method, method_detail, method_snippet)
+              );
               free(method_detail);
               if !equals(method_snippet, "") {
                 free(method_snippet);
@@ -3238,7 +3447,14 @@ fun _declared(
       .Function(f) -> {
         if f.has_name && !equals(f.name, "") && _visible_from(n, file) {
           str fn_detail = render_function(f);
-          items.push(_snippet_item(f.name, .Function, fn_detail, _call_snippet(f.name, fn_detail, false, snippets)));
+          items.push(
+            _snippet_item(
+            f.name,
+            .Function,
+            fn_detail,
+            _call_snippet(f.name, fn_detail, false, snippets)
+            )
+          );
         }
         if !covers(n, f, file, line) {
           continue;
@@ -3303,14 +3519,34 @@ fun _declared(
       .Compound(c) -> {
         if _visible_from(n, file) {
           items.push(
-            _snippet_item(c.name, .Struct, "compound", _generic_type_snippet(c.name, &c.type_params, &c.type_param_defaults, snippets))
+            _snippet_item(
+            c.name,
+            .Struct,
+            "compound",
+            _generic_type_snippet(
+            c.name,
+            &c.type_params,
+            &c.type_param_defaults,
+            snippets
+            )
+            )
           );
         }
       }
       .Enum(e) -> {
         if _visible_from(n, file) {
           items.push(
-            _snippet_item(e.name, .Enumeration, "enum", _generic_type_snippet(e.name, &e.type_params, &e.type_param_defaults, snippets))
+            _snippet_item(
+            e.name,
+            .Enumeration,
+            "enum",
+            _generic_type_snippet(
+            e.name,
+            &e.type_params,
+            &e.type_param_defaults,
+            snippets
+            )
+            )
           );
         }
       }
@@ -3327,6 +3563,16 @@ fun _declared(
       .Variable(v) -> {
         if _visible_from(n, file) {
           str decl_type_text = render_type(v.var_type);
+          // Same reasoning as `_alias_module_completions`'s own
+          // `.Variable` branch: an untyped top-level const/let never
+          // resolves its own declared type in the parsed tree, so this
+          // falls back to the same literal-initializer inference
+          // `lookup_top_level` already runs for the exact same shape.
+          if equals(decl_type_text, "__let_infer__") && v.has_val {
+            free(decl_type_text);
+            str inferred = infer_global_const_type(v.val, program);
+            decl_type_text = substr(inferred, 0, len(inferred));
+          }
           items.push(_item(v.name, .Variable, decl_type_text));
           free(decl_type_text);
         }
@@ -3405,6 +3651,15 @@ fun _collect_locals(
   fit body.kind {
     .Variable(v) -> {
       str local_type_text = render_type(v.var_type);
+      // An untyped `let`/`const` local never resolves its own declared
+      // type in the parsed tree either - same reasoning as the
+      // top-level `.Variable` branches above, falling back here to the
+      // real token-based re-inference `hover` already uses for the
+      // same local, instead of leaking the raw sentinel.
+      if equals(local_type_text, "__let_infer__") {
+        free(local_type_text);
+        local_type_text = type_name_of_local(tokens, program, v.name, file, line);
+      }
       items.push(_item(v.name, .Variable, local_type_text));
       free(local_type_text);
     }
@@ -3439,7 +3694,9 @@ fun _collect_locals(
             str tuple_binding_name = branch.bindings.get(tbi);
             num tuple_pos = _fit_tuple_binding_position(branch, tbi);
             if tuple_pos >= 0 && tuple_pos < tuple_pieces.len {
-              items.push(_item(tuple_binding_name, .Variable, tuple_pieces.get(tuple_pos)));
+              items.push(
+                _item(tuple_binding_name, .Variable, tuple_pieces.get(tuple_pos))
+              );
             }
             tbi = tbi + 1;
           }
@@ -3458,14 +3715,28 @@ fun _collect_locals(
           );
           str bname = branch.bindings.get(0);
           if !equals(bname, "_") {
-            items.push(_item(bname, .Variable, format("{str}*", shape_type_name)));
+            // Same gap, same fix, as `symbols.fn`'s own `_lookup_fit_
+            // binding`: a flat mangled instantiation ("Box__num")
+            // needs the "Box<num>" form before any member lookup off
+            // this binding substitutes its own type params correctly.
+            str display_shape_type = _fls_mangled_instantiation_to_generic_text(
+              program,
+              shape_type_name
+            );
+            items.push(_item(bname, .Variable, format("{str}*", display_shape_type)));
           }
         } elif branch.has_bindings && !equals(enum_name, "") {
           str variant_name = branch_variant_name(branch);
           num bi = 0;
           for bi < branch.bindings.len {
             str binding_name = branch.bindings.get(bi);
-            let payload_type = variant_payload_type(program, enum_name, variant_name, bi, concrete_args);
+            let payload_type = variant_payload_type(
+              program,
+              enum_name,
+              variant_name,
+              bi,
+              concrete_args
+            );
             if payload_type.is_some() {
               items.push(_item(binding_name, .Variable, payload_type.unwrap()));
             }
@@ -3484,7 +3755,15 @@ fun _collect_locals(
           str map_key = "";
           str map_value = "";
           flag is_map = fi.has_index_name &&
-            _for_iter_map_kv(tokens, fi.iterable, program, file, line, &map_key, &map_value);
+            _for_iter_map_kv(
+            tokens,
+            fi.iterable,
+            program,
+            file,
+            line,
+            &map_key,
+            &map_value
+          );
           if fi.has_index_name {
             str index_type = "num";
             if is_map {
@@ -3509,7 +3788,9 @@ fun _collect_locals(
               if fd_split && fdi2 < fd_members2.len {
                 fd_type2 = fd_members2.get(fdi2);
               }
-              items.push(_item(fi.item_destructure_names.get(fdi2), .Variable, fd_type2));
+              items.push(
+                _item(fi.item_destructure_names.get(fdi2), .Variable, fd_type2)
+              );
               fdi2 = fdi2 + 1;
             }
             if fd_split {
@@ -3671,7 +3952,12 @@ fun _item(str label, ItemKind kind, str detail) Item {
 // ${2:E}>$0`, one tab stop per declared type parameter. "" (plain
 // label insertion) for a non-generic type, or when the client
 // wouldn't understand a snippet.
-fun _generic_type_snippet(str name, Vec<str>* type_params, Vec<DataType*>* defaults, flag snippets) str {
+fun _generic_type_snippet(
+  str name,
+  Vec<str>* type_params,
+  Vec<DataType*>* defaults,
+  flag snippets
+) str {
   if !snippets || type_params.len == 0 {
     ret "";
   }

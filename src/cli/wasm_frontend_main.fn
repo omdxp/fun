@@ -29,7 +29,10 @@ fun main() num {
   str out_path = "/playground.c";
 
   if !exists(src_path) {
-    writeln_to(.Stderr, "no source provided: expected /playground.fn to exist before this module runs");
+    writeln_to(
+      .Stderr,
+      "no source provided: expected /playground.fn to exist before this module runs"
+    );
     ret 1;
   }
 
@@ -80,7 +83,24 @@ fun main() num {
   // same reason if the program itself uses `fork` - confirmed directly,
   // a real concurrency example hung the deployed Playground's own tab
   // indefinitely. See `lower_to_c`'s own doc comment on this parameter.
-  let lowered = lower_to_c(src_path, out_path, &defines, false, false, false, "", false, false, nil, true, false, true, "", false, true);
+  let lowered = lower_to_c(
+    src_path,
+    out_path,
+    &defines,
+    false,
+    false,
+    false,
+    "",
+    false,
+    false,
+    nil,
+    true,
+    false,
+    true,
+    "",
+    false,
+    true
+  );
   defines.free();
 
   if lowered.is_err() {

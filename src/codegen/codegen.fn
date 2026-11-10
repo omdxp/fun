@@ -71,6 +71,11 @@ compound ChainResolution {
 compound OperatorDispatchTarget {
   ChainResolution recv;
   str mangled;
+  // The bare method name (`op_add`, `op_index`, ...) `mangled` was
+  // resolved from - needed by every caller to trigger the same lazy
+  // monomorphization an ordinary `.method()` call site already gets
+  // (see `emit_operator_call`'s own callers for why).
+  str method;
 }
 
 // Which mangled `to_string` function to call for a `Display` argument in
@@ -102,12 +107,17 @@ compound OwnParamCallResolution {
 
 // One variant's shape within a generic enum template: its name, whether
 // it carries a payload, and each payload position's declared type before
-// substitution.
+// substitution - both flattened (`payload_type_strs`, a bare type param's
+// own name, or a further-generic payload's bare base name with its own
+// args dropped) and structural (`payload_dtypes`, generic_args/
+// tuple_members intact), the same split a generic compound's own field
+// pass already keeps between its flat names and `field_dtypes`.
 compound GenericEnumVariantTemplate {
   str name;
   flag has_payload;
   Vec<str> payload_type_strs;
   Vec<flag> payload_is_pointer;
+  Vec<DataType*> payload_dtypes;
 }
 
 // Where `fn_proto_splice_pos` chose to splice a lazily-triggered
@@ -197,6 +207,16 @@ pub compound Codegen {
   // type param from the enclosing function's own return type when it
   // can't be read off the call's arguments.
   Option<DataType> current_fn_rtype_dt;
+  // The expected declared type of whatever's being emitted right now
+  // - a `let`/declared-variable's own type while its initializer is
+  // emitted, or a call's own declared parameter type while that
+  // argument is emitted - the context `maybe_instantiate_generic_
+  // function` falls back to when a type param appears in neither the
+  // call's own arguments nor the enclosing function's own return
+  // type: `Vec<num> v = make_empty();` and `take_box(make_zero_box
+  // ());` both have nothing else anywhere to infer `T` from. `.None`
+  // outside either of those two positions.
+  Option<DataType> expected_let_dt;
   // The enum a bare `.Variant`/`.Variant(x)` shorthand resolves against,
   // standing in for "the expected type from context." Empty when nothing
   // in the enclosing statement provides one; scoped to the statement's
@@ -218,6 +238,47 @@ pub compound Codegen {
   // nested row, or a compound-init field value. When false, a bare array
   // literal is rejected outright rather than emitting invalid C.
   flag in_array_initializer;
+  // True in that exact same declaration context, for a compound
+  // literal instead of an array one - a `Type{...}`/`.{...}`
+  // initializer's own leading `(Type)` cast is likewise only needed
+  // where the value is used as a standalone rvalue (a call argument,
+  // say); directly initializing an already-declared variable, or
+  // filling a nested field/array-element slot inside one, never
+  // needs it, and real MSVC - unlike GCC/clang, which merely tolerate
+  // the redundant cast as a GNU extension - rejects it outright for a
+  // global specifically ("C2099: initializer is not a constant": a
+  // compound-literal cast is itself a non-constant expression under
+  // the C standard, so MSVC's strict front end refuses it wherever a
+  // static-duration object's own initializer must be a compile-time
+  // constant). Threaded through the exact same declaration-context
+  // sites `in_array_initializer` already is.
+  flag in_bare_initializer_context;
+  // Non-empty while emitting an array literal whose own declared
+  // element type is a shape (`Sized[2] arr = [&a, &b];`) - the shape's
+  // own resolved identity, consulted by `.Bracket`'s own per-element
+  // loop to wrap each element in the same coercion every other shape-
+  // typed destination already gets. "" means no coercion is needed.
+  str expected_array_elem_shape_type;
+  // True only for a global array (set alongside `expected_array_elem_
+  // shape_type` above): each element's own coercion is inlined as a
+  // constant brace literal rather than a `__fun_coerce_` function
+  // call, since C requires a global's own initializer - every
+  // element included - to be a compile-time constant. A local array's
+  // initializer has no such restriction, so it keeps the ordinary
+  // function-call form every other local coercion site already uses.
+  flag expected_array_elem_shape_coerce_as_constant;
+  // True while emitting a global/const's own initializer value, at any
+  // nesting depth - unlike `in_bare_initializer_context` (which only
+  // says a leading cast is already redundant), this says a function
+  // call is categorically unavailable here, since C requires the
+  // whole tree to be a compile-time constant. A shape-coercion
+  // reached while this is set (a compound literal field nested inside
+  // a global's own initializer, at any depth - `expected_array_elem_
+  // shape_coerce_as_constant` above only ever covers the array's own
+  // direct element, one level) inlines the same constant brace literal
+  // `emit_global_variable`'s own top-level coercion already does,
+  // instead of the ordinary `__fun_coerce_` call every local site uses.
+  flag in_global_constant_initializer;
   // Names of every shape with at least one concrete (non-generic) impl
   // emitted so far, used to recognize a receiver/declared type as a
   // shape (dispatched through a vtable) rather than a concrete compound.
@@ -435,12 +496,31 @@ pub compound Codegen {
   // `Box__num`) in place of the template's own bare `type_name`. Empty
   // is the ordinary, non-generic case.
   str shape_inst_override_name;
+  // Companion override, non-empty only when the shape itself is also
+  // generic and its own argument is the implementor's type param
+  // (`impl Box<T> as Container<T>`) - names that shape's own resolved
+  // concrete identity (e.g. `Container__num`) in place of the bare
+  // shape name, the same role `i.shape_concrete_instantiation` plays
+  // when the shape's argument was already concrete at parse time
+  // (`impl Config as To<JsonValue>`). Empty whenever the shape isn't
+  // itself generic, or already carries its own concrete instantiation.
+  str shape_inst_override_shape_concrete;
   // Where a lazily-monomorphized typedef or generic impl method
   // definition is spliced, instead of wherever the output happens to be
   // when it's first triggered: for a type used inside a function body
   // that would nest a definition inside the function's braces, which is
   // invalid C. `.None` means append at the current tail.
   Option<num> hoist_insert_pos;
+  // `name = value;` statements for a global/const whose own initializer
+  // isn't a C compile-time constant expression (a function call, a
+  // generic call, a stdlib constructor like `some()`/`ok()`, or a copy
+  // of another global's value) - C rejects all of those as file-scope
+  // initializers outright. Each such global instead gets a bare
+  // tentative declaration at its own source position, and its real
+  // assignment is buffered here and flushed into a generated
+  // `__fun_init_globals` function, called once before any of `main`,
+  // the test runner, or the fuzz harness's own body runs.
+  Vec<str> pending_global_runtime_inits;
   // Position right before the currently executing statement, updated
   // before dispatching each statement in a body. Lets a lazily-triggered
   // prototype land as its own declaration right before the current
@@ -702,8 +782,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
   g.shape_inst_override_name = "";
+  g.shape_inst_override_shape_concrete = "";
   g.loop_defer_marks.init(0);
   g.hoist_insert_pos = .None;
+  g.pending_global_runtime_inits.init(0);
   g.current_stmt_start_pos = .None;
   g.suppress_next_expr_parens = false;
   g.current_fn_body_start_pos = .None;
@@ -738,11 +820,16 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.fit_subj_temp_counter = 0;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
+  g.expected_let_dt = .None;
   g.expected_enum_type = "";
   g.expected_compound_type = "";
   g.has_expected_tuple_type = false;
   g.expected_tuple_type = dtype_new();
   g.in_array_initializer = false;
+  g.in_bare_initializer_context = false;
+  g.expected_array_elem_shape_type = "";
+  g.expected_array_elem_shape_coerce_as_constant = false;
+  g.in_global_constant_initializer = false;
   g.shape_names.init(0);
   g.emitted_shape_impl_vtables.init(0);
   g.shape_decl_names.init(0);
@@ -1037,11 +1124,76 @@ fun is_arithmetic_operator(str op) flag {
 
 // True when `dt` is a pointer of any depth, matching `write_type`'s
 // `ptr_depth`/`flags.is_pointer` check.
+// Splits `s` on literal "__" into exactly `n` pieces, or `.None` when
+// it doesn't split into exactly that many (too few separators, or a
+// nested generic argument's own "__" producing too many) - the one
+// shape this can reconstruct unambiguously from a flat mangled name
+// alone, with no structural type information left to disambiguate a
+// further-generic segment's own internal "__" from a real separator.
+fun _split_double_underscore_exact(str s, num n) Option<Vec<str>> {
+  if equals(s, "") {
+    ret .None;
+  }
+  // A single segment is never ambiguous - the whole string is that
+  // one argument, whatever characters it contains (its own nested
+  // "__", included).
+  if n == 1 {
+    Vec<str> one;
+    one.init(1);
+    one.push(s);
+    ret .Some(one);
+  }
+  Vec<str> parts;
+  parts.init(n);
+  str rest = s;
+  num found = 0;
+  for found < n - 1 {
+    num sep = index_of_str(rest, "__");
+    if sep < 0 {
+      ret .None;
+    }
+    parts.push(substr(rest, 0, sep));
+    rest = substr(rest, sep + 2, len(rest) - sep - 2);
+    found = found + 1;
+  }
+  if equals(rest, "") || index_of_str(rest, "__") >= 0 {
+    ret .None;
+  }
+  parts.push(rest);
+  ret .Some(parts);
+}
+
 fun dtype_is_pointer(DataType dt) flag {
   if dt.pointer_depth > 0 {
     ret true;
   }
   ret dt.flags.is_pointer;
+}
+
+// `dt`'s own type with one array dimension consumed, for an indexed
+// receiver's own element dtype (`arr[0]` off a real array `dt`) - the
+// array-ness is what indexing decays, any pointer star on the
+// element itself survives unchanged.
+fun _one_level_array_decay(DataType dt) DataType {
+  DataType out = dt;
+  if out.array_depth > 0 {
+    out.array_depth = out.array_depth - 1;
+  }
+  out.is_array = out.array_depth > 0;
+  ret out;
+}
+
+// `dt`'s own type with one pointer level consumed, for an indexed
+// receiver's own element dtype when `dt` is a raw pointer indexed
+// like an array (`pts[0]` off `Point** pts`, C pointer arithmetic for
+// `*(pts + 0)`) - the element is one level shallower than the base
+// pointer being indexed.
+fun _one_level_pointer_decay(DataType dt) DataType {
+  DataType out = dt;
+  if out.pointer_depth > 0 {
+    out.pointer_depth = out.pointer_depth - 1;
+  }
+  ret out;
 }
 
 // True for an unsized array type (`T[]`, no bracket dimension), which
@@ -1055,6 +1207,29 @@ fun dtype_is_array_as_pointer(DataType dt) flag {
     ret false;
   }
   ret dt.array_depth <= 1;
+}
+
+// True when `dt`, or any generic argument or tuple member nested inside
+// it to arbitrary depth, names `name` - a compound field whose own
+// declared type only reaches back to the enclosing template through
+// another generic wrapper (`Option<Node<T>*>` inside `compound
+// Node<T>`) is just as self-referential as a direct field of that type,
+// and needs the same forward declaration before instantiation.
+fun dtype_mentions_type_name(DataType dt, str name) flag {
+  if equals(dt.type_str, name) {
+    ret true;
+  }
+  for ga : dt.generic_args {
+    if dtype_mentions_type_name(*ga, name) {
+      ret true;
+    }
+  }
+  for tm : dt.tuple_members {
+    if dtype_mentions_type_name(*tm, name) {
+      ret true;
+    }
+  }
+  ret false;
 }
 
 // True when `dt` matches a constraint name from an `impl Vec<T: num |
@@ -1227,6 +1402,26 @@ impl Codegen {
       new_members.init(0);
       for m : dt.tuple_members {
         flag substituted = false;
+        // A tuple member that is itself a further-generic type
+        // (`(TreeNode<T>*, num)`'s own `TreeNode<T>*`) or a nested
+        // tuple has no bare `type_str` the check just below could ever
+        // match - its own type param lives one level deeper, inside
+        // `generic_args`/`tuple_members`, which only recursing into
+        // this same substitution reaches. The same shape of gap the
+        // `generic_args` loop below already covers for an ordinary
+        // generic instantiation's own further-nested argument, one
+        // level up: left unfixed, a tuple member referencing the
+        // template's own self (or any other further-generic type)
+        // stayed completely unsubstituted, so its own field - and,
+        // once a stale, wrongly-mangled recursive instantiation got
+        // cached under the unsubstituted name, every other field
+        // resolved after it too - never got its real type argument.
+        if m.is_tuple || m.generic_args.len > 0 {
+          DataType* sub_nested_member = malloc(sizeof(DataType));
+          *sub_nested_member = self.resolve_type_subst(*m);
+          new_members.push(sub_nested_member);
+          continue;
+        }
         if m.generic_args.len == 0 && !m.is_tuple {
           for i : 0..self.type_subst_param_names.len {
             if equals(self.type_subst_param_names.get(i), m.type_str) {
@@ -1311,6 +1506,20 @@ impl Codegen {
         DataType* sub_tuple = malloc(sizeof(DataType));
         *sub_tuple = self.resolve_type_subst(*a);
         new_args.push(sub_tuple);
+        continue;
+      }
+      // A nested generic argument (`MyOpt<Vec<T>>`'s own `Vec<T>`) has
+      // its own further-nested param, which the bare-name check just
+      // below can never match since `a.type_str` here is `Vec`, not
+      // `T` - recursing into the same substitution the outer call
+      // already got reaches it. Left unfixed, a doubly-nested generic
+      // return type substituted its outer level fine but left the
+      // inner one's own type param untouched - the same shape of gap
+      // the tuple case just above already covers, one level further.
+      if a.generic_args.len > 0 {
+        DataType* sub_nested = malloc(sizeof(DataType));
+        *sub_nested = self.resolve_type_subst(*a);
+        new_args.push(sub_nested);
         continue;
       }
       if a.generic_args.len == 0 {
@@ -1557,6 +1766,12 @@ impl Codegen {
     self.state.write(" (*");
     self.state.write(mangled_name);
     self.state.write(")(");
+    if sig.params.len == 0 {
+      // A real empty parameter list ("void"), not a bare "()" - the
+      // latter declares an old-style function accepting anything,
+      // which MSVC (and any strict C compiler) rejects outright.
+      self.state.write("void");
+    }
     flag first = true;
     for p2 : sig.params {
       if !first {
@@ -1670,7 +1885,13 @@ impl Codegen {
     self.state = saved_state;
     self.emit_hoisted(tuple_scratch.out.build());
 
-    self.record_compound_typed(mangled_name, field_names, member_names, member_is_ptr, member_dtypes);
+    self.record_compound_typed(
+      mangled_name,
+      field_names,
+      member_names,
+      member_is_ptr,
+      member_dtypes
+    );
     ret .Some(mangled_name);
   }
 
@@ -1882,7 +2103,7 @@ impl Codegen {
     // name to reference before the body is written.
     flag is_self_referential = false;
     for fdt : field_dtypes {
-      if equals(fdt.type_str, dt.type_str) {
+      if dtype_mentions_type_name(*fdt, dt.type_str) {
         is_self_referential = true;
       }
     }
@@ -2167,11 +2388,21 @@ impl Codegen {
     // Pushed before the enum body is written, and forward-declared when
     // self-referential; see `ensure_compound_instantiated`.
     self.emitted_generic_instantiations.push(mangled_name);
-    let variant_templates = self.generic_enum_variants.get(template_idx);
+    Vec<GenericEnumVariantTemplate> variant_templates = self.generic_enum_variants.get(
+      template_idx
+    );
     flag enum_is_self_referential = false;
     for vt : variant_templates {
-      for pt : vt.payload_type_strs {
-        if equals(pt, dt.type_str) {
+      for pd : vt.payload_dtypes {
+        // Structural, not just `payload_type_strs`'s own flat name:
+        // a tuple-wrapped self-reference (`Node((TreeEnum<T>*,
+        // TreeEnum<T>*))`) has an empty flat name for the tuple
+        // itself, so a plain string-equals check against it could
+        // never see the self-reference nested one level inside -
+        // the exact same gap `ensure_compound_instantiated`'s own
+        // field pass had before this session's earlier fix, here on
+        // the enum side instead.
+        if dtype_mentions_type_name(*pd, dt.type_str) {
           enum_is_self_referential = true;
         }
       }
@@ -2226,6 +2457,79 @@ impl Codegen {
           }
         }
       }
+    }
+
+    // A payload that is itself a further-generic type (`Box<T>*`,
+    // generic_args.len > 0) or a tuple has its own type param one
+    // level deeper than a bare-name match against `type_params`
+    // could ever reach - resolved here, before `self.state` swaps to
+    // `enum_scratch` below, the same reason the bare-type-param pass
+    // just above runs first too: `resolve_type_name` can itself
+    // trigger a nested type's own first-use instantiation, which
+    // needs the real buffer on hand to splice into, not a scratch
+    // one. `emit_tagged_union_enum_instance` reads the result back
+    // out of this rebuilt `variant_templates`, never resolving
+    // anything itself.
+    if is_tagged_union && self.state == self.root_state {
+      let prev_enum_subst_params = self.type_subst_param_names;
+      let prev_enum_subst_arg_names = self.type_subst_arg_type_strs;
+      let prev_enum_subst_arg_ptrs = self.type_subst_arg_is_pointer;
+      let prev_enum_subst_arg_dtypes = self.type_subst_arg_dtypes;
+      self.type_subst_param_names = type_params;
+      self.type_subst_arg_type_strs = arg_type_names;
+      self.type_subst_arg_is_pointer = arg_is_pointer;
+      self.type_subst_arg_dtypes = arg_dtypes;
+      Vec<GenericEnumVariantTemplate> pre_resolved_variants;
+      pre_resolved_variants.init(variant_templates.len);
+      for vt3 : variant_templates {
+        GenericEnumVariantTemplate resolved_vt;
+        resolved_vt.name = vt3.name;
+        resolved_vt.has_payload = vt3.has_payload;
+        Vec<str> resolved_ptypes;
+        resolved_ptypes.init(vt3.payload_type_strs.len);
+        Vec<DataType*> resolved_pdtypes;
+        resolved_pdtypes.init(vt3.payload_dtypes.len);
+        num pti3 = 0;
+        for pti3 < vt3.payload_type_strs.len {
+          str ptype3 = vt3.payload_type_strs.get(pti3);
+          let pdt3 = vt3.payload_dtypes.get(pti3);
+          flag is_self_ref3 = equals(ptype3, dt.type_str);
+          flag matched_bare3 = false;
+          num pi3 = 0;
+          for pi3 < type_params.len {
+            if equals(type_params.get(pi3), ptype3) {
+              matched_bare3 = true;
+            }
+            pi3 = pi3 + 1;
+          }
+          if !is_self_ref3 && !matched_bare3 &&
+            (pdt3.generic_args.len > 0 || pdt3.is_tuple) {
+            let resolved_name3 = self.resolve_type_name(*pdt3);
+            if resolved_name3.is_some() {
+              resolved_ptypes.push(resolved_name3.unwrap());
+              DataType* subst_pdt3 = malloc(sizeof(DataType));
+              *subst_pdt3 = self.resolve_type_subst(*pdt3);
+              resolved_pdtypes.push(subst_pdt3);
+            } else {
+              resolved_ptypes.push(ptype3);
+              resolved_pdtypes.push(pdt3);
+            }
+          } else {
+            resolved_ptypes.push(ptype3);
+            resolved_pdtypes.push(pdt3);
+          }
+          pti3 = pti3 + 1;
+        }
+        resolved_vt.payload_type_strs = resolved_ptypes;
+        resolved_vt.payload_is_pointer = vt3.payload_is_pointer;
+        resolved_vt.payload_dtypes = resolved_pdtypes;
+        pre_resolved_variants.push(resolved_vt);
+      }
+      variant_templates = pre_resolved_variants;
+      self.type_subst_param_names = prev_enum_subst_params;
+      self.type_subst_arg_type_strs = prev_enum_subst_arg_names;
+      self.type_subst_arg_is_pointer = prev_enum_subst_arg_ptrs;
+      self.type_subst_arg_dtypes = prev_enum_subst_arg_dtypes;
     }
 
     Vec<str> variant_names;
@@ -2348,6 +2652,17 @@ impl Codegen {
     CodegenState qvt_scratch = self.new_scratch_state();
     CodegenState* saved_qvt_state = self.state;
     self.state = &qvt_scratch;
+    // Forward-declared ahead of the vtable struct, same as `emit_shape_
+    // vtable_machinery`'s own identical line: a method can return the
+    // very shape it belongs to (`self_ref() Chain` on `shape Chain`),
+    // and the vtable's function-pointer field for it needs the name in
+    // scope before the shape's own fat pointer struct is completed
+    // below. Harmless when nothing actually self-refers.
+    self.state.write("typedef struct ");
+    self.state.write(q_mangled);
+    self.state.write(" ");
+    self.state.write(q_mangled);
+    self.state.write(";\n");
     self.state.write("typedef struct ");
     self.state.write(q_mangled);
     self.state.write("_vtable ");
@@ -2378,6 +2693,13 @@ impl Codegen {
         }
       }
       self.state.write(");\n");
+    }
+    // MSVC rejects an empty struct outright (`shape Empty { }` is
+    // explicitly documented as valid - see examples/sizeof_all_types.fn)
+    // - the same dummy field `emit_shape_vtable_machinery`'s own
+    // identical struct-build already writes for this exact case.
+    if self.msvc_mode && q_methods.len == 0 {
+      self.state.write("  int __fun_dummy;\n");
     }
     self.state.write("};\n");
     self.state.write("typedef struct ");
@@ -2428,6 +2750,9 @@ impl Codegen {
             ret perr;
           }
           self.state.write("))(");
+          if rsig.params.len == 0 {
+            self.state.write("void");
+          }
           flag rfirst = true;
           for rp : rsig.params {
             if !rfirst {
@@ -2493,6 +2818,9 @@ impl Codegen {
             self.state.write(" (*");
             self.state.write(v.name);
             self.state.write(")(");
+            if sig.params.len == 0 {
+              self.state.write("void");
+            }
             flag pfirst = true;
             for p : sig.params {
               if !pfirst {
@@ -2673,7 +3001,10 @@ impl Codegen {
   emit_function_prototype(Node n) Option<CodegenErrorKind> {
     fit n.kind {
       .Function(f) -> {
-        ret self.emit_generic_impl_method_prototype(n, self.effective_function_name(f.name));
+        ret self.emit_generic_impl_method_prototype(
+          n,
+          self.effective_function_name(f.name)
+        );
       }
       _ -> { ret .Some(.InvalidNode); }
     }
@@ -2908,7 +3239,18 @@ impl Codegen {
           // against the shape's own declaration: that shape needs a
           // vtable keyed by the resolved `K`, which this machinery
           // doesn't build, so it's skipped rather than misfiring with a
-          // stale, unsubstituted vtable shape.
+          // stale, unsubstituted vtable shape. Dynamic dispatch through
+          // one of these (a bare `Container<T> c` parameter, not a
+          // static `for`/method call) is instead handled lazily, only
+          // when a real coercion needs it - see
+          // `ensure_generic_shape_vtable_instantiated`, called from
+          // `resolve_shape_coerce_concrete_type`'s own call sites.
+          // Firing this unconditionally for every instantiation here
+          // instead (as a first attempt at this did) corrupts something
+          // as ubiquitous as `impl Vec<T> as Iterator<T>` every time any
+          // `Vec<T>` is instantiated for completely unrelated reasons,
+          // whether or not the program ever dispatches through it
+          // dynamically at all.
           flag shape_itself_generic = false;
           num qdi = 0;
           for qdi < self.shape_decl_names.len {
@@ -3182,7 +3524,9 @@ impl Codegen {
             fit m.kind {
               .Function(proto_fnv) -> {
                 if proto_fnv.has_rtype {
-                  let proto_rt_name = self.resolve_type_name(self.resolve_type_subst(*proto_fnv.rtype));
+                  let proto_rt_name = self.resolve_type_name(
+                    self.resolve_type_subst(*proto_fnv.rtype)
+                  );
                   if proto_rt_name.is_some() {
                     proto_type_names.push(proto_rt_name.unwrap());
                   }
@@ -3192,7 +3536,9 @@ impl Codegen {
                     fit proto_arg.kind {
                       .Variable(proto_v) -> {
                         if !proto_v.var_type.has_fn_sig {
-                          let proto_pt_name = self.resolve_type_name(self.resolve_type_subst(*proto_v.var_type));
+                          let proto_pt_name = self.resolve_type_name(
+                            self.resolve_type_subst(*proto_v.var_type)
+                          );
                           if proto_pt_name.is_some() {
                             proto_type_names.push(proto_pt_name.unwrap());
                           }
@@ -4036,6 +4382,28 @@ impl Codegen {
     ret false;
   }
 
+  // The declared return type of a plain (non-generic) top-level
+  // function named `fname`, resolved to its own C type name - used to
+  // infer a method's own type param from a function-typed argument's
+  // *return* type (`map<U>(fun(T) U f)`, called with a plain function
+  // reference), the one shape the bare-match inference just below can
+  // never catch on its own: `f`'s declared type is a function
+  // signature, not literally `U`, so the direct `type_str` comparison
+  // never fires no matter what gets passed.
+  _toplevel_function_rtype_name(str fname) Option<str> {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Function(f) -> {
+          if f.has_name && equals(f.name, fname) && !f.has_type_params && f.has_rtype {
+            ret self.resolve_type_name(*f.rtype);
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+
   // Monomorphizes a method that declares its own generic type params,
   // combining the impl's known substitution with a fresh one inferred
   // from `args`. Signature and body are hoisted together to the current
@@ -4045,7 +4413,11 @@ impl Codegen {
   //
   // A plain impl contributes no substitution of its own, so the combined
   // one reduces to the method's own params.
-  maybe_instantiate_generic_impl_method_own_params(str owner_type, str bare_name, Vec<Node*> args) Option<OwnParamCallResolution> {
+  maybe_instantiate_generic_impl_method_own_params(
+    str owner_type,
+    str bare_name,
+    Vec<Node*> args
+  ) Option<OwnParamCallResolution> {
     num ii = 0;
     flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -4132,6 +4504,22 @@ impl Codegen {
                               found_name = inferred.unwrap();
                               found = true;
                             }
+                          } elif !found && v.var_type.has_fn_sig &&
+                          v.var_type.fn_sig != nil &&
+                          v.var_type.fn_sig.rtype != nil &&
+                            equals(v.var_type.fn_sig.rtype.type_str, tp) &&
+                            v.var_type.fn_sig.rtype.generic_args.len == 0 &&
+                            arg_i < args.len {
+                            fit args.get(arg_i).kind {
+                              .Identifier(fname) -> {
+                                let fn_rtype = self._toplevel_function_rtype_name(fname);
+                                if fn_rtype.is_some() {
+                                  found_name = fn_rtype.unwrap();
+                                  found = true;
+                                }
+                              }
+                              _ -> {}
+                            }
                           }
                         }
                         _ -> {}
@@ -4145,7 +4533,9 @@ impl Codegen {
                   // resolved names stand in as plain types.
                   if !found && own_idx < fnv.type_param_defaults.len &&
                     fnv.type_param_defaults.get(own_idx) != nil {
-                    DataType* default_dt = dtype_clone(fnv.type_param_defaults.get(own_idx));
+                    DataType* default_dt = dtype_clone(
+                      fnv.type_param_defaults.get(own_idx)
+                    );
                     Vec<DataType*> earlier;
                     earlier.init(0);
                     for en : own_arg_type_names {
@@ -4158,6 +4548,24 @@ impl Codegen {
                     let default_name = self.resolve_type_name(*default_dt);
                     if default_name.is_some() {
                       found_name = default_name.unwrap();
+                      found = true;
+                    }
+                  }
+                  // A method's own additional type param this call's
+                  // arguments reveal nothing about (`make_other<U>()`
+                  // takes none at all) still has the enclosing `let`'s
+                  // own declared type to infer from (`Box<num> b2 =
+                  // b1.make_other();`) - the same context a plain
+                  // generic function's own type param already falls
+                  // back to, reused here since `fnv` is the same
+                  // `FunctionNode` shape that helper already reads.
+                  if !found {
+                    let let_ctx = self.infer_generic_function_type_param_from_let_context(
+                      fnv,
+                      tp
+                    );
+                    if let_ctx.is_some() {
+                      found_name = let_ctx.unwrap();
                       found = true;
                     }
                   }
@@ -4377,6 +4785,7 @@ impl Codegen {
             resolved_dtype = dtype_new();
             resolved_dtype.type_str = mangled_name;
           } else {
+            flag matched_bare_param = false;
             num pi = 0;
             for pi < type_params.len {
               if equals(type_params.get(pi), ptype) {
@@ -4385,8 +4794,34 @@ impl Codegen {
                 if pi < arg_dtypes.len {
                   resolved_dtype = *arg_dtypes.get(pi);
                 }
+                matched_bare_param = true;
               }
               pi = pi + 1;
+            }
+            // A payload that is itself a further-generic type
+            // (`Box<T>*`, generic_args.len > 0) or a tuple
+            // (`payload_type_strs`'s own flat name is always "" for
+            // one, matching no bare param above) has its own type
+            // param one level deeper than a bare-name match could
+            // ever reach. `ensure_enum_instantiated`'s own pre-pass,
+            // run before `self.state` ever swaps to this function's
+            // scratch buffer, already resolved and substituted this
+            // exact position in place - `ptype`/`payload_dt` read
+            // here are already the result, not the template's own
+            // unsubstituted original. Left unfixed (resolving here
+            // instead, already inside the scratch swap), a nested
+            // type's own first-use instantiation spliced its typedef
+            // straight into this scratch buffer instead of the real
+            // one, landing mid-declaration; resolving before the
+            // swap, the same way a generic compound's own field pass
+            // already does, is what avoids that altogether.
+            if !matched_bare_param && i < vt.payload_dtypes.len {
+              let payload_dt = vt.payload_dtypes.get(i);
+              if payload_dt.generic_args.len > 0 || payload_dt.is_tuple {
+                resolved_type = ptype;
+                resolved_dtype = *payload_dt;
+                resolved_ptr = dtype_is_pointer(*payload_dt) || pptr;
+              }
             }
           }
           self.write_type_name(resolved_type);
@@ -4675,6 +5110,43 @@ impl Codegen {
         j = j + 1;
       }
       i = i + 1;
+    }
+    if found_count == 1 {
+      ret .Some(found_name);
+    }
+    ret .None;
+  }
+
+  // `resolve_unique_enum_for_variant`'s own registry (`enum_names`/
+  // `enum_variant_names`) only gains an entry once an enum is
+  // actually emitted - too late for a `let`-inferred global's own
+  // bare shorthand (`let g = .Red;`), since `pub transpile`
+  // deliberately emits every global before any type, on the
+  // assumption a global is a plain literal with nothing to depend on
+  // yet (see that pass's own comment). Scans the whole program's AST
+  // directly instead, which needs no prior emission at all - correct
+  // for this one caller, not a general replacement for the registry-
+  // based version (which also covers a generic enum's own concrete
+  // instantiations, never visible from the template declaration
+  // alone).
+  _resolve_unique_plain_enum_for_variant_from_ast(str variant_name) Option<str> {
+    str found_name = "";
+    num found_count = 0;
+    for n : self.all_nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          if e.has_type_params {
+            continue;
+          }
+          for v : e.variants {
+            if equals(v.name, variant_name) {
+              found_name = e.name;
+              found_count = found_count + 1;
+            }
+          }
+        }
+        _ -> {}
+      }
     }
     if found_count == 1 {
       ret .Some(found_name);
@@ -5020,6 +5492,15 @@ impl Codegen {
   resolve_operator_operand(Node* operand) Option<ChainResolution> {
     fit operand.kind {
       .Identifier(_) -> { ret self.resolve_field_chain(operand); }
+      // `(a + b) == c`: a parenthesized group is its own node kind
+      // (never folded into the `.Expression` it wraps), so without
+      // this the outer `==` never even tried to resolve its own left
+      // operand's type here - it fell through as plain, unresolved C
+      // infix `==` on two full compound values, even though the
+      // inner `+` dispatched correctly on its own (nothing stopped
+      // `resolve_field_chain`'s own identical arm from already doing
+      // this for every other receiver position).
+      .ExpressionParenthesis(inner) -> { ret self.resolve_operator_operand(inner); }
       .Expression(inner_e) -> {
         // Deliberately no `"()"` case: a plain call result used
         // directly (`get_vec3() + b`, no intermediate `let`) looks
@@ -5082,6 +5563,21 @@ impl Codegen {
       // (unary operators don't go through that mapping at all - see
       // the unary call site's own doc comment).
       .Unary(u) -> {
+        // `*ptr + other`: a dereferenced pointer as the operator's own
+        // left operand. `resolve_field_chain` already resolves exactly
+        // this shape correctly (the pointee's own type, `is_pointer`
+        // cleared) for every other receiver position - delegating to
+        // it here is what every other dispatch-capable receiver in
+        // this function already does for its own base case (see the
+        // `.Identifier` arm above). Left unhandled before, this check
+        // alone rejected every dereferenced-pointer operand outright
+        // (`u.has_indirection` being true was itself disqualifying),
+        // so `*ptr1 + p2` silently fell through to raw infix `+` on
+        // two full compound values instead of dispatching to `op_add`.
+        if !u.is_left_operanded_unary && equals(u.op, "*") && u.has_indirection &&
+          u.indirection_depth == 1 {
+          ret self.resolve_field_chain(operand);
+        }
         if u.is_left_operanded_unary || u.has_indirection ||
           (!equals(u.op, "-") && !equals(u.op, "!")) {
           ret .None;
@@ -5169,6 +5665,7 @@ impl Codegen {
     OperatorDispatchTarget t;
     t.recv = recv_r;
     t.mangled = mangled;
+    t.method = method;
     ret .Some(t);
   }
 
@@ -5343,7 +5840,12 @@ impl Codegen {
         format_num(node.pos.col)
       );
     }
-    self.error_note = format("{str} ({str}){str}", node_kind_name(node.kind), stage, where);
+    self.error_note = format(
+      "{str} ({str}){str}",
+      node_kind_name(node.kind),
+      stage,
+      where
+    );
   }
 
   // Emits `cond` as an `if`/`while` condition, without the one redundant
@@ -5727,9 +6229,40 @@ impl Codegen {
       self.state.write(operand_enum_name);
       self.state.write("_");
       self.state.write(none_or_err);
-      self.state.write(") { return ");
-      self.state.write(early_ret_text);
-      self.state.write("; } ");
+      self.state.write(") { ");
+      if self.defer_stack.len > 0 {
+        // A pending `defer` must still run on this early return -
+        // evaluated into its own temp first, same reasoning `ret`'s own
+        // defer-aware path uses, so a deferred statement can't change
+        // what gets returned.
+        self.state.write("__auto_type __fun_prop_ret_");
+        self.state.write(format_num(try_id));
+        self.state.write(" = ");
+        self.state.write(early_ret_text);
+        self.state.write(";\n");
+        // Under `-g`/debug info, a deferred statement's own
+        // `write_indent` flushes a pending `#line` directive the
+        // instant it runs - fine at the start of an ordinary
+        // statement, but this whole construct is one single line of
+        // hand-assembled inline text, so with no newline here first
+        // that flush landed the directive (which only ever ends with
+        // its own trailing newline, never starts with one) stray
+        // mid-line, after the `;` just written - confirmed directly
+        // against a real `-memcheck` run (which forces debug info
+        // on): the real C compiler rejected it outright with "stray
+        // '#' in program".
+        let prop_dferr = self.emit_function_scope_defers();
+        if prop_dferr.is_some() {
+          ret prop_dferr;
+        }
+        self.state.write("return __fun_prop_ret_");
+        self.state.write(format_num(try_id));
+        self.state.write("; } ");
+      } else {
+        self.state.write("return ");
+        self.state.write(early_ret_text);
+        self.state.write("; } ");
+      }
       self.state.write(try_name);
       self.state.write(".payload.");
       self.state.write(some_or_ok);
@@ -5780,9 +6313,77 @@ impl Codegen {
     try_decl_sb.append(operand_enum_name);
     try_decl_sb.append("_");
     try_decl_sb.append(none_or_err);
-    try_decl_sb.append(") { return ");
-    try_decl_sb.append(early_ret_text);
-    try_decl_sb.append("; }\n");
+    try_decl_sb.append(") { ");
+    if self.defer_stack.len > 0 {
+      // Same reasoning as the GNU statement-expression path above: a
+      // pending `defer` must still run before this early return, which
+      // this hoisted MSVC/wasm form - no GNU statement expressions
+      // available - splices as its own extra statement inside the same
+      // guard, rather than skipping it outright.
+      // A deferred statement can itself trigger a generic type's
+      // first-use instantiation, which calls `emit_hoisted` - that
+      // needs the same scratch-aware routing the operand's own render
+      // above already sets up (`hoist_scratch_depth`, a cleared
+      // `hoist_insert_pos`/`current_stmt_start_pos`, and
+      // `root_state`/`root_hoist_pos` pinned to the real buffer).
+      // Without it, `emit_hoisted`'s no-scratch fallback wrote straight
+      // into this throwaway scratch buffer inline with the deferred
+      // statement text itself, and splicing that blob into
+      // `try_decl_sb` below then landed a stray typedef in the middle
+      // of a C statement - confirmed directly against a real MSVC
+      // compile, which rejected the result with "missing ';'" and
+      // struct-redefinition errors.
+      CodegenState prop_defer_scratch = self.new_scratch_state();
+      CodegenState* prop_defer_saved_state = self.state;
+      let prop_defer_saved_hoist_pos = self.hoist_insert_pos;
+      let prop_defer_saved_stmt_pos = self.current_stmt_start_pos;
+      if self.hoist_scratch_depth == 0 {
+        self.root_state = self.state;
+        self.root_hoist_pos = self.hoist_insert_pos;
+        self.root_stmt_start_pos = self.current_stmt_start_pos;
+      }
+      self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+      self.state = &prop_defer_scratch;
+      self.hoist_insert_pos = .None;
+      self.current_stmt_start_pos = .None;
+      let prop_dferr2 = self.emit_function_scope_defers();
+      self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+      self.state = prop_defer_saved_state;
+      if self.hoist_scratch_depth == 0 {
+        self.hoist_insert_pos = self.root_hoist_pos;
+        self.current_stmt_start_pos = self.root_stmt_start_pos;
+      } else {
+        self.hoist_insert_pos = prop_defer_saved_hoist_pos;
+        self.current_stmt_start_pos = prop_defer_saved_stmt_pos;
+      }
+      if prop_dferr2.is_some() {
+        ret prop_dferr2;
+      }
+      str prop_defer_text = prop_defer_scratch.out.build();
+      try_decl_sb.append(self.current_fn_rtype_name);
+      try_decl_sb.append(" __fun_prop_ret_");
+      try_decl_sb.append(format_num(try_id));
+      try_decl_sb.append(" = ");
+      try_decl_sb.append(early_ret_text);
+      // Same reasoning as the GNU statement-expression path above:
+      // under `-g`/debug info, the first deferred statement's own
+      // `write_indent` flushes a pending `#line` directive the
+      // instant it starts writing into `prop_defer_scratch` - which,
+      // being a fresh scratch buffer, means that directive (which
+      // only ever ends with its own trailing newline, never starts
+      // with one) would otherwise become the very first text in
+      // `prop_defer_text`, landing stray mid-line once spliced in
+      // right after the `;` above with no newline between them.
+      try_decl_sb.append(";\n");
+      try_decl_sb.append(prop_defer_text);
+      try_decl_sb.append(" return __fun_prop_ret_");
+      try_decl_sb.append(format_num(try_id));
+      try_decl_sb.append("; }\n");
+    } else {
+      try_decl_sb.append("return ");
+      try_decl_sb.append(early_ret_text);
+      try_decl_sb.append("; }\n");
+    }
     str try_decl_text = try_decl_sb.build();
     let try_hoist_save = self.hoist_insert_pos;
     let try_splice_pos = self.current_stmt_start_pos;
@@ -6025,9 +6626,12 @@ impl Codegen {
         } else {
           ret .Some(.UnsupportedNode);
         }
-        self.state.write("(");
-        self.state.write(type_name);
-        self.state.write("){");
+        if !self.in_bare_initializer_context {
+          self.state.write("(");
+          self.state.write(type_name);
+          self.state.write(")");
+        }
+        self.state.write("{");
         if ci.fields.len == 0 {
           self.state.write("0");
         } else {
@@ -6046,6 +6650,10 @@ impl Codegen {
             let field_info = self.lookup_compound_field(type_name, f.name);
             let prev_expected_enum = self.expected_enum_type;
             let prev_expected_compound = self.expected_compound_type;
+            flag field_did_shape_coerce = false;
+            flag field_shape_coerce_inline = false;
+            str field_concrete_name_for_inline = "";
+            str field_shape_name_for_inline = "";
             if field_info.is_some() {
               let finfo = field_info.unwrap();
               if self.enum_names.contains(finfo.type_name) {
@@ -6053,17 +6661,75 @@ impl Codegen {
               } else {
                 self.expected_compound_type = finfo.type_name;
               }
+              // A concrete-typed field value where the field is itself
+              // declared as a shape needs the same coercion wrap a
+              // `Variable`/`ret`/call-argument initializer already
+              // gets; without it a concrete pointer is stored directly
+              // where C expects the shape's fat-pointer struct by
+              // value - not a type mismatch the C compiler catches
+              // (both sides are pointer-sized), so it silently reads
+              // garbage as a vtable pointer at the first dynamic
+              // dispatch through it.
+              if self.shape_names.contains(finfo.type_name) {
+                let field_concrete = self.resolve_shape_coerce_concrete_type(f.value);
+                if field_concrete.is_some() {
+                  self.ensure_generic_impl_shape_vtable_instantiated(
+                    field_concrete.unwrap(),
+                    finfo.type_name
+                  );
+                  if self.in_global_constant_initializer {
+                    // Reached while emitting a global/const's own
+                    // initializer, however deeply nested - the same
+                    // reasoning as `emit_global_variable`'s own
+                    // top-level coercion: a function call, however
+                    // trivial its body, is never a C constant
+                    // expression, so this inlines the identical brace
+                    // literal instead of a `__fun_coerce_` call.
+                    self._ensure_plain_shape_impl_vtable_emitted(
+                      field_concrete.unwrap(),
+                      finfo.type_name
+                    );
+                    self.state.write("{ .self = (");
+                    field_shape_coerce_inline = true;
+                    field_concrete_name_for_inline = field_concrete.unwrap();
+                    field_shape_name_for_inline = finfo.type_name;
+                  } else {
+                    self.state.write("__fun_coerce_");
+                    self.state.write(field_concrete.unwrap());
+                    self.state.write("_");
+                    self.state.write(finfo.type_name);
+                    self.state.write("(");
+                    field_did_shape_coerce = true;
+                  }
+                }
+              }
             }
-            // A field value may itself be an array literal, needing the
-            // bare-brace-list form.
+            // A field value may itself be an array or compound
+            // literal, needing the same bare form - once inside a
+            // `{...}` body, every nested sub-object slot is always
+            // bare-eligible in C, regardless of whether the outer
+            // literal itself needed a leading cast.
             let prev_arr_init = self.in_array_initializer;
+            let prev_bare_init = self.in_bare_initializer_context;
             self.in_array_initializer = true;
+            self.in_bare_initializer_context = true;
             let ferr = self.emit_expr(*f.value);
             self.in_array_initializer = prev_arr_init;
+            self.in_bare_initializer_context = prev_bare_init;
             self.expected_enum_type = prev_expected_enum;
             self.expected_compound_type = prev_expected_compound;
             if ferr.is_some() {
               ret ferr;
+            }
+            if field_did_shape_coerce {
+              self.state.write(")");
+            }
+            if field_shape_coerce_inline {
+              self.state.write("), .vtable = &__fun_impl_");
+              self.state.write(field_concrete_name_for_inline);
+              self.state.write("_");
+              self.state.write(field_shape_name_for_inline);
+              self.state.write("_vtable }");
             }
           }
         }
@@ -6148,6 +6814,19 @@ impl Codegen {
           self.state.write(self.infer_array_literal_elem_c_type(inner));
           self.state.write("[])");
         }
+        // An array literal whose own declared element type is a
+        // shape (`Sized[2] arr = [&a, &b];`) needs the identical
+        // coercion wrap every other shape-typed destination already
+        // gets, applied to each element here - the array's own
+        // declaration site set this before emitting the literal; see
+        // `Codegen.expected_array_elem_shape_type`'s own doc comment.
+        // Cleared while recursing into each element so a nested
+        // bracket (a 2D array's own inner row) never wrongly inherits
+        // it.
+        str bracket_elem_shape = self.expected_array_elem_shape_type;
+        flag bracket_elem_shape_const = self.expected_array_elem_shape_coerce_as_constant;
+        self.expected_array_elem_shape_type = "";
+        self.expected_array_elem_shape_coerce_as_constant = false;
         Vec<Node*> elems;
         elems.init(0);
         self.flatten_call_args(inner, &elems);
@@ -6158,7 +6837,44 @@ impl Codegen {
             self.state.write(", ");
           }
           first = false;
+          flag elem_did_shape_coerce = false;
+          str elem_concrete_for_coerce = "";
+          if !equals(bracket_elem_shape, "") {
+            let elem_concrete = self.resolve_shape_coerce_concrete_type(elem);
+            if elem_concrete.is_some() {
+              self.ensure_generic_impl_shape_vtable_instantiated(
+                elem_concrete.unwrap(),
+                bracket_elem_shape
+              );
+              if bracket_elem_shape_const {
+                self._ensure_plain_shape_impl_vtable_emitted(
+                  elem_concrete.unwrap(),
+                  bracket_elem_shape
+                );
+                self.state.write("{ .self = (");
+              } else {
+                self.state.write("__fun_coerce_");
+                self.state.write(elem_concrete.unwrap());
+                self.state.write("_");
+                self.state.write(bracket_elem_shape);
+                self.state.write("(");
+              }
+              elem_concrete_for_coerce = elem_concrete.unwrap();
+              elem_did_shape_coerce = true;
+            }
+          }
           let eerr = self.emit_expr(*elem);
+          if elem_did_shape_coerce {
+            if bracket_elem_shape_const {
+              self.state.write("), .vtable = &__fun_impl_");
+              self.state.write(elem_concrete_for_coerce);
+              self.state.write("_");
+              self.state.write(bracket_elem_shape);
+              self.state.write("_vtable }");
+            } else {
+              self.state.write(")");
+            }
+          }
           if eerr.is_some() {
             ret eerr;
           }
@@ -6225,11 +6941,35 @@ impl Codegen {
           }
           let recv_r0_opt = self.resolve_operator_operand(u.operand);
           if recv_r0_opt.is_some() {
-            let mangled_opt = self.lookup_impl_method(recv_r0_opt.unwrap().type_name, op_method);
+            let mangled_opt = self.lookup_impl_method(
+              recv_r0_opt.unwrap().type_name,
+              op_method
+            );
             if mangled_opt.is_some() {
-              let recv_r_opt = self.materialize_operator_operand(recv_r0_opt.unwrap(), u.operand);
+              let recv_r_opt = self.materialize_operator_operand(
+                recv_r0_opt.unwrap(),
+                u.operand
+              );
               if recv_r_opt.is_some() {
-                ret self.emit_operator_call(recv_r_opt.unwrap(), mangled_opt.unwrap(), .None);
+                // A generic impl's own `op_neg`/`op_not` gets its C
+                // prototype and body emitted here, at the first call
+                // site for this instantiation - the same trigger an
+                // ordinary `.method()` call already gets, which the
+                // operator syntax (confirmed for the binary case just
+                // below, `p1 + p2`) never reached on its own.
+                let emit_err = self.ensure_generic_impl_method_emitted(
+                  recv_r_opt.unwrap().type_name,
+                  op_method,
+                  ""
+                );
+                if emit_err.is_some() {
+                  ret emit_err;
+                }
+                ret self.emit_operator_call(
+                  recv_r_opt.unwrap(),
+                  mangled_opt.unwrap(),
+                  .None
+                );
               }
             }
           }
@@ -6330,6 +7070,14 @@ impl Codegen {
                   let dispatched_set = self.resolve_operator_dispatch("[]=", idx_e.left);
                   if dispatched_set.is_some() {
                     let target = dispatched_set.unwrap();
+                    let emit_err = self.ensure_generic_impl_method_emitted(
+                      target.recv.type_name,
+                      target.method,
+                      ""
+                    );
+                    if emit_err.is_some() {
+                      ret emit_err;
+                    }
                     ret self.emit_operator_index_set_call(
                       target.recv,
                       target.mangled,
@@ -6413,6 +7161,22 @@ impl Codegen {
         if dispatched.is_some() {
           self.suppress_next_expr_parens = false;
           let target = dispatched.unwrap();
+          // A generic impl's own operator method gets its C prototype
+          // and body emitted here, at the first call site for this
+          // instantiation - the same trigger an ordinary `.method()`
+          // call already gets. Confirmed directly as a real gap: `p1 +
+          // p2` on a generic `Pair<T>` resolved the right mangled name
+          // ("Pair__num__op_add") but never triggered its emission,
+          // while `p1.op_add(p2)` on the identical type worked, since
+          // only the latter went through the ordinary method-call path.
+          let emit_err = self.ensure_generic_impl_method_emitted(
+            target.recv.type_name,
+            target.method,
+            ""
+          );
+          if emit_err.is_some() {
+            ret emit_err;
+          }
           ret self.emit_operator_call(target.recv, target.mangled, .Some(e.right));
         }
         // Consumed here, one shot: only this outermost pair is skipped,
@@ -6450,6 +7214,10 @@ impl Codegen {
             if self.shape_names.contains(lhs_type_name2) {
               let concrete2 = self.resolve_shape_coerce_concrete_type(e.right);
               if concrete2.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  concrete2.unwrap(),
+                  lhs_type_name2
+                );
                 self.state.write("__fun_coerce_");
                 self.state.write(concrete2.unwrap());
                 self.state.write("_");
@@ -6644,7 +7412,10 @@ impl Codegen {
                   shape_ok = true;
                 }
                 if shape_ok {
-                  let fn_name_opt2 = self.lookup_impl_method(type_name.unwrap(), "to_string");
+                  let fn_name_opt2 = self.lookup_impl_method(
+                    type_name.unwrap(),
+                    "to_string"
+                  );
                   if fn_name_opt2.is_some() {
                     // A Display impl reached only through this
                     // unary-wrapped dispatch needs a forward prototype,
@@ -6654,7 +7425,11 @@ impl Codegen {
                       type_name.unwrap(),
                       "to_string"
                     );
-                    self.ensure_generic_impl_method_emitted(type_name.unwrap(), "to_string", "");
+                    self.ensure_generic_impl_method_emitted(
+                      type_name.unwrap(),
+                      "to_string",
+                      ""
+                    );
                     DisplayResolution res2;
                     res2.fn_name = fn_name_opt2.unwrap();
                     // `*p` evaluates to a plain value, so a
@@ -6911,7 +7686,11 @@ impl Codegen {
                       }
                     }
                     if self.enum_has_variant(enum_name, variant_name) {
-                      ret self.emit_enum_variant_construction(enum_name, variant_name, e.right);
+                      ret self.emit_enum_variant_construction(
+                        enum_name,
+                        variant_name,
+                        e.right
+                      );
                     }
                   }
                   _ -> {}
@@ -7661,7 +8440,11 @@ impl Codegen {
     // name for the per-argument bare-shorthand lookup below, since
     // `lookup_function_param_type` only knows a template by its bare name.
     str template_callee_name = callee_name;
-    let generic_inst = self.maybe_instantiate_generic_function(callee_name, args, e.generic_args);
+    let generic_inst = self.maybe_instantiate_generic_function(
+      callee_name,
+      args,
+      e.generic_args
+    );
     if generic_inst.is_some() {
       callee_name = generic_inst.unwrap().mangled_name;
     } else {
@@ -7700,6 +8483,8 @@ impl Codegen {
         }
       }
       str prev_expected = self.expected_enum_type;
+      str prev_expected_compound2 = self.expected_compound_type;
+      let prev_expected_let_dt2 = self.expected_let_dt;
       flag prev_has_expected_tuple2 = self.has_expected_tuple_type;
       DataType prev_expected_tuple2 = self.expected_tuple_type;
       flag arg_did_shape_coerce = false;
@@ -7708,9 +8493,19 @@ impl Codegen {
           self.has_expected_tuple_type = true;
           self.expected_tuple_type = ptype.unwrap();
         }
+        // A nested generic call passed directly as this argument
+        // (`take_box(make_zero_box())`, no intermediate `let`) has
+        // this declared parameter type as its own only context to
+        // infer an unreachable-from-its-own-arguments type param
+        // from - the same fallback `expected_let_dt` already gives a
+        // declared local's own initializer.
+        if ptype.unwrap().generic_args.len > 0 {
+          self.expected_let_dt = .Some(ptype.unwrap());
+        }
         let resolved = self.resolve_type_name(ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
+          self.expected_compound_type = resolved.unwrap();
           // A concrete-typed argument passed where the declared parameter
           // is a shape type needs the same coercion wrap a `Variable` or
           // `ret` initializer gets; without it the argument's concrete
@@ -7719,6 +8514,10 @@ impl Codegen {
           if self.shape_names.contains(resolved.unwrap()) {
             let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
             if arg_concrete.is_some() {
+              self.ensure_generic_impl_shape_vtable_instantiated(
+                arg_concrete.unwrap(),
+                resolved.unwrap()
+              );
               self.state.write("__fun_coerce_");
               self.state.write(arg_concrete.unwrap());
               self.state.write("_");
@@ -7731,6 +8530,8 @@ impl Codegen {
       }
       let aerr = self.emit_expr(*arg);
       self.expected_enum_type = prev_expected;
+      self.expected_compound_type = prev_expected_compound2;
+      self.expected_let_dt = prev_expected_let_dt2;
       self.has_expected_tuple_type = prev_has_expected_tuple2;
       self.expected_tuple_type = prev_expected_tuple2;
       if aerr.is_some() {
@@ -7943,7 +8744,11 @@ impl Codegen {
       ret operand_err;
     }
     str operand_text = addr_scratch.out.build();
-    str tmp_name2 = self.hoist_call_result_operand(operand_text, self.expected_enum_type, false);
+    str tmp_name2 = self.hoist_call_result_operand(
+      operand_text,
+      self.expected_enum_type,
+      false
+    );
     self.state.write("&");
     self.state.write(tmp_name2);
     ret .None;
@@ -7983,7 +8788,12 @@ impl Codegen {
 
   // Shared by the two forms above. `declare_only` splices `T tmp;` and
   // leaves the assignment to the caller.
-  hoist_call_result_temp(str call_text, str recv_type_name, flag recv_is_pointer, flag declare_only) str {
+  hoist_call_result_temp(
+    str call_text,
+    str recv_type_name,
+    flag recv_is_pointer,
+    flag declare_only
+  ) str {
     self.call_recv_temp_counter = self.call_recv_temp_counter + 1;
     StringBuilder recv_tmp_name_sb = string_builder_init(24);
     recv_tmp_name_sb.append("__fun_recv_tmp");
@@ -8107,7 +8917,11 @@ impl Codegen {
   emit_shape_dispatch_call(ChainResolution recv_r, str method_name, Node* args_node) Option<CodegenErrorKind> {
     str recv_text = recv_r.text;
     if recv_r.is_call_result {
-      recv_text = self.hoist_call_result_to_temp(recv_r.text, recv_r.type_name, recv_r.is_pointer);
+      recv_text = self.hoist_call_result_to_temp(
+        recv_r.text,
+        recv_r.type_name,
+        recv_r.is_pointer
+      );
     }
     str sep = ".";
     if recv_r.is_pointer {
@@ -8139,8 +8953,12 @@ impl Codegen {
   // Resolves the concrete type an expression's value coerces from, for a
   // shape-typed destination such as a `Variable` initializer or a `ret`
   // from a shape-returning function; the `__fun_coerce_<Type>_<Shape>`
-  // helper needs `<Type>` by name. Handles `&identifier` and a bare
-  // identifier that's already a pointer; `.None` for anything else.
+  // helper needs `<Type>` by name. Handles `&identifier`, a bare
+  // identifier that's already a pointer, and a call whose own declared
+  // return type is a concrete pointer (a plain function, a method, or a
+  // generic instantiation - whatever `infer_let_expr_type` already
+  // resolves a call's return type as, reused rather than duplicated);
+  // `.None` for anything else.
   resolve_shape_coerce_concrete_type(Node* exp) Option<str> {
     fit exp.kind {
       .Unary(u) -> {
@@ -8154,6 +8972,38 @@ impl Codegen {
           ret self.lookup_local_type_name(name);
         }
       }
+      .Expression(e) -> {
+        if equals(e.op, "()") {
+          let rdt_opt = self.infer_let_expr_type(exp);
+          if rdt_opt.is_some() {
+            let rdt = rdt_opt.unwrap();
+            if dtype_is_pointer(rdt) {
+              // `resolve_type_name`, not the bare `rdt.type_str`: a
+              // call returning a pointer to a generic compound
+              // (`Box<num>*`) needs its mangled identity ("Box__num"),
+              // the same name the vtable/coerce-helper machinery below
+              // is keyed under - the bare template name alone matches
+              // nothing there and silently builds against an
+              // undeclared helper.
+              let rname = self.resolve_type_name(rdt);
+              if rname.is_some() {
+                ret .Some(rname.unwrap());
+              }
+            }
+          }
+        }
+      }
+      .Ternary(t) -> {
+        // `HasX h = cond ? &p1 : &p2;` - either arm names the same
+        // concrete type as a matter of typechecking, so the first one
+        // that resolves is as good as checking both.
+        let then_concrete = self.resolve_shape_coerce_concrete_type(t.then_val);
+        if then_concrete.is_some() {
+          ret then_concrete;
+        }
+        ret self.resolve_shape_coerce_concrete_type(t.else_val);
+      }
+      .ExpressionParenthesis(inner) -> { ret self.resolve_shape_coerce_concrete_type(inner); }
       _ -> {}
     }
     ret .None;
@@ -8180,12 +9030,158 @@ impl Codegen {
           if equals(field_name, "") {
             ret .None;
           }
-          ret .Some(self.lookup_compound_field(self.resolve_field_chain(e.left)?.type_name, field_name)?.type_name);
+          ret .Some(
+            self.lookup_compound_field(
+            self.resolve_field_chain(e.left)?.type_name,
+            field_name
+            )?.type_name
+          );
         }
       }
       _ -> {}
     }
     ret .None;
+  }
+
+  // Lazily builds the vtable machinery (struct, if not already built by
+  // `ensure_shape_instantiated`; trampolines; vtable instance; the
+  // `__fun_coerce_<concrete>_<shape>` helper) for one concrete
+  // instantiation of a generic compound's impl of a shape that is also
+  // generic (`impl Box<T> as Container<T>`), the moment a real coercion
+  // needs it - every `__fun_coerce_` call site above calls this first
+  // with the coercion's own source and destination types, already known
+  // there. Firing this unconditionally for every instantiation instead
+  // (`maybe_emit_shape_vtable_for_instantiation`'s own eager per-impl
+  // pass, which an earlier version of this routed through) corrupts
+  // something as ubiquitous as `impl Vec<T> as Iterator<T>` every time
+  // any `Vec<T>` is instantiated, whether or not the program ever
+  // dispatches through it dynamically at all - see that function's own
+  // comment. A no-op whenever `shape_concrete_name` isn't actually a
+  // generic shape's own per-instantiation identity (the ordinary
+  // non-generic and already-concrete-at-parse-time cases are already
+  // built eagerly, so no matching template is ever found here for
+  // them), or `concrete_type_name` isn't a tracked generic instantiation.
+  ensure_generic_impl_shape_vtable_instantiated(str concrete_type_name, str shape_concrete_name) {
+    num ii = 0;
+    flag found_inst = false;
+    for ii < self.instantiation_mangled_name.len {
+      if equals(self.instantiation_mangled_name.get(ii), concrete_type_name) {
+        found_inst = true;
+        break;
+      }
+      ii = ii + 1;
+    }
+    if !found_inst {
+      ret;
+    }
+    str base_name = self.instantiation_base_name.get(ii);
+    let arg_type_names = self.instantiation_arg_type_names.get(ii);
+    let arg_is_pointer = self.instantiation_arg_is_pointer.get(ii);
+    let arg_dtypes = self.instantiation_arg_dtypes.get(ii);
+
+    for tmpl : self.generic_impl_templates {
+      fit tmpl.kind {
+        .Impl(i) -> {
+          if !equals(i.type_name, base_name) || !i.has_shape_name ||
+            i.has_shape_concrete_instantiation || !i.has_shape_arg_dtype ||
+            i.type_params.len != arg_type_names.len {
+            continue;
+          }
+          if !impl_allows_generic_args(
+            i.has_type_param_forced_insts,
+            i.type_param_forced_insts,
+            arg_dtypes,
+            self.all_nodes
+          ) {
+            continue;
+          }
+          let prev_params = self.type_subst_param_names;
+          let prev_arg_names = self.type_subst_arg_type_strs;
+          let prev_arg_ptrs = self.type_subst_arg_is_pointer;
+          let prev_arg_dtypes = self.type_subst_arg_dtypes;
+          self.type_subst_param_names = i.type_params;
+          self.type_subst_arg_type_strs = arg_type_names;
+          self.type_subst_arg_is_pointer = arg_is_pointer;
+          self.type_subst_arg_dtypes = arg_dtypes;
+          // Whether this candidate's own shape argument, substituted
+          // against this instantiation, is the identity the caller is
+          // actually after - more than one impl can share
+          // (base_name, arity) the same way the eager pass's own
+          // disambiguation comment describes, so a name match alone
+          // isn't enough to commit to the wrong one.
+          let resolved_shape_arg = self.resolve_type_name(*i.shape_arg_dtype);
+          flag identity_matches = false;
+          if resolved_shape_arg.is_some() {
+            StringBuilder shape_id_sb = string_builder_init(16);
+            shape_id_sb.append(i.shape_name);
+            shape_id_sb.append("__");
+            shape_id_sb.append(resolved_shape_arg.unwrap());
+            identity_matches = equals(shape_id_sb.build(), shape_concrete_name);
+          }
+          if !identity_matches {
+            self.type_subst_param_names = prev_params;
+            self.type_subst_arg_type_strs = prev_arg_names;
+            self.type_subst_arg_is_pointer = prev_arg_ptrs;
+            self.type_subst_arg_dtypes = prev_arg_dtypes;
+            continue;
+          }
+
+          str prev_override = self.shape_inst_override_name;
+          self.shape_inst_override_name = concrete_type_name;
+          str prev_shape_concrete_override = self.shape_inst_override_shape_concrete;
+          self.shape_inst_override_shape_concrete = shape_concrete_name;
+
+          CodegenState qv_scratch = self.new_scratch_state();
+          CodegenState* saved_qv_state = self.state;
+          let saved_qv_hoist_pos = self.hoist_insert_pos;
+          let saved_qv_scratch_depth = self.hoist_scratch_depth;
+          let saved_qv_stmt_start_pos = self.current_stmt_start_pos;
+          self.state = &qv_scratch;
+          self.hoist_insert_pos = .None;
+          self.hoist_scratch_depth = 0;
+          self.current_stmt_start_pos = .None;
+          self.emit_shape_vtable_machinery(tmpl);
+
+          StringBuilder qm_pfx_sb = string_builder_init(16);
+          qm_pfx_sb.append(base_name);
+          qm_pfx_sb.append("__");
+          qm_pfx_sb.append(i.shape_name);
+          qm_pfx_sb.append("__");
+          str qm_prefix = qm_pfx_sb.build();
+          flag prev_suppress_qv = self.suppress_generic_impl_method_draining;
+          self.suppress_generic_impl_method_draining = true;
+          for m : i.methods {
+            fit m.kind {
+              .Function(fnv) -> {
+                let qm_bare = strip_prefix(fnv.name, qm_prefix);
+                self.ensure_generic_impl_method_emitted(
+                  concrete_type_name,
+                  qm_bare,
+                  i.shape_name
+                );
+              }
+              _ -> {}
+            }
+          }
+          self.suppress_generic_impl_method_draining = prev_suppress_qv;
+
+          self.state = saved_qv_state;
+          self.hoist_insert_pos = saved_qv_hoist_pos;
+          self.hoist_scratch_depth = saved_qv_scratch_depth;
+          self.current_stmt_start_pos = saved_qv_stmt_start_pos;
+          self.emit_hoisted(qv_scratch.out.build());
+
+          self.shape_inst_override_name = prev_override;
+          self.shape_inst_override_shape_concrete = prev_shape_concrete_override;
+          self.type_subst_param_names = prev_params;
+          self.type_subst_arg_type_strs = prev_arg_names;
+          self.type_subst_arg_is_pointer = prev_arg_ptrs;
+          self.type_subst_arg_dtypes = prev_arg_dtypes;
+          ret;
+        }
+        _ -> {}
+      }
+    }
   }
 
   // Emits a method call `recv.method(arg1, ...)` as C
@@ -8315,7 +9311,11 @@ impl Codegen {
       // A generic impl method such as `Vec<str>.sum()` gets its C
       // prototype and body emitted here, at the first call site for this
       // instantiation. A no-op for a plain type's method.
-      let emit_err = self.ensure_generic_impl_method_emitted(recv_r.type_name, method_name, "");
+      let emit_err = self.ensure_generic_impl_method_emitted(
+        recv_r.type_name,
+        method_name,
+        ""
+      );
       if emit_err.is_some() {
         ret emit_err;
       }
@@ -8380,7 +9380,10 @@ impl Codegen {
     }
     // The same trailing-default fill-in `emit_call` does for a plain
     // function, keyed by (owner type, bare method name) instead.
-    let method_defaults = self.lookup_impl_method_default_values(recv_r.type_name, method_name);
+    let method_defaults = self.lookup_impl_method_default_values(
+      recv_r.type_name,
+      method_name
+    );
     if method_defaults.is_some() {
       let mdparam_types = self.lookup_impl_method_param_types(recv_r.type_name, method_name);
       // A method call has already written its receiver, so a default
@@ -8756,6 +9759,14 @@ impl Codegen {
       let dispatched = self.resolve_operator_dispatch("[]", e.left);
       if dispatched.is_some() {
         let target = dispatched.unwrap();
+        let emit_err = self.ensure_generic_impl_method_emitted(
+          target.recv.type_name,
+          target.method,
+          ""
+        );
+        if emit_err.is_some() {
+          ret emit_err;
+        }
         ret self.emit_operator_call(target.recv, target.mangled, .Some(index_node));
       }
     }
@@ -8909,6 +9920,31 @@ impl Codegen {
         self.state.write(field_name);
       }
       ret .None;
+    }
+    // `enum_recv_name` names a real generic enum template (`Option`,
+    // never registered under its own bare name - only a concrete
+    // instantiation like `Option__num` is), but nothing anywhere
+    // provided a concrete instantiation to fall back to either: no
+    // declared type on the statement this sits in, no enclosing call
+    // argument or return type, nothing. A payload-less variant like
+    // `None` carries no information of its own to infer one from, so
+    // this is genuinely unresolvable, not a gap in this fallback
+    // chain - reported here with a real diagnostic instead of
+    // falling through to emit `enum_recv_name` as a bare, undeclared
+    // C identifier (confirmed directly: `let opt = Option.None;`
+    // crashed as "unknown identifier 'Option'" with no real error at
+    // all).
+    if left_is_single_level && !is_bare_shorthand &&
+      self.generic_enum_names.contains(enum_recv_name) {
+      self.error_note = format(
+        "cannot infer {str}'s own type argument from '{str}.{str}' alone - write it explicitly ({str}<...>.{str}) or declare the variable's own type",
+        enum_recv_name,
+        enum_recv_name,
+        field_name,
+        enum_recv_name,
+        field_name
+      );
+      ret .Some(.UnsupportedNode);
     }
     if is_bare_shorthand {
       ret .Some(.UnsupportedNode);
@@ -9307,12 +10343,19 @@ impl Codegen {
                     // A real array's own element star (if any) survives
                     // indexing unchanged; the array-ness is what decays.
                     elem_is_pointer = dtype_is_pointer(edt);
+                    elem_dtype = .Some(_one_level_array_decay(edt));
                   } else {
                     // A raw pointer indexed like an array (`pts[0]`,
                     // pointer arithmetic for `*(pts + 0)`) dereferences
                     // one level of the pointer itself: `Point* pts`
-                    // yields a value, `Point** pts` yields `Point*`.
+                    // yields a value, `Point** pts` yields `Point*` -
+                    // the element's own `dtype` needs that same level
+                    // taken off too, or a caller reading its real
+                    // remaining depth (an outer field access deciding
+                    // how many further derefs it needs) double-counts
+                    // the level indexing already consumed.
                     elem_is_pointer = edt.pointer_depth > 1;
+                    elem_dtype = .Some(_one_level_pointer_decay(edt));
                   }
                 } else {
                   let p = self.lookup_local_is_pointer(arr_name);
@@ -9331,8 +10374,10 @@ impl Codegen {
                   let bdt = base_r.dtype.unwrap();
                   if bdt.is_array {
                     elem_is_pointer = dtype_is_pointer(bdt);
+                    elem_dtype = .Some(_one_level_array_decay(bdt));
                   } else {
                     elem_is_pointer = bdt.pointer_depth > 1;
+                    elem_dtype = .Some(_one_level_pointer_decay(bdt));
                   }
                 } else {
                   elem_is_pointer = base_r.is_pointer;
@@ -9649,33 +10694,47 @@ impl Codegen {
           ret .Some(r0);
         }
         if !equals(u.op, "*") || u.is_left_operanded_unary || !u.has_indirection ||
-          u.indirection_depth != 1 {
+          u.indirection_depth < 1 {
           ret .None;
         }
         let recv_r = self.resolve_field_chain(u.operand)?;
         if !recv_r.is_pointer {
           ret .None;
         }
-        StringBuilder deref_sb = string_builder_init(8);
-        deref_sb.append("(*");
+        StringBuilder deref_sb = string_builder_init(8 + u.indirection_depth);
+        deref_sb.append("(");
+        num di = 0;
+        for di < u.indirection_depth {
+          deref_sb.append("*");
+          di = di + 1;
+        }
         deref_sb.append(recv_r.text);
         deref_sb.append(")");
         Option<DataType> deref_dtype = recv_r.dtype;
         if deref_dtype.is_some() {
           DataType dd = deref_dtype.unwrap();
-          if dd.pointer_depth > 0 {
+          num remaining = u.indirection_depth;
+          for remaining > 0 && dd.pointer_depth > 0 {
             dd.pointer_depth = dd.pointer_depth - 1;
+            remaining = remaining - 1;
           }
           // `dtype_is_pointer` also honors `flags.is_pointer`
-          // independently of `pointer_depth`, so clearing it too is what
-          // keeps the deref from still reading as a pointer.
+          // independently of `pointer_depth`, so clearing it too is
+          // what keeps a fully-dereferenced plain value from still
+          // reading as a pointer - a partial deref of a multi-level
+          // pointer (`(*pp).field` on `Box** pp`) correctly still is
+          // one, computed below from whatever `pointer_depth` remains
+          // rather than hardcoded false the way this used to read:
+          // every multi-level pointer's own single-`*` deref emitted
+          // `.field` instead of `->field` for the remaining level,
+          // which the real C compiler rejects outright.
           dd.flags.is_pointer = false;
           deref_dtype = .Some(dd);
         }
         ChainResolution r;
         r.text = deref_sb.build();
         r.type_name = recv_r.type_name;
-        r.is_pointer = false;
+        r.is_pointer = deref_dtype.is_some() && dtype_is_pointer(deref_dtype.unwrap());
         r.dtype = deref_dtype;
         r.is_call_result = false;
         ret .Some(r);
@@ -9689,11 +10748,46 @@ impl Codegen {
   // decide `.`/`->` for the next link in a chain it's emitting inline.
   emit_receiver_and_resolve_type(Node* recv) Option<FieldTypeInfo> {
     let r = self.resolve_field_chain(recv)?;
-    self.state.write(r.text);
+    str recv_text = r.text;
+    Option<DataType> recv_dtype = r.dtype;
+    // A resolved receiver whose own pointer depth is still more than
+    // one level (`Box** pp;` resolving `pp`, or a field/call whose
+    // declared type is itself a multi-level pointer) needs `(depth -
+    // 1)` leading derefs synthesized here before the field access's
+    // own single `->`/`.` picks up the last level - otherwise this
+    // always reads as a single pointer, and the real C compiler
+    // rejects it (`pp->val` on a `Box**` is still a pointer to a
+    // pointer, never a structure). Every other branch of
+    // `resolve_field_chain` (explicit derefs in particular) already
+    // reduces its own result to the true remaining depth before
+    // returning, so this never double-adjusts an already-correct
+    // result - it only ever fires on a raw, unadjusted multi-level
+    // pointer reaching this single, non-recursive top-level call site.
+    if recv_dtype.is_some() {
+      let recv_dt = recv_dtype.unwrap();
+      if recv_dt.pointer_depth > 1 {
+        StringBuilder extra_deref_sb = string_builder_init(
+          len(recv_text) + recv_dt.pointer_depth + 2
+        );
+        extra_deref_sb.append("(");
+        num edi = 0;
+        for edi < recv_dt.pointer_depth - 1 {
+          extra_deref_sb.append("*");
+          edi = edi + 1;
+        }
+        extra_deref_sb.append(recv_text);
+        extra_deref_sb.append(")");
+        recv_text = extra_deref_sb.build();
+        DataType adjusted_dt = recv_dt;
+        adjusted_dt.pointer_depth = 1;
+        recv_dtype = .Some(adjusted_dt);
+      }
+    }
+    self.state.write(recv_text);
     FieldTypeInfo info;
     info.type_name = r.type_name;
     info.is_pointer = r.is_pointer;
-    info.dtype = r.dtype;
+    info.dtype = recv_dtype;
     ret .Some(info);
   }
 
@@ -9782,7 +10876,12 @@ impl Codegen {
           let elem_resolved = self.resolve_type_name(elem_dt);
           if elem_resolved.is_some() {
             let elem_subst = self.resolve_type_subst(elem_dt);
-            self.record_local_typed(name, elem_resolved.unwrap(), dtype_is_pointer(elem_subst), elem_subst);
+            self.record_local_typed(
+              name,
+              elem_resolved.unwrap(),
+              dtype_is_pointer(elem_subst),
+              elem_subst
+            );
           }
         }
       }
@@ -9871,6 +10970,10 @@ impl Codegen {
           if ret_concrete.is_some() {
             ret_did_shape_coerce = true;
             ret_shape_concrete = ret_concrete.unwrap();
+            self.ensure_generic_impl_shape_vtable_instantiated(
+              ret_shape_concrete,
+              self.current_fn_rtype_name
+            );
           }
         }
         if self.defer_stack.len == 0 {
@@ -9886,7 +10989,16 @@ impl Codegen {
               self.state.write("(");
             }
             let prev_expected = self.expected_enum_type;
+            let prev_expected_compound = self.expected_compound_type;
             self.expected_enum_type = self.current_fn_rtype_name;
+            // A bare `.{ field = value, ... }` return value has only
+            // this to resolve its own type from - `expected_enum_type`
+            // alone covers a bare enum-variant shorthand (`ret
+            // .Some(x);`), never a compound literal, which crashed
+            // codegen outright with nothing generics-specific about
+            // it at all (confirmed directly: `Pair{ ... }`, the
+            // explicitly-typed form, always worked).
+            self.expected_compound_type = self.current_fn_rtype_name;
             flag prev_has_expected_tuple4 = self.has_expected_tuple_type;
             DataType prev_expected_tuple4 = self.expected_tuple_type;
             if self.current_fn_rtype_dt.is_some() &&
@@ -9896,6 +11008,7 @@ impl Codegen {
             }
             let eerr = self.emit_expr(*exp);
             self.expected_enum_type = prev_expected;
+            self.expected_compound_type = prev_expected_compound;
             self.has_expected_tuple_type = prev_has_expected_tuple4;
             self.expected_tuple_type = prev_expected_tuple4;
             if eerr.is_some() {
@@ -9930,7 +11043,12 @@ impl Codegen {
             self.state.write("(");
           }
           let prev_expected = self.expected_enum_type;
+          let prev_expected_compound = self.expected_compound_type;
           self.expected_enum_type = self.current_fn_rtype_name;
+          // Same reason as the non-deferred `return` path just above:
+          // a bare `.{ }` return value needs this to resolve its own
+          // type, which `expected_enum_type` alone never covers.
+          self.expected_compound_type = self.current_fn_rtype_name;
           flag prev_has_expected_tuple5 = self.has_expected_tuple_type;
           DataType prev_expected_tuple5 = self.expected_tuple_type;
           if self.current_fn_rtype_dt.is_some() &&
@@ -9940,6 +11058,7 @@ impl Codegen {
           }
           let eerr = self.emit_expr(*exp);
           self.expected_enum_type = prev_expected;
+          self.expected_compound_type = prev_expected_compound;
           self.has_expected_tuple_type = prev_has_expected_tuple5;
           self.expected_tuple_type = prev_expected_tuple5;
           if eerr.is_some() {
@@ -9964,7 +11083,9 @@ impl Codegen {
       }
       .StatementBreak -> {
         if self.loop_defer_marks.len > 0 {
-          let derr = self.emit_defers_from(self.loop_defer_marks.get(self.loop_defer_marks.len - 1));
+          let derr = self.emit_defers_from(
+            self.loop_defer_marks.get(self.loop_defer_marks.len - 1)
+          );
           if derr.is_some() {
             ret derr;
           }
@@ -9975,7 +11096,9 @@ impl Codegen {
       }
       .StatementContinue -> {
         if self.loop_defer_marks.len > 0 {
-          let derr = self.emit_defers_from(self.loop_defer_marks.get(self.loop_defer_marks.len - 1));
+          let derr = self.emit_defers_from(
+            self.loop_defer_marks.get(self.loop_defer_marks.len - 1)
+          );
           if derr.is_some() {
             ret derr;
           }
@@ -10077,7 +11200,24 @@ impl Codegen {
         if is_let && v.is_const && v.has_val {
           let const_idt_opt = self.infer_let_expr_type(v.val);
           if const_idt_opt.is_some() {
-            const_check_type_name = const_idt_opt.unwrap().type_str;
+            let const_idt = const_idt_opt.unwrap();
+            // `resolve_type_name`, not the bare `type_str`: a generic
+            // compound's own inferred type still names the template
+            // ("Node", `generic_args` carrying `[num]` separately) at
+            // this point, never the mangled identity ("Node__num")
+            // `compound_names` is actually keyed under - checking the
+            // bare name against that registry always missed, so a
+            // `const`-bound generic compound kept the real C `const`
+            // every other compound here is deliberately excluded from
+            // (see this check's own sibling comment on why: Fun's own
+            // typechecker is supposed to be the one rejecting a
+            // reassignment, not C's).
+            let const_resolved_name = self.resolve_type_name(const_idt);
+            if const_resolved_name.is_some() {
+              const_check_type_name = const_resolved_name.unwrap();
+            } else {
+              const_check_type_name = const_idt.type_str;
+            }
           }
         }
         flag const_is_compound = self.compound_names.contains(const_check_type_name);
@@ -10222,7 +11362,10 @@ impl Codegen {
               if v.has_val {
                 fit v.val.kind {
                   .Bracket(_) -> {
-                    self.emit_multidim_inner_declarators(v.val, v.var_type.array_depth - 1);
+                    self.emit_multidim_inner_declarators(
+                      v.val,
+                      v.var_type.array_depth - 1
+                    );
                     wrote_inner_dims = true;
                   }
                   _ -> {}
@@ -10292,30 +11435,39 @@ impl Codegen {
           // A shape-typed declaration's initializer needs a coercion call
           // wrapped around the RHS.
           flag did_shape_coerce = false;
-          // A concrete shape instantiation is registered under its
-          // mangled identity (`To__num`), not `v.var_type.type_str`.
-          str var_shape_type = v.var_type.type_str;
-          if !self.shape_names.contains(var_shape_type) && v.var_type.generic_args.len > 0 {
-            StringBuilder vq_sb = string_builder_init(16);
-            vq_sb.append(v.var_type.type_str);
-            for vqarg : v.var_type.generic_args {
-              vq_sb.append("__");
-              vq_sb.append(vqarg.type_str);
+          let prev_local_arr_elem_shape = self.expected_array_elem_shape_type;
+          let prev_local_arr_elem_const = self.expected_array_elem_shape_coerce_as_constant;
+          self.expected_array_elem_shape_type = "";
+          self.expected_array_elem_shape_coerce_as_constant = false;
+          if v.var_type.is_array {
+            // Mirrors the matching branch in `emit_global_variable` -
+            // each element gets the coercion wrap inside `.Bracket`'s
+            // own per-element loop instead of around the whole
+            // initializer. A local array's own initializer isn't
+            // bound by C's compile-time-constant restriction on
+            // globals, so this keeps the ordinary function-call form.
+            let local_elem_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(local_elem_shape_type, "") {
+              self.expected_array_elem_shape_type = local_elem_shape_type;
             }
-            let vq_candidate = vq_sb.build();
-            if self.shape_names.contains(vq_candidate) {
-              var_shape_type = vq_candidate;
-            }
-          }
-          if self.shape_names.contains(var_shape_type) {
-            let concrete = self.resolve_shape_coerce_concrete_type(v.val);
-            if concrete.is_some() {
-              self.state.write("__fun_coerce_");
-              self.state.write(concrete.unwrap());
-              self.state.write("_");
-              self.state.write(var_shape_type);
-              self.state.write("(");
-              did_shape_coerce = true;
+          } else {
+            // A concrete shape instantiation is registered under its
+            // mangled identity (`To__num`), not `v.var_type.type_str`.
+            let var_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(var_shape_type, "") {
+              let concrete = self.resolve_shape_coerce_concrete_type(v.val);
+              if concrete.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  concrete.unwrap(),
+                  var_shape_type
+                );
+                self.state.write("__fun_coerce_");
+                self.state.write(concrete.unwrap());
+                self.state.write("_");
+                self.state.write(var_shape_type);
+                self.state.write("(");
+                did_shape_coerce = true;
+              }
             }
           }
           // `let_is_bracket_literal` already declared an explicitly-typed
@@ -10327,10 +11479,25 @@ impl Codegen {
             self.has_expected_tuple_type = true;
             self.expected_tuple_type = *v.var_type;
           }
+          // `Vec<num> v = make_empty();`: a generic call's own type
+          // param this call's arguments never reveal (there may be
+          // none at all) still has this declaration's own concrete
+          // type to infer it from - the other context
+          // `maybe_instantiate_generic_function` falls back to,
+          // alongside the enclosing function's own return type.
+          let prev_expected_let_dt = self.expected_let_dt;
+          if !is_let && v.var_type.generic_args.len > 0 {
+            self.expected_let_dt = .Some(*v.var_type);
+          } else {
+            self.expected_let_dt = .None;
+          }
           let verr = self.emit_expr(*v.val);
+          self.expected_let_dt = prev_expected_let_dt;
           if did_shape_coerce {
             self.state.write(")");
           }
+          self.expected_array_elem_shape_type = prev_local_arr_elem_shape;
+          self.expected_array_elem_shape_coerce_as_constant = prev_local_arr_elem_const;
           self.in_array_initializer = prev_arr_init;
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
@@ -10357,7 +11524,12 @@ impl Codegen {
         }
         if have_resolved {
           if resolved_dtype.is_some() {
-            self.record_local_typed(v.name, resolved_name, resolved_ptr, resolved_dtype.unwrap());
+            self.record_local_typed(
+              v.name,
+              resolved_name,
+              resolved_ptr,
+              resolved_dtype.unwrap()
+            );
           } else {
             self.record_local(v.name, resolved_name, resolved_ptr);
           }
@@ -10425,6 +11597,33 @@ impl Codegen {
           ret perr;
         }
         self.state.write(";\n");
+        ret .None;
+      }
+      .Ternary(t) -> {
+        // A bare `cond ? a() : b();` statement (not assigned, returned,
+        // or passed anywhere) is control flow spelled as a value
+        // expression - lowered to the equivalent if/else here instead
+        // of a raw C ternary statement, which needs the GNU void-
+        // expression extension real MSVC doesn't support, exactly the
+        // shape this always is: neither branch's own value is ever
+        // used by anything.
+        self.state.write_indent();
+        self.state.write("if (");
+        let cerr = self.emit_expr(*t.cond);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(") { ");
+        let therr = self.emit_expr(*t.then_val);
+        if therr.is_some() {
+          ret therr;
+        }
+        self.state.write("; } else { ");
+        let elerr = self.emit_expr(*t.else_val);
+        if elerr.is_some() {
+          ret elerr;
+        }
+        self.state.write("; }\n");
         ret .None;
       }
       .StatementAssert(a) -> {
@@ -11016,7 +12215,12 @@ impl Codegen {
           let fd_resolved = self.resolve_type_name(fd_elem);
           if fd_resolved.is_some() {
             let fd_subst = self.resolve_type_subst(fd_elem);
-            self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+            self.record_local_typed(
+              name,
+              fd_resolved.unwrap(),
+              dtype_is_pointer(fd_subst),
+              fd_subst
+            );
           }
         }
         fdi = fdi + 1;
@@ -11134,7 +12338,12 @@ impl Codegen {
           let fd_resolved = self.resolve_type_name(fd_elem);
           if fd_resolved.is_some() {
             let fd_subst = self.resolve_type_subst(fd_elem);
-            self.record_local_typed(name, fd_resolved.unwrap(), dtype_is_pointer(fd_subst), fd_subst);
+            self.record_local_typed(
+              name,
+              fd_resolved.unwrap(),
+              dtype_is_pointer(fd_subst),
+              fd_subst
+            );
           }
         }
         fdi = fdi + 1;
@@ -11669,7 +12878,12 @@ impl Codegen {
     StringBuilder payload_sb = string_builder_init(32);
     payload_sb.append(opt_tmp);
     payload_sb.append(".payload.Some._0");
-    let bind_err = self.emit_inlined_next_bind_from_expr(fi, elem_dt, idx_counter_name, payload_sb.build());
+    let bind_err = self.emit_inlined_next_bind_from_expr(
+      fi,
+      elem_dt,
+      idx_counter_name,
+      payload_sb.build()
+    );
     if bind_err.is_some() {
       ret bind_err;
     }
@@ -12030,7 +13244,12 @@ impl Codegen {
             plain_err = .Some(.UnsupportedNode);
           } else {
             self.ensure_plain_impl_method_prototype_emitted(coll_dt.type_str, "next");
-            plain_err = self.emit_called_iterator_next(fi, elem_dt2, cursor, next_mangled.unwrap());
+            plain_err = self.emit_called_iterator_next(
+              fi,
+              elem_dt2,
+              cursor,
+              next_mangled.unwrap()
+            );
           }
         }
         self.state.indent_level = self.state.indent_level - 1;
@@ -12264,6 +13483,31 @@ impl Codegen {
     self.emit_hoisted(scratch.out.build());
   }
 
+  // The bare, declared name behind `maybe_mangled`, for a shape-
+  // downcast fit arm's own subject type: usually already bare
+  // ("Container"), but a doubly-generic shape (`impl Box<T> as
+  // Container<T>`) resolves a parameter/local declared with it to its
+  // own concrete per-instantiation identity instead ("Container__num"
+  // - see `ensure_shape_instantiated`), which `shape_decl_names` never
+  // registers directly (only the template's own bare declaration is).
+  // "" when `maybe_mangled` names neither - the caller's own signal
+  // this isn't a shape-downcast subject at all.
+  _bare_shape_decl_name_for(str maybe_mangled) str {
+    if self.shape_decl_names.contains(maybe_mangled) {
+      ret maybe_mangled;
+    }
+    num i = 0;
+    for i < self.shape_decl_names.len {
+      str decl_name = self.shape_decl_names.get(i);
+      if self.shape_decl_type_params.get(i).len > 0 &&
+        starts_with(maybe_mangled, format("{str}__", decl_name)) {
+        ret decl_name;
+      }
+      i = i + 1;
+    }
+    ret "";
+  }
+
   // Ensures the concrete impl (implementor, shape) pair a shape-downcast
   // fit arm names is fully instantiated (struct and vtable) before the
   // arm's own `if (subj.vtable == &__fun_impl_...)` check references it
@@ -12313,23 +13557,144 @@ impl Codegen {
               recon_sb.append(tp);
             }
             str reconstructed = recon_sb.build();
-            if !equals(reconstructed, type_name) {
-              continue;
+            if equals(reconstructed, type_name) {
+              DataType dt = dtype_new();
+              dt.type_str = i.type_name;
+              Vec<DataType*> gargs;
+              gargs.init(i.type_params.len);
+              for tp : i.type_params {
+                DataType* argdt = malloc(sizeof(DataType));
+                *argdt = dtype_new();
+                argdt.type_str = tp;
+                gargs.push(argdt);
+              }
+              dt.generic_args = gargs;
+              self._trigger_compound_instantiation_hoisted(dt);
+              ret;
             }
-            DataType dt = dtype_new();
-            dt.type_str = i.type_name;
-            Vec<DataType*> gargs;
-            gargs.init(i.type_params.len);
+            // A genuinely unbound template (every `tp` a fresh type
+            // param, never a reference to an already-declared type)
+            // has nothing to reconstruct ahead of time - mirrors the
+            // same gap, and the same fix, in `Checker.
+            // _shape_downcast_target_verdict`'s own reconstruction
+            // loop: an explicit `Box<num>(b)` arm (or `Pair<str, num>
+            // (p)`, for a multi-param implementor) names its own
+            // chosen instantiation directly, taken at face value here
+            // instead - unambiguous whenever the mangled suffix splits
+            // into exactly as many plain "__"-joined segments as this
+            // template has type params; a segment that's itself
+            // further-generic (nesting its own "__") is the one case
+            // this can't split back out of unambiguously, same
+            // residual as every other mangled-name reconstruction in
+            // this codebase.
+            flag all_unbound = true;
             for tp : i.type_params {
-              DataType* argdt = malloc(sizeof(DataType));
-              *argdt = dtype_new();
-              argdt.type_str = tp;
-              gargs.push(argdt);
+              if self._is_known_concrete_type_name(tp) {
+                all_unbound = false;
+                break;
+              }
             }
-            dt.generic_args = gargs;
-            self._trigger_compound_instantiation_hoisted(dt);
-            ret;
+            str prefix = format("{str}__", i.type_name);
+            if all_unbound && starts_with(type_name, prefix) {
+              str suffix = substr(
+                type_name,
+                len(prefix),
+                len(type_name) - len(prefix)
+              );
+              let explicit_args_opt = _split_double_underscore_exact(
+                suffix,
+                i.type_params.len
+              );
+              if explicit_args_opt.is_some() {
+                let explicit_args = explicit_args_opt.unwrap();
+                DataType dt = dtype_new();
+                dt.type_str = i.type_name;
+                Vec<DataType*> gargs;
+                gargs.init(explicit_args.len);
+                for explicit_arg : explicit_args {
+                  DataType* argdt = malloc(sizeof(DataType));
+                  *argdt = dtype_new();
+                  argdt.type_str = explicit_arg;
+                  gargs.push(argdt);
+                }
+                dt.generic_args = gargs;
+                self._trigger_compound_instantiation_hoisted(dt);
+                ret;
+              }
+            }
           }
+        }
+        _ -> {}
+      }
+    }
+  }
+
+  // Forces a genuinely plain (neither generic nor a forced concrete
+  // instantiation) shape impl's vtable machinery to exist right now,
+  // hoisted to wherever `hoist_insert_pos` currently points - needed
+  // specifically for a shape-typed global's own coercion, the one
+  // coercion site that runs before the ordinary top-level per-impl
+  // pass (`pub transpile` deliberately emits every global first, so a
+  // later-hoisted monomorphized definition still lands before it; see
+  // that pass's own comment). Every other coercion site sits inside a
+  // function body, always emitted after that ordinary pass already
+  // built this same impl's machinery in plain source order, so this
+  // was never needed there. A no-op (not an error) when no such impl
+  // exists, or it's already built - `emit_shape_vtable_machinery`'s
+  // own dedup handles the latter.
+  // `dt`'s own resolved shape identity, when `dt` names a shape at
+  // all ("" otherwise) - shared by every declaration site that needs
+  // to know whether its own declared type (scalar or, with `is_array`
+  // set, an array's element type either way: `is_array` layers on
+  // top without changing `type_str`/`generic_args`) is a shape
+  // needing the coercion wrap. A concrete instantiation of a generic
+  // shape is registered under its mangled identity (`To__num`), never
+  // `dt.type_str` alone.
+  _resolve_shape_type_for_dtype(DataType dt) str {
+    str shape_type = dt.type_str;
+    if !self.shape_names.contains(shape_type) && dt.generic_args.len > 0 {
+      StringBuilder sq_sb = string_builder_init(16);
+      sq_sb.append(dt.type_str);
+      for sqarg : dt.generic_args {
+        sq_sb.append("__");
+        sq_sb.append(sqarg.type_str);
+      }
+      let sq_candidate = sq_sb.build();
+      if self.shape_names.contains(sq_candidate) {
+        shape_type = sq_candidate;
+      }
+    }
+    if self.shape_names.contains(shape_type) {
+      ret shape_type;
+    }
+    ret "";
+  }
+
+  _ensure_plain_shape_impl_vtable_emitted(str type_name, str shape_name) {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Impl(i) -> {
+          if !i.has_shape_name || !equals(i.shape_name, shape_name) ||
+          i.has_type_params || i.has_concrete_dtype ||
+          !equals(i.type_name, type_name) {
+            continue;
+          }
+          CodegenState pq_scratch = self.new_scratch_state();
+          CodegenState* saved_pq_state = self.state;
+          let saved_pq_hoist_pos = self.hoist_insert_pos;
+          let saved_pq_scratch_depth = self.hoist_scratch_depth;
+          let saved_pq_stmt_start_pos = self.current_stmt_start_pos;
+          self.state = &pq_scratch;
+          self.hoist_insert_pos = .None;
+          self.hoist_scratch_depth = 0;
+          self.current_stmt_start_pos = .None;
+          self.emit_shape_vtable_machinery(n);
+          self.state = saved_pq_state;
+          self.hoist_insert_pos = saved_pq_hoist_pos;
+          self.hoist_scratch_depth = saved_pq_scratch_depth;
+          self.current_stmt_start_pos = saved_pq_stmt_start_pos;
+          self.emit_hoisted(pq_scratch.out.build());
+          ret;
         }
         _ -> {}
       }
@@ -12697,7 +14062,9 @@ impl Codegen {
             }
             _ -> {}
           }
-          let resolved_await_rtype = self.resolve_type_name(*(await_rtype?!(.UnsupportedNode)));
+          let resolved_await_rtype = self.resolve_type_name(
+            *(await_rtype?!(.UnsupportedNode))
+          );
           if resolved_await_rtype.is_none() {
             ret .Some(.UnsupportedNode);
           }
@@ -13091,14 +14458,38 @@ impl Codegen {
       // vtable_emitted` below). Requiring `shape_names` here first would
       // mean a shape with no non-generic implementor anywhere in the
       // program could never enter this branch at all.
-      if subj_type.is_some() && self.shape_decl_names.contains(subj_type.unwrap()) {
+      str bare_subj_shape_name = "";
+      if subj_type.is_some() {
+        bare_subj_shape_name = self._bare_shape_decl_name_for(subj_type.unwrap());
+      }
+      if subj_type.is_some() && !equals(bare_subj_shape_name, "") {
         str shape_downcast_type = self._fit_shape_destructure_type_name(br);
         if !equals(shape_downcast_type, "") {
           shape_downcast_type = self._auto_resolve_bare_generic_shape_target(
             shape_downcast_type,
+            bare_subj_shape_name
+          );
+          self.ensure_specific_shape_impl_vtable_emitted(
+            shape_downcast_type,
+            bare_subj_shape_name
+          );
+          // `ensure_specific_shape_impl_vtable_emitted` above only
+          // instantiates the implementor (`Box<num>`'s own struct),
+          // the same trigger an ordinary `Box<num> b;` declaration
+          // would use - when the shape itself is also generic
+          // (`impl Box<T> as Container<T>`), that alone never builds
+          // the vtable this branch's own comparison needs
+          // (`__fun_impl_Box__num_Container__num_vtable`), since the
+          // eager per-instantiation pass deliberately skips a
+          // doubly-generic shape (building it unconditionally there
+          // corrupts `impl Vec<T> as Iterator<T>` - see `maybe_emit_
+          // shape_vtable_for_instantiation`'s own comment). The lazy
+          // trigger every `__fun_coerce_` call site already uses
+          // covers this one too.
+          self.ensure_generic_impl_shape_vtable_instantiated(
+            shape_downcast_type,
             subj_type.unwrap()
           );
-          self.ensure_specific_shape_impl_vtable_emitted(shape_downcast_type, subj_type.unwrap());
           let sherr = self.emit_fit_shape_branch(
             subj_name,
             subj_is_pointer,
@@ -13565,7 +14956,13 @@ impl Codegen {
     if !self.coverage || !coverage_counts_statement(stmt) {
       ret;
     }
-    if in_test_range(stmt.pos.filename, stmt.pos.line, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to) {
+    if in_test_range(
+      stmt.pos.filename,
+      stmt.pos.line,
+      &self.cover_skip_files,
+      &self.cover_skip_from,
+      &self.cover_skip_to
+    ) {
       ret;
     }
     str path = cover_display_path(stmt.pos.filename, self.cover_pwd);
@@ -13623,14 +15020,18 @@ impl Codegen {
     sb.append("};\n");
     sb.append("static void __fun_cov_startup(void) {\n    __fun_cov_n = ");
     sb.append_num(n);
-    sb.append(";\n    __fun_cov_counts = (long long*)calloc((size_t)(__fun_cov_n > 0 ? __fun_cov_n : 1), sizeof(long long));\n}\n");
+    sb.append(
+      ";\n    __fun_cov_counts = (long long*)calloc((size_t)(__fun_cov_n > 0 ? __fun_cov_n : 1), sizeof(long long));\n}\n"
+    );
     sb.append("static void __fun_cov_dump(void) {\n");
     sb.append("    FILE* __fun_cov_f = fopen(\"");
     sb.append(c_string_escape(self.cover_out));
     sb.append("\", \"w\");\n");
     sb.append("    if (!__fun_cov_f) { return; }\n");
     sb.append("    for (int __fun_cov_i = 0; __fun_cov_i < __fun_cov_n; __fun_cov_i++) {\n");
-    sb.append("        fprintf(__fun_cov_f, \"%s\\t%d\\t%lld\\n\", __fun_cov_file_tab[__fun_cov_i], __fun_cov_line_tab[__fun_cov_i], __fun_cov_counts[__fun_cov_i]);\n");
+    sb.append(
+      "        fprintf(__fun_cov_f, \"%s\\t%d\\t%lld\\n\", __fun_cov_file_tab[__fun_cov_i], __fun_cov_line_tab[__fun_cov_i], __fun_cov_counts[__fun_cov_i]);\n"
+    );
     sb.append("    }\n    fclose(__fun_cov_f);\n}\n");
     self.state.write(sb.build());
   }
@@ -13678,6 +15079,9 @@ impl Codegen {
     self.state.write(" (*");
     self.state.write(name);
     self.state.write(")(");
+    if sig.params.len == 0 {
+      self.state.write("void");
+    }
     flag first = true;
     for p : sig.params {
       if !first {
@@ -13705,6 +15109,9 @@ impl Codegen {
           self.state.write(" (*");
           self.state.write(v.name);
           self.state.write(")(");
+          if sig.params.len == 0 {
+            self.state.write("void");
+          }
           flag first = true;
           for p : sig.params {
             if !first {
@@ -14319,6 +15726,9 @@ impl Codegen {
         // itself takes, completing `R (*name(args))(P1, P2)`.
         if f.rtype.has_fn_sig {
           self.state.write("))(");
+          if f.rtype.fn_sig.params.len == 0 {
+            self.state.write("void");
+          }
           flag rpfirst = true;
           for rp : f.rtype.fn_sig.params {
             if !rpfirst {
@@ -14360,11 +15770,15 @@ impl Codegen {
           self.state.write("if (__fun_vtags) {\n");
           self.state.indent_level = self.state.indent_level + 1;
           self.state.write_indent_pinned(node.pos);
-          self.state.write("size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n");
+          self.state.write(
+            "size_t __fun_vc = 0; while (__fun_vtags[__fun_vc] != 0) { __fun_vc++; }\n"
+          );
           self.state.write_indent_pinned(node.pos);
           self.state.write("vargs.len = (int64_t)__fun_vc; vargs.cap = (int64_t)__fun_vc;\n");
           self.state.write_indent_pinned(node.pos);
-          self.state.write("if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n");
+          self.state.write(
+            "if (__fun_vc > 0) { vargs.data = (char**)malloc(sizeof(char*) * __fun_vc); }\n"
+          );
           self.state.write_indent_pinned(node.pos);
           self.state.write("va_list __fun_ap; va_start(__fun_ap, __fun_vtags);\n");
           self.state.write_indent_pinned(node.pos);
@@ -14392,17 +15806,29 @@ impl Codegen {
             "case 's': { const char* __fun_s_src = va_arg(__fun_ap, const char*); if (__fun_s_src) { size_t __fun_s_len = strlen(__fun_s_src); char* __fun_s_copy = (char*)malloc(__fun_s_len + 1); if (__fun_s_copy) { memcpy(__fun_s_copy, __fun_s_src, __fun_s_len + 1); } vargs.data[__fun_vi] = __fun_s_copy; } else { vargs.data[__fun_vi] = NULL; } break; }\n"
           );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'n': vargs.data[__fun_vi] = fmt_num((int64_t)va_arg(__fun_ap, long long)); break;\n");
+          self.state.write(
+            "case 'n': vargs.data[__fun_vi] = fmt_num((int64_t)va_arg(__fun_ap, long long)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n");
+          self.state.write(
+            "case 'd': vargs.data[__fun_vi] = fmt_dec((double)va_arg(__fun_ap, double)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n");
+          self.state.write(
+            "case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n");
+          self.state.write(
+            "case 'c': vargs.data[__fun_vi] = fmt_chr((char)va_arg(__fun_ap, int)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+          self.state.write(
+            "case 'p': vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n"
+          );
           self.state.write_indent_pinned(node.pos);
-          self.state.write("default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n");
+          self.state.write(
+            "default: vargs.data[__fun_vi] = fmt_raw((void*)va_arg(__fun_ap, void*)); break;\n"
+          );
           self.state.indent_level = self.state.indent_level - 1;
           self.state.write_indent_pinned(node.pos);
           self.state.write("}\n");
@@ -14720,12 +16146,16 @@ impl Codegen {
             payload_type_strs.init(0);
             Vec<flag> payload_is_pointer;
             payload_is_pointer.init(0);
+            Vec<DataType*> payload_dtypes;
+            payload_dtypes.init(0);
             for pt : v.payload {
               payload_type_strs.push(pt.type_str);
               payload_is_pointer.push(dtype_is_pointer(*pt));
+              payload_dtypes.push(pt);
             }
             vt.payload_type_strs = payload_type_strs;
             vt.payload_is_pointer = payload_is_pointer;
+            vt.payload_dtypes = payload_dtypes;
             variant_templates.push(vt);
           }
           self.generic_enum_names.push(e.name);
@@ -14884,7 +16314,9 @@ impl Codegen {
           for f : c.fields {
             field_names.push(f.name);
             field_type_names.push(f.dtype.type_str);
-            field_is_pointer.push(dtype_is_pointer(*f.dtype) || dtype_is_array_as_pointer(*f.dtype));
+            field_is_pointer.push(
+              dtype_is_pointer(*f.dtype) || dtype_is_array_as_pointer(*f.dtype)
+            );
             field_template_dtypes.push(f.dtype);
           }
           self.generic_compound_names.push(c.name);
@@ -14985,6 +16417,76 @@ impl Codegen {
     }
   }
 
+  // Whether `n`, somewhere inside a global/const's own initializer tree,
+  // forces that initializer to be evaluated at runtime rather than
+  // written as a literal C constant expression. C rejects a function
+  // call of any kind - an ordinary one, a generic one, or a stdlib
+  // constructor like `some()`/`ok()`, all of which parse identically as
+  // `.Expression` with `op == "()"` - as a static-duration initializer,
+  // and likewise rejects a bare reference to another global's own
+  // value (as opposed to a literal or a shape coercion, both already
+  // handled as constants elsewhere in this file). Recurses through
+  // every composite shape an initializer can take; anything not
+  // explicitly handled here is a leaf already safe to emit directly, matching
+  // every initializer form this file already writes as a literal.
+  _global_init_needs_runtime(Node n) flag {
+    fit n.kind {
+      .Expression(e) -> {
+        if equals(e.op, "()") {
+          ret true;
+        }
+        if e.has_left && self._global_init_needs_runtime(*e.left) {
+          ret true;
+        }
+        if e.has_right && self._global_init_needs_runtime(*e.right) {
+          ret true;
+        }
+        ret false;
+      }
+      .ExpressionParenthesis(inner) -> { ret self._global_init_needs_runtime(*inner); }
+      .Unary(u) -> {
+        // `&a_global` is always a C constant (the address of a static-
+        // duration object), unlike every other way a global's own
+        // value can be read - this is the one case recursing into the
+        // operand would wrongly flag.
+        if equals(u.op, "&") {
+          ret false;
+        }
+        ret self._global_init_needs_runtime(*u.operand);
+      }
+      .Bracket(inner) -> { ret self._global_init_needs_runtime(*inner); }
+      .Panic(inner) -> { ret self._global_init_needs_runtime(*inner); }
+      .CompoundInit(c) -> {
+        for f : c.fields {
+          if self._global_init_needs_runtime(*f.value) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      .TupleLiteral(t) -> {
+        for el : t.elements {
+          if self._global_init_needs_runtime(*el) {
+            ret true;
+          }
+        }
+        ret false;
+      }
+      .Ternary(t) -> {
+        ret self._global_init_needs_runtime(*t.cond) ||
+          self._global_init_needs_runtime(*t.then_val) ||
+          self._global_init_needs_runtime(*t.else_val);
+      }
+      // A bare name in a global's own initializer can only be another
+      // global (no locals exist at file scope); a plain function name
+      // would be a function pointer, itself a C constant, but that
+      // shape isn't reachable here through any coercion this file
+      // already does, so it's left unflagged.
+      .Identifier(name) -> { ret self._global_var_index(name) >= 0; }
+      _ -> { ret false; }
+    }
+  }
+
   // Emits a top-level `const`/`let` declaration as a C file-scope global.
   // Doesn't reuse the local-`Variable` case's indent and `record_local`
   // bookkeeping, there being no enclosing function scope and no later
@@ -14998,6 +16500,21 @@ impl Codegen {
     fit node.kind {
       .Variable(v) -> {
         flag is_let = equals(v.var_type.type_str, "__let_infer__");
+        // Captured at function scope so the type-recording step at
+        // the end of this function can still read it after the
+        // `if v.has_val { ... }` block below (where `let_inferred_
+        // type_name` also gets read a second time, to set the
+        // expected-type context a bare `.Variant` shorthand needs)
+        // ends.
+        str let_inferred_type_name = "";
+        Option<DataType> let_inferred_dtype = .None;
+        // Set below, in the `is_let` declarator's own MSVC branch, the
+        // moment a real type (not `int64_t`) actually lands on this
+        // declarator's LHS - read again further down to decide the
+        // same bare-brace cast-dropping an explicitly-typed global
+        // already gets, since a cast is just as redundant, and just as
+        // rejected by real MSVC (C2099), once the LHS is a real type.
+        flag let_msvc_wrote_real_type = false;
         // `pub transpile` emits every global before any plain type's full
         // body, which breaks for a global whose declared type is itself a
         // plain compound or enum. This emits that body first; memoization
@@ -15005,6 +16522,101 @@ impl Codegen {
         let gt_err = self.ensure_plain_type_emitted(v.var_type.type_str);
         if gt_err.is_some() {
           ret gt_err;
+        }
+        // A `let`-inferred global's own real type - a bare `.Variant`
+        // enum shorthand (`let g = .Red;`) needs the same global-
+        // uniqueness fallback a `let`-inferred local already gets,
+        // and any other inferrable initializer (a compound literal, a
+        // plain identifier, ...) goes through `infer_let_expr_type`,
+        // the exact same helper the local site uses - needs its own
+        // real type forced into existence this early too, mirroring
+        // the explicitly-typed branch's own call just above (which
+        // `v.var_type.type_str` - always the `__let_infer__` sentinel
+        // here - never reaches). Must happen before any other output
+        // for this declaration: `ensure_plain_type_emitted` writes
+        // directly at the current tail rather than hoisting, so
+        // calling it any later (once "name = " has already been
+        // written) corrupts the declaration it's meant to precede.
+        if is_let && v.has_val {
+          flag resolved_via_shorthand = false;
+          fit v.val.kind {
+            .Expression(ve_shorthand) -> {
+              if equals(ve_shorthand.op, ".") && ve_shorthand.has_left &&
+                ve_shorthand.has_right {
+                fit ve_shorthand.left.kind {
+                  .Blank -> {
+                    fit ve_shorthand.right.kind {
+                      .Identifier(vname_shorthand) -> {
+                        let unique_shorthand = self._resolve_unique_plain_enum_for_variant_from_ast(
+                          vname_shorthand
+                        );
+                        if unique_shorthand.is_some() {
+                          let_inferred_type_name = unique_shorthand.unwrap();
+                          resolved_via_shorthand = true;
+                        }
+                      }
+                      _ -> {}
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+            }
+            _ -> {}
+          }
+          if !resolved_via_shorthand {
+            let ginferred = self.infer_let_expr_type(v.val);
+            if ginferred.is_some() {
+              let gidt = ginferred.unwrap();
+              let gresolved = self.resolve_type_name(gidt);
+              if gresolved.is_some() {
+                let_inferred_type_name = gresolved.unwrap();
+                let_inferred_dtype = .Some(self.resolve_type_subst(gidt));
+              }
+            }
+          }
+          if !equals(let_inferred_type_name, "") {
+            let letg_err = self.ensure_plain_type_emitted(let_inferred_type_name);
+            if letg_err.is_some() {
+              ret letg_err;
+            }
+          }
+        }
+        // C rejects a function call (ordinary, generic, or a stdlib
+        // constructor like `some()`/`ok()`) and a bare reference to
+        // another global's own value as a static-duration initializer
+        // outright; see `_global_init_needs_runtime`'s own doc
+        // comment. Computed this early so the `is_let` declarator
+        // below can pick the real resolved type over `__auto_type`
+        // when it applies - `__auto_type` needs an initializer right
+        // there to infer from, which a runtime-deferred global's own
+        // declarator no longer has.
+        flag needs_runtime = v.has_val && self._global_init_needs_runtime(*v.val);
+        // A fixed-size C array can never be assigned as a whole -
+        // `arr = {...}` is illegal regardless of any cast, array
+        // types simply aren't assignable - so a top-level array
+        // literal needing runtime init is instead assigned element by
+        // element inside `__fun_init_globals`, after a declarator with
+        // no initializer here. The element count is still known at
+        // compile time (the literal's own length) even though each
+        // element's own value isn't, so the declarator's bracket size
+        // is unaffected either way.
+        Vec<Node*> ginit_array_elems;
+        ginit_array_elems.init(0);
+        flag is_runtime_array_literal = false;
+        if needs_runtime && !is_let {
+          fit v.val.kind {
+            .Bracket(ginit_arr_inner) -> {
+              if v.var_type.array_depth <= 1 {
+                self.flatten_call_args(ginit_arr_inner, &ginit_array_elems);
+                is_runtime_array_literal = true;
+              } else {
+                self.error_note = "a multi-dimensional array global whose own elements can't be evaluated until runtime isn't supported - write it with explicit compile-time values, or initialize it inside 'main' instead";
+                ret .Some(.UnsupportedNode);
+              }
+            }
+            _ -> {}
+          }
         }
         // An unsized array global (`T[] buf = malloc(...);`) decays to a
         // pointer, as a local does, unless it's initialized with a
@@ -15038,23 +16650,66 @@ impl Codegen {
         if is_let && v.is_const && v.has_val {
           let const_gdt_opt = self.infer_let_expr_type(v.val);
           if const_gdt_opt.is_some() {
-            const_check_type_name = const_gdt_opt.unwrap().type_str;
+            let const_gdt = const_gdt_opt.unwrap();
+            // `resolve_type_name`, not the bare `type_str` - see the
+            // identical fix on the local-variable site's own matching
+            // check for why a generic compound's bare template name
+            // never matches `compound_names`' own mangled keys.
+            let const_gresolved_name = self.resolve_type_name(const_gdt);
+            if const_gresolved_name.is_some() {
+              const_check_type_name = const_gresolved_name.unwrap();
+            } else {
+              const_check_type_name = const_gdt.type_str;
+            }
           }
         }
         flag const_is_compound = self.compound_names.contains(const_check_type_name);
-        if v.is_const && !const_is_ptr_binding && !const_is_compound {
+        // A runtime-deferred global's own real assignment lands in
+        // `__fun_init_globals`, after this declaration already exists -
+        // a real C `const` here would make that assignment itself a
+        // compile error, so it's dropped the same way the pointer/
+        // compound cases above already drop it for their own reasons.
+        // Fun's own typechecker already rejects reassigning a const
+        // binding regardless of what C emits, so this loses no safety.
+        if v.is_const && !const_is_ptr_binding && !const_is_compound && !needs_runtime {
           self.state.write("const ");
         }
         if is_let {
-          if self.msvc_mode && v.has_val {
-            let msvc_gdt_opt = self.infer_let_expr_type(v.val);
-            if msvc_gdt_opt.is_some() {
-              let msvc_gdt = msvc_gdt_opt.unwrap();
-              let msvc_gwt = self.write_type(msvc_gdt);
-              if msvc_gwt.is_none() {
-                self.state.write("int64_t");
+          if needs_runtime {
+            // `__auto_type` needs a real initializer right here to
+            // infer from, which this declarator no longer has -
+            // `let_inferred_type_name`/`let_inferred_dtype` were
+            // already resolved above, before any output, the same
+            // values `record_global_typed` reads at the end of this
+            // function.
+            if equals(let_inferred_type_name, "") {
+              self.error_note = "a let-bound global/const whose initializer can't run until main starts needs an inferrable type - write an explicit type instead";
+              ret .Some(.UnsupportedNode);
+            }
+            DataType ginit_decl_dtype = dtype_new();
+            ginit_decl_dtype.type_str = let_inferred_type_name;
+            if let_inferred_dtype.is_some() {
+              ginit_decl_dtype = let_inferred_dtype.unwrap();
+            }
+            self.write_type(ginit_decl_dtype)?!(.UnsupportedNode);
+          } elif self.msvc_mode && v.has_val {
+            // Reuses `let_inferred_type_name`/`let_inferred_dtype`
+            // (already resolved above, before any output) instead of
+            // a second, independent `infer_let_expr_type` call - which
+            // also never recognized a bare enum-variant shorthand
+            // (`let g = .Red;`), since that helper has no case for one
+            // at all; the real type is already known here regardless
+            // of which route resolved it.
+            if !equals(let_inferred_type_name, "") {
+              DataType msvc_ginit_dtype = dtype_new();
+              msvc_ginit_dtype.type_str = let_inferred_type_name;
+              if let_inferred_dtype.is_some() {
+                msvc_ginit_dtype = let_inferred_dtype.unwrap();
               }
-            } else {
+              let msvc_gwt = self.write_type(msvc_ginit_dtype);
+              let_msvc_wrote_real_type = msvc_gwt.is_some();
+            }
+            if !let_msvc_wrote_real_type {
               self.state.write("int64_t");
             }
           } else {
@@ -15126,23 +16781,311 @@ impl Codegen {
                 mdim_d = mdim_d + 1;
               }
             }
+          } elif is_runtime_array_literal {
+            // No explicit size was written, and C requires one for a
+            // tentative declaration with no initializer here - the
+            // literal's own element count is still known at compile
+            // time even though each element's own value isn't.
+            self.state.write("[");
+            self.state.write(format_num(ginit_array_elems.len));
+            self.state.write("]");
           } else {
             self.state.write("[]");
           }
         }
-        if v.has_val {
+        if v.has_val && is_runtime_array_literal {
+          // A fixed-size C array can never be assigned as a whole, so
+          // each element is its own assignment statement inside
+          // `__fun_init_globals` instead of a single "name = value".
+          CodegenState ginit_arr_scratch = self.new_scratch_state();
+          CodegenState* saved_ginit_arr_state = self.state;
+          let saved_ginit_arr_hoist_pos = self.hoist_insert_pos;
+          let saved_ginit_arr_stmt_start_pos = self.current_stmt_start_pos;
+          if self.hoist_scratch_depth == 0 {
+            self.root_state = self.state;
+            self.root_hoist_pos = self.hoist_insert_pos;
+            self.root_stmt_start_pos = self.current_stmt_start_pos;
+          }
+          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+          self.state = &ginit_arr_scratch;
+          self.hoist_insert_pos = .None;
+          self.current_stmt_start_pos = .None;
+          str ginit_arr_elem_shape = self._resolve_shape_type_for_dtype(*v.var_type);
+          num ginit_arr_i = 0;
+          Option<CodegenErrorKind> ginit_arr_err = .None;
+          for ginit_arr_elem : ginit_array_elems {
+            self.state.write(v.name);
+            self.state.write("[");
+            self.state.write(format_num(ginit_arr_i));
+            self.state.write("] = ");
+            flag ginit_arr_elem_coerced = false;
+            if !equals(ginit_arr_elem_shape, "") {
+              let ginit_arr_elem_concrete = self.resolve_shape_coerce_concrete_type(
+                ginit_arr_elem
+              );
+              if ginit_arr_elem_concrete.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  ginit_arr_elem_concrete.unwrap(),
+                  ginit_arr_elem_shape
+                );
+                self.state.write("__fun_coerce_");
+                self.state.write(ginit_arr_elem_concrete.unwrap());
+                self.state.write("_");
+                self.state.write(ginit_arr_elem_shape);
+                self.state.write("(");
+                ginit_arr_elem_coerced = true;
+              }
+            }
+            let ginit_arr_elem_err = self.emit_expr(*ginit_arr_elem);
+            if ginit_arr_elem_coerced {
+              self.state.write(")");
+            }
+            self.state.write(";\n");
+            if ginit_arr_elem_err.is_some() {
+              ginit_arr_err = ginit_arr_elem_err;
+              break;
+            }
+            ginit_arr_i = ginit_arr_i + 1;
+          }
+          self.state = saved_ginit_arr_state;
+          self.hoist_insert_pos = saved_ginit_arr_hoist_pos;
+          self.current_stmt_start_pos = saved_ginit_arr_stmt_start_pos;
+          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+          if self.hoist_scratch_depth == 0 {
+            self.hoist_insert_pos = self.root_hoist_pos;
+            self.current_stmt_start_pos = self.root_stmt_start_pos;
+          }
+          if ginit_arr_err.is_some() {
+            ret ginit_arr_err;
+          }
+          self.pending_global_runtime_inits.push(ginit_arr_scratch.out.build());
+        } elif v.has_val {
+          // `needs_runtime` is already resolved above, before the
+          // declarator; such an initializer is buffered into
+          // `__fun_init_globals` below, run once before any of
+          // `main`, the test runner, or the fuzz harness's own body.
+          CodegenState ginit_scratch = self.new_scratch_state();
+          CodegenState* saved_ginit_state = self.state;
+          let saved_ginit_hoist_pos = self.hoist_insert_pos;
+          let saved_ginit_stmt_start_pos = self.current_stmt_start_pos;
+          if needs_runtime {
+            // Shares the `hoist_scratch_depth` nesting counter with
+            // every other scratch-buffer swap: a call in this
+            // initializer can itself trigger a generic function's
+            // own lazy monomorphization, which must land in the real
+            // output (via `root_hoist_pos`), never spliced into the
+            // text being captured for `pending_global_runtime_inits`.
+            if self.hoist_scratch_depth == 0 {
+              self.root_state = self.state;
+              self.root_hoist_pos = self.hoist_insert_pos;
+              self.root_stmt_start_pos = self.current_stmt_start_pos;
+            }
+            self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+            self.state = &ginit_scratch;
+            self.hoist_insert_pos = .None;
+            self.current_stmt_start_pos = .None;
+            self.state.write(v.name);
+          }
           self.state.write(" = ");
+          // A bare `.Variant` enum shorthand or `.{...}` compound-
+          // literal shorthand in a global's own initializer resolves
+          // against the declared type, the same way a local
+          // `Variable` declaration's own initializer already does -
+          // a separate codegen path from that one, so it never
+          // inherited this either. An `is_let` global has no declared
+          // type to resolve a bare shorthand against, falling back to
+          // global uniqueness the same way a `let`-inferred local does.
+          let prev_expected_g = self.expected_enum_type;
+          let prev_expected_compound_g = self.expected_compound_type;
+          if !is_let {
+            let resolved_decl_type_g = self.resolve_type_name(*v.var_type);
+            if resolved_decl_type_g.is_some() {
+              self.expected_enum_type = resolved_decl_type_g.unwrap();
+            } else {
+              self.expected_enum_type = v.var_type.type_str;
+            }
+            self.expected_compound_type = self.expected_enum_type;
+          } elif !equals(let_inferred_type_name, "") {
+            // Already resolved, and already forced into existence,
+            // by the early top-of-function check (`let_inferred_
+            // type_name`, function-scoped) - reused here only to set
+            // the expected type `emit_expr`'s own bare-shorthand
+            // handling reads.
+            self.expected_enum_type = let_inferred_type_name;
+            self.expected_compound_type = let_inferred_type_name;
+          }
           // A top-level global's initializer is a declaration context
           // too; see `Codegen.in_array_initializer`.
           let prev_arr_init = self.in_array_initializer;
           self.in_array_initializer = true;
+          // Real MSVC rejects a compound literal's own leading
+          // `(Type)` cast as a static-duration initializer outright
+          // (C2099); dropping it needs the declared type already
+          // known on the LHS. An `is_let` global's own plain
+          // `__auto_type` isn't that - the cast is what tells it what
+          // type to infer - but under MSVC specifically, `let_msvc_
+          // wrote_real_type` means the declarator's own MSVC branch
+          // just wrote a real type instead (confirmed above), making
+          // the cast exactly as redundant, and exactly as rejected,
+          // as it would be for an explicitly-typed global.
+          let prev_bare_init = self.in_bare_initializer_context;
+          // A runtime-deferred global is assigned by an ordinary C
+          // assignment statement inside `__fun_init_globals`, not a
+          // declarator - a bare `{...}` is illegal there (C requires
+          // the explicit `(Type){...}` cast outside a declaration),
+          // the opposite of the declaration case right below.
+          if (!is_let || let_msvc_wrote_real_type) && !needs_runtime {
+            self.in_bare_initializer_context = true;
+          }
+          // A shape-typed global's initializer needs the same
+          // coercion wrap a local `Variable` declaration's own
+          // initializer already gets - a separate codegen path from
+          // that one, so it never inherited the fix.
+          flag global_did_shape_coerce = false;
+          flag global_did_shape_coerce_call = false;
+          str global_concrete_name_for_coerce = "";
+          str global_shape_name_for_coerce = "";
+          let prev_arr_elem_shape = self.expected_array_elem_shape_type;
+          let prev_arr_elem_const = self.expected_array_elem_shape_coerce_as_constant;
+          self.expected_array_elem_shape_type = "";
+          self.expected_array_elem_shape_coerce_as_constant = false;
+          // Covers every nesting depth, not just the global's own
+          // direct type or its direct array element (the two cases
+          // handled explicitly below): a shape-typed field discovered
+          // arbitrarily deep inside this initializer - a compound
+          // nested inside an array nested inside another compound,
+          // say - reaches `CompoundInit`'s own field-coercion code,
+          // which consults this same flag to inline rather than call.
+          let prev_global_const_init = self.in_global_constant_initializer;
+          // Only the still-constant path needs every nested coercion
+          // inlined as a brace literal; once this whole initializer is
+          // already routed to `__fun_init_globals` (an ordinary
+          // function body, where a call is perfectly legal), every
+          // coercion anywhere inside it - this one included - uses the
+          // same plain `__fun_coerce_` call every local site already
+          // does.
+          self.in_global_constant_initializer = !needs_runtime;
+          if !is_let && v.var_type.is_array {
+            // An array's own element type - `is_array` layers on top
+            // of `type_str`/`generic_args` without changing what they
+            // name - needs the identical coercion wrap on each
+            // element, applied inside `.Bracket`'s own per-element
+            // loop instead of around the whole initializer.
+            let global_elem_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(global_elem_shape_type, "") {
+              self.expected_array_elem_shape_type = global_elem_shape_type;
+              self.expected_array_elem_shape_coerce_as_constant = !needs_runtime;
+            }
+          } elif !is_let {
+            let global_shape_type = self._resolve_shape_type_for_dtype(*v.var_type);
+            if !equals(global_shape_type, "") {
+              let global_concrete = self.resolve_shape_coerce_concrete_type(v.val);
+              if global_concrete.is_some() {
+                self.ensure_generic_impl_shape_vtable_instantiated(
+                  global_concrete.unwrap(),
+                  global_shape_type
+                );
+                if needs_runtime {
+                  self.state.write("__fun_coerce_");
+                  self.state.write(global_concrete.unwrap());
+                  self.state.write("_");
+                  self.state.write(global_shape_type);
+                  self.state.write("(");
+                  global_did_shape_coerce_call = true;
+                } else {
+                  self._ensure_plain_shape_impl_vtable_emitted(
+                    global_concrete.unwrap(),
+                    global_shape_type
+                  );
+                  // Not the ordinary `__fun_coerce_` function call every
+                  // other coercion site uses: C requires a global's own
+                  // initializer to be a compile-time constant expression,
+                  // which a function call - however trivial its body -
+                  // never is. The call's own body is nothing but this
+                  // same brace literal already, so it's inlined directly
+                  // instead: both `&recv` and the vtable instance's own
+                  // address are themselves compile-time constants
+                  // (addresses of other statics), so this compiles where
+                  // a call wrapping the identical value never could.
+                  self.state.write("{ .self = (");
+                  global_concrete_name_for_coerce = global_concrete.unwrap();
+                  global_shape_name_for_coerce = global_shape_type;
+                  global_did_shape_coerce = true;
+                }
+              }
+            }
+          }
           let verr = self.emit_expr(*v.val);
           self.in_array_initializer = prev_arr_init;
+          self.in_bare_initializer_context = prev_bare_init;
+          self.in_global_constant_initializer = prev_global_const_init;
+          self.expected_array_elem_shape_type = prev_arr_elem_shape;
+          self.expected_array_elem_shape_coerce_as_constant = prev_arr_elem_const;
+          self.expected_enum_type = prev_expected_g;
+          self.expected_compound_type = prev_expected_compound_g;
+          if global_did_shape_coerce_call {
+            self.state.write(")");
+          }
           if verr.is_some() {
+            if needs_runtime {
+              self.state = saved_ginit_state;
+              self.hoist_insert_pos = saved_ginit_hoist_pos;
+              self.current_stmt_start_pos = saved_ginit_stmt_start_pos;
+              self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+              if self.hoist_scratch_depth == 0 {
+                self.hoist_insert_pos = self.root_hoist_pos;
+                self.current_stmt_start_pos = self.root_stmt_start_pos;
+              }
+            }
             ret verr;
+          }
+          if global_did_shape_coerce {
+            self.state.write("), .vtable = &__fun_impl_");
+            self.state.write(global_concrete_name_for_coerce);
+            self.state.write("_");
+            self.state.write(global_shape_name_for_coerce);
+            self.state.write("_vtable }");
+          }
+          if needs_runtime {
+            self.state.write(";\n");
+            self.state = saved_ginit_state;
+            self.hoist_insert_pos = saved_ginit_hoist_pos;
+            self.current_stmt_start_pos = saved_ginit_stmt_start_pos;
+            self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+            if self.hoist_scratch_depth == 0 {
+              self.hoist_insert_pos = self.root_hoist_pos;
+              self.current_stmt_start_pos = self.root_stmt_start_pos;
+            }
+            self.pending_global_runtime_inits.push(ginit_scratch.out.build());
           }
         }
         self.state.write(";\n");
+        // Mirrors the local-variable declaration site's own identical
+        // step: a `let`-inferred global is emitted correctly (its own
+        // `__auto_type`/MSVC-fallback declarator included) but, with
+        // no declared type of its own to read, stays invisible to
+        // `resolve_field_chain` as a receiver - `_global.field`/
+        // `_global.method()` anywhere in any function body fails with
+        // an unsupported-node codegen error otherwise. `let_inferred_
+        // type_name`/`let_inferred_dtype` were already fully resolved
+        // (and their own type already forced into existence) by the
+        // early top-of-function check - nothing left to do here but
+        // record them. Stays empty (a no-op) for an initializer
+        // `infer_let_expr_type` can't resolve, exactly as it already
+        // does for a local.
+        if is_let && !equals(let_inferred_type_name, "") {
+          DataType g_dtype = dtype_new();
+          g_dtype.type_str = let_inferred_type_name;
+          if let_inferred_dtype.is_some() {
+            g_dtype = let_inferred_dtype.unwrap();
+          }
+          self.record_global_typed(
+            v.name,
+            let_inferred_type_name,
+            dtype_is_pointer(g_dtype),
+            g_dtype
+          );
+        }
         ret .None;
       }
       _ -> { ret .Some(.InvalidNode); }
@@ -15403,8 +17346,38 @@ impl Codegen {
         }
         fit e.left.kind {
           .Identifier(callee_name) -> {
-            let rt = self.lookup_function_rtype(callee_name)?;
-            ret .Some(rt.type_str);
+            let rt = self.lookup_function_rtype(callee_name);
+            if rt.is_some() {
+              ret .Some(rt.unwrap().type_str);
+            }
+            // A generic callee (`identity<T>`) isn't in the plain
+            // registry `lookup_function_rtype` reads - its own
+            // substituted return type comes from the same
+            // instantiation other callers already trigger for this
+            // (see `_resolve_call_rtype`'s identical fallback). Left
+            // unhandled before, inferring a type param from an
+            // argument that is itself a call to another generic
+            // function (`wrap(identity(5))`) silently gave up here,
+            // leaving `wrap`'s own `T` uninferred - which this
+            // function's only caller then read as "no instantiation
+            // exists," emitting the bare, unmangled `wrap(...)`
+            // instead of `wrap__num(...)`.
+            if e.has_right {
+              Vec<Node*> inner_args;
+              inner_args.init(0);
+              self.flatten_call_args(e.right, &inner_args);
+              Vec<DataType*> no_explicit_gargs;
+              no_explicit_gargs.init(0);
+              let ginst = self.maybe_instantiate_generic_function(
+                callee_name,
+                inner_args,
+                no_explicit_gargs
+              );
+              if ginst.is_some() {
+                ret self.resolve_type_name(ginst.unwrap().rtype);
+              }
+            }
+            ret .None;
           }
           _ -> {
             // Method call (`receiver.method(args)`): resolve via the chain
@@ -15753,6 +17726,26 @@ impl Codegen {
                 dt.type_str = t.unwrap();
                 ret .Some(dt);
               }
+              // A genuine array-typed local (`Box[] arr`), not a
+              // decayed pointer - neither check above matches it
+              // (`is_pointer` reads false for an array, same as it
+              // does for `str`), so it fell all the way through to
+              // the unconditional `.None` below and `x` in `let x =
+              // arr[0];` never got recorded with any type at all,
+              // crashing as "unknown identifier 'x'" on its very
+              // next use. The element's own full type - compound/
+              // enum name, pointer depth, one array level shallower -
+              // comes straight off the local's own recorded dtype.
+              let arr_dt = self.lookup_local_dtype(recv_name);
+              if arr_dt.is_some() {
+                let full = arr_dt.unwrap();
+                if full.is_array && full.array_depth > 0 {
+                  DataType elem = full;
+                  elem.array_depth = full.array_depth - 1;
+                  elem.is_array = elem.array_depth > 0;
+                  ret .Some(elem);
+                }
+              }
             }
             _ -> {
               // A field-chain receiver like `self.workers`: resolve the
@@ -15898,7 +17891,32 @@ impl Codegen {
               }
               ret .None;
             }
-            ret .Some(*(self.lookup_impl_method_rtype(recv_r.type_name, method_name)?));
+            // A method declaring its own generic type param on top of
+            // the receiver's (`impl MyOpt<T> { pub map<U>(fun(T) U f)
+            // MyOpt<U> }`) needs that param substituted too, which
+            // `lookup_impl_method_rtype`'s flat, unsubstituted table
+            // can never do on its own - left unchecked, `let r =
+            // o.map(doubleit);` recorded `r`'s own type as the
+            // template's literal `MyOpt<U>` instead of the inferred
+            // `MyOpt<num>`, which the enum's own tagged-union template
+            // then tried to monomorphize as if `U` were itself a real
+            // concrete type name.
+            if e.has_right {
+              Vec<Node*> own_args;
+              own_args.init(0);
+              self.flatten_call_args(e.right, &own_args);
+              let own_res = self.maybe_instantiate_generic_impl_method_own_params(
+                recv_r.type_name,
+                method_name,
+                own_args
+              );
+              if own_res.is_some() {
+                ret .Some(own_res.unwrap().rtype);
+              }
+            }
+            ret .Some(
+              *(self.lookup_impl_method_rtype(recv_r.type_name, method_name)?)
+            );
           }
           _ -> { ret .None; }
         }
@@ -15907,6 +17925,26 @@ impl Codegen {
       // resolves `pb`'s chain first, then drops one level of
       // `pointer_depth`, a dereferenced pointer being a plain value.
       .Unary(u) -> {
+        // `let v = await fn(...);`: `v`'s own type is the awaited
+        // call's own declared return type - unresolved otherwise (no
+        // case fell through to anything but `.None` here), which left
+        // `v` registered with no real Fun type at all. Fine for a
+        // plain value (the GNU `__auto_type` fallback this triggers
+        // still gets the right native C type), but a later `fit v {
+        // .Variant -> ... }` on an enum-returning async call has
+        // nothing to resolve `v`'s own tag/variants against, and
+        // crashed codegen outright instead of a working program.
+        if !u.is_left_operanded_unary && equals(u.op, "await") {
+          fit u.operand.kind {
+            .Expression(await_e) -> {
+              if equals(await_e.op, "()") && await_e.has_left {
+                ret self._resolve_call_rtype(await_e);
+              }
+            }
+            _ -> {}
+          }
+          ret .None;
+        }
         // `let v = expr?;`/`let v = expr!;`: `v`'s own type is `T`, the
         // propagated value's own generic arg (`expr`'s `Option<T>`/
         // `Result<T,E>`), not the whole Option/Result - needed so a
@@ -16010,6 +18048,36 @@ impl Codegen {
       if equals(templ_arg.type_str, tp) && templ_arg.generic_args.len == 0 {
         let caller_arg = caller_rtype.generic_args.get(pi);
         ret self.resolve_type_name(*caller_arg);
+      }
+      pi = pi + 1;
+    }
+    ret .None;
+  }
+
+  // `infer_generic_function_type_param_from_context`'s own sibling,
+  // against `self.expected_let_dt` - a declared local's own type
+  // (`Vec<num> v = make_empty();`) or an enclosing call's own
+  // declared parameter type for an argument that is itself this call
+  // (`take_box(make_zero_box());`), whichever is active - instead of
+  // the enclosing function's own return type. The other real context
+  // a type param that appears in neither the call's own arguments
+  // nor the enclosing function's return type can still be pinned
+  // down by.
+  infer_generic_function_type_param_from_let_context(FunctionNode f, str tp) Option<str> {
+    if !f.has_rtype || self.expected_let_dt.is_none() {
+      ret .None;
+    }
+    let declared = self.expected_let_dt.unwrap();
+    if !equals(f.rtype.type_str, declared.type_str) ||
+      f.rtype.generic_args.len != declared.generic_args.len {
+      ret .None;
+    }
+    num pi = 0;
+    for pi < f.rtype.generic_args.len {
+      let templ_arg = f.rtype.generic_args.get(pi);
+      if equals(templ_arg.type_str, tp) && templ_arg.generic_args.len == 0 {
+        let declared_arg = declared.generic_args.get(pi);
+        ret self.resolve_type_name(*declared_arg);
       }
       pi = pi + 1;
     }
@@ -16123,6 +18191,16 @@ impl Codegen {
                 let ctx_inferred = self.infer_generic_function_type_param_from_context(f, tp);
                 if ctx_inferred.is_some() {
                   found_name = ctx_inferred.unwrap();
+                  found = true;
+                }
+              }
+              if !found {
+                let let_ctx_inferred = self.infer_generic_function_type_param_from_let_context(
+                  f,
+                  tp
+                );
+                if let_ctx_inferred.is_some() {
+                  found_name = let_ctx_inferred.unwrap();
                   found = true;
                 }
               }
@@ -16605,6 +18683,8 @@ impl Codegen {
         str shape_type_identity = shape_name;
         if i.has_shape_concrete_instantiation {
           shape_type_identity = i.shape_concrete_instantiation;
+        } elif !equals(self.shape_inst_override_shape_concrete, "") {
+          shape_type_identity = self.shape_inst_override_shape_concrete;
         }
 
         StringBuilder pfx = string_builder_init(16);
@@ -16613,6 +18693,31 @@ impl Codegen {
         pfx.append(shape_name);
         pfx.append("__");
         str prefix = pfx.build();
+
+        // The vtable's own fields, and each instance's own initializer,
+        // are scoped to exactly the shape's own declared method names -
+        // never the impl's full method list, which can carry extra
+        // `pub` methods beyond what the shape requires (`impl Vec<T> as
+        // Sized { pub len()... pub is_empty()... pub capacity()... }`,
+        // `capacity` no part of `Sized`'s own contract, called
+        // statically wherever a concrete `Vec<T>` needs it, never
+        // through this vtable at all). Skipping an extra method here
+        // keeps every implementor of the same shape - including one
+        // with a different extra-method set - building the identical
+        // struct shape.
+        Set<str> shape_own_method_names = set_init("", 8);
+        flag have_shape_own_methods = false;
+        num shp_qi = 0;
+        for shp_qi < self.shape_decl_names.len {
+          if equals(self.shape_decl_names.get(shp_qi), shape_name) {
+            for shp_qm : self.shape_decl_methods.get(shp_qi) {
+              shape_own_method_names.add(shp_qm.name);
+            }
+            have_shape_own_methods = true;
+            break;
+          }
+          shp_qi = shp_qi + 1;
+        }
 
         if !self.shape_names.contains(shape_type_identity) {
           // Forward-declared ahead of the vtable struct: a method can
@@ -16638,6 +18743,10 @@ impl Codegen {
           for m : i.methods {
             fit m.kind {
               .Function(fnv) -> {
+                let base = strip_prefix(fnv.name, prefix);
+                if have_shape_own_methods && !shape_own_method_names.has(base) {
+                  continue;
+                }
                 vtable_has_methods = true;
                 self.state.write("  ");
                 if fnv.has_rtype {
@@ -16648,7 +18757,6 @@ impl Codegen {
                 } else {
                   self.state.write("void");
                 }
-                let base = strip_prefix(fnv.name, prefix);
                 self.state.write(" (*");
                 self.state.write(base);
                 self.state.write(")(void* self");
@@ -16762,6 +18870,19 @@ impl Codegen {
               }
               self.state.write(");\n");
 
+              // The forward prototype above is written for every
+              // method regardless - a static call elsewhere (`bg.
+              // capacity()`, not through the vtable) relies on it
+              // existing before its own real body, which `ensure_
+              // generic_impl_method_emitted` supplies lazily the same
+              // way any other generic method's does. Only the wrapper
+              // trampoline and vtable-instance field below are scoped
+              // to the shape's own contract - nothing ever calls
+              // `vtable->capacity`, so there is nothing for a wrapper
+              // to dispatch to in the first place.
+              if have_shape_own_methods && !shape_own_method_names.has(base) {
+                continue;
+              }
               self.state.write("static ");
               if fnv.has_rtype {
                 let wt2 = self.write_type(*fnv.rtype);
@@ -16833,6 +18954,9 @@ impl Codegen {
           fit m.kind {
             .Function(fnv) -> {
               let base2 = strip_prefix(fnv.name, prefix);
+              if have_shape_own_methods && !shape_own_method_names.has(base2) {
+                continue;
+              }
               StringBuilder wsb2 = string_builder_init(32);
               wsb2.append("__fun_wrap_");
               wsb2.append(type_name);
@@ -16877,7 +19001,8 @@ impl Codegen {
   // nodes never survive flattening, so there is no way to see which
   // `std.c.*` modules a program used, and an unused header is harmless.
   pub write_prelude() {
-    self.state.write(`#ifndef _WIN32
+    self.state.write(
+      `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
     `#endif
@@ -16894,8 +19019,11 @@ impl Codegen {
     `#include <string.h>
     `#include <ctype.h>
     `#include <limits.h>
-    ``);
-    self.state.write("static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n");
+    ``
+    );
+    self.state.write(
+      "static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n"
+    );
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
     if program_uses_std_c_header(self.all_nodes, "math.fn") {
@@ -16918,7 +19046,8 @@ impl Codegen {
       // known (see `emit_cover_tables`), hence the pointer and the
       // prototypes for what is defined at the end of the file. An atomic
       // add keeps counts right when tests run on several threads.
-      self.state.write(`static long long* __fun_cov_counts = 0;
+      self.state.write(
+        `static long long* __fun_cov_counts = 0;
       `static int __fun_cov_n = 0;
       `static void __fun_cov_startup(void);
       `static void __fun_cov_dump(void);
@@ -16928,7 +19057,8 @@ impl Codegen {
       `#else
       `static void __fun_cov_hit(int id) { __atomic_fetch_add(&__fun_cov_counts[id], 1, __ATOMIC_RELAXED); }
       `#endif
-      ``);
+      ``
+      );
     }
     // `-memcheck`'s own runtime hooks: `std.memcheck`'s Fun-level logic
     // tracks every live allocation and page-guards it, but needs a
@@ -16941,7 +19071,8 @@ impl Codegen {
     // shape as `__fun_cpu_count`/`__fun_thread_start` elsewhere in this
     // preamble - `std.memcheck` itself never branches on platform.
     if self.memcheck {
-      self.state.write(`#ifdef _WIN32
+      self.state.write(
+        `#ifdef _WIN32
       `#ifndef WIN32_LEAN_AND_MEAN
       `#define WIN32_LEAN_AND_MEAN
       `#endif
@@ -17169,7 +19300,8 @@ impl Codegen {
       `#define calloc(n, sz) __fun_memcheck_calloc((n), (sz), __FILE__, __LINE__)
       `#define realloc(p, sz) __fun_memcheck_realloc((p), (sz), __FILE__, __LINE__)
       `#define free(p) __fun_memcheck_free((p), __FILE__, __LINE__)
-      ``);
+      ``
+      );
     }
     if self.test_mode {
       self.state.write("#include <setjmp.h>\n");
@@ -17198,12 +19330,15 @@ impl Codegen {
       // explicit large stack instead (see `emit_test_runner`), since
       // POSIX has no equivalent of the Windows linker pragma for growing
       // the *main* thread's stack after the process has already started.
-      self.state.write("#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#else\n#include <pthread.h>\n#endif\n");
+      self.state.write(
+        "#ifdef _WIN32\n#pragma comment(linker, \"/STACK:134217728\")\n#else\n#include <pthread.h>\n#endif\n"
+      );
     }
     // Spawning has no counterpart on Windows, so the bindings are backed
     // there by a compatibility layer over the platform's own process API.
     if program_uses_std_c_header(self.all_nodes, "process.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `#if defined(_WIN32)
       `#ifndef WIN32_LEAN_AND_MEAN
       `#define WIN32_LEAN_AND_MEAN
@@ -17466,7 +19601,8 @@ impl Codegen {
       `extern char** environ;
       `static char** environ_ptr(void){ return environ; }
       `#endif
-      ``);
+      ``
+      );
     }
     // TLS and crypto need real native support (OpenSSL on POSIX, the
     // platform's own SChannel/CNG on Windows), not something every
@@ -17481,13 +19617,15 @@ impl Codegen {
     // Ws2_32.lib already does.
     if program_uses_std_c_header(self.all_nodes, "tls.fn") ||
       program_uses_std_c_header(self.all_nodes, "crypto.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `#if defined(_WIN32)
       `#pragma comment(lib, "secur32.lib")
       `#pragma comment(lib, "bcrypt.lib")
       `#pragma comment(lib, "crypt32.lib")
       `#else
-      ``);
+      ``
+      );
       // Built from pieces, not one literal: self-hosting means codegen.fn
       // itself compiles this very function, and a single contiguous
       // string literal here would show up verbatim in THAT compile's own
@@ -17497,14 +19635,16 @@ impl Codegen {
       // that imports std.c.tls/std.c.crypto - never as one compile-time
       // literal in codegen.fn's own generated C.
       self.state.write(format("/* __fun_link: -l{str} -l{str} */\n", "ssl", "crypto"));
-      self.state.write(`#include <openssl/ssl.h>
+      self.state.write(
+        `#include <openssl/ssl.h>
       `#include <openssl/err.h>
       `#include <openssl/evp.h>
       `#include <openssl/rand.h>
       `#include <openssl/hmac.h>
       `#include <pthread.h>
       `#endif
-      ``);
+      ``
+      );
     }
     // `__fun_tls_connect`/`read`/`write`/`close` (see `std.c.tls`): a
     // full client TLS handshake and record layer, OpenSSL on POSIX,
@@ -17513,7 +19653,8 @@ impl Codegen {
     // unlike `__fun_socket_set_timeout` this is a real multi-step
     // protocol implementation per platform, not a one-line shim.
     if program_uses_std_c_header(self.all_nodes, "tls.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `#if defined(_WIN32)
       `#ifndef WIN32_LEAN_AND_MEAN
       `#define WIN32_LEAN_AND_MEAN
@@ -17890,7 +20031,8 @@ impl Codegen {
       `  free(sess);
       `}
       `#endif
-      ``);
+      ``
+      );
     }
     // `__fun_hash_*`/`__fun_hmac_sha256`/`__fun_random_bytes`/
     // `__fun_aes256gcm_*`/`__fun_ed25519_*` (see `std.c.crypto`):
@@ -17901,7 +20043,8 @@ impl Codegen {
     // functions return `NULL`, and `std.crypto`'s own `ed25519_generate`
     // turns that into a real `Err` rather than silently wrong key material.
     if program_uses_std_c_header(self.all_nodes, "crypto.fn") {
-      self.state.write(`
+      self.state.write(
+        `
       `static char __fun_hex_chars[] = "0123456789abcdef";
       `
       `static char* __fun_bytes_to_hex(const unsigned char* buf, size_t n) {
@@ -18102,8 +20245,10 @@ impl Codegen {
       `static char* __fun_ed25519_sign(const char* priv_hex, const char* message, long long msg_len) { (void)priv_hex; (void)message; (void)msg_len; return NULL; }
       `static long long __fun_ed25519_verify(const char* pub_hex, const char* message, long long msg_len, const char* signature_hex) { (void)pub_hex; (void)message; (void)msg_len; (void)signature_hex; return 0; }
       `#else
-      ``);
-      self.state.write(`static void* __fun_hash_new(long long algo) {
+      ``
+      );
+      self.state.write(
+        `static void* __fun_hash_new(long long algo) {
       `  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
       `  if (ctx == NULL) return NULL;
       `  const EVP_MD* md = (algo == 1) ? EVP_sha512() : EVP_sha256();
@@ -18318,15 +20463,18 @@ impl Codegen {
       `  return result;
       `}
       `#endif
-      ``);
+      ``
+      );
     }
     // `stdout`/`stderr`/`stdin` are macros or globals, not callable, and
     // differ per libc, so a `static` wrapper each lets `std.c.io`'s
     // bodyless stream bindings resolve portably.
-    self.state.write(`static FILE* stdout_stream(void){ return stdout; }
+    self.state.write(
+      `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
-    ``);
+    ``
+    );
     // Suspends the calling thread for whole seconds, used by
     // std.time's sleep_seconds. Not a direct libc binding since POSIX's
     // nanosleep has no Windows equivalent under the same name; Windows
@@ -18335,7 +20483,8 @@ impl Codegen {
     // clock_gettime at all, so std.c.time's binding (used directly by
     // std.channel's own deadline math) needs a real Windows definition
     // rather than relying on a header to provide one.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18414,27 +20563,35 @@ impl Codegen {
     `  return (long long)__fun_clen;
     `}
     `#endif
-    ``);
+    ``
+    );
     // FNV-1a-style hashes backing the `__fun_key_hash` intrinsic. Always
     // emitted, harmless when unused.
-    self.state.write(`static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
+    self.state.write(
+      `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
-    ``);
+    ``
+    );
     // `__fun_tag(x)` maps a vararg's C type to the one-character tag
     // `emit_call` embeds in `__fun_vtags`, which the callee-side
     // unpacking in `emit_function_named` reads back.
-    self.state.write("#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n");
+    self.state.write(
+      "#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n"
+    );
     // Frees a variadic function's own `vargs` unpacking: `data` itself
     // (the backing array `emit_function_named` mallocs above), plus
     // every element `tags[i] != 's'` marks as an owned `fmt_*` string
     // rather than an argument borrowed straight through.
-    self.state.write("static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }\n");
+    self.state.write(
+      "static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }\n"
+    );
     // Directory helpers for `std.c.dirent`, backing `std.fs`'s
     // `list_dir`/`walk_dir`/`is_dir`/`make_dir`. Platform directory APIs
     // differ too much (POSIX `opendir`/`readdir` versus Win32
     // `FindFirstFile`) for direct bindings, so each wrapper's signature
     // is matched exactly to its Fun type.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18459,7 +20616,8 @@ impl Codegen {
     `static long long __fun_path_is_dir(const char* path) { if (!path) return 0; struct stat st; if (stat(path, &st) != 0) return 0; return S_ISDIR(st.st_mode) ? 1 : 0; }
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
-    ``);
+    ``
+    );
     // The private thread primitive, always emitted regardless of whether
     // the program uses `fork`, `async`, or channels. `await` and `fork`
     // build directly on `__fun_thread_start`/`__fun_thread_join`, and the
@@ -18480,7 +20638,8 @@ impl Codegen {
     // no single one of its threads accumulates a run's worth of history
     // the way the test runner's own one persistent thread does, and 8 MB
     // has been enough for real `fork`/`await` bodies in practice.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18539,14 +20698,16 @@ impl Codegen {
     `static int __fun_thread_join(__fun_thread_t t) { return pthread_join(t, NULL); }
     `static int __fun_thread_start_sized(__fun_thread_t* t, __fun_thread_entry_t entry, void* arg, size_t stack_bytes) { pthread_attr_t __fun_tattr; pthread_attr_init(&__fun_tattr); pthread_attr_setstacksize(&__fun_tattr, stack_bytes); int __fun_trc = pthread_create(t, &__fun_tattr, entry, arg); pthread_attr_destroy(&__fun_tattr); return __fun_trc; }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.atomic`'s operations need a real implementation on every
     // platform - GCC/Clang's `__atomic_*` builtins can't be forward-
     // declared at all (a hard compile error, "cannot redeclare builtin
     // function"), and MSVC has no equivalent builtin name, so both sides
     // get a small wrapper here instead of a `std.c.*` binding calling
     // straight through the way most of this module works.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `#include <intrin.h>
     `static inline int64_t __fun_atomic_load(int64_t* ptr) { return _InterlockedExchangeAdd64(ptr, 0); }
     `static inline void __fun_atomic_store(int64_t* ptr, int64_t val) { _InterlockedExchange64(ptr, val); }
@@ -18560,7 +20721,8 @@ impl Codegen {
     `static inline int64_t __fun_atomic_exchange(int64_t* ptr, int64_t val) { return __atomic_exchange_n(ptr, val, __ATOMIC_SEQ_CST); }
     `static inline int64_t __fun_atomic_cas(int64_t* ptr, int64_t expected, int64_t desired) { int64_t __fun_ac_exp = expected; int64_t __fun_ac_ok = __atomic_compare_exchange_n(ptr, &__fun_ac_exp, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return __fun_ac_ok ? 1 : 0; }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.sys`'s `__fun_cpu_count` binding (behind `std.sys.cpu_count`),
     // always emitted like the atomic wrappers above rather than gated on
     // program contents, since worker-pool sizing (`fun test`'s parallel
@@ -18569,25 +20731,29 @@ impl Codegen {
     // scheduler. `emit_scheduler_runtime` reuses this same symbol instead
     // of defining its own, rather than every gated feature that wants a
     // CPU count carrying a private copy.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `static int __fun_cpu_count(void) { SYSTEM_INFO si; GetSystemInfo(&si); int n = (int)si.dwNumberOfProcessors; return n > 0 ? n : 1; }
     `#else
     `#include <unistd.h>
     `static int __fun_cpu_count(void) { long n = sysconf(_SC_NPROCESSORS_ONLN); return n > 0 ? (int)n : 1; }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.sys`'s `__fun_process_id` binding (behind `std.sys.process_id`),
     // always emitted for the same reason as `__fun_cpu_count` above - a
     // process-unique value is a reasonable general thing to want (e.g. a
     // caller building a scratch file name that must never collide with
     // another concurrently-running copy of the same program), not
     // specific to any one gated feature.
-    self.state.write(`#ifdef _WIN32
+    self.state.write(
+      `#ifdef _WIN32
     `static long __fun_process_id(void) { return (long)GetCurrentProcessId(); }
     `#else
     `static long __fun_process_id(void) { return (long)getpid(); }
     `#endif
-    ``);
+    ``
+    );
     // `std.c.net`'s socket bindings need these headers, in both their
     // Windows and POSIX forms, and are emitted unconditionally like every
     // other prelude header. Winsock additionally needs `WSAStartup` called
@@ -18607,7 +20773,8 @@ impl Codegen {
     // just fails normally. Every close from `std.net` is a socket, so
     // trying `closesocket` first means the common case never risks
     // touching `_close` at all.
-    self.state.write(`#if defined(_WIN32)
+    self.state.write(
+      `#if defined(_WIN32)
     `#ifndef WIN32_LEAN_AND_MEAN
     `#define WIN32_LEAN_AND_MEAN
     `#endif
@@ -18683,7 +20850,8 @@ impl Codegen {
     `  freeaddrinfo(res);
     `  return out;
     `}
-    ``);
+    ``
+    );
     // A non-fork program can still deadlock on a channel wait, and
     // `std/channel.fn` calls `__fun_wd_enter_wait`/`__fun_wd_leave_wait`
     // around every blocking wait, so these three symbols must always
@@ -18695,7 +20863,8 @@ impl Codegen {
     if self.uses_fork {
       self.emit_scheduler_runtime();
     } else {
-      self.state.write(`typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
+      self.state.write(
+        `typedef struct __fun_wd_state { int armed; long long threshold_ms; int abort_on_fire; int blocked; long long progress_seq; int started; } __fun_wd_state;
       `static __fun_wd_state __fun_g_wd;
       `void __fun_wd_warn(long long blocked_or_count, long long pending_or_cap, long long stall_ms){
       `  fprintf(stderr, "fun: possible deadlock: %lld blocked, %lld pending/cap, no progress for %lldms\n", blocked_or_count, pending_or_cap, stall_ms);
@@ -18733,7 +20902,8 @@ impl Codegen {
       `  __fun_g_wd.blocked++;
       `}
       `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
-      ``);
+      ``
+      );
     }
   }
 
@@ -18749,7 +20919,8 @@ impl Codegen {
   // a `WaitGroup` or channel. Cooperative, not preemptive: a blocked task
   // holds its worker, the blocking primitives being the yield points.
   emit_scheduler_runtime() {
-    self.state.write(` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
+    self.state.write(
+      ` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
     `typedef void (*__fun_task_fn)(void*);
     `typedef struct __fun_task { __fun_task_fn fn; void* arg; } __fun_task;
     `#ifdef _WIN32
@@ -18941,7 +21112,8 @@ impl Codegen {
     `  __fun_sched_mtx_unlock(&__fun_g_sched.mu);
     `}
     `
-    ``);
+    ``
+    );
   }
 
   // The prefix `register_impl_methods` mangles every one of `im`'s own
@@ -19213,12 +21385,22 @@ impl Codegen {
     self.uses_fork = uses_fork_in(nodes, self.test_mode, self.fuzz_mode);
     self.c_shadow_names = collect_c_shadow_names(nodes, self.test_mode, self.fuzz_mode);
     if self.coverage {
-      collect_test_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+      collect_test_ranges(
+        &nodes,
+        &self.cover_skip_files,
+        &self.cover_skip_from,
+        &self.cover_skip_to
+      );
       // Shares the same skip list `in_test_range` already checks for
       // every statement about to be instrumented - an `allow no_cover`
       // function's own statements are excluded from the counters the
       // exact same way a test/fuzz body's own are.
-      collect_no_cover_ranges(&nodes, &self.cover_skip_files, &self.cover_skip_from, &self.cover_skip_to);
+      collect_no_cover_ranges(
+        &nodes,
+        &self.cover_skip_files,
+        &self.cover_skip_from,
+        &self.cover_skip_to
+      );
     }
     self.write_prelude();
     self.register_function_signatures(nodes);
@@ -19280,6 +21462,35 @@ impl Codegen {
               self.state.write(e.name);
               self.state.write(";\n");
             }
+          }
+        }
+        _ -> {}
+      }
+    }
+    // Builds every non-generic shape's own vtable struct and fat-
+    // pointer type here too, before any function prototype - unlike a
+    // plain compound/enum above, a shape used by value as a parameter
+    // or return type needs its complete definition in scope, not just
+    // an opaque forward tag, so this calls straight through to
+    // `ensure_shape_instantiated` (the same builder a generic shape's
+    // own concrete instantiation already goes through) rather than
+    // only writing a name. Previously this only ever got built as a
+    // side effect of emitting its first impl (`emit_shape_vtable_
+    // machinery`, reached in plain source order) or a generic
+    // implementor's first instantiation, either of which can be
+    // textually later than a function already declaring a parameter
+    // of that shape - a real, deterministic C error (`unknown type
+    // name`), not a flake. A generic shape itself (`shape Container<T>
+    // { ... }`) has no single monomorphic struct to build this early;
+    // only a concrete instantiation does, built lazily wherever that
+    // instantiation is first needed, unaffected by this.
+    for n : nodes {
+      fit n.kind {
+        .Shape(q) -> {
+          if q.type_params.len == 0 {
+            DataType q_dt = dtype_new();
+            q_dt.type_str = q.name;
+            self.ensure_shape_instantiated(q_dt);
           }
         }
         _ -> {}
@@ -19501,6 +21712,26 @@ impl Codegen {
       }
     }
 
+    // Every global/const whose own initializer needs a real C function
+    // call - a plain or generic function, a stdlib constructor like
+    // `some()`/`ok()`, or a copy of another global's value - buffered
+    // its real assignment into `pending_global_runtime_inits` instead
+    // of writing it as a (C-illegal) static-duration initializer; see
+    // `_global_init_needs_runtime`. Guarded for idempotency since the
+    // fuzz harness calls its own entry point - where this is also
+    // called - once per input, not once per process.
+    if self.pending_global_runtime_inits.len > 0 {
+      self.state.write("static int __fun_globals_inited = 0;\n");
+      self.state.write("static void __fun_init_globals(void) {\n");
+      self.state.write("  if (__fun_globals_inited) return;\n");
+      self.state.write("  __fun_globals_inited = 1;\n");
+      for stmt : self.pending_global_runtime_inits {
+        self.state.write("  ");
+        self.state.write(stmt);
+      }
+      self.state.write("}\n\n");
+    }
+
     if self.test_mode {
       let runner_err = self.emit_test_runner(nodes);
       if runner_err.is_some() {
@@ -19558,6 +21789,13 @@ impl Codegen {
     if self.memcheck && !self.memcheck_leaks {
       mc_leak_suppress = "  __fun_memcheck_disable_leak_sweep();\n";
     }
+    // Runs once, before any user code: see the matching emission (and
+    // the idempotency guard inside it) right before this function is
+    // called in `pub transpile`.
+    str ginit_call = "";
+    if self.pending_global_runtime_inits.len > 0 {
+      ginit_call = "  __fun_init_globals();\n";
+    }
     if self.emscripten_mode {
       // A browser's own main (document) thread must never block
       // synchronously waiting on another thread - `pthread_join` from
@@ -19571,18 +21809,20 @@ impl Codegen {
       // thread, no wrapper needed at all for this target.
       self.state.write(
         format(
-        "int main(int argc, char** argv) {\n{str}  return {str}(argc, argv);\n}\n",
+        "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
         mc_leak_suppress,
+        ginit_call,
         real_name
         )
       );
       ret .None;
     }
-    self.state.write(format(
+    self.state.write(
+      format(
       `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
       `static void* __fun_main_run(void* __fun_main_p) {
       `  __fun_main_run_args* __fun_main_a = (__fun_main_run_args*)__fun_main_p;
-      `  __fun_main_a->result = {str}(__fun_main_a->argc, __fun_main_a->argv);
+      `{str}  __fun_main_a->result = {str}(__fun_main_a->argc, __fun_main_a->argv);
       `  return 0;
       `}
       `#ifdef _WIN32
@@ -19612,9 +21852,11 @@ impl Codegen {
       `  return __fun_main_a.result;
       `}
       ``,
+      ginit_call,
       real_name,
       mc_leak_suppress
-    ));
+      )
+    );
     ret .None;
   }
 
@@ -19662,7 +21904,9 @@ impl Codegen {
           if owns_test_fn_body_start_pos {
             self.current_fn_body_start_pos = .Some(self.state.out.len());
           }
-          self.state.write(format("static void __fun_test_{str}(void) {\n", format_num(index)));
+          self.state.write(
+            format("static void __fun_test_{str}(void) {\n", format_num(index))
+          );
           self.state.indent_level = self.state.indent_level + 1;
           let berr = self.emit_body(*t.body);
           if berr.is_some() {
@@ -19692,11 +21936,13 @@ impl Codegen {
     self.state.write("    switch (i) {\n");
     num di = 0;
     for di < names.len {
-      self.state.write(format(
+      self.state.write(
+        format(
         "        case {str}: __fun_test_{str}(); break;\n",
         format_num(di),
         format_num(di)
-      ));
+        )
+      );
       di = di + 1;
     }
     self.state.write("    }\n");
@@ -19754,7 +22000,9 @@ impl Codegen {
     // fact, unlike the Windows linker pragma). `argc`out parameters travel
     // through a small struct since a pthread start function takes a
     // single `void*`.
-    self.state.write("typedef struct { int argc; char** argv; int result; } __fun_test_main_args;\n\n");
+    self.state.write(
+      "typedef struct { int argc; char** argv; int result; } __fun_test_main_args;\n\n"
+    );
 
     // Shared state for the parallel worker pool below: `next` is the
     // shared cursor every worker claims-and-increments under `mu`, which
@@ -19784,7 +22032,9 @@ impl Codegen {
     self.state.write("        pthread_mutex_unlock(&ctx->mu);\n");
     self.state.write("        if (__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("        char* name = __fun_test_name(i);\n");
-    self.state.write("        if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n");
+    self.state.write(
+      "        if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n"
+    );
     self.state.write("        int ok;\n");
     self.state.write("        clock_t __fun_t0 = clock();\n");
     self.state.write("        if (setjmp(__fun_test_jmp) == 0) {\n");
@@ -19793,10 +22043,14 @@ impl Codegen {
     self.state.write("        } else {\n");
     self.state.write("            ok = 0;\n");
     self.state.write("        }\n");
-    self.state.write("        ctx->elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
+    self.state.write(
+      "        ctx->elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n"
+    );
     self.state.write("        pthread_mutex_lock(&ctx->mu);\n");
     self.state.write("        ctx->ran++;\n");
-    self.state.write("        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n");
+    self.state.write(
+      "        if (ok) { ctx->passed++; printf(\"test: %s ... PASS\\n\", name); }\n"
+    );
     self.state.write("        else { printf(\"test: %s ... FAIL\\n\", name); }\n");
     // A pipe makes stdout fully (not line-) buffered, and `abort()` never
     // flushes it; without this, a crash anywhere in the run loses or
@@ -19810,19 +22064,30 @@ impl Codegen {
     self.state.write("}\n\n");
 
     self.state.write("static void* __fun_test_main_worker(void* __fun_test_argp) {\n");
-    self.state.write("    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n");
+    if self.pending_global_runtime_inits.len > 0 {
+      self.state.write("    __fun_init_globals();\n");
+    }
+    self.state.write(
+      "    __fun_test_main_args* __fun_test_a = (__fun_test_main_args*)__fun_test_argp;\n"
+    );
     self.state.write("    int argc = __fun_test_a->argc;\n");
     self.state.write("    char** argv = __fun_test_a->argv;\n");
     self.state.write("    const char* filter = argc > 1 ? argv[1] : (const char*)0;\n");
-    self.state.write("    { const char* __fun_tt = getenv(\"FUN_TEST_TRACE\"); __fun_test_trace = (__fun_tt && __fun_tt[0] && strcmp(__fun_tt, \"0\") != 0); }\n");
+    self.state.write(
+      "    { const char* __fun_tt = getenv(\"FUN_TEST_TRACE\"); __fun_test_trace = (__fun_tt && __fun_tt[0] && strcmp(__fun_tt, \"0\") != 0); }\n"
+    );
     self.state.write(format("    int64_t total = {str};\n", format_num(names.len)));
     self.state.write("    int64_t ran = 0;\n");
     self.state.write("    int64_t passed = 0;\n");
     if self.coverage {
       self.state.write("    __fun_cov_startup();\n");
     }
-    self.state.write("    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n");
-    self.state.write("    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n");
+    self.state.write(
+      "    double* elapsed_ms = (double*)malloc(sizeof(double) * (size_t)total);\n"
+    );
+    self.state.write(
+      "    for (int64_t __fun_ei = 0; __fun_ei < total; __fun_ei++) { elapsed_ms[__fun_ei] = 0.0; }\n"
+    );
     self.state.write("    if (filter) {\n");
     // A single named test runs alone regardless of `sequential`: with at
     // most one test selected, there's no sibling to isolate from, and
@@ -19854,7 +22119,9 @@ impl Codegen {
     self.state.write("        for (int64_t i = 0; i < total; i++) {\n");
     self.state.write("            if (!__fun_test_is_sequential(i)) { continue; }\n");
     self.state.write("            char* name = __fun_test_name(i);\n");
-    self.state.write("            if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n");
+    self.state.write(
+      "            if (__fun_test_trace) { printf(\"running: %s\\n\", name); fflush(stdout); }\n"
+    );
     self.state.write("            ran++;\n");
     self.state.write("            clock_t __fun_t0 = clock();\n");
     self.state.write("            if (setjmp(__fun_test_jmp) == 0) {\n");
@@ -19865,7 +22132,9 @@ impl Codegen {
     self.state.write("                printf(\"test: %s ... FAIL\\n\", name);\n");
     self.state.write("            }\n");
     self.state.write("            fflush(stdout);\n");
-    self.state.write("            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n");
+    self.state.write(
+      "            elapsed_ms[i] = (double)(clock() - __fun_t0) * 1000.0 / CLOCKS_PER_SEC;\n"
+    );
     self.state.write("        }\n");
     self.state.write("        __fun_test_par_ctx ctx;\n");
     self.state.write("        ctx.total = total;\n");
@@ -19900,14 +22169,20 @@ impl Codegen {
     self.state.write("        int nworkers;\n");
     self.state.write("        const char* __fun_tij = getenv(\"FUN_TEST_INTRA_JOBS\");\n");
     if self.memcheck {
-      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count() / 2; }\n");
+      self.state.write(
+        "        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count() / 2; }\n"
+      );
     } else {
-      self.state.write("        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n");
+      self.state.write(
+        "        if (__fun_tij && __fun_tij[0]) { nworkers = atoi(__fun_tij); } else { nworkers = __fun_cpu_count(); }\n"
+      );
     }
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
     self.state.write("        if ((int64_t)nworkers > total) { nworkers = (int)total; }\n");
     self.state.write("        if (nworkers < 1) { nworkers = 1; }\n");
-    self.state.write("        __fun_thread_t* threads = (__fun_thread_t*)malloc(sizeof(__fun_thread_t) * (size_t)nworkers);\n");
+    self.state.write(
+      "        __fun_thread_t* threads = (__fun_thread_t*)malloc(sizeof(__fun_thread_t) * (size_t)nworkers);\n"
+    );
     self.state.write("        int started = 0;\n");
     self.state.write("        for (int wi = 0; wi < nworkers; wi++) {\n");
     // `__fun_thread_start_sized`, not the plain 8 MB `__fun_thread_start`:
@@ -19922,7 +22197,9 @@ impl Codegen {
     // start drains the queue, and if none did, this thread (already
     // given the large stack) runs the whole queue itself, so a resource
     // failure slows the run down instead of silently skipping tests.
-    self.state.write("            if (__fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728) != 0) { break; }\n");
+    self.state.write(
+      "            if (__fun_thread_start_sized(&threads[wi], __fun_test_par_worker, &ctx, (size_t)134217728) != 0) { break; }\n"
+    );
     self.state.write("            started++;\n");
     self.state.write("        }\n");
     self.state.write("        if (started == 0) { __fun_test_par_worker(&ctx); }\n");
@@ -19942,14 +22219,24 @@ impl Codegen {
     // that visible instead of requiring a manual binary search over
     // FUN_TEST_INTRA_JOBS to find out.
     self.state.write("    if (!filter && total > 0) {\n");
-    self.state.write("        __fun_test_timing* __fun_tt = (__fun_test_timing*)malloc(sizeof(__fun_test_timing) * (size_t)total);\n");
-    self.state.write("        for (int64_t __fun_ti = 0; __fun_ti < total; __fun_ti++) { __fun_tt[__fun_ti].idx = __fun_ti; __fun_tt[__fun_ti].ms = elapsed_ms[__fun_ti]; }\n");
-    self.state.write("        qsort(__fun_tt, (size_t)total, sizeof(__fun_test_timing), __fun_test_timing_cmp);\n");
+    self.state.write(
+      "        __fun_test_timing* __fun_tt = (__fun_test_timing*)malloc(sizeof(__fun_test_timing) * (size_t)total);\n"
+    );
+    self.state.write(
+      "        for (int64_t __fun_ti = 0; __fun_ti < total; __fun_ti++) { __fun_tt[__fun_ti].idx = __fun_ti; __fun_tt[__fun_ti].ms = elapsed_ms[__fun_ti]; }\n"
+    );
+    self.state.write(
+      "        qsort(__fun_tt, (size_t)total, sizeof(__fun_test_timing), __fun_test_timing_cmp);\n"
+    );
     self.state.write("        int64_t __fun_slow_n = total < 5 ? total : 5;\n");
     self.state.write("        if (__fun_slow_n > 0 && __fun_tt[0].ms >= 1.0) {\n");
     self.state.write("            printf(\"\\nSlowest tests:\\n\");\n");
-    self.state.write("            for (int64_t __fun_si = 0; __fun_si < __fun_slow_n; __fun_si++) {\n");
-    self.state.write("                printf(\"  %8.1fms  %s\\n\", __fun_tt[__fun_si].ms, __fun_test_name(__fun_tt[__fun_si].idx));\n");
+    self.state.write(
+      "            for (int64_t __fun_si = 0; __fun_si < __fun_slow_n; __fun_si++) {\n"
+    );
+    self.state.write(
+      "                printf(\"  %8.1fms  %s\\n\", __fun_tt[__fun_si].ms, __fun_test_name(__fun_tt[__fun_si].idx));\n"
+    );
     self.state.write("            }\n");
     self.state.write("        }\n");
     self.state.write("        free(__fun_tt);\n");
@@ -19958,7 +22245,9 @@ impl Codegen {
     if self.coverage {
       self.state.write("    __fun_cov_dump();\n");
     }
-    self.state.write("    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n");
+    self.state.write(
+      "    printf(\"%lld/%lld tests passed\\n\", (long long)passed, (long long)ran);\n"
+    );
     self.state.write("    __fun_test_a->result = passed == ran ? 0 : 1;\n");
     self.state.write("    return 0;\n");
     self.state.write("}\n\n");
@@ -19992,7 +22281,9 @@ impl Codegen {
       self.state.write("    pthread_attr_init(&__fun_test_attr);\n");
       self.state.write("    pthread_attr_setstacksize(&__fun_test_attr, 134217728);\n");
       self.state.write("    pthread_t __fun_test_thread;\n");
-      self.state.write("    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n");
+      self.state.write(
+        "    pthread_create(&__fun_test_thread, &__fun_test_attr, __fun_test_main_worker, &__fun_test_a);\n"
+      );
       self.state.write("    pthread_attr_destroy(&__fun_test_attr);\n");
       self.state.write("    pthread_join(__fun_test_thread, (void**)0);\n");
       self.state.write("#endif\n");
@@ -20086,7 +22377,15 @@ impl Codegen {
           _ -> {}
         }
 
-        self.state.write("int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n");
+        self.state.write(
+          "int LLVMFuzzerTestOneInput(const unsigned char* __fun_fuzz_data, unsigned long __fun_fuzz_size) {\n"
+        );
+        if self.pending_global_runtime_inits.len > 0 {
+          // Guarded for idempotency inside `__fun_init_globals` itself
+          // (see where it's emitted in `pub transpile`) - this entry
+          // point runs once per fuzzer input, not once per process.
+          self.state.write("  __fun_init_globals();\n");
+        }
         self.state.write(format("  void* {str} = (void*)__fun_fuzz_data;\n", data_name));
         self.state.write(format("  int64_t {str} = (int64_t)__fun_fuzz_size;\n", len_name));
         let berr = self.emit_body(*fd.body);
@@ -22693,7 +24992,10 @@ test "emit_expr emits a tagged-union payload construction as a compound literal"
   Node n = node_new(.Expression(call_e));
 
   assert g.emit_expr(n).is_none(), "expected the enum-variant construction to emit";
-  assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (5) } })"), "expected a tagged-union compound literal with the payload set";
+  assert equals(
+    st.out.build(),
+    "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (5) } })"
+  ), "expected a tagged-union compound literal with the payload set";
 }
 
 test "emit_expr emits a bare-shorthand payload construction resolved against expected_enum_type" {
@@ -22734,7 +25036,10 @@ test "emit_expr emits a bare-shorthand payload construction resolved against exp
   Node n = node_new(.Expression(call_e));
 
   assert g.emit_expr(n).is_none(), "expected the bare-shorthand construction to emit";
-  assert equals(st.out.build(), "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (9) } })"), "expected 'Option' resolved from expected_enum_type, not a qualifier";
+  assert equals(
+    st.out.build(),
+    "((Option){ .tag = Option_Some, .payload.Some = { ._0 = (9) } })"
+  ), "expected 'Option' resolved from expected_enum_type, not a qualifier";
 }
 
 test "emit_expr resolves a bare-shorthand construction NESTED inside another variant's own construction" {
@@ -24419,7 +26724,10 @@ test "pub transpile hoists a generic impl method's monomorphized definition BEFO
   str out = st.out.build();
   num typedef_pos = index_of_str(out, "typedef struct Box__num {");
   num proto_pos = index_of_str(out, "int64_t Box__num__get(Box__num* self);");
-  num def_pos = index_of_str(out, "int64_t Box__num__get(Box__num* self) {\n    return self->value;\n}");
+  num def_pos = index_of_str(
+    out,
+    "int64_t Box__num__get(Box__num* self) {\n    return self->value;\n}"
+  );
   num main_pos = index_of_str(out, "int __fun_shadow__main(int argc, char** argv) {");
   assert typedef_pos >= 0 && proto_pos >= 0 && def_pos >= 0 && main_pos >= 0, "expected every piece present in the output";
   assert typedef_pos < main_pos && proto_pos < main_pos && def_pos < main_pos, "expected the struct typedef, the monomorphized method's own prototype, and its DEFINITION (lazily triggered by the call inside main's own body) all BEFORE 'main', not nested inside its braces";
@@ -25428,7 +27736,10 @@ test "pub transpile monomorphizes a generic function from its own call site, inf
   str out = st.out.build();
   assert contains(out, "int64_t identity__num(int64_t value) {\n    return value;\n}"), "expected the monomorphized 'identity__num', not the unsubstituted template";
   assert !contains(out, "int64_t identity(int64_t value)"), "expected the unsubstituted 'identity' template itself to never be emitted";
-  assert contains(out, "int __fun_shadow__main(int argc, char** argv) {\n    return identity__num(5);\n}"), "expected 'main' forced to its real C entry-point signature, under its shadowed name";
+  assert contains(
+    out,
+    "int __fun_shadow__main(int argc, char** argv) {\n    return identity__num(5);\n}"
+  ), "expected 'main' forced to its real C entry-point signature, under its shadowed name";
 }
 
 test "pub transpile does not crash when a generic function's OWN return type is itself a generic enum instantiation" {
@@ -25584,7 +27895,10 @@ test "pub transpile does not crash when a generic function's OWN return type is 
   nodes.push(main_node);
 
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile without crashing";
-  assert contains(st.out.build(), "int __fun_shadow__main(int argc, char** argv) {\n    return 0;\n}"), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
+  assert contains(
+    st.out.build(),
+    "int __fun_shadow__main(int argc, char** argv) {\n    return 0;\n}"
+  ), "expected main's discarded 'Opt<num>' return to just report success, its own signature still forced to the real C entry-point shape";
   assert !contains(st.out.build(), "wrap__num"), "expected 'wrap', reachable ONLY through main's own discarded return, to never be monomorphized at all -- nothing else in this program calls it";
 }
 

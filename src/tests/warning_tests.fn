@@ -1260,7 +1260,10 @@ test "allow no_cover is accepted at module scope, right above a function" {
     `  ret 0;
     `}`
   );
-  assert equals(err, ""), format("expected a module-scope allow no_cover to parse cleanly, got: {str}", err);
+  assert equals(err, ""), format(
+    "expected a module-scope allow no_cover to parse cleanly, got: {str}",
+    err
+  );
 }
 
 test "allow no_covers (plural) is also accepted at module scope" {
@@ -1270,7 +1273,10 @@ test "allow no_covers (plural) is also accepted at module scope" {
     `  ret 0;
     `}`
   );
-  assert equals(err, ""), format("expected a module-scope allow no_covers to parse cleanly, got: {str}", err);
+  assert equals(err, ""), format(
+    "expected a module-scope allow no_covers to parse cleanly, got: {str}",
+    err
+  );
 }
 
 test "expect no_cover is rejected: nothing ever reports it, so it could never be satisfied" {
@@ -1280,6 +1286,12 @@ test "expect no_cover is rejected: nothing ever reports it, so it could never be
     `  ret 0;
     `}`
   );
-  assert contains(err, "no_cover"), format("expected the rejection to name no_cover, got: {str}", err);
-  assert contains(err, "expect"), format("expected the rejection to explain why expect specifically doesn't work, got: {str}", err);
+  assert contains(err, "no_cover"), format(
+    "expected the rejection to name no_cover, got: {str}",
+    err
+  );
+  assert contains(err, "expect"), format(
+    "expected the rejection to explain why expect specifically doesn't work, got: {str}",
+    err
+  );
 }

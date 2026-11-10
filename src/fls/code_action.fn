@@ -20,7 +20,12 @@ use std.c.mem;
 
 // The quick fixes available for `diags`, as the result a client is
 // sent.
-pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<Diagnostic>* diags) str {
+pub fun code_actions(
+  AnalysisCache* cache,
+  Document doc,
+  str document_uri,
+  Vec<Diagnostic>* diags
+) str {
   Vec<str> lines = split(doc.text, '\n');
   StringBuilder b = string_builder_init(256);
   b.append("[");
@@ -59,7 +64,11 @@ pub fun code_actions(AnalysisCache* cache, Document doc, str document_uri, Vec<D
         b.append(",");
       }
       any = true;
-      str remove_line_text = _remove_line_action(document_uri, "Remove unused import", d.line);
+      str remove_line_text = _remove_line_action(
+        document_uri,
+        "Remove unused import",
+        d.line
+      );
       b.append(remove_line_text);
       free(remove_line_text);
     }
@@ -234,7 +243,12 @@ fun _fit_arm_action(AnalysisCache* cache, Document doc, str document_uri, Diagno
   for ri < refs.len {
     EnumVariantRef ev = refs.get(ri);
     ri = ri + 1;
-    let variant = enum_variant_declaration(&read.program.nodes, ev.enum_name, ev.variant_name, no_args);
+    let variant = enum_variant_declaration(
+      &read.program.nodes,
+      ev.enum_name,
+      ev.variant_name,
+      no_args
+    );
     if variant.is_none() {
       continue;
     }
@@ -506,6 +520,37 @@ compound ShapeConformanceRef {
   str shape_name;
 }
 
+// The concrete args the `impl ... as shape_name<...>` block reported at
+// `diag_line` (0-indexed, matching a `Diagnostic.line`) supplies for the
+// shape's own type params - "" when the impl targets the shape
+// symbolically (its own type param, not a fixed instantiation) or isn't
+// generic at all, in which case the caller gets the bare, unsubstituted
+// signature back, same as before this existed.
+fun _shape_impl_concrete_args(Vec<Node>* program, str shape_name, num diag_line) Vec<str> {
+  Vec<str> empty_args;
+  empty_args.init(0);
+  num source_line = diag_line + 1;
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    if n.pos.line != source_line {
+      continue;
+    }
+    fit n.kind {
+      .Impl(im) -> {
+        if !im.has_shape_name || !equals(im.shape_name, shape_name) ||
+          !im.has_shape_concrete_instantiation {
+          ret empty_args;
+        }
+        ret shape_instantiation_args(program, shape_name, im.shape_concrete_instantiation);
+      }
+      _ -> {}
+    }
+  }
+  ret empty_args;
+}
+
 // The quick fix for a "does not supply" shape-conformance error: a
 // stub method (`pub name(args) rtype { // TODO: implement }`) with
 // the exact signature the shape itself declares, inserted right
@@ -522,7 +567,17 @@ fun _shape_stub_action(AnalysisCache* cache, Document doc, str document_uri, Dia
   if !read.lexed || !read.parsed {
     ret "";
   }
-  let method = shape_method_declaration(&read.program.nodes, qc.shape_name, qc.method_name);
+  Vec<str> concrete_args = _shape_impl_concrete_args(
+    &read.program.nodes,
+    qc.shape_name,
+    d.line
+  );
+  let method = shape_method_declaration(
+    &read.program.nodes,
+    qc.shape_name,
+    qc.method_name,
+    concrete_args
+  );
   if method.is_none() {
     ret "";
   }

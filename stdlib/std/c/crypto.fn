@@ -26,12 +26,26 @@ pub fun __fun_random_bytes(num n) str;
 // AES-256-GCM encrypt: `pt_len` bytes of `plaintext`, `key`/`nonce` as
 // hex (64/24 hex chars), `aad_len` bytes of `aad`. Returns hex-encoded
 // ciphertext with its 16-byte tag appended, or `nil` on failure.
-pub fun __fun_aes256gcm_encrypt(str plaintext, num pt_len, str key, str nonce, str aad, num aad_len) str;
+pub fun __fun_aes256gcm_encrypt(
+  str plaintext,
+  num pt_len,
+  str key,
+  str nonce,
+  str aad,
+  num aad_len
+) str;
 
 // AES-256-GCM decrypt: `ciphertext`/`key`/`nonce` as hex, `aad_len`
 // bytes of `aad`. Returns the plaintext, or `nil` when the tag doesn't
 // verify (wrong key, or the ciphertext/aad was tampered with).
-pub fun __fun_aes256gcm_decrypt(str ciphertext, num ct_hex_len, str key, str nonce, str aad, num aad_len) str;
+pub fun __fun_aes256gcm_decrypt(
+  str ciphertext,
+  num ct_hex_len,
+  str key,
+  str nonce,
+  str aad,
+  num aad_len
+) str;
 
 // Generates a fresh Ed25519 private key, as hex.
 pub fun __fun_ed25519_generate_private() str;

@@ -447,7 +447,14 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           _ -> {}
         }
         if is_chain_num && _preceded_by_dot(&tokens, t) {
-          let chained = _resolve_chained_tuple_hover(&tokens, t, &read.program.nodes, doc.path, line + 1, doc.text);
+          let chained = _resolve_chained_tuple_hover(
+            &tokens,
+            t,
+            &read.program.nodes,
+            doc.path,
+            line + 1,
+            doc.text
+          );
           if !equals(chained, "") {
             ret _hover_result(chained, span_of(t, doc.text));
           }
@@ -492,7 +499,13 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         // before `t` in a dotted chain - passing `t` itself (not its
         // receiver token) is exactly the convention `_resolve_chained_tuple_hover`
         // already uses one level up.
-        str tv_recv_type = chain_receiver_type(&tokens, t, &read.program.nodes, doc.path, line + 1);
+        str tv_recv_type = chain_receiver_type(
+          &tokens,
+          t,
+          &read.program.nodes,
+          doc.path,
+          line + 1
+        );
         if _is_known_enum(&read.program.nodes, tv_recv_type) {
           ret _hover_result(
             _doc(
@@ -513,7 +526,10 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         if token_is_keyword(ckw, "allow") || token_is_keyword(ckw, "expect") {
           let wref = warning_id_or_plural_from_string(token_word(t));
           if wref.is_some() {
-            ret _hover_result(warning_id_doc(wref.unwrap().id), span_of(t, doc.text));
+            ret _hover_result(
+              warning_id_doc(wref.unwrap().id),
+              span_of(t, doc.text)
+            );
           }
         }
       }
@@ -548,7 +564,10 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         ret _hover_result(
           _doc(
           token_word(t),
-          format("A C builtin the language accepts without a declaration of its own, documented by {str}.", builtin_module)
+          format(
+          "A C builtin the language accepts without a declaration of its own, documented by {str}.",
+          builtin_module
+          )
           ),
           span_of(t, doc.text)
         );
@@ -569,7 +588,11 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // the only other shape `import_target` above doesn't already
     // cover, since the cursor here isn't on the import path.
     if read.parsed {
-      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, token_word(t));
+      str alias_target = import_alias_target(
+        &read.program.entry_nodes,
+        doc.path,
+        token_word(t)
+      );
       if !equals(alias_target, "") {
         ret _import_hover_result(alias_target, span_of(t, doc.text));
       }
@@ -588,6 +611,45 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
       ret _hover_result(detail, span_of(t, doc.text));
     }
+    // Unlike completion and signature help, hover had no token-only
+    // fallback tier of its own at all while the document doesn't
+    // parse - `resolve_at` above returns `.None` outright the moment
+    // `!read.parsed`, with nothing here recovering anything beyond
+    // the two narrow cases above and the call-inferred local just
+    // below. A dot-qualified chain (`b.val`, `b.inner().val`, any
+    // length) is the broadest gap: `chain_tail_type_from_tokens`
+    // (symbols.fn) already walks the whole thing token-only for
+    // completion and signature help, reused here unchanged.
+    if !read.parsed && _preceded_by_dot(&tokens, t) {
+      str chain_type = chain_tail_type_from_tokens(
+        &tokens,
+        doc.path,
+        cache,
+        index_of_token(&tokens, t)
+      );
+      if !equals(chain_type, "") {
+        str detail = format("{str} {str}", chain_type, token_word(t));
+        str result = _hover_result(detail, span_of(t, doc.text));
+        free(detail);
+        free(chain_type);
+        ret result;
+      }
+    }
+    // A bare local with an explicit declared type (`num x = 5;`,
+    // nothing inferred at all) is the other half of that same gap:
+    // `resolve_at`'s own parsed-tree lookup would have found this
+    // trivially, but with no tree at all `_receiver_type_from_tokens`
+    // (symbols.fn) reads the exact same "Type name" declaration
+    // straight off the tokens instead.
+    if !read.parsed && !_preceded_by_dot(&tokens, t) {
+      str explicit_type = _receiver_type_from_tokens(&tokens, token_word(t));
+      if !equals(explicit_type, "") {
+        str detail = format("{str} {str}", explicit_type, token_word(t));
+        str result = _hover_result(detail, span_of(t, doc.text));
+        free(detail);
+        ret result;
+      }
+    }
     // A call-inferred local (`let l = logger_init(...)`, no type
     // annotation for `resolve_at`'s own parsed-tree lookup to use, and
     // the document doesn't parse at all right now - most commonly a
@@ -596,7 +658,12 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // completion.fn's own dot-completion fallback already relies on,
     // shared here via `let_call_return_type_from_tokens`.
     if !read.parsed {
-      str inferred_type = let_call_return_type_from_tokens(&tokens, doc.path, cache, token_word(t));
+      str inferred_type = let_call_return_type_from_tokens(
+        &tokens,
+        doc.path,
+        cache,
+        token_word(t)
+      );
       if !equals(inferred_type, "") {
         str detail = format("{str} {str}", inferred_type, token_word(t));
         str result = _hover_result(detail, span_of(t, doc.text));
@@ -645,7 +712,15 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
   if read.parsed {
     fit d.kind {
       .Function -> {
-        str specialized = specialized_call_signature(&tokens, d, t, &read.program.nodes, doc.path, line, 0);
+        str specialized = specialized_call_signature(
+          &tokens,
+          d,
+          t,
+          &read.program.nodes,
+          doc.path,
+          line,
+          0
+        );
         if !equals(specialized, d.detail) {
           d.detail = specialized;
         }
@@ -741,7 +816,11 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
     // call site (`cmath.sqrt(...)`) rather than in the import
     // statement itself. Mirrors hover's own fallback above.
     if read.parsed {
-      str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, token_word(t));
+      str alias_target = import_alias_target(
+        &read.program.entry_nodes,
+        doc.path,
+        token_word(t)
+      );
       if !equals(alias_target, "") {
         ret _file_start_location_result(alias_target);
       }
@@ -774,9 +853,20 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
     if !read.parsed {
       str receiver = _receiver_of(&tokens, t);
       if !equals(receiver, "") {
-        str receiver_type = let_call_return_type_from_tokens(&tokens, doc.path, cache, receiver);
+        str receiver_type = let_call_return_type_from_tokens(
+          &tokens,
+          doc.path,
+          cache,
+          receiver
+        );
         if !equals(receiver_type, "") {
-          let member = member_declaration_from_tokens(&tokens, doc.path, cache, receiver_type, token_word(t));
+          let member = member_declaration_from_tokens(
+            &tokens,
+            doc.path,
+            cache,
+            receiver_type,
+            token_word(t)
+          );
           free(receiver_type);
           if member.is_some() {
             ret _location_result(doc, member.unwrap());
@@ -988,7 +1078,13 @@ pub fun type_definition(AnalysisCache* cache, Document doc, num line, num charac
 // What the name `t` refers to, judged from where it sits: a field when
 // it is reached through a dot, and otherwise a local, a parameter, or
 // something the program declares.
-pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token t, num line) Option<Declaration> {
+pub fun resolve_at(
+  AnalysisCache* cache,
+  Document doc,
+  Vec<Token>* tokens,
+  Token t,
+  num line
+) Option<Declaration> {
   str name = token_word(t);
   if equals(name, "") {
     ret .None;
@@ -1042,7 +1138,14 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     // ...)` alone would fail here whenever the receiver is itself a
     // field access or a call rather than a bare local, since neither
     // was ever declared as one.
-    ChainReceiver found_receiver = chain_receiver(tokens, t, &program.nodes, doc.path, source_line, 0);
+    ChainReceiver found_receiver = chain_receiver(
+      tokens,
+      t,
+      &program.nodes,
+      doc.path,
+      source_line,
+      0
+    );
     str type_name = found_receiver.type_name;
     if !equals(type_name, "") {
       // A name is called (`b.len()`), not read as a field (`b.len`),
@@ -1062,17 +1165,32 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
         // threaded all the way through by `chain_receiver` however deep
         // the chain leading to the receiver is, not just for a bare
         // local carrying them directly.
-        let method = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
+        let method = lookup_method(
+          &program.nodes,
+          type_name,
+          name,
+          found_receiver.generic_args
+        );
         if method.is_some() {
           ret method;
         }
       }
-      let field = lookup_field(&program.nodes, type_name, name, found_receiver.generic_args);
+      let field = lookup_field(
+        &program.nodes,
+        type_name,
+        name,
+        found_receiver.generic_args
+      );
       if field.is_some() {
         ret field;
       }
       if !is_call {
-        let method2 = lookup_method(&program.nodes, type_name, name, found_receiver.generic_args);
+        let method2 = lookup_method(
+          &program.nodes,
+          type_name,
+          name,
+          found_receiver.generic_args
+        );
         if method2.is_some() {
           ret method2;
         }
@@ -1087,7 +1205,11 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     // collision gets renamed to keep the merged program compiling (see
     // `import_resolver.fn`'s own `alias_rename_keys` note), so the bare
     // name alone always matches whichever module merged first.
-    str alias_target = import_alias_target(&read.program.entry_nodes, doc.path, receiver);
+    str alias_target = import_alias_target(
+      &read.program.entry_nodes,
+      doc.path,
+      receiver
+    );
     if !equals(alias_target, "") {
       // The straightforward case: `name` still declares under its own
       // bare name in `alias_target`'s own file (nothing else merged
@@ -1126,12 +1248,23 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     // resolve, unlike a fit's own subject expression.
     Vec<str> no_args;
     no_args.init(0);
-    let qualified_variant = enum_variant_declaration(&program.nodes, receiver, name, no_args);
+    let qualified_variant = enum_variant_declaration(
+      &program.nodes,
+      receiver,
+      name,
+      no_args
+    );
     if qualified_variant.is_some() {
       ret qualified_variant;
     }
   } elif _is_dot_shorthand(tokens, t) {
-    let variant = lookup_fit_variant(tokens, &program.nodes, name, doc.path, source_line);
+    let variant = lookup_fit_variant(
+      tokens,
+      &program.nodes,
+      name,
+      doc.path,
+      source_line
+    );
     if variant.is_some() {
       ret variant;
     }
@@ -1152,11 +1285,30 @@ pub fun resolve_at(AnalysisCache* cache, Document doc, Vec<Token>* tokens, Token
     }
     // Every other shape a bare variant is legitimately written in:
     // compared, assigned, or passed as a call argument.
-    str context_type = _dot_shorthand_context_type(tokens, &program.nodes, t, doc.path, source_line);
+    str context_type = _dot_shorthand_context_type(
+      tokens,
+      &program.nodes,
+      t,
+      doc.path,
+      source_line
+    );
     if !equals(context_type, "") {
-      Vec<str> no_args;
-      no_args.init(0);
-      let cv = enum_variant_declaration(&program.nodes, context_type, name, no_args);
+      // `context_type` is a rendered "Name<args>" type (same shape
+      // `_param_type_from_piece`/`ChainReceiver.full_type_name`
+      // produce), not a bare name - split it the same way every other
+      // caller of a generic-aware lookup does, rather than handing the
+      // whole thing to `enum_variant_declaration` as if it already
+      // were one (an exact `equals` match against the AST's own bare
+      // enum name, which a generic instantiation's own angle brackets
+      // always failed outright).
+      Vec<str> context_args = generic_args_of_detail(context_type);
+      str bare_context_type = bare_type_expr(context_type);
+      let cv = enum_variant_declaration(
+        &program.nodes,
+        bare_context_type,
+        name,
+        context_args
+      );
       if cv.is_some() {
         ret cv;
       }
@@ -1383,7 +1535,23 @@ pub fun dot_shorthand_context_type_at(
       ret "";
     }
     Token last = operand.unwrap();
-    ret chain_ending_type(tokens, last, token_is_symbol(last, ')'), program, file, line);
+    // `full_type_name`, not `chain_ending_type`'s bare `type_name`
+    // alone: a generic comparison operand (`x == .Some(5)` against an
+    // `Option<num>` operand) needs its own concrete args to reach the
+    // variant/payload lookup below, which `chain_ending_type` always
+    // discarded - `full_type_name` already carries both in the same
+    // "Name<args>" text every other context source here returns, so
+    // every downstream caller can split it the same way regardless of
+    // which branch produced it.
+    ret chain_ending_receiver(
+      tokens,
+      last,
+      token_is_symbol(last, ')'),
+      program,
+      file,
+      line,
+      0
+    ).full_type_name;
   }
 
   if token_is_operator(prev, "(") || token_is_operator(prev, ",") {
@@ -1420,7 +1588,13 @@ fun _error_slot_type(Vec<Node>* program, str file, num line) str {
 // receiver's type via `lookup_method`) rather than reading `DataType*`
 // params directly, the same string-based approach signature_help.fn
 // and inlay_hints.fn already share for this exact job.
-fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx, str file, num line) str {
+fun _call_arg_expected_type(
+  Vec<Token>* tokens,
+  Vec<Node>* program,
+  num dot_idx,
+  str file,
+  num line
+) str {
   num depth = 0;
   num i = dot_idx - 1;
   num open_idx = -1;
@@ -1491,7 +1665,12 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
     if is_return_value(tokens, callee) {
       let rdt = enclosing_return_dtype(program, file, line);
       if rdt.is_some() {
-        let payload = variant_payload_type_typed(program, rdt.unwrap(), callee_name, arg_index);
+        let payload = variant_payload_type_typed(
+          program,
+          rdt.unwrap(),
+          callee_name,
+          arg_index
+        );
         if payload.is_some() {
           ret payload.unwrap();
         }
@@ -1500,13 +1679,22 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
     // Any other context the outer shorthand itself reads against (a
     // `?!(...)` error slot, another call's parameter, a comparison or
     // assignment operand): resolve that enum first, then take this
-    // variant's own payload at `arg_index`.
+    // variant's own payload at `arg_index`. `owner` is a rendered
+    // "Name<args>" type, same shape `_param_type_from_piece` below
+    // produces - split the same way, rather than handing the whole
+    // thing to `variant_payload_type` as if it were already a bare
+    // name, which only ever matched a non-generic enum.
     str owner = dot_shorthand_context_type_at(tokens, program, callee_idx - 1, file, line);
     if !equals(owner, "") {
-      Vec<str> no_args;
-      no_args.init(0);
-      let payload = variant_payload_type(program, owner, callee_name, arg_index, no_args);
-      no_args.free();
+      Vec<str> owner_args = generic_args_of_detail(owner);
+      str bare_owner = bare_type_expr(owner);
+      let payload = variant_payload_type(
+        program,
+        bare_owner,
+        callee_name,
+        arg_index,
+        owner_args
+      );
       if payload.is_some() {
         ret payload.unwrap();
       }
@@ -1520,21 +1708,22 @@ fun _call_arg_expected_type(Vec<Token>* tokens, Vec<Node>* program, num dot_idx,
     // A method call: written arguments never include `self`, but the
     // callee's own rendered signature does - shift the index to match.
     arg_index = arg_index + 1;
-    // `chain_receiver_type`, not `chain_ending_type`: the latter needs
+    // `chain_receiver`, not `chain_ending_type`: the latter needs
     // the receiver chain's own last token handed in already correctly
     // isolated, which this call site got wrong for anything beyond a
     // single hop (passing the token right before the connecting dot,
-    // rather than the connecting dot's own far side) - `chain_receiver_type`
+    // rather than the connecting dot's own far side) - `chain_receiver`
     // takes the member name itself and walks its own receiver back,
     // the same way every other hover/completion call site in this file
-    // already does.
-    str receiver_type = chain_receiver_type(tokens, callee, program, file, line);
-    if equals(receiver_type, "") {
+    // already does. Its own `generic_args` (dropped here until now)
+    // specializes a generic method's own parameter types against the
+    // receiver's real instantiation, the same substitution every other
+    // `lookup_method` call site in this file already threads through.
+    let recv = chain_receiver(tokens, callee, program, file, line, 0);
+    if equals(recv.type_name, "") {
       ret "";
     }
-    Vec<str> no_args;
-    no_args.init(0);
-    let method = lookup_method(program, receiver_type, callee_name, no_args);
+    let method = lookup_method(program, recv.type_name, callee_name, recv.generic_args);
     if method.is_none() {
       ret "";
     }
@@ -1847,7 +2036,12 @@ fun _reversed_num_vec(Vec<num> v) Vec<num> {
 // access), the same token the existing single-hop resolution already
 // passed to `chain_receiver_type` to resolve the base receiver's type.
 // Empty when `t` itself isn't numeric-chain-shaped.
-fun _chained_tuple_hops(Vec<Token>* tokens, Token t, str source_text, Token* out_base_hop) Vec<num> {
+fun _chained_tuple_hops(
+  Vec<Token>* tokens,
+  Token t,
+  str source_text,
+  Token* out_base_hop
+) Vec<num> {
   Vec<num> hops;
   hops.init(4);
   num cursor = index_of_token(tokens, t);
@@ -2300,7 +2494,10 @@ pub fun keyword_doc(str word) str {
     ret _doc(`fun name(arg Type) Type { ... }`, `Declares a function.`);
   }
   if equals(word, "as") {
-    ret _doc(`impl Type as Shape { ... }`, `Names the shape an impl block implements for a type.`);
+    ret _doc(
+      `impl Type as Shape { ... }`,
+      `Names the shape an impl block implements for a type.`
+    );
   }
   if equals(word, "enum") {
     ret _doc(
