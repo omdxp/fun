@@ -3594,6 +3594,87 @@ test "operator overloading: a mismatched op_index_set value type is rejected" {
   "expected the error to name both the expected and the found value type";
 }
 
+test "a fixed-size array read past its own declared size is rejected" {
+  str msg = check(
+    `fun main() {
+    `  num[3] arr;
+    `  num v = arr[3];
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "index 3") && contains(msg, "size 3"),
+  "expected the error to name both the offending index and the array's own size";
+}
+
+test "a fixed-size array write past its own declared size is rejected" {
+  str msg = check(
+    `fun main() {
+    `  num[3] arr;
+    `  arr[3] = 1;
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "index 3") && contains(msg, "size 3"),
+  "expected the error to name both the offending index and the array's own size";
+}
+
+test "a negative constant index into a fixed-size array is rejected" {
+  str msg = check(
+    `fun main() {
+    `  num[3] arr;
+    `  num v = arr[-1];
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "index -1") && contains(msg, "size 3"),
+  "expected the error to name both the offending index and the array's own size";
+}
+
+test "a fixed-size array index within range is accepted" {
+  accepts(
+    `fun main() {
+    `  num[3] arr;
+    `  arr[0] = 1;
+    `  arr[2] = 2;
+    `  num v = arr[1];
+    `}`,
+    "expected every in-range index to type-check cleanly"
+  );
+}
+
+test "a multi-dimensional fixed-size array's own inner dimension is bounds-checked too" {
+  str msg = check(
+    `fun main() {
+    `  num[3][4] grid;
+    `  grid[2][4] = 9;
+    `}`
+  );
+  assert !equals(msg, ""), "expected a type error, not a successful check";
+  assert contains(msg, "index 4") && contains(msg, "size 4"),
+  "expected the error to name the inner dimension's own size, not the outer one's";
+}
+
+test "a non-constant index into a fixed-size array is left unchecked" {
+  accepts(
+    `fun main() {
+    `  num[3] arr;
+    `  num i = 5;
+    `  num v = arr[i];
+    `}`,
+    "expected a non-constant index to pass through unchecked, the same as any other runtime bounds the checker can't see"
+  );
+}
+
+test "an array declared without a size at every dimension is left unchecked" {
+  accepts(
+    `fun main() {
+    `  num[] arr;
+    `  num v = arr[99];
+    `}`,
+    "expected a size-less array declaration to skip bounds-checking entirely, not crash or misfire"
+  );
+}
+
 test "operator overloading: a plain array's own [] assignment keeps today's behavior" {
   accepts(
     `fun main() {

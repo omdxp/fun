@@ -22,6 +22,15 @@ pub compound CheckedType {
   DataTypeType base;
   flag is_array;
   num array_depth;
+  // Each dimension's own declared size, outermost first, when every
+  // dimension was written with one and it folds to a literal number
+  // (`num[3][4]`'s own `[3, 4]`) - `-1` at an index whose dimension's
+  // size doesn't fold (a non-constant size expression), empty when
+  // `is_array` is false or the declaration left any dimension bare
+  // (`num[]`). Indexing (`infer`'s own `"[]"` case, `check_index_
+  // assignment`) checks a constant index against this dimension's own
+  // first entry before dropping it for whatever dimension remains.
+  Vec<num> array_sizes;
   num pointer_depth;
   // `nil`, which stands for a pointer or a string of any type.
   flag is_null_literal;
@@ -51,6 +60,7 @@ pub fun checked_unknown() CheckedType {
   t.base = .Unknown;
   t.is_array = false;
   t.array_depth = 0;
+  t.array_sizes.init(0);
   t.pointer_depth = 0;
   t.is_null_literal = false;
   t.is_panic_literal = false;
@@ -82,6 +92,23 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   // is still one deep.
   if t.is_array && t.array_depth == 0 {
     t.array_depth = 1;
+  }
+  // Only every dimension sized (`dt.array_brackets.len == dt.array_
+  // depth`) folds to anything at all - a mix of sized and bare
+  // dimensions can't be matched back up positionally either (see
+  // `render_type`'s own identical guard), so bounds-checking stays off
+  // rather than guessing which entry belongs to which dimension.
+  if dt.is_array && dt.array_depth > 0 && dt.array_brackets.len == dt.array_depth {
+    num ai = 0;
+    for ai < dt.array_brackets.len {
+      let sz = _constant_value(dt.array_brackets.get(ai));
+      if sz.is_some() {
+        t.array_sizes.push(sz.unwrap());
+      } else {
+        t.array_sizes.push(-1);
+      }
+      ai = ai + 1;
+    }
   }
   t.pointer_depth = dt.pointer_depth;
   if dt.flags.is_pointer && t.pointer_depth == 0 {
@@ -641,6 +668,7 @@ fun _free_checked_type_contents(CheckedType* t) {
     j = j + 1;
   }
   t.tuple_members.free();
+  t.array_sizes.free();
 }
 
 // A deep, independently-owned copy of `t`: `.generic_args`/
@@ -666,6 +694,12 @@ fun _clone_checked_type(CheckedType t) CheckedType {
   for j < t.tuple_members.len {
     c.tuple_members.push(_clone_checked_type(t.tuple_members.get(j)));
     j = j + 1;
+  }
+  c.array_sizes.init(t.array_sizes.len);
+  num k = 0;
+  for k < t.array_sizes.len {
+    c.array_sizes.push(t.array_sizes.get(k));
+    k = k + 1;
   }
   ret c;
 }
@@ -2678,9 +2712,18 @@ impl Checker {
         }
         ret checked_unknown();
       }
+      if e.has_right {
+        Node* read_index_node = e.right;
+        fit e.right.kind {
+          .Bracket(inner) -> { read_index_node = inner; }
+          _ -> {}
+        }
+        self.check_array_index_bounds(node, base, read_index_node);
+      }
       CheckedType held = base;
       held.array_depth = base.array_depth - 1;
       held.is_array = held.array_depth > 0;
+      held.array_sizes = _array_sizes_shifted(base.array_sizes);
       ret held;
     }
     if equals(e.op, ",") {
@@ -4120,9 +4163,31 @@ fun _is_assignment(str op) flag {
   ret matched;
 }
 
+// `sizes` with its own outermost dimension dropped, as a fresh,
+// independently-owned `Vec` - never `sizes`'s own backing buffer,
+// which an ordinary struct copy (`CheckedType held = base;`) still
+// shares with whatever `base` it came from. Used by a chained index
+// (`arr[i][j]`) to check its own next dimension against what remains
+// once the first one is consumed.
+fun _array_sizes_shifted(Vec<num> sizes) Vec<num> {
+  Vec<num> out;
+  num cap = sizes.len - 1;
+  if cap < 0 {
+    cap = 0;
+  }
+  out.init(cap);
+  num i = 1;
+  for i < sizes.len {
+    out.push(sizes.get(i));
+    i = i + 1;
+  }
+  ret out;
+}
+
 // The value an expression is known to hold when it is written out of
 // literals. Only the shapes a divisor is plausibly written as are folded:
-// a literal, a parenthesized one, and the arithmetic between two of them.
+// a literal, a parenthesized one, a leading `-`/`+`, and the arithmetic
+// between two of them.
 fun _constant_value(Node* node) Option<num> {
   if node == nil {
     ret .None;
@@ -4136,6 +4201,19 @@ fun _constant_value(Node* node) Option<num> {
     }
     .ExpressionParenthesis(inner) -> { ret _constant_value(inner); }
     .Bracket(inner) -> { ret _constant_value(inner); }
+    .Unary(u) -> {
+      let operand = _constant_value(u.operand);
+      if operand.is_none() {
+        ret .None;
+      }
+      if equals(u.op, "-") {
+        ret .Some(0 - operand.unwrap());
+      }
+      if equals(u.op, "+") {
+        ret .Some(operand.unwrap());
+      }
+      ret .None;
+    }
     .Expression(e) -> {
       if !e.has_left || !e.has_right {
         ret .None;
@@ -5139,6 +5217,35 @@ impl Checker {
     }
   }
 
+  // Fails with a clear diagnostic when `index_node` folds to a
+  // constant out of range for the dimension about to be indexed -
+  // `base.array_sizes`'s own first entry, dropped for whatever
+  // dimension remains the same way `infer`'s own `"[]"` case already
+  // drops it for the rest of a chained index (`arr[i][j]`). Left
+  // unchecked, the same as a non-constant divisor already is
+  // elsewhere in this file, when `base` isn't an array with every
+  // dimension's own size known, or the index isn't itself foldable.
+  check_array_index_bounds(Node* node, CheckedType base, Node* index_node) {
+    if base.array_sizes.len == 0 {
+      ret;
+    }
+    num declared = base.array_sizes.get(0);
+    if declared < 0 {
+      ret;
+    }
+    let idx = _constant_value(index_node);
+    if idx.is_none() {
+      ret;
+    }
+    num iv = idx.unwrap();
+    if iv < 0 || iv >= declared {
+      self.fail(
+        format("index {num} is out of range for an array of size {num}", iv, declared),
+        node
+      );
+    }
+  }
+
   // `a[i] = v` on a real array/`Vec<T>`/`str` keeps its own builtin
   // meaning, unchecked here exactly as it was before this method
   // existed - only a type with no array of its own gets validated,
@@ -5153,7 +5260,18 @@ impl Checker {
       ret;
     }
     CheckedType base = self.infer(target.left, env);
-    if base.pointer_depth > 0 || base.is_array || equals(base.name, "") ||
+    if base.is_array {
+      if target.has_right {
+        Node* write_index_node = target.right;
+        fit target.right.kind {
+          .Bracket(inner) -> { write_index_node = inner; }
+          _ -> {}
+        }
+        self.check_array_index_bounds(node, base, write_index_node);
+      }
+      ret;
+    }
+    if base.pointer_depth > 0 || equals(base.name, "") ||
       (base.base == .Str && !base.is_array) {
       ret;
     }
