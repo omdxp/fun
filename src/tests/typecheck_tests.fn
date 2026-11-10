@@ -125,6 +125,48 @@ test "assigning to a field through a const-bound receiver is rejected the same w
   );
 }
 
+test "a dereferenced assignment target's own value must fit what it writes into, same as every other target shape" {
+  // `check_assignment`'s own `fit e.left.kind` had no `.Unary` case at
+  // all - every other assignment target shape (a bare name, a field)
+  // checks the value fits what it's writing into, but `*ptr = v;`
+  // skipped straight past this whole function with no check
+  // whatsoever, leaking a raw C compiler error for anything
+  // mismatched instead - confirmed directly: `*head = a_node_ptr;`
+  // (assigning a pointer where its own pointee type is expected)
+  // compiled all the way through to a real C type error.
+  rejects(
+    `compound Node { num value; Node* next; }
+    `fun main() {
+    `  Node n;
+    `  Node* head = &n;
+    `  Node* other = &n;
+    `  *head = other;
+    `}`,
+    "expected assigning a pointer where its own pointee type is expected to be rejected"
+  );
+  rejects(
+    `fun main() {
+    `  num x = 5;
+    `  num* p = &x;
+    `  *p = "hello";
+    `}`,
+    "expected assigning a string through a num pointer to be rejected"
+  );
+  accepts(
+    `compound Node { num value; }
+    `fun main() {
+    `  Node a = Node{value = 1};
+    `  Node b = Node{value = 2};
+    `  Node* pa = &a;
+    `  *pa = b;
+    `  num x = 5;
+    `  num* p = &x;
+    `  *p = 10;
+    `}`,
+    "expected a dereferenced assignment whose value actually fits the pointee type to stay allowed"
+  );
+}
+
 test "a top-level const must fit its own declared type, not just a local variable" {
   rejects(
     `const str NAME = 1;

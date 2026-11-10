@@ -5047,7 +5047,7 @@ impl Checker {
             format(
             "cannot assign to a field of '{str}', which is const",
             const_root.unwrap()
-          ),
+            ),
             node
           );
           ret;
@@ -5097,6 +5097,39 @@ impl Checker {
             type_name(value),
             name,
             type_name(b.type)
+            ),
+            node
+          );
+        }
+      }
+      // `*ptr = v;` had no case here at all - every other assignment
+      // target shape above checks the value fits what it's writing
+      // into, but a dereferenced one skipped straight past this whole
+      // `fit` with no check whatsoever, leaking a raw C compiler
+      // error for anything mismatched (assigning a pointer where its
+      // own pointee type is expected included, confirmed directly:
+      // `*head = a_node_ptr;` where `head` is `Node*` compiled all the
+      // way to a real C type error, "assigning to 'Node' from
+      // incompatible type 'Node *'").
+      .Unary(u) -> {
+        if !equals(u.op, "*") || !equals(e.op, "=") || !e.has_right {
+          ret;
+        }
+        CheckedType target = self.infer(e.left, env);
+        if self.failed {
+          ret;
+        }
+        CheckedType value = self.infer(e.right, env);
+        self.check_shorthand_variant(e.right, target, env);
+        if self.failed {
+          ret;
+        }
+        if !self.assignable(target, value) {
+          self.fail(
+            format(
+            "cannot assign {str} to a dereferenced value of type {str}",
+            type_name(value),
+            type_name(target)
             ),
             node
           );
