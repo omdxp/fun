@@ -11582,6 +11582,33 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
+      .Ternary(t) -> {
+        // A bare `cond ? a() : b();` statement (not assigned, returned,
+        // or passed anywhere) is control flow spelled as a value
+        // expression - lowered to the equivalent if/else here instead
+        // of a raw C ternary statement, which needs the GNU void-
+        // expression extension real MSVC doesn't support, exactly the
+        // shape this always is: neither branch's own value is ever
+        // used by anything.
+        self.state.write_indent();
+        self.state.write("if (");
+        let cerr = self.emit_expr(*t.cond);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(") { ");
+        let therr = self.emit_expr(*t.then_val);
+        if therr.is_some() {
+          ret therr;
+        }
+        self.state.write("; } else { ");
+        let elerr = self.emit_expr(*t.else_val);
+        if elerr.is_some() {
+          ret elerr;
+        }
+        self.state.write("; }\n");
+        ret .None;
+      }
       .StatementAssert(a) -> {
         // `assert cond;` and `assert cond, "msg";` lower to
         // `if (!(cond)) { ...; abort(); }`. Under a test run the failure

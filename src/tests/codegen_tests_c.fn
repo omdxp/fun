@@ -438,6 +438,37 @@ test "a shape coercion recognizes a generic call's own mangled return type, a te
   assert equals(out, "7 1 1 1\n"), "expected the generic call, ternary, and parenthesized operand to all coerce correctly";
 }
 
+test "a bare ternary used as its own statement, for its side effects, lowers to if/else" {
+  // `emit_statement` had no `.Ternary` case at all - a ternary never
+  // assigned, returned, or passed anywhere (`cond ? a() : b();`, both
+  // branches used only for their own side effect) fell straight to
+  // "unsupported node", since this file's own `.Expression`/`.Unary`/
+  // `.Panic` cases cover every other bare-expression-statement shape
+  // but this one. Emitting a raw C ternary statement here instead
+  // would need the GNU void-expression extension real MSVC doesn't
+  // support (both branches here return nothing used), so this lowers
+  // to the equivalent if/else, which needs no such extension.
+  str src = `use std.c.io;
+  `fun main() num {
+  `  flag full_mode = false;
+  `  num i = 0;
+  `  for i < 2 {
+  `    full_mode ? printf("true %lld\n", i) : printf("false %lld\n", i);
+  `    i = i + 1;
+  `  }
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "ternary_statement",
+    "a bare ternary used as its own statement, for its side effects, lowers to if/else"
+  );
+  assert equals(out, "false 0\nfalse 1\n"), format(
+    "expected both loop iterations to take the false branch, got: {str}",
+    out
+  );
+}
+
 test "a top-level global's own compound-literal initializer drops its redundant cast under MSVC" {
   // Found investigating a REAL Windows CI failure on the test just
   // above, not locally reproducible (real MSVC isn't available
