@@ -141,6 +141,15 @@ pub fun print_node(Node* node, num depth) {
         print_node(f.body, depth + 2);
       }
     }
+    .ClosureLiteral(f) -> {
+      if f.has_rtype {
+        _line(depth + 1, format("Return Type: {str}", _dtype_str(f.rtype)));
+      }
+      if f.has_body {
+        _line(depth + 1, "Body:");
+        print_node(f.body, depth + 2);
+      }
+    }
     .Body(b) -> {
       if b.statements.len > 0 {
         _line(depth + 1, format("Statements count: {num}", b.statements.len));

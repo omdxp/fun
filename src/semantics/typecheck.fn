@@ -48,6 +48,14 @@ pub compound CheckedType {
   // against it, rather than degrading to unknown.
   flag has_fn_sig;
   FnTypeSig* fn_sig;
+  // A capturing closure's own declared signature (`closure() R`), kept
+  // entirely separate from `has_fn_sig`/`fn_sig` above - mirrors
+  // `DataType`'s own identical split, for the identical reason: a
+  // closure's runtime shape is not binary-compatible with a plain bare
+  // function pointer, so the two must never be treated as the same
+  // type.
+  flag has_closure_sig;
+  FnTypeSig* closure_sig;
   // A real tuple type (`(num, str)`). Like a function type, this has no
   // `name` of its own, so `is_unknown` must never treat one as
   // unresolved just because `name` is empty.
@@ -68,6 +76,8 @@ pub fun checked_unknown() CheckedType {
   t.generic_args.init(0);
   t.has_fn_sig = false;
   t.fn_sig = nil;
+  t.has_closure_sig = false;
+  t.closure_sig = nil;
   t.is_tuple = false;
   t.tuple_members.init(0);
   ret t;
@@ -124,6 +134,8 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
   }
   t.has_fn_sig = dt.has_fn_sig;
   t.fn_sig = dt.fn_sig;
+  t.has_closure_sig = dt.has_closure_sig;
+  t.closure_sig = dt.closure_sig;
   t.is_tuple = dt.is_tuple;
   num ti = 0;
   for ti < dt.tuple_members.len {
@@ -204,7 +216,7 @@ pub fun is_unknown(CheckedType t) flag {
   // carries `has_fn_sig` instead of a name - neither is "the checker
   // doesn't understand this", so neither reaches the empty-name check
   // below, which exists for a genuine placeholder/unresolved reference.
-  if t.is_tuple || t.has_fn_sig {
+  if t.is_tuple || t.has_fn_sig || t.has_closure_sig {
     ret false;
   }
   // A `let` carries a placeholder until its value is known, which is
@@ -2341,9 +2353,45 @@ impl Checker {
       .Unary(u) -> { ret self.infer_unary(node, u, env); }
       .Ternary(t) -> { ret self.infer_ternary(node, t, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
+      .ClosureLiteral(f) -> { ret self.infer_closure_literal(f, env); }
       _ -> { ret checked_unknown(); }
     }
     ret checked_unknown();
+  }
+
+  // A closure literal's body shares the SAME live `env` its enclosing
+  // function's own body is already being checked against (`TypeEnv` is
+  // just a flat scope stack, so this is no different from how an `if`/
+  // `for` block's own body already sees everything around it) - never
+  // an isolated one, which would silently lose visibility into every
+  // local the closure actually captures. `self.rtype` is saved and
+  // swapped the same way `check_function_with_self` already does for a
+  // real function, so a `ret` inside the closure checks against the
+  // closure's OWN declared return type, not whatever function the
+  // closure literal itself happens to sit inside.
+  infer_closure_literal(FunctionNode f, TypeEnv* env) CheckedType {
+    CheckedType previous_rtype = self.rtype;
+    self.rtype = checked_unknown();
+    if f.has_rtype {
+      self.rtype = checked_from_dtype(f.rtype);
+    }
+    env.push();
+    self.check_statement(f.body, env);
+    env.pop();
+    _free_checked_type_contents(&self.rtype);
+    self.rtype = previous_rtype;
+
+    CheckedType t = checked_unknown();
+    t.has_closure_sig = true;
+    // Every `closure() R` shares this same fixed placeholder name,
+    // mirroring `fun(...) R`'s own identical looseness (see
+    // `parse_closure_type_datatype`'s own comment) - the generic
+    // `assignable`/`can_assign` path treats any two closures as
+    // mutually interchangeable this way; `check_closure_rtype_matches`
+    // is the real, narrower enforcement wherever it actually matters.
+    t.name = "closure(...)";
+    t.closure_sig = f.closure_sig;
+    ret t;
   }
 
   // The type a compound literal builds. A generic one written without
@@ -2867,6 +2915,18 @@ impl Checker {
     str field = _callee_name(e.right);
     if equals(field, "") {
       ret checked_unknown();
+    }
+    // A closure value's own `.fn`/`.env` - real, typechecked fields on
+    // any `closure() R`-typed expression, the same special-cased-
+    // builtin-accessor shape as `check_field_function_call` already
+    // uses for "this needs its own typecheck path beyond the general
+    // method-call dispatch." Lets a closure's own representation stay
+    // opaque to ordinary Fun code everywhere else while still letting
+    // `std.thread_spawn.spawn`'s own body (`ret runtime_async_spawn(c.
+    // fn, c.env);`) be ordinary, real Fun code rather than a codegen-
+    // only intrinsic with no body at all.
+    if receiver.has_closure_sig && (equals(field, "fn") || equals(field, "env")) {
+      ret checked_of(.Raw);
     }
     if self.check_alias_qualified_read(e, field, env) {
       ret checked_unknown();
@@ -3780,6 +3840,44 @@ impl Checker {
         continue;
       }
       CheckedType got = self.infer(args.get(i), env);
+      if want.has_closure_sig {
+        // Same gap `check_variable` also closes: a bare named function
+        // passed where a closure is expected has no captured
+        // environment at all, never interchangeable with one, but
+        // degrades to `checked_unknown()` through the general
+        // `self.infer`/`env.lookup` path, which `assignable`'s own
+        // "unknown matches anything" convention would otherwise accept.
+        str bare_arg_name = "";
+        fit args.get(i).kind {
+          .Identifier(an) -> { bare_arg_name = an; }
+          _ -> {}
+        }
+        if !equals(bare_arg_name, "") && self.fns.at(bare_arg_name).is_some() {
+          self.fail(
+            format(
+            "argument {num} of '{str}': '{str}' is a plain function, not a closure",
+            i + 1,
+            name,
+            bare_arg_name
+            ),
+            args.get(i)
+          );
+          ret;
+        }
+        if got.has_closure_sig && !self.check_closure_rtype_matches(want, got) {
+          self.fail(
+            format(
+            "argument {num} of '{str}': its closure returns {str}, not {str}",
+            i + 1,
+            name,
+            type_name(checked_from_dtype(got.closure_sig.rtype)),
+            type_name(checked_from_dtype(want.closure_sig.rtype))
+            ),
+            args.get(i)
+          );
+          ret;
+        }
+      }
       self.check_shorthand_variant(args.get(i), want, env);
       if self.failed {
         ret;
@@ -4037,6 +4135,16 @@ impl Checker {
         ret checked_unknown();
       }
       let callee = local.unwrap();
+      if callee.has_closure_sig {
+        if args.len != 0 {
+          self.fail(
+            format("'{str}' is a closure and takes no arguments, got {num}", name, args.len),
+            node
+          );
+          ret checked_unknown();
+        }
+        ret checked_from_dtype(callee.closure_sig.rtype);
+      }
       if !callee.has_fn_sig {
         ret checked_unknown();
       }
@@ -5597,8 +5705,63 @@ impl Checker {
         );
         ret;
       }
+      if declared.has_closure_sig {
+        // A bare named function (`fun add(...) ...`, referenced by
+        // name) degrades to `checked_unknown()` through this same
+        // general path (see `infer`'s own `.Identifier` arm - it only
+        // ever consults `env`, never `self.fns`), which `can_assign`'s
+        // "unknown matches anything" convention would otherwise accept
+        // here - a real correctness hole, not just permissiveness: a
+        // plain function has no captured environment at all, a
+        // completely different runtime shape from a closure, never
+        // interchangeable with one.
+        str bare_fn_name = "";
+        fit v.val.kind {
+          .Identifier(vn) -> { bare_fn_name = vn; }
+          _ -> {}
+        }
+        if !equals(bare_fn_name, "") && self.fns.at(bare_fn_name).is_some() {
+          self.fail(
+            format(
+            "cannot initialize '{str}': '{str}' is a plain function, not a closure",
+            v.name,
+            bare_fn_name
+            ),
+            stmt
+          );
+          ret;
+        }
+        if value.has_closure_sig && !self.check_closure_rtype_matches(declared, value) {
+          self.fail(
+            format(
+            "cannot initialize '{str}': its closure returns {str}, not {str}",
+            v.name,
+            type_name(checked_from_dtype(value.closure_sig.rtype)),
+            type_name(checked_from_dtype(declared.closure_sig.rtype))
+            ),
+            stmt
+          );
+          ret;
+        }
+      }
     }
     env.bind(v.name, declared, v.is_const);
+  }
+
+  // Real closure-signature compatibility, unlike the generic
+  // `assignable` check above: every `closure() R` type shares the same
+  // fixed placeholder name ("closure(...)", mirroring `fun(...) R`'s own
+  // identical looseness - see `parse_closure_type_datatype`'s own
+  // comment), so `assignable`/`can_assign` alone treats every closure as
+  // mutually interchangeable regardless of its real return type. This
+  // is the actual enforcement, called wherever a closure literal's
+  // value meets a declared `closure() R` slot (a variable's own
+  // initializer, a call argument).
+  check_closure_rtype_matches(CheckedType declared, CheckedType value) flag {
+    ret self.assignable(
+      checked_from_dtype(declared.closure_sig.rtype),
+      checked_from_dtype(value.closure_sig.rtype)
+    );
   }
 
   // `let (a, b, c) = expr;`: unlike an ordinary `let`, whose real

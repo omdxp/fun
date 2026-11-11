@@ -981,6 +981,71 @@ impl ParseState {
     ret .None;
   }
 
+  // Parses a capturing-closure parameter's datatype: `closure() R`.
+  // Called from `parse_datatype` on a leading `closure` keyword, sibling
+  // to `parse_fn_type_datatype` directly above - same shape, same
+  // return-type sniff, but with no parameter loop at all (a closure
+  // literal never takes call-time parameters, see `parse_closure_literal`'s
+  // own doc comment), and filling the entirely separate `closure_sig`/
+  // `has_closure_sig` pair rather than `fn_sig`/`has_fn_sig`: a capturing
+  // closure's runtime shape (a function pointer plus a heap environment
+  // pointer) is not binary-compatible with a plain bare function
+  // pointer, so the two type tracks must never be interchangeable.
+  pub parse_closure_type_datatype(DataType* dt) Option<ParseErrorKind> {
+    self.token_next(); // consume 'closure'
+    let operr = self.expect_op("(");
+    if operr.is_some() {
+      ret operr;
+    }
+    let cperr = self.expect_sym(')');
+    if cperr.is_some() {
+      ret cperr;
+    }
+
+    DataType* rtype = malloc(sizeof(DataType));
+    *rtype = dtype_new();
+    flag has_rtype_tok = false;
+    fit self.token_peek_next() {
+      .Some(t) -> {
+        if t.type == .Identifier {
+          has_rtype_tok = true;
+        } else {
+          if t.type == .Keyword {
+            fit t.data {
+              .Sval(s) -> {
+                if keyword_is_datatype(s) {
+                  has_rtype_tok = true;
+                }
+              }
+              _ -> {}
+            }
+          }
+        }
+      }
+      .None -> {}
+    }
+    if has_rtype_tok {
+      let rerr = self.parse_datatype(rtype);
+      if rerr.is_some() {
+        ret rerr;
+      }
+    } else {
+      rtype.kind = .Void;
+      rtype.type_str = "void";
+    }
+
+    FnTypeSig sig = fn_type_sig_new();
+    sig.rtype = rtype;
+    FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
+    *sig_ptr = sig;
+
+    dt.kind = .Unknown;
+    dt.closure_sig = sig_ptr;
+    dt.has_closure_sig = true;
+    dt.type_str = "closure(...)";
+    ret .None;
+  }
+
   // Parses a tuple type (`(num, str)`): a comma-separated `parse_datatype`
   // run of at least two members, then the same trailing pointer-depth
   // suffix every other datatype shape gets. A single `(T)` is rejected
@@ -1061,6 +1126,9 @@ impl ParseState {
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
     if self.next_token_is_keyword("fun") {
       ret self.parse_fn_type_datatype(dt);
+    }
+    if self.next_token_is_keyword("closure") {
+      ret self.parse_closure_type_datatype(dt);
     }
     if self.next_token_is_operator("(") {
       ret self.parse_tuple_type_datatype(dt);
@@ -2578,6 +2646,14 @@ impl Parser {
           }
           if equals(kw, "await") {
             ret self.parse_await_operand();
+          }
+          // An anonymous `fun() R { ... }` closure literal as a primary
+          // expression operand - `fun` has never been a legal expression
+          // starter before this (it only ever appeared in type positions
+          // or at the top level), so this is an unambiguous addition, not
+          // a conflict with anything above.
+          if equals(kw, "fun") {
+            ret self.parse_closure_literal();
           }
           // A builtin scalar type keyword as the sole operand of
           // `sizeof(...)` is a type keyword token rather than a value
@@ -4627,7 +4703,10 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
+            .Sval(s) -> {
+              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
+                equals(s, "closure");
+            }
             _ -> {}
           }
         }
@@ -5989,6 +6068,162 @@ impl Parser {
     ret .None;
   }
 
+  // Parses an anonymous `fun() [R] { body }` closure literal, leaving a
+  // `.ClosureLiteral` node on the node stack - an expression, never a
+  // declaration, so this is reached from `parse_expressionable_single`
+  // (any primary-expression position), not `parse_top_level_declaration`.
+  // Modeled directly on `parse_function`, trimmed down: no name, no
+  // generics, and - unlike a real function - a closure's own parameter
+  // list is never parsed at all (every call-time input it needs comes
+  // from what it captures, not arguments), so anything other than an
+  // immediate `)` right after `(` is a parse error naming the offending
+  // token, the earliest and most honest place to reject it. A body is
+  // always required (no bodyless/prototype form - an anonymous value
+  // with nothing to call makes no sense).
+  pub parse_closure_literal() Option<ParseErrorKind> {
+    self.state.new_scope();
+
+    let fun_tok = self.state.token_next(); // consume 'fun'
+
+    let operr = self.state.expect_op("(");
+    if operr.is_some() {
+      self.state.finish_scope();
+      ret operr;
+    }
+    let cperr = self.state.expect_sym(')');
+    if cperr.is_some() {
+      self.state.finish_scope();
+      ret cperr;
+    }
+
+    FunctionNode fnv = function_node_new();
+    fnv.has_name = false;
+    fnv.args.init(0);
+    fnv.has_args = false;
+
+    Node cl_node = node_new(.ClosureLiteral(fnv));
+    fit fun_tok {
+      .Some(t) -> {
+        cl_node.pos = t.pos;
+        cl_node.has_pos = true;
+      }
+      .None -> {}
+    }
+
+    // Mirrors `parse_test_declaration`'s own save/restore of
+    // `current_function` around a synthetic context: nested node
+    // construction inside this closure's body stamps `binded.function`
+    // from whatever's active at that moment, so it needs to name this
+    // closure (not whatever real function the closure literal itself
+    // appears inside), restored once the body is done either way.
+    let prev_fn = self.current_function;
+    let prev_has_fn = self.has_current_function;
+    self.current_function = &cl_node;
+    self.has_current_function = true;
+
+    DataType* rtype = malloc(sizeof(DataType));
+    flag has_explicit_rtype = false;
+    fit self.state.token_peek_next() {
+      .Some(rt) -> {
+        flag looks_like_type = false;
+        if rt.type == .Identifier {
+          looks_like_type = true;
+        }
+        if rt.type == .Keyword {
+          fit rt.data {
+            .Sval(s) -> {
+              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
+                equals(s, "closure");
+            }
+            _ -> {}
+          }
+        }
+        if rt.type == .Operator {
+          fit rt.data {
+            .Sval(s) -> { looks_like_type = looks_like_type || equals(s, "("); }
+            _ -> {}
+          }
+        }
+        if looks_like_type {
+          *rtype = dtype_new();
+          let rerr = self.state.parse_datatype(rtype);
+          if rerr.is_some() {
+            self.current_function = prev_fn;
+            self.has_current_function = prev_has_fn;
+            self.state.finish_scope();
+            ret rerr;
+          }
+          if self.state.next_token_is_operator("[") {
+            let raberr = self.parse_array_brackets(rtype);
+            if raberr.is_some() {
+              self.current_function = prev_fn;
+              self.has_current_function = prev_has_fn;
+              self.state.finish_scope();
+              ret raberr;
+            }
+          }
+          has_explicit_rtype = true;
+        }
+      }
+      .None -> {}
+    }
+    if !has_explicit_rtype {
+      *rtype = dtype_new();
+      rtype.kind = .Void;
+      rtype.type_str = "void";
+    }
+    fit cl_node.kind {
+      .ClosureLiteral(cur) -> {
+        cur.rtype = rtype;
+        cur.has_rtype = true;
+        // Built once, here, wrapping this SAME `rtype` pointer (never a
+        // second, independently-owned copy) - see `FunctionNode.
+        // closure_sig`'s own comment on why `infer()` needs this
+        // pre-built rather than allocating a fresh one on every call.
+        FnTypeSig csig = fn_type_sig_new();
+        csig.rtype = rtype;
+        FnTypeSig* csig_ptr = malloc(sizeof(FnTypeSig));
+        *csig_ptr = csig;
+        cur.closure_sig = csig_ptr;
+        cl_node.kind = .ClosureLiteral(cur);
+      }
+      _ -> {}
+    }
+
+    if !self.state.next_token_is_symbol('{') {
+      self.state.err("expected closure body");
+      self.current_function = prev_fn;
+      self.has_current_function = prev_has_fn;
+      self.state.finish_scope();
+      ret .Some(.InvalidStatement);
+    }
+    let berr = self.parse_body();
+    self.current_function = prev_fn;
+    self.has_current_function = prev_has_fn;
+    self.state.finish_scope();
+    if berr.is_some() {
+      ret berr;
+    }
+    let maybe_body = self.state.node_pop();
+    if maybe_body.is_none() {
+      self.state.err("expected closure body");
+      ret .Some(.InvalidStatement);
+    }
+    Node* body = malloc(sizeof(Node));
+    *body = maybe_body.unwrap();
+    fit cl_node.kind {
+      .ClosureLiteral(cur2) -> {
+        cur2.body = body;
+        cur2.has_body = true;
+        cl_node.kind = .ClosureLiteral(cur2);
+      }
+      _ -> {}
+    }
+
+    self.create_node(&cl_node);
+    ret .None;
+  }
+
   // Parses `await <expr>` as a bounded expression operand, lowered as a
   // `Unary` node with `op = "await"` and left on the node stack. Doesn't
   // consume a trailing `;`; statement-position callers do that themselves.
@@ -7006,7 +7241,7 @@ impl Parser {
         .Sval(s) -> { kw = s; }
         _ -> {}
       }
-      if keyword_is_datatype(kw) || equals(kw, "fun") {
+      if keyword_is_datatype(kw) || equals(kw, "fun") || equals(kw, "closure") {
         ret self._parse_bare_type_variable_declaration(false);
       }
       if equals(kw, "let") {
@@ -7886,7 +8121,10 @@ impl Parser {
           }
           if rt.type == .Keyword {
             fit rt.data {
-              .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
+              .Sval(s) -> {
+                looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
+                  equals(s, "closure");
+              }
               _ -> {}
             }
           }
@@ -8359,7 +8597,10 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> { looks_like_type = keyword_is_datatype(s) || equals(s, "fun"); }
+            .Sval(s) -> {
+              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
+                equals(s, "closure");
+            }
             _ -> {}
           }
         }

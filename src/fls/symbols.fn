@@ -150,6 +150,29 @@ pub fun render_type(DataType* dt) str {
     }
     ret b.build();
   }
+  if dt.has_closure_sig && dt.closure_sig != nil {
+    // A capturing closure's own declared type (`closure() R`) - same
+    // reasoning as the `has_fn_sig` case just above: the parser's own
+    // fixed placeholder text (`"closure(...)"`) never reflects the
+    // real return type, since codegen reads `closure_sig` directly
+    // instead. Always zero parameters (see `parse_closure_type_
+    // datatype`'s own comment), so there is no parameter list to
+    // render.
+    b.append("closure() ");
+    str crtype_text = render_type(dt.closure_sig.rtype);
+    b.append(crtype_text);
+    free(crtype_text);
+    num cstars = dt.pointer_depth;
+    if dt.flags.is_pointer && cstars == 0 {
+      cstars = 1;
+    }
+    num cs = 0;
+    for cs < cstars {
+      b.append("*");
+      cs = cs + 1;
+    }
+    ret b.build();
+  }
   str base_name = _base_type_name(dt);
   b.append(base_name);
   free(base_name);
@@ -1078,22 +1101,37 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
       ret "";
     }
   }
+  // `closure() R name`: `j` has already walked back past `R` itself
+  // (whichever shape just below would otherwise return it bare) - a
+  // closure's own declared type is `closure() R` as a whole, not just
+  // its return type, so this is checked first, before either ordinary
+  // branch returns just `R` alone and silently drops the fact that
+  // `name` is a closure at all. Matches `render_type`'s own identical
+  // `"closure(...)"` + real-rtype rendering, so every fls codepath
+  // that resolves a closure-typed local's own declared type agrees on
+  // the same `starts_with(..., "closure(")` convention.
+  str maybe_rtype = "";
   if tokens.get(j).type == .Identifier {
-    if had_array {
-      ret format("{str}[]", token_word(tokens.get(j)));
-    }
-    ret token_word(tokens.get(j));
-  }
-  // A builtin scalar (`num x = 5;`) lexes its own type name as a
-  // `.Keyword` token, never `.Identifier` - without this, every bare
-  // local declared with one of these (rather than a user-defined
-  // compound/enum name) read as having no declared type at all here.
-  if tokens.get(j).type == .Keyword &&
+    maybe_rtype = token_word(tokens.get(j));
+  } elif tokens.get(j).type == .Keyword &&
     _is_builtin_scalar_type_word(token_word(tokens.get(j))) {
-    if had_array {
-      ret format("{str}[]", token_word(tokens.get(j)));
+    maybe_rtype = token_word(tokens.get(j));
+  }
+  if !equals(maybe_rtype, "") {
+    num cj = _prev_real_index(tokens, j);
+    if cj >= 0 && token_is_symbol(tokens.get(cj), ')') {
+      num oj = _prev_real_index(tokens, cj);
+      if oj >= 0 && token_is_operator(tokens.get(oj), "(") {
+        num kj = _prev_real_index(tokens, oj);
+        if kj >= 0 && token_is_keyword(tokens.get(kj), "closure") {
+          ret format("closure() {str}", maybe_rtype);
+        }
+      }
     }
-    ret token_word(tokens.get(j));
+    if had_array {
+      ret format("{str}[]", maybe_rtype);
+    }
+    ret maybe_rtype;
   }
   ret "";
 }

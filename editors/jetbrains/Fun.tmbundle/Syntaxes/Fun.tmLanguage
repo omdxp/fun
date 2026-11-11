@@ -217,7 +217,7 @@
         <string>keyword.control.fun</string>
         <key>match</key>
         <string>
-          \b(use|as|pub|fun|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b</string>
+          \b(use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b</string>
       </dict>
       <dict>
         <key>name</key>

@@ -1295,3 +1295,45 @@ test "expect no_cover is rejected: nothing ever reports it, so it could never be
     err
   );
 }
+
+test "a closure capturing a pointer to a same-function local is noticed" {
+  notices(
+    `fun main() {
+    `  num x = 1;
+    `  num* px = &x;
+    `  closure() void c = fun() {
+    `    _ = *px;
+    `  };
+    `  c();
+    `}`,
+    "closure_captures_escaping_pointer",
+    "expected a closure capturing a pointer to a same-function stack local to be flagged - unsafe once this function returns"
+  );
+}
+
+test "a closure capturing a pointer that is itself a parameter is not flagged - best-effort, not this function's own local" {
+  says_nothing(
+    `fun run(num* p) {
+    `  closure() void c = fun() {
+    `    _ = *p;
+    `  };
+    `  c();
+    `}`,
+    "expected no warning: 'p' is a parameter, not a local this function itself took the address of"
+  );
+}
+
+test "a closure capturing a heap pointer (never a stack address) is not flagged" {
+  says_nothing(
+    `use std.c.mem;
+    `fun main() {
+    `  num* h = malloc(sizeof(num));
+    `  closure() void c = fun() {
+    `    *h = 1;
+    `  };
+    `  c();
+    `  free(h);
+    `}`,
+    "expected no warning: a malloc'd pointer safely outlives this function, unlike a stack local's address"
+  );
+}

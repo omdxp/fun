@@ -1117,6 +1117,62 @@ exports for `fun(T, T) num` (negative when `a` sorts before `b`, positive
 when after, 0 when equal), so a function of your own can take a comparator
 the same way: `fun sort_with(Vec<num>* v, Comparator<num> order)`.
 
+### Closures
+
+Fun has no nested function declarations, but `fun() R { ... }` is also a
+closure literal: an anonymous value, written wherever an expression is
+expected, that captures every outer local it reads by value at the
+moment it's created:
+
+```fun
+use std.io;
+
+fun main() {
+  num x = 1;
+  closure() void c = fun() {
+    println_fmt("x={num}", x);
+  };
+  x = 99;
+  c(); // prints "x=1" - the closure captured a snapshot, not a live alias
+}
+```
+
+A closure's own declared type is `closure() R`, deliberately distinct
+from a plain `fun(...) R` function pointer: a closure's runtime shape
+(a function pointer plus its own captured environment) is wider than a
+bare function pointer, so the two are never interchangeable, in either
+direction. A bare named function can't be assigned where a closure is
+expected, and a closure can't stand in for a plain `fun(...) R`
+parameter.
+
+A closure literal always takes zero call-time parameters, `fun()`,
+never `fun(x Type)` - everything it needs comes from what it captures,
+not from arguments. Capturing a pointer opts into aliasing explicitly,
+the same as it would anywhere else in the language; capturing an
+ordinary value never does.
+
+Calling or spawning a closure runs it at most once: its own captured
+environment is freed the moment it finishes. Calling or spawning the
+same closure value again afterward is undefined. A closure that's
+created but never spawned or called needs its own explicit
+`free(c.env)` - there is nothing else to call that would free it.
+
+#### `closure_captures_escaping_pointer`
+
+Capturing a pointer to a local declared in the *same* enclosing
+function is flagged, since the closure may well run after that
+function has already returned - exactly the situation spawning a
+closure onto another thread creates. Best-effort: it only catches a
+direct `&local` assignment immediately visible in the same function,
+not one that reaches the capture through a helper function's return
+value, a struct field, or a reassignment in a conditional branch.
+Capturing a pointer to something heap-allocated, or a parameter handed
+in from outside, is never flagged - only a pointer to a local this
+same function itself took the address of.
+
+See [Concurrency](concurrency.md) for `std.thread_spawn`'s `spawn`,
+which runs a closure on a new OS thread.
+
 ### `missing_return`
 
 A non-`void` function that can fall off the end without returning

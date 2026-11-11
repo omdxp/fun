@@ -16,6 +16,7 @@ use std.string;
 use std.option;
 use std.shapes;
 use std.c.mem;
+use std.set;
 
 // ===== Data types =====
 
@@ -69,6 +70,15 @@ pub compound DataType {
   Vec<DataType*> generic_args;
   FnTypeSig* fn_sig;
   flag has_fn_sig;
+  // A capturing closure's own signature (`closure() R`), kept entirely
+  // separate from `fn_sig`/`has_fn_sig` above rather than unioned with
+  // it: a closure's runtime shape (a function pointer plus a heap
+  // environment pointer) is not binary-compatible with a plain bare
+  // function pointer, so the two type tracks must never be
+  // interchangeable. `closure_sig.params` is always empty (a closure
+  // literal takes no call-time parameters); only `rtype` is ever real.
+  FnTypeSig* closure_sig;
+  flag has_closure_sig;
   // A real, permanently-persisting tuple type (`(num, str)`), kept
   // separate from `generic_args` since a tuple has no single named
   // declaration behind it the way a generic instantiation always does.
@@ -92,6 +102,8 @@ pub fun dtype_new() DataType {
   dt.generic_args.init(0);
   dt.fn_sig = nil;
   dt.has_fn_sig = false;
+  dt.closure_sig = nil;
+  dt.has_closure_sig = false;
   dt.is_tuple = false;
   dt.tuple_members.init(0);
   ret dt;
@@ -166,6 +178,13 @@ pub enum WarningId {
   BlockingForkDeadlock,
   // A mutable compound forked into concurrently with no synchronization.
   SharedMutableCaptureRace,
+  // A closure literal captures a pointer to a local declared in the same
+  // enclosing function - unsafe once that function returns, which a
+  // fire-and-forget `spawn` is very likely to do before the closure
+  // ever runs. Best-effort: only catches a direct `&local` assignment
+  // immediately visible in the same function, the same narrowness
+  // `SharedMutableCaptureRace` above already ships with.
+  ClosureCapturesEscapingPointer,
   // An integer literal that can't fit its declared arbitrary-width type.
   IntegerLiteralOutOfRange,
   // More blocking sends issued into a bounded channel than it can hold.
@@ -209,6 +228,7 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
     "missing_return" -> { ret .Some(.MissingReturn); }
     "blocking_fork_deadlock" -> { ret .Some(.BlockingForkDeadlock); }
     "shared_mutable_capture_race" -> { ret .Some(.SharedMutableCaptureRace); }
+    "closure_captures_escaping_pointer" -> { ret .Some(.ClosureCapturesEscapingPointer); }
     "integer_literal_out_of_range" -> { ret .Some(.IntegerLiteralOutOfRange); }
     "channel_capacity_overflow" -> { ret .Some(.ChannelCapacityOverflow); }
     "no_cover" -> { ret .Some(.NoCover); }
@@ -255,14 +275,14 @@ pub fun warning_id_or_plural_from_string(str name) Option<WarningIdRef> {
 }
 
 test "warning_id_or_plural_from_string resolves every warning id both singular and plural" {
-  // Covers all 16 ids, including the one irregular case
+  // Covers all 17 ids, including the one irregular case
   // (`fit_unreachable_branch` -> `...branches` needs the "es" strip,
   // not a plain "s" strip) and the one that already ends in "e"
   // (`integer_literal_out_of_range` -> `...ranges` is a plain "s"
   // strip, not "es" - the "es" attempt on it must fail closed and fall
   // through rather than matching a bogus "...rang").
-  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,integer_literal_out_of_range,channel_capacity_overflow,no_cover";
-  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,integer_literal_out_of_ranges,channel_capacity_overflows,no_covers";
+  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,closure_captures_escaping_pointer,integer_literal_out_of_range,channel_capacity_overflow,no_cover";
+  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,closure_captures_escaping_pointers,integer_literal_out_of_ranges,channel_capacity_overflows,no_covers";
   Vec<str> sing = split(singulars, ',');
   Vec<str> plur = split(plurals, ',');
   assert sing.len == plur.len, "expected a matched singular/plural pair per id";
@@ -323,6 +343,7 @@ impl WarningId as To<str> {
       .MissingReturn -> { ret "missing_return"; }
       .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
       .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
+      .ClosureCapturesEscapingPointer -> { ret "closure_captures_escaping_pointer"; }
       .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
       .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
       .NoCover -> { ret "no_cover"; }
@@ -491,6 +512,19 @@ pub compound FunctionNode {
   // freeing (see `_free_node_contents`) and cloning (see `node_clone`)
   // instead of being treated as eternal, shared token text.
   flag owns_name;
+  // Only ever set for a `.ClosureLiteral`'s own `FunctionNode` (always
+  // `nil` for a real `.Function` declaration): a `closure() R`-shaped
+  // signature built once, here, by the parser, wrapping this SAME
+  // node's own `rtype` pointer (never a second, independently-owned
+  // DataType) - so `infer()`'s own `.ClosureLiteral` arm can hand back
+  // a `CheckedType` whose `closure_sig` is borrowed from the AST,
+  // freed exactly once with it, the same way a real function-typed
+  // value's own `CheckedType.fn_sig` already borrows straight from its
+  // declaring `DataType`, rather than allocating a fresh wrapper on
+  // every single `infer()` call for the same literal - which `fls`'s
+  // own live, repeated re-typechecking during an edit session would
+  // otherwise leak without bound.
+  FnTypeSig* closure_sig;
 }
 
 pub fun function_node_new() FunctionNode {
@@ -513,6 +547,7 @@ pub fun function_node_new() FunctionNode {
   f.is_variadic = false;
   f.body = nil;
   f.has_body = false;
+  f.closure_sig = nil;
   ret f;
 }
 
@@ -1007,6 +1042,17 @@ pub enum NodeKind {
   Panic(Node*),
   Variable(VariableNode),
   Function(FunctionNode),
+  // An anonymous `fun() R { ... }` closure literal, an expression, never
+  // a declaration. Reuses `FunctionNode` as-is (`name=""`, `has_name =
+  // false`, `args` always empty since a closure takes no call-time
+  // parameters), but kept as its own variant rather than an
+  // oddly-flagged `.Function`, since `.Function` is matched in roughly
+  // 185 places across this codebase (many via a wildcard default arm) -
+  // a dedicated variant falls through those harmlessly, while reusing
+  // `.Function` would risk silent miscategorization in any site that
+  // keys real behavior off `has_name`/`has_body` for an actual
+  // top-level declaration.
+  ClosureLiteral(FunctionNode),
   Body(BodyNode),
   // Absent (nil) for a bare `ret;`.
   StatementReturn(Node*),
@@ -1076,6 +1122,7 @@ pub fun node_kind_name(NodeKind kind) str {
     .TupleLiteral(_) -> { ret "tuple literal"; }
     .Variable(_) -> { ret "variable declaration"; }
     .Function(_) -> { ret "function"; }
+    .ClosureLiteral(_) -> { ret "closure literal"; }
     .Compound(_) -> { ret "compound declaration"; }
     .Enum(_) -> { ret "enum declaration"; }
     .Shape(_) -> { ret "shape declaration"; }
@@ -1253,6 +1300,13 @@ pub fun dtype_free(DataType* dt) {
     }
     free(dt.fn_sig);
   }
+  if dt.has_closure_sig && dt.closure_sig != nil {
+    _free_dtype_vec(&dt.closure_sig.params);
+    if dt.closure_sig.rtype != nil {
+      dtype_free(dt.closure_sig.rtype);
+    }
+    free(dt.closure_sig);
+  }
   free(dt);
 }
 
@@ -1381,6 +1435,20 @@ fun _free_node_contents(Node* n) {
       }
       if f.owns_name {
         free(f.name);
+      }
+    }
+    .ClosureLiteral(f) -> {
+      if f.has_rtype {
+        dtype_free(f.rtype);
+      }
+      // `closure_sig.rtype` is the exact same pointer as `f.rtype` just
+      // freed above (see `FunctionNode.closure_sig`'s own comment) -
+      // only the small wrapper struct itself is this node's to free.
+      if f.closure_sig != nil {
+        free(f.closure_sig);
+      }
+      if f.has_body {
+        node_free(f.body);
       }
     }
     .Body(b) -> { _free_node_vec(&b.statements); }
@@ -1633,6 +1701,12 @@ pub fun dtype_clone(DataType* dt) DataType* {
     fs.params = _clone_dtype_vec(&dt.fn_sig.params);
     fs.rtype = dtype_clone(dt.fn_sig.rtype);
     c.fn_sig = fs;
+  }
+  if dt.has_closure_sig && dt.closure_sig != nil {
+    FnTypeSig* cs = malloc(sizeof(FnTypeSig));
+    cs.params = _clone_dtype_vec(&dt.closure_sig.params);
+    cs.rtype = dtype_clone(dt.closure_sig.rtype);
+    c.closure_sig = cs;
   }
   ret c;
 }
@@ -1912,6 +1986,27 @@ pub fun node_clone(Node n) Node {
       }
       c.kind = .Function(cf);
     }
+    .ClosureLiteral(f) -> {
+      FunctionNode cf = f;
+      if f.has_rtype {
+        cf.rtype = dtype_clone(f.rtype);
+      }
+      // Rebuilt to alias the just-cloned `cf.rtype` above, never the
+      // original's own `f.closure_sig.rtype` - each clone owns its own
+      // independent DataType tree, so its own `closure_sig` must point
+      // into that same tree, not back at the source node's.
+      if f.closure_sig != nil {
+        FnTypeSig sig = fn_type_sig_new();
+        sig.rtype = cf.rtype;
+        FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
+        *sig_ptr = sig;
+        cf.closure_sig = sig_ptr;
+      }
+      if f.has_body {
+        cf.body = node_clone_ptr(f.body);
+      }
+      c.kind = .ClosureLiteral(cf);
+    }
     .Body(b) -> {
       BodyNode cb = b;
       cb.statements = _clone_node_vec(&b.statements);
@@ -2079,4 +2174,152 @@ pub fun clone_node_tree(Vec<Node>* nodes) Vec<Node> {
     i = i + 1;
   }
   ret out;
+}
+
+// Every identifier `body` reads that isn't bound somewhere inside
+// `body` itself (a `let`/`const`, a for-loop variable, a `fit` pattern
+// binding) or already present in the caller's own `bound` set - the
+// free variables a closure literal wrapping this body must capture.
+// Pure name-set algebra with no type information at all, deliberately:
+// typecheck's own inferred types never get written back onto the AST,
+// and codegen re-derives everything itself from its own local-scope
+// table, so there is nothing for the two independent passes to hand
+// off except plain names. Both the escape-safety lint (typecheck) and
+// the capture-copy emission (codegen) share this one walk.
+//
+// A nested closure literal's own body is walked inline, as though it
+// were any other expression - a name it reads that isn't bound in
+// either closure's own scope still needs to be captured by the outer
+// one too, since the inner closure is itself created from inside the
+// outer closure's body wherever it runs. Over-capturing into the
+// outer closure's environment is harmless; under-capturing would be a
+// real correctness bug.
+pub fun closure_free_identifier_names(Node* body, Set<str> bound) Set<str> {
+  Set<str> bound_copy = bound.clone();
+  defer bound_copy.free();
+  Set<str> free_names = set_init("", 8);
+  _collect_closure_free_names(body, &bound_copy, &free_names);
+  ret free_names;
+}
+
+fun _collect_closure_free_names(Node* node, Set<str>* bound, Set<str>* free_names) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Identifier(name) -> {
+      if !bound.has(name) {
+        free_names.add(name);
+      }
+    }
+    .Expression(e) -> {
+      if e.has_left {
+        _collect_closure_free_names(e.left, bound, free_names);
+      }
+      if e.has_right {
+        _collect_closure_free_names(e.right, bound, free_names);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _collect_closure_free_names(inner, bound, free_names); }
+    .Unary(u) -> {
+      _collect_closure_free_names(u.operand, bound, free_names);
+      if u.has_error_arg {
+        _collect_closure_free_names(u.error_arg, bound, free_names);
+      }
+    }
+    .Ternary(t) -> {
+      _collect_closure_free_names(t.cond, bound, free_names);
+      _collect_closure_free_names(t.then_val, bound, free_names);
+      _collect_closure_free_names(t.else_val, bound, free_names);
+    }
+    .Bracket(items) -> { _collect_closure_free_names(items, bound, free_names); }
+    .Panic(message) -> { _collect_closure_free_names(message, bound, free_names); }
+    .CompoundInit(init) -> {
+      for f : init.fields {
+        _collect_closure_free_names(f.value, bound, free_names);
+      }
+    }
+    .TupleLiteral(t) -> {
+      for el : t.elements {
+        _collect_closure_free_names(el, bound, free_names);
+      }
+    }
+    .Body(b) -> {
+      for s : b.statements {
+        _collect_closure_free_names(s, bound, free_names);
+      }
+    }
+    .Variable(v) -> {
+      if v.has_val {
+        _collect_closure_free_names(v.val, bound, free_names);
+      }
+      if v.is_destructure {
+        for n : v.destructure_names {
+          bound.add(n);
+        }
+      } else {
+        bound.add(v.name);
+      }
+    }
+    .StatementReturn(value) -> { _collect_closure_free_names(value, bound, free_names); }
+    .StatementDefer(inner) -> { _collect_closure_free_names(inner, bound, free_names); }
+    .StatementFork(call) -> { _collect_closure_free_names(call, bound, free_names); }
+    .StatementIf(ifn) -> {
+      _collect_closure_free_names(ifn.condition, bound, free_names);
+      _collect_closure_free_names(ifn.body, bound, free_names);
+    }
+    .StatementElseIf(ein) -> {
+      _collect_closure_free_names(ein.condition, bound, free_names);
+      _collect_closure_free_names(ein.body, bound, free_names);
+    }
+    .StatementElse(b) -> { _collect_closure_free_names(b, bound, free_names); }
+    .StatementAssert(a) -> {
+      _collect_closure_free_names(a.condition, bound, free_names);
+      if a.has_message {
+        _collect_closure_free_names(a.message, bound, free_names);
+      }
+    }
+    .StatementFit(f) -> {
+      _collect_closure_free_names(f.exp, bound, free_names);
+      for branch : f.branches {
+        for bn : branch.bindings {
+          bound.add(bn);
+        }
+        if branch.has_condition {
+          _collect_closure_free_names(branch.condition, bound, free_names);
+        }
+        _collect_closure_free_names(branch.body, bound, free_names);
+      }
+    }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> {
+          if c.has_condition {
+            _collect_closure_free_names(c.condition, bound, free_names);
+          }
+          _collect_closure_free_names(c.body, bound, free_names);
+        }
+        .Iter(it) -> {
+          _collect_closure_free_names(it.iterable, bound, free_names);
+          if it.item_is_destructure {
+            for n : it.item_destructure_names {
+              bound.add(n);
+            }
+          } else {
+            bound.add(it.item_name);
+            if it.has_index_name {
+              bound.add(it.index_name);
+            }
+          }
+          _collect_closure_free_names(it.body, bound, free_names);
+        }
+      }
+    }
+    .ClosureLiteral(f) -> {
+      if f.has_body {
+        _collect_closure_free_names(f.body, bound, free_names);
+      }
+    }
+    _ -> {}
+  }
 }

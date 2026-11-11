@@ -136,3 +136,39 @@ completion count is guarded by its own internal `Mutex`, so `add()` is
 safe to call concurrently from multiple already-forked tasks (growing the
 group for their own children), and `wait()` never returns before every
 expected `done()` has actually landed.
+
+## `std.thread_spawn`: a closure on a real OS thread
+
+`spawn(closure() void c)` runs a closure on a new, real OS thread,
+fire-and-forget - unlike `fork`, which runs an `async fun` on this
+project's own M:N virtual-thread scheduler, `spawn` is a thin
+pass-through straight to `std.thread`'s own `Thread.start`: a
+[closure](language.md#closures)'s `{fn, env}` runtime shape already
+matches what a thread's own entry point and argument expect, with no
+translation at all.
+
+```fun
+use std.io;
+use std.thread_spawn;
+use std.c.mem;
+
+fun main() {
+  num* counter = malloc(sizeof(num));
+  *counter = 0;
+  RuntimeAsyncTask task = spawn(fun() {
+    *counter = *counter + 1;
+  });
+  task.join(nil);
+  println_fmt("counter={num}", *counter);
+  free(counter);
+}
+```
+
+Reach for `spawn` for one genuinely parallel, CPU-bound piece of work
+that needs its own real OS thread; reach for `fork` for many cheap,
+short-lived concurrent tasks, which the scheduler multiplexes far more
+cheaply than one real thread each.
+
+A closure runs at most once: `spawn` (or a direct call) frees its own
+captured environment the moment it finishes. `RuntimeAsyncTask.join`/
+`detach` manage the underlying `Thread` the usual way; see `std.thread`.

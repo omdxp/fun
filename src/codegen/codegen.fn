@@ -650,6 +650,9 @@ pub compound Codegen {
   // Incremented for each `?`/`!` propagation, so each one's own hoisted
   // temp gets a unique name in the surrounding scope.
   num try_call_counter;
+  // Incremented for each closure literal, so each one's own hoisted env
+  // struct/body function/entry trampoline gets a unique C name.
+  num closure_counter;
   // Emit exactly one `fuzz` block as a harness in place of the program's
   // own `main`.
   flag fuzz_mode;
@@ -795,6 +798,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.iter_inline_local_counter = 0;
   g.va_call_counter = 0;
   g.try_call_counter = 0;
+  g.closure_counter = 0;
   g.hoist_scratch_depth = 0;
   // Matches `g.state`, so `self.state == self.root_state` is already
   // true for the very first function, not just after the first nested
@@ -2809,7 +2813,10 @@ impl Codegen {
       first = false;
       fit arg.kind {
         .Variable(v) -> {
-          if v.var_type.has_fn_sig {
+          if v.var_type.has_closure_sig {
+            self.state.write("__fun_closure_t ");
+            self.state.write(v.name);
+          } elif v.var_type.has_fn_sig {
             let sig = v.var_type.fn_sig;
             let prt = self.write_type(*sig.rtype);
             if prt.is_none() {
@@ -6886,6 +6893,7 @@ impl Codegen {
         self.state.write(name);
         ret .None;
       }
+      .ClosureLiteral(_) -> { ret self.emit_closure_literal(node); }
       .ExpressionParenthesis(inner) -> {
         // An explicit parenthesized sub-expression (`(a + b)`).
         self.state.write("(");
@@ -7704,6 +7712,20 @@ impl Codegen {
         }
       }
       _ -> { ret .Some(.UnsupportedNode); }
+    }
+    // Calling a closure-typed local (`c();`) - not an ordinary bare C
+    // function-pointer call (`callee_name(args)` further below assumes
+    // that shape, which a `__fun_closure_t` 2-word struct value isn't),
+    // so this is checked and dispatched before anything else here, the
+    // same way calling a function-typed compound field is checked and
+    // dispatched before ordinary method resolution in `emit_method_call`.
+    let closure_callee_dt = self.lookup_local_dtype(callee_name);
+    if closure_callee_dt.is_some() && closure_callee_dt.unwrap().has_closure_sig {
+      ret self.emit_closure_call(
+        callee_name,
+        closure_callee_dt.unwrap().closure_sig,
+        e.right
+      );
     }
     Vec<Node*> args;
     args.init(0);
@@ -9223,6 +9245,325 @@ impl Codegen {
       }
     }
     self.state.write(")");
+    ret .None;
+  }
+
+  // Emits a closure literal's own value: a hoisted env struct (one
+  // field per captured name, copied by value), a hoisted body function
+  // (an ordinary C function, each capture a real parameter - so the
+  // closure's own body needs no rewriting at all, it already reads
+  // these names as plain locals), a hoisted entry trampoline (unpacks
+  // the env, calls the body function once, frees the env, returns),
+  // and finally the closure value itself at this expression's own
+  // point of use: a GNU statement expression heap-allocating and
+  // populating the env, the same accepted idiom this codegen already
+  // uses for `?`/`!` propagation and `panic(...)`.
+  emit_closure_literal(Node node) Option<CodegenErrorKind> {
+    fit node.kind {
+      .ClosureLiteral(f) -> {
+        self.closure_counter = self.closure_counter + 1;
+        num n = self.closure_counter;
+        str env_name = format("__fun_closure_env_{num}", n);
+        str body_name = format("__fun_closure_body_{num}", n);
+        str entry_name = format("__fun_closure_entry_{num}", n);
+
+        Set<str> empty_bound = set_init("", 1);
+        defer empty_bound.free();
+        Set<str> free_names = closure_free_identifier_names(f.body, empty_bound);
+        defer free_names.free();
+
+        // A free name that isn't a real local (a global/const/function/
+        // enum variant instead) needs no capture at all - it's already
+        // ambient at file scope in the hoisted body function exactly
+        // the same way it is here.
+        Vec<str> cap_names;
+        cap_names.init(4);
+        defer cap_names.free();
+        Vec<DataType> cap_dtypes;
+        cap_dtypes.init(4);
+        defer cap_dtypes.free();
+        for name : free_names.keys() {
+          let dt_opt = self.lookup_local_dtype(name);
+          if dt_opt.is_some() {
+            cap_names.push(name);
+            cap_dtypes.push(dt_opt.unwrap());
+          }
+        }
+
+        // 1. Env struct typedef, hoisted.
+        CodegenState env_scratch = self.new_scratch_state();
+        CodegenState* saved_state_env = self.state;
+        self.state = &env_scratch;
+        self.state.write("typedef struct {\n");
+        num ei = 0;
+        for ei < cap_names.len {
+          self.state.write("  ");
+          let ewt = self.write_named_type(cap_dtypes.get(ei), cap_names.get(ei));
+          if ewt.is_some() {
+            self.state = saved_state_env;
+            ret ewt;
+          }
+          self.state.write(";\n");
+          ei = ei + 1;
+        }
+        self.state.write("} ");
+        self.state.write(env_name);
+        self.state.write(";\n");
+        self.state = saved_state_env;
+        self.emit_hoisted(env_scratch.out.build());
+
+        // 2. Body function: a synthetic, ordinary top-level `.Function`
+        // node, reusing `f.rtype`/`f.body` directly (never cloned -
+        // `emit_function_named` only ever reads them), each capture
+        // becoming a real parameter.
+        Vec<Node*> body_args;
+        body_args.init(cap_names.len);
+        num ai = 0;
+        for ai < cap_names.len {
+          DataType* cap_dt_ptr = malloc(sizeof(DataType));
+          *cap_dt_ptr = cap_dtypes.get(ai);
+          VariableNode vn;
+          vn.var_type = cap_dt_ptr;
+          vn.name = cap_names.get(ai);
+          vn.val = nil;
+          vn.has_val = false;
+          vn.is_const = false;
+          vn.is_destructure = false;
+          vn.destructure_names.init(0);
+          Node arg_node = node_new(.Variable(vn));
+          arg_node.pos = node.pos;
+          arg_node.has_pos = node.has_pos;
+          Node* arg_ptr = malloc(sizeof(Node));
+          *arg_ptr = arg_node;
+          body_args.push(arg_ptr);
+          ai = ai + 1;
+        }
+        FunctionNode synth = function_node_new();
+        synth.name = body_name;
+        synth.has_name = true;
+        synth.args = body_args;
+        synth.has_args = body_args.len > 0;
+        synth.rtype = f.rtype;
+        synth.has_rtype = f.has_rtype;
+        synth.body = f.body;
+        synth.has_body = f.has_body;
+        Node synth_node = node_new(.Function(synth));
+        synth_node.pos = node.pos;
+        synth_node.has_pos = node.has_pos;
+
+        // Mirrors `drain_pending_generic_impl_methods`'s own identical
+        // save/restore dance around a recursive, mid-body
+        // `emit_function_named` call - this body function's own
+        // statements can themselves trigger another nested hoist (a
+        // generic instantiation, another closure literal), so the
+        // scratch-depth bookkeeping is needed here, unlike the simpler
+        // env-struct/trampoline blocks above and below.
+        CodegenState body_scratch = self.new_scratch_state();
+        CodegenState* saved_state_body = self.state;
+        let saved_hoist_pos = self.hoist_insert_pos;
+        let saved_stmt_start_pos = self.current_stmt_start_pos;
+        let saved_local_names = self.local_names;
+        let saved_local_is_pointer = self.local_is_pointer;
+        let saved_local_type_name = self.local_type_name;
+        let saved_local_dtype = self.local_dtype;
+        let saved_fn_rtype_name = self.current_fn_rtype_name;
+        let saved_fn_rtype_dt = self.current_fn_rtype_dt;
+        let saved_defer_stack = self.defer_stack;
+        let saved_defer_scope_starts = self.defer_scope_starts;
+        if self.hoist_scratch_depth == 0 {
+          self.root_state = self.state;
+          self.root_hoist_pos = self.hoist_insert_pos;
+          self.root_stmt_start_pos = self.current_stmt_start_pos;
+        }
+        self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+        self.state = &body_scratch;
+        self.hoist_insert_pos = .None;
+        self.current_stmt_start_pos = .None;
+        let body_err = self.emit_function_named(synth_node, body_name);
+        self.state = saved_state_body;
+        self.hoist_insert_pos = saved_hoist_pos;
+        self.current_stmt_start_pos = saved_stmt_start_pos;
+        self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+        if self.hoist_scratch_depth == 0 {
+          self.hoist_insert_pos = self.root_hoist_pos;
+          self.current_stmt_start_pos = self.root_stmt_start_pos;
+        }
+        self.local_names = saved_local_names;
+        self.local_is_pointer = saved_local_is_pointer;
+        self.local_type_name = saved_local_type_name;
+        self.local_dtype = saved_local_dtype;
+        self.current_fn_rtype_name = saved_fn_rtype_name;
+        self.current_fn_rtype_dt = saved_fn_rtype_dt;
+        self.defer_stack = saved_defer_stack;
+        self.defer_scope_starts = saved_defer_scope_starts;
+        if body_err.is_some() {
+          ret body_err;
+        }
+        self.emit_hoisted(body_scratch.out.build());
+
+        // 3. Entry trampoline. Always `void*` for a `void`-returning
+        // closure, matching `pthread_create`'s own expected entry
+        // shape exactly (the only kind `std.thread_spawn.spawn`
+        // accepts) - a non-void closure's own real return type is used
+        // instead, since that shape is never handed to a thread
+        // primitive at all, only ever called back synchronously
+        // through `emit_closure_call`'s own cast.
+        flag is_void_closure = !f.has_rtype || equals(f.rtype.type_str, "void");
+        CodegenState entry_scratch = self.new_scratch_state();
+        CodegenState* saved_state_entry = self.state;
+        self.state = &entry_scratch;
+        if is_void_closure {
+          self.state.write("static void* ");
+        } else {
+          let ert = self.write_type(*f.rtype);
+          if ert.is_none() {
+            self.state = saved_state_entry;
+            ret .Some(.UnsupportedNode);
+          }
+          self.state.write(" ");
+        }
+        self.state.write(entry_name);
+        self.state.write("(void* __env) {\n  ");
+        self.state.write(env_name);
+        self.state.write("* __e = (");
+        self.state.write(env_name);
+        self.state.write("*)__env;\n  ");
+        if !is_void_closure {
+          let ert2 = self.write_type(*f.rtype);
+          if ert2.is_none() {
+            self.state = saved_state_entry;
+            ret .Some(.UnsupportedNode);
+          }
+          self.state.write(" __r = ");
+        }
+        self.state.write(body_name);
+        self.state.write("(");
+        num ci = 0;
+        for ci < cap_names.len {
+          if ci > 0 {
+            self.state.write(", ");
+          }
+          self.state.write("__e->");
+          self.state.write(cap_names.get(ci));
+          ci = ci + 1;
+        }
+        self.state.write(");\n  free(__env);\n  ");
+        if is_void_closure {
+          self.state.write("return NULL;\n}\n");
+        } else {
+          self.state.write("return __r;\n}\n");
+        }
+        self.state = saved_state_entry;
+        self.emit_hoisted(entry_scratch.out.build());
+
+        // 4. The closure value itself, right here at this expression's
+        // own point of use. Deliberately never a GNU statement
+        // expression (unlike `?`/`!` propagation/`panic(...)`
+        // elsewhere in this codegen): MSVC rejects that extension
+        // outright (confirmed directly - a real CI failure, not a
+        // theoretical concern), and there's no awkward conditional
+        // control flow to hoist here that would make the plain-
+        // statement form painful, unlike propagation's own early
+        // return. Every part of this - the env allocation, each
+        // capture's own field assignment, and the final `{fn, env}`
+        // value - is instead spliced as plain, universally-portable
+        // statements immediately before the enclosing statement
+        // (`current_stmt_start_pos`, the same splice point `?`/`!`
+        // propagation's own MSVC/wasm fallback already uses), with
+        // just the resulting temp's own name left at this expression's
+        // point of use.
+        StringBuilder cl_sb = string_builder_init(64);
+        cl_sb.append(env_name);
+        cl_sb.append("* __fun_closure_envp_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(" = malloc(sizeof(");
+        cl_sb.append(env_name);
+        cl_sb.append("));\n");
+        num wi = 0;
+        for wi < cap_names.len {
+          cl_sb.append("__fun_closure_envp_");
+          cl_sb.append(format_num(n));
+          cl_sb.append("->");
+          cl_sb.append(cap_names.get(wi));
+          cl_sb.append(" = ");
+          cl_sb.append(cap_names.get(wi));
+          cl_sb.append(";\n");
+          wi = wi + 1;
+        }
+        cl_sb.append("__fun_closure_t __fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(";\n__fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(".fn = (void*)");
+        cl_sb.append(entry_name);
+        cl_sb.append(";\n__fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(".env = (void*)__fun_closure_envp_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(";\n");
+        str cl_text = cl_sb.build();
+
+        let cl_hoist_save = self.hoist_insert_pos;
+        let cl_splice_pos = self.current_stmt_start_pos;
+        self.hoist_insert_pos = cl_splice_pos;
+        // Mirrors `?`/`!` propagation's own identical fallback: a
+        // closure literal evaluated from inside another construct's
+        // own suspended scratch render (nested inside a generic
+        // instantiation, say) has `current_stmt_start_pos` cleared,
+        // same as `hoist_insert_pos` - routed through
+        // `root_stmt_start_pos` instead for the duration of this one
+        // splice.
+        flag cl_routed_via_root_stmt = false;
+        let cl_saved_root_hoist = self.root_hoist_pos;
+        if cl_splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
+          self.root_stmt_start_pos.is_some() {
+          self.root_hoist_pos = self.root_stmt_start_pos;
+          cl_routed_via_root_stmt = true;
+        }
+        self.emit_hoisted(cl_text);
+        if cl_routed_via_root_stmt {
+          self.root_hoist_pos = cl_saved_root_hoist;
+        }
+        if cl_splice_pos.is_some() {
+          cl_hoist_save = adjust_pos_after_splice(
+            cl_hoist_save,
+            cl_splice_pos.unwrap(),
+            len(cl_text)
+          );
+        }
+        self.hoist_insert_pos = cl_hoist_save;
+        self.state.write("__fun_closure_val_");
+        self.state.write(format_num(n));
+        ret .None;
+      }
+      _ -> { ret .Some(.InvalidNode); }
+    }
+  }
+
+  // Calls a closure-typed local (`c();`) - not an ordinary bare C
+  // function-pointer call, which a `__fun_closure_t` 2-word struct
+  // value isn't: casts its own `fn` field back to the statically-known
+  // `R(*)(void*)` shape (`closure_sig.rtype`, never erased - typecheck
+  // already guarantees every call site agrees with it) and calls it
+  // with `env`.
+  emit_closure_call(str callee_name, FnTypeSig* closure_sig, Node* args_node) Option<CodegenErrorKind> {
+    Vec<Node*> args;
+    args.init(0);
+    defer args.free();
+    self.flatten_call_args(args_node, &args);
+    if args.len != 0 {
+      ret .Some(.UnsupportedNode);
+    }
+    self.state.write("((");
+    let rt = self.write_type(*closure_sig.rtype);
+    if rt.is_none() {
+      ret .Some(.UnsupportedNode);
+    }
+    self.state.write("(*)(void*))");
+    self.state.write(callee_name);
+    self.state.write(".fn)(");
+    self.state.write(callee_name);
+    self.state.write(".env)");
     ret .None;
   }
 
@@ -11136,7 +11477,7 @@ impl Codegen {
         // same shape a function-typed field or parameter already does,
         // so the plain "type, then space, then name" writing below
         // doesn't apply to it at all.
-        flag fn_sig_local = v.var_type.has_fn_sig;
+        flag fn_sig_local = v.var_type.has_fn_sig || v.var_type.has_closure_sig;
         if fn_sig_local {
           let wnt = self.write_named_type(*v.var_type, v.name);
           if wnt.is_some() {
@@ -11508,6 +11849,16 @@ impl Codegen {
           }
         }
         self.state.write(";\n");
+        // An explicitly-typed (non-`let`) closure local needs its own
+        // registration here too, the same as a closure-typed parameter
+        // already gets in `emit_function_param` - unlike every other
+        // explicitly-typed local shape, which some other, earlier pass
+        // apparently already registers (confirmed directly: without
+        // this, a later `c.fn`/`c()` on a plain `closure() void c =
+        // ...;` local failed with "unknown identifier 'c'").
+        if !is_let && v.var_type.has_closure_sig {
+          self.record_local_typed(v.name, "", false, *v.var_type);
+        }
         if is_let && v.has_val {
           let inferred = self.infer_let_expr_type(v.val);
           if inferred.is_some() {
@@ -15061,6 +15412,17 @@ impl Codegen {
   // function type puts it inside the declarator, `flag (*name)(num)`, so
   // a type and a name cannot simply be written one after the other.
   write_named_type(DataType dtype, str name) Option<CodegenErrorKind> {
+    // A closure-typed value is the ordinary two-word `__fun_closure_t`
+    // struct, never a function-pointer declarator (unlike `fun(...)R`
+    // just below) - a plain `<type> <name>` is already the right shape,
+    // just with a fixed type name standing in for `write_type`'s own
+    // generic name resolution, which `closure() R`'s fixed placeholder
+    // `type_str` ("closure(...)") was never meant to resolve through.
+    if dtype.has_closure_sig {
+      self.state.write("__fun_closure_t ");
+      self.state.write(name);
+      ret .None;
+    }
     if !dtype.has_fn_sig {
       let plain = self.write_type(dtype);
       if plain.is_none() {
@@ -15100,6 +15462,12 @@ impl Codegen {
   emit_function_param(Node param) Option<CodegenErrorKind> {
     fit param.kind {
       .Variable(v) -> {
+        if v.var_type.has_closure_sig {
+          self.state.write("__fun_closure_t ");
+          self.state.write(v.name);
+          self.record_local_typed(v.name, "", false, *v.var_type);
+          ret .None;
+        }
         if v.var_type.has_fn_sig {
           let sig = v.var_type.fn_sig;
           let rt = self.write_type(*sig.rtype);
@@ -19023,6 +19391,17 @@ impl Codegen {
     );
     self.state.write(
       "static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n"
+    );
+    // A closure value's fixed runtime shape: `fn`'s own real C signature
+    // is `void* (*)(void* env)` at every use site, deliberately
+    // identical to a thread entry point's own expected shape
+    // (`__fun_thread_start`'s own `entry`/`arg` below), so a closure's
+    // `{fn, env}` pair plugs directly into `Thread.start`/`thread_start`
+    // with no translation at all. Unconditional, like every other
+    // header/helper above - a program with no closures in it just never
+    // references the name.
+    self.state.write(
+      "typedef struct { void* fn; void* env; } __fun_closure_t;\n"
     );
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
@@ -26275,6 +26654,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <ctype.h>
     `#include <limits.h>
     `static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }
+    `typedef struct { void* fn; void* env; } __fun_closure_t;
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }

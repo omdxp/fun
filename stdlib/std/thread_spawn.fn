@@ -1,0 +1,42 @@
+// A closure-based `spawn` for `std.thread`.
+//
+// Deliberately its own module, not folded into `std.thread`/`std.
+// thread_runtime`: this checkout's own compiler build (`src/cli/
+// driver.fn`'s `use std.thread_pool;`, which itself imports both of
+// those) must still compile under last release's own `fun` binary,
+// which has never seen `closure() R` syntax at all - landing this
+// here means that binary never has to parse this file, since nothing
+// in the compiler's own source imports it.
+
+use std.thread_runtime;
+use std.atomic;
+use std.c.mem;
+
+// Runs `task` on a new OS thread, fire-and-forget: `Thread.start`'s own
+// `(raw* entry, raw* arg)` pair is exactly a closure value's own
+// `{fn, env}` shape already, so this is a thin pass-through.
+//
+// A closure runs at most once, through `spawn` or a direct call -
+// its own captured environment is freed the moment it finishes
+// running. Spawning (or calling) the same closure value again
+// afterward is undefined. A closure created but never spawned or
+// called at all leaks its own environment; there is nothing to call
+// to free it otherwise.
+pub fun spawn(closure() void task) RuntimeAsyncTask {
+  ret runtime_async_spawn(task.fn, task.env);
+}
+
+test "spawn runs a closure on a real thread, capturing a heap counter it mutates" {
+  // Heap-allocated, never a stack local's own address: `hits` must
+  // stay valid on the spawned thread regardless of whether this test
+  // function's own frame has already returned by the time the closure
+  // actually runs.
+  Atomic<num>* hp = malloc(sizeof(Atomic<num>));
+  *hp = atomic_new(0);
+  RuntimeAsyncTask task = spawn(fun() {
+      hp.fetch_add(1);
+  });
+    assert task.join(nil) == 0, "expected the spawned thread to join cleanly";
+    assert hp.load() == 1, "expected the closure to have run exactly once on the spawned thread";
+    free(hp);
+}

@@ -516,6 +516,41 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           );
         }
       }
+      // `.fn`/`.env` on a closure value - the same contextual builtin-
+      // field shape `.tag_value()` just above already is: neither is a
+      // real declared compound field anywhere (a closure's `{fn, env}`
+      // representation is compiler-synthesized, with no Fun-level
+      // `compound` declaration behind it at all), so the ordinary
+      // field-hover path just below could never resolve either one on
+      // its own.
+      if (equals(token_word(t), "fn") || equals(token_word(t), "env")) &&
+      read.parsed && _preceded_by_dot(&tokens, t) {
+        str cf_recv_type = chain_receiver_type(
+          &tokens,
+          t,
+          &read.program.nodes,
+          doc.path,
+          line + 1
+        );
+        if starts_with(cf_recv_type, "closure(") {
+          if equals(token_word(t), "fn") {
+            ret _hover_result(
+              _doc(
+              "fn: raw*",
+              "The closure's own underlying function pointer. Opaque - cast and call it yourself only if you know what you're doing; `std.thread_spawn.spawn` is the ordinary way to run a closure."
+              ),
+              span_of(t, doc.text)
+            );
+          }
+          ret _hover_result(
+            _doc(
+            "env: raw*",
+            "The closure's own captured environment, heap-allocated when the closure was created. Freed automatically the one time the closure runs (through `spawn` or a direct call); never touch it yourself."
+            ),
+            span_of(t, doc.text)
+          );
+        }
+      }
       // A warning id right after `allow`/`expect` (`allow
       // unused_import, "...";`) is recognized the same contextual way
       // `fork` is: never a lexer keyword, and never a real declared
@@ -2493,6 +2528,17 @@ pub fun keyword_doc(str word) str {
   if equals(word, "fun") {
     ret _doc(`fun name(arg Type) Type { ... }`, `Declares a function.`);
   }
+  if equals(word, "closure") {
+    ret _doc(
+      `closure() Type name = fun() { ... };`,
+      `Names the type of a capturing closure: an anonymous fun() { ... }
+      `value that snapshots every outer local it reads at the moment
+      `it's created. Distinct from a plain fun(...) Type function
+      `pointer - the two are never interchangeable. Takes no call-time
+      `parameters; everything it needs comes from what it captures.
+      `std.thread_spawn's spawn runs one on a new thread.`
+    );
+  }
   if equals(word, "as") {
     ret _doc(
       `impl Type as Shape { ... }`,
@@ -2716,6 +2762,15 @@ pub fun warning_id_doc(WarningId id) str {
       `multiple times, so several tasks mutate the same value with no
       `synchronization. Guard it with a Mutex, or give each task its
       `own copy.`
+      ;
+    }
+    .ClosureCapturesEscapingPointer -> {
+      ret `Flags a closure literal that captures a pointer to a local
+      `declared in the same enclosing function - unsafe once that
+      `function returns, which spawning the closure onto another
+      `thread is very likely to do before the closure ever runs.
+      `Best-effort: only catches a direct &local assignment immediately
+      `visible in the same function.`
       ;
     }
     .IntegerLiteralOutOfRange -> {

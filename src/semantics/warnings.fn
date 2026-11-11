@@ -42,6 +42,7 @@ pub fun warning_id_name(WarningId id) str {
     .MissingReturn -> { ret "missing_return"; }
     .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
     .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
+    .ClosureCapturesEscapingPointer -> { ret "closure_captures_escaping_pointer"; }
     .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
     .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
     .NoCover -> { ret "no_cover"; }
@@ -912,6 +913,52 @@ fun _calls_method(Node* node, str method) flag {
   ret false;
 }
 
+// Every `.ClosureLiteral` node directly reachable from `node`'s own
+// expression/statement tree, not recursing inside one once found - each
+// closure is checked independently against the known-address-of state
+// live at its own point of definition, not merged into an ancestor's.
+fun _find_closure_literals(Node* node, Vec<Node*>* out) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .ClosureLiteral(_) -> { out.push(node); }
+    .Expression(e) -> {
+      if e.has_left {
+        _find_closure_literals(e.left, out);
+      }
+      if e.has_right {
+        _find_closure_literals(e.right, out);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _find_closure_literals(inner, out); }
+    .Unary(u) -> { _find_closure_literals(u.operand, out); }
+    .Ternary(t) -> {
+      _find_closure_literals(t.cond, out);
+      _find_closure_literals(t.then_val, out);
+      _find_closure_literals(t.else_val, out);
+    }
+    .Bracket(items) -> { _find_closure_literals(items, out); }
+    .CompoundInit(init) -> {
+      for f : init.fields {
+        _find_closure_literals(f.value, out);
+      }
+    }
+    .TupleLiteral(t) -> {
+      for el : t.elements {
+        _find_closure_literals(el, out);
+      }
+    }
+    .Variable(v) -> {
+      if v.has_val {
+        _find_closure_literals(v.val, out);
+      }
+    }
+    .StatementReturn(value) -> { _find_closure_literals(value, out); }
+    _ -> {}
+  }
+}
+
 // True when a body forks a task.
 fun _contains_fork(Node* node) flag {
   if node == nil {
@@ -1134,6 +1181,95 @@ impl Analysis {
       }
     }
     ret false;
+  }
+
+  // Reports a closure literal that captures a pointer to a local
+  // declared in the same enclosing function - best-effort, same
+  // narrowness as `check_shared_captures` above: only a direct
+  // `name = &local;`/`T* name = &local;` assignment textually visible
+  // in the same top-level body is tracked, so a pointer that flows
+  // through a helper function's return value, a struct field, or a
+  // conditional branch this walk doesn't descend into stays
+  // undetected.
+  check_closure_escaping_captures(Node* body) {
+    if body == nil {
+      ret;
+    }
+    fit body.kind {
+      .Body(inner) -> {
+        Map<str, str> last_address_of;
+        last_address_of.init(4);
+        defer last_address_of.free();
+        for st : inner.statements {
+          self.check_closure_escaping_statement(st, &last_address_of);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  check_closure_escaping_statement(Node* st, Map<str, str>* last_address_of) {
+    if st == nil {
+      ret;
+    }
+    fit st.kind {
+      .Variable(v) -> {
+        if v.has_val {
+          str aliased = _address_of_name(v.val);
+          if !equals(aliased, "") {
+            last_address_of.put(v.name, aliased);
+          }
+        }
+      }
+      .Expression(e) -> {
+        if equals(e.op, "=") && e.has_left && e.has_right {
+          str lhs = "";
+          fit e.left.kind {
+            .Identifier(n) -> { lhs = n; }
+            _ -> {}
+          }
+          if !equals(lhs, "") {
+            str aliased = _address_of_name(e.right);
+            if !equals(aliased, "") {
+              last_address_of.put(lhs, aliased);
+            }
+          }
+        }
+      }
+      _ -> {}
+    }
+
+    Vec<Node*> closures;
+    closures.init(2);
+    defer closures.free();
+    _find_closure_literals(st, &closures);
+    for c : closures {
+      fit c.kind {
+        .ClosureLiteral(f) -> {
+          if f.has_body {
+            Set<str> empty_bound = set_init("", 1);
+            defer empty_bound.free();
+            Set<str> free_names = closure_free_identifier_names(f.body, empty_bound);
+            defer free_names.free();
+            for name : free_names.keys() {
+              let aliased = last_address_of.at(name);
+              if aliased.is_some() {
+                self.report(
+                  .ClosureCapturesEscapingPointer,
+                  format(
+                  "closure captures '{str}', a pointer to '{str}' (a local in the same function); unsafe once this function returns",
+                  name,
+                  aliased.unwrap()
+                  ),
+                  c
+                );
+              }
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
   }
 
   // Reports a literal a sized integer cannot hold, which is a value the
@@ -1765,6 +1901,7 @@ impl Analysis {
     self.waits_on_unsized_group = _creates_empty_wait_group(body);
     self.check_channel_sends(body);
     self.walk_body(body, locals);
+    self.check_closure_escaping_captures(body);
     if self.report_unused {
       self.check_unused_locals(body);
     }
@@ -2640,6 +2777,14 @@ pub fun collect_reads(Node* node, Set<str>* out) {
         }
       }
     }
+    // A closure literal's own body is real code that runs - anything
+    // it calls must count as a read here the same as anywhere else, or
+    // `mark_reachable_names` (codegen.fn) never discovers it and the
+    // callee's own body silently never gets emitted at all (confirmed
+    // directly: a stdlib function called only from inside a closure
+    // compiled clean but linked with "implicit function declaration",
+    // since its real definition was never written anywhere).
+    .ClosureLiteral(f) -> { collect_reads(f.body, out); }
     _ -> {}
   }
 }

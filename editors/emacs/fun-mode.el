@@ -11,8 +11,9 @@
   "Syntax table for fun-mode.")
 
 (defconst fun-keywords
-  '("use" "as" "pub" "fun" "als" "compound" "shape" "impl" "enum" "asm" "volatile" "arch"
-    "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "fork" "break" "continue" "assert" "allow" "expect" "let"))
+  '("use" "as" "pub" "fun" "closure" "als" "compound" "shape" "impl" "enum" "asm" "volatile" "arch"
+    "defer" "ret" "if" "elif" "else" "for" "fit" "async" "await" "fork" "break" "continue" "assert"
+    "panic" "test" "sequential" "fuzz" "allow" "expect" "let" "const"))
 
 (defconst fun-types
   '("void" "raw" "num" "dec" "f32" "f64" "str" "flag" "chr"))
