@@ -3126,6 +3126,10 @@ impl Checker {
       if self.check_alias_qualified_call(node, e, method, env) {
         ret checked_unknown();
       }
+      let field_call = self.check_field_function_call(node, e, args, env);
+      if field_call.is_some() {
+        ret field_call.unwrap();
+      }
       self.check_receiver_has_method(node, e, method, env);
       ret checked_unknown();
     }
@@ -3495,6 +3499,91 @@ impl Checker {
     }
     self.check_visibility(method, sig.file, sig.is_public, "function", node);
     ret true;
+  }
+
+  // `receiver.field(args)` when `field` names no method but IS a real
+  // field of the receiver's own type whose declared type is itself a
+  // function value (`fun(T1, T2) R`, docs/language.md's own "Function
+  // values" section) - `resolve_method_call_with_receiver` only ever
+  // looks for a real method, so this call shape fell straight through
+  // to `check_receiver_has_method`'s "has no method" error otherwise,
+  // even though reading the field directly and calling it (`let f =
+  // o.op; f(6, 7);`) already worked fine. Checks arguments against the
+  // field's own declared signature the same way a function-typed
+  // local already does (see the plain-call path's own identical
+  // `callee.has_fn_sig` branch). `.None` - not a real field at all, or
+  // one whose type isn't a function value - leaves the call for the
+  // ordinary "no method" diagnostic to report instead. A generic
+  // compound's own field substitution isn't handled here; left to
+  // that same fallback too, same as every other unhandled shape in
+  // this file already is, rather than risking a wrong but silent
+  // answer.
+  check_field_function_call(Node* node, ExprNode e, Vec<Node*>* args, TypeEnv* env) Option<CheckedType> {
+    if !e.has_left {
+      ret .None;
+    }
+    fit e.left.kind {
+      .Expression(callee) -> {
+        if !equals(callee.op, ".") || !callee.has_left || !callee.has_right {
+          ret .None;
+        }
+        CheckedType receiver = self.infer(callee.left, env);
+        if equals(receiver.name, "") {
+          ret .None;
+        }
+        let info = self.compounds.at(self.canonical_type_name(receiver.name));
+        if info.is_none() || info.unwrap().is_generic {
+          ret .None;
+        }
+        str field = _callee_name(callee.right);
+        if equals(field, "") {
+          ret .None;
+        }
+        let found = info.unwrap().fields.at(field);
+        if found.is_none() || !found.unwrap().has_fn_sig {
+          ret .None;
+        }
+        FnTypeSig* fsig = found.unwrap().fn_sig;
+        if args.len != fsig.params.len {
+          self.fail(
+            format(
+            "'{str}' expects {num} arguments, got {num}",
+            field,
+            fsig.params.len,
+            args.len
+            ),
+            node
+          );
+          ret .Some(checked_unknown());
+        }
+        num ci = 0;
+        for ci < fsig.params.len {
+          let want = checked_from_dtype(fsig.params.get(ci));
+          let got = self.infer(args.get(ci), env);
+          self.check_shorthand_variant(args.get(ci), want, env);
+          if self.failed {
+            ret .Some(checked_unknown());
+          }
+          if !self.assignable(want, got) {
+            self.fail(
+              format(
+              "argument {num} of '{str}' expects {str}, found {str}",
+              ci + 1,
+              field,
+              type_name(want),
+              type_name(got)
+              ),
+              args.get(ci)
+            );
+            ret .Some(checked_unknown());
+          }
+          ci = ci + 1;
+        }
+        ret .Some(checked_from_dtype(fsig.rtype));
+      }
+      _ -> {}
+    }
+    ret .None;
   }
 
   // Reports a method called on a value whose type declares none. Only a

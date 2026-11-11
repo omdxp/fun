@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import RunCodeBlock from "./RunCodeBlock";
 import HighlightedCode from "./HighlightedCode";
@@ -230,110 +230,131 @@ export default function MarkdownWithPlayground({
       );
     };
 
+  // A fresh object (and fresh `code`/`a`/`h1`-`h6` functions) every
+  // render - even one triggered by something this component itself
+  // never reads, a theme toggle at the page root included - is what
+  // `components` used to be, written directly inline in the JSX
+  // below. React treats each of those as a *different component
+  // type* from the one it rendered last time (identity is the
+  // function reference, not what it does), so it unmounted and
+  // remounted every single child underneath - `<RunCodeBlock>`
+  // among them - on every re-render. Confirmed directly: a page-wide
+  // theme toggle gave every runnable example on the page a fresh
+  // `useId()`, discarding its nav history, resetting fls back to
+  // "not loaded yet," and restarting the whole lazy-load cycle, each
+  // toggle compounding the last. `useMemo` keeps this one object (and
+  // everything in it) referentially stable across a render that
+  // doesn't touch any of its own real inputs.
+  const components = useMemo<Components>(
+    () => ({
+      // `code()` below already returns a full `<pre>` for every block
+      // form (a runnable block, a highlighted block, or the plain
+      // fallback) - without this override, react-markdown's own default
+      // `pre` wraps that in a second, unstyled `<pre>`, doubling the box
+      // around every fenced code block.
+      pre: (props) => <>{props.children}</>,
+      // A wide table needs to scroll horizontally rather than squeeze
+      // its columns, but `overflow-x: auto` directly on the <table>
+      // (its old home) forces `display: block`, which breaks the
+      // browser's own column-width distribution: a table narrower than
+      // its container no longer stretches to fill it, leaving a dead
+      // gap next to a header background sized to the content instead
+      // of the row. Scrolling lives on this wrapper div instead, so the
+      // table itself stays a real table and lays out its columns
+      // normally.
+      table: (props) => (
+        <div className="md-table-wrap">
+          <table>{props.children}</table>
+        </div>
+      ),
+      h1: headingRenderer("h1"),
+      h2: headingRenderer("h2"),
+      h3: headingRenderer("h3"),
+      h4: headingRenderer("h4"),
+      h5: headingRenderer("h5"),
+      h6: headingRenderer("h6"),
+      a(props) {
+        const { href, children } = props;
+        const resolved = resolveHref(href, sourcePath);
+        const openInNewTab = Boolean(
+          resolved &&
+          !resolved.startsWith("#") &&
+          (resolved !== href || isExternalUrl(resolved)),
+        );
+        return (
+          <a
+            href={resolved}
+            className={openInNewTab ? "md-external-link" : undefined}
+            target={openInNewTab ? "_blank" : undefined}
+            rel={openInNewTab ? "noopener noreferrer" : undefined}
+          >
+            {children}
+          </a>
+        );
+      },
+      code(props) {
+        const { className, children } = props;
+        const text = String(children).replace(/\n$/, "");
+        const isBlock = Boolean(className);
+        const isFun = className?.includes("language-fun");
+        const lang = className?.match(/language-(\w+)/)?.[1];
+
+        if (isBlock && isFun && enableRunnableFunBlocks) {
+          if (NO_RUN_MARKER.test(text)) {
+            return (
+              <HighlightedCode
+                code={text.replace(NO_RUN_MARKER, "")}
+                lang="fun"
+                className="md-pre"
+                showCopy
+              />
+            );
+          }
+          return <RunCodeBlock initialCode={text} />;
+        }
+
+        if (isBlock && lang) {
+          return (
+            <HighlightedCode
+              code={text}
+              lang={lang}
+              className="md-pre"
+              showCopy
+            />
+          );
+        }
+
+        if (isBlock) {
+          return (
+            <HighlightedCode
+              code={text}
+              lang=""
+              className="md-pre"
+              showCopy
+            />
+          );
+        }
+
+        const inlineText = String(children);
+        return (
+          <HighlightedCode
+            code={inlineText}
+            lang="fun"
+            inline
+            className="md-inline-code"
+          />
+        );
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sourcePath, headingPrefix, headingIdsByLine, enableRunnableFunBlocks],
+  );
+
   return (
     <ReactMarkdown
       className="md-content"
       remarkPlugins={[remarkGfm]}
-      components={{
-        // `code()` below already returns a full `<pre>` for every block
-        // form (a runnable block, a highlighted block, or the plain
-        // fallback) - without this override, react-markdown's own default
-        // `pre` wraps that in a second, unstyled `<pre>`, doubling the box
-        // around every fenced code block.
-        pre: (props) => <>{props.children}</>,
-        // A wide table needs to scroll horizontally rather than squeeze
-        // its columns, but `overflow-x: auto` directly on the <table>
-        // (its old home) forces `display: block`, which breaks the
-        // browser's own column-width distribution: a table narrower than
-        // its container no longer stretches to fill it, leaving a dead
-        // gap next to a header background sized to the content instead
-        // of the row. Scrolling lives on this wrapper div instead, so the
-        // table itself stays a real table and lays out its columns
-        // normally.
-        table: (props) => (
-          <div className="md-table-wrap">
-            <table>{props.children}</table>
-          </div>
-        ),
-        h1: headingRenderer("h1"),
-        h2: headingRenderer("h2"),
-        h3: headingRenderer("h3"),
-        h4: headingRenderer("h4"),
-        h5: headingRenderer("h5"),
-        h6: headingRenderer("h6"),
-        a(props) {
-          const { href, children } = props;
-          const resolved = resolveHref(href, sourcePath);
-          const openInNewTab = Boolean(
-            resolved &&
-            !resolved.startsWith("#") &&
-            (resolved !== href || isExternalUrl(resolved)),
-          );
-          return (
-            <a
-              href={resolved}
-              className={openInNewTab ? "md-external-link" : undefined}
-              target={openInNewTab ? "_blank" : undefined}
-              rel={openInNewTab ? "noopener noreferrer" : undefined}
-            >
-              {children}
-            </a>
-          );
-        },
-        code(props) {
-          const { className, children } = props;
-          const text = String(children).replace(/\n$/, "");
-          const isBlock = Boolean(className);
-          const isFun = className?.includes("language-fun");
-          const lang = className?.match(/language-(\w+)/)?.[1];
-
-          if (isBlock && isFun && enableRunnableFunBlocks) {
-            if (NO_RUN_MARKER.test(text)) {
-              return (
-                <HighlightedCode
-                  code={text.replace(NO_RUN_MARKER, "")}
-                  lang="fun"
-                  className="md-pre"
-                  showCopy
-                />
-              );
-            }
-            return <RunCodeBlock initialCode={text} />;
-          }
-
-          if (isBlock && lang) {
-            return (
-              <HighlightedCode
-                code={text}
-                lang={lang}
-                className="md-pre"
-                showCopy
-              />
-            );
-          }
-
-          if (isBlock) {
-            return (
-              <HighlightedCode
-                code={text}
-                lang=""
-                className="md-pre"
-                showCopy
-              />
-            );
-          }
-
-          const inlineText = String(children);
-          return (
-            <HighlightedCode
-              code={inlineText}
-              lang="fun"
-              inline
-              className="md-inline-code"
-            />
-          );
-        },
-      }}
+      components={components}
     >
       {effectiveMarkdown}
     </ReactMarkdown>

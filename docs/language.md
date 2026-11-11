@@ -272,6 +272,7 @@ type from the expression:
   category (`dec` over `num`).
 
 ```fun
+// fun:no-run
 compound Point { num x; num y; }
 
 fun make_point(num x, num y) Point {
@@ -340,6 +341,8 @@ union. An enum becomes a tagged union as soon as *any* variant has a
 payload; payload-free variants still coexist.
 
 ```fun
+use std.io;
+
 compound Vec2 { num x; num y; }
 
 enum Shape {
@@ -361,7 +364,10 @@ fun area(Shape s) num {
 
 fun main() {
   Shape s = .Circle(5);   // shorthand construction
-  _ = area(s);
+  println_fmt("circle area={num}", area(s));
+
+  Shape t = .At(Vec2{x = 3, y = 4});  // compound payload, by value
+  println_fmt("at area={num}", area(t));
 }
 ```
 
@@ -839,10 +845,6 @@ impl Accum<T: num | dec> {
   }
 }
 
-compound Box<T: num | str> {
-  T value;
-}
-
 fun identity<T: num | str>(T x) T {
   ret x;
 }
@@ -894,6 +896,12 @@ fun main() {
   Pair<num> same = Pair<num>{ a = 3, b = 4 };
   Pair<num, str> mixed = Pair<num, str>{ a = 1, b = "x" };
   println_fmt("{num} {str}", same.a + same.b, mixed.b);
+
+  Res<num> r = half(4);  // E defaults to str
+  fit r {
+    .Ok(v) -> { println_fmt("half={num}", v); }
+    .Err(e) -> { println_fmt("err={str}", e); }
+  }
 }
 ```
 
@@ -1141,9 +1149,12 @@ fun main() {
 produces a value, for use anywhere an expression can go:
 
 ```fun
+use std.io;
+
 fun main() {
   num x = 5;
   str size = x > 10 ? "big" : x > 0 ? "small" : "non-positive";
+  println(size);
 }
 ```
 
@@ -1348,7 +1359,6 @@ call already uses:
 
 ```fun
 use std.io;
-use std.string;
 
 shape HasArea {
   area() num;
