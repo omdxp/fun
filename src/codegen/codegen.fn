@@ -9457,28 +9457,83 @@ impl Codegen {
         self.emit_hoisted(entry_scratch.out.build());
 
         // 4. The closure value itself, right here at this expression's
-        // own point of use.
-        self.state.write("((__fun_closure_t){.fn = (void*)");
-        self.state.write(entry_name);
-        self.state.write(", .env = (void*)({ ");
-        self.state.write(env_name);
-        self.state.write("* __ce = malloc(sizeof(");
-        self.state.write(env_name);
-        self.state.write(")); *__ce = (");
-        self.state.write(env_name);
-        self.state.write("){");
+        // own point of use. Deliberately never a GNU statement
+        // expression (unlike `?`/`!` propagation/`panic(...)`
+        // elsewhere in this codegen): MSVC rejects that extension
+        // outright (confirmed directly - a real CI failure, not a
+        // theoretical concern), and there's no awkward conditional
+        // control flow to hoist here that would make the plain-
+        // statement form painful, unlike propagation's own early
+        // return. Every part of this - the env allocation, each
+        // capture's own field assignment, and the final `{fn, env}`
+        // value - is instead spliced as plain, universally-portable
+        // statements immediately before the enclosing statement
+        // (`current_stmt_start_pos`, the same splice point `?`/`!`
+        // propagation's own MSVC/wasm fallback already uses), with
+        // just the resulting temp's own name left at this expression's
+        // point of use.
+        StringBuilder cl_sb = string_builder_init(64);
+        cl_sb.append(env_name);
+        cl_sb.append("* __fun_closure_envp_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(" = malloc(sizeof(");
+        cl_sb.append(env_name);
+        cl_sb.append("));\n");
         num wi = 0;
         for wi < cap_names.len {
-          if wi > 0 {
-            self.state.write(", ");
-          }
-          self.state.write(".");
-          self.state.write(cap_names.get(wi));
-          self.state.write(" = ");
-          self.state.write(cap_names.get(wi));
+          cl_sb.append("__fun_closure_envp_");
+          cl_sb.append(format_num(n));
+          cl_sb.append("->");
+          cl_sb.append(cap_names.get(wi));
+          cl_sb.append(" = ");
+          cl_sb.append(cap_names.get(wi));
+          cl_sb.append(";\n");
           wi = wi + 1;
         }
-        self.state.write("}; __ce; }) })");
+        cl_sb.append("__fun_closure_t __fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(";\n__fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(".fn = (void*)");
+        cl_sb.append(entry_name);
+        cl_sb.append(";\n__fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(".env = (void*)__fun_closure_envp_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(";\n");
+        str cl_text = cl_sb.build();
+
+        let cl_hoist_save = self.hoist_insert_pos;
+        let cl_splice_pos = self.current_stmt_start_pos;
+        self.hoist_insert_pos = cl_splice_pos;
+        // Mirrors `?`/`!` propagation's own identical fallback: a
+        // closure literal evaluated from inside another construct's
+        // own suspended scratch render (nested inside a generic
+        // instantiation, say) has `current_stmt_start_pos` cleared,
+        // same as `hoist_insert_pos` - routed through
+        // `root_stmt_start_pos` instead for the duration of this one
+        // splice.
+        flag cl_routed_via_root_stmt = false;
+        let cl_saved_root_hoist = self.root_hoist_pos;
+        if cl_splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
+          self.root_stmt_start_pos.is_some() {
+          self.root_hoist_pos = self.root_stmt_start_pos;
+          cl_routed_via_root_stmt = true;
+        }
+        self.emit_hoisted(cl_text);
+        if cl_routed_via_root_stmt {
+          self.root_hoist_pos = cl_saved_root_hoist;
+        }
+        if cl_splice_pos.is_some() {
+          cl_hoist_save = adjust_pos_after_splice(
+            cl_hoist_save,
+            cl_splice_pos.unwrap(),
+            len(cl_text)
+          );
+        }
+        self.hoist_insert_pos = cl_hoist_save;
+        self.state.write("__fun_closure_val_");
+        self.state.write(format_num(n));
         ret .None;
       }
       _ -> { ret .Some(.InvalidNode); }
