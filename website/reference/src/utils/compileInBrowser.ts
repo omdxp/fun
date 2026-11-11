@@ -720,3 +720,102 @@ export async function runEditedCode(
   const c = await runFrontend(files, entryPath);
   return compileAndRun(c);
 }
+
+const FILE_MARKER_RE = /^\s*\/\/\s*file:\s*(.+?)\s*$/i;
+
+export type ParsedSnippet = {
+  files: Record<string, string>;
+  entry: string;
+  // Each split file's own starting line within the combined source,
+  // in document order - `Playground.tsx` never needs this (it shows
+  // each file in its own real, independently-numbered editor tab),
+  // but `RunCodeBlock.tsx` does: one runnable example is a single
+  // continuous editor, so a cursor position there has to be mapped
+  // back to which split file (and which *local* line within it)
+  // that position actually falls in before any fls request can name
+  // the right document.
+  fileRanges: { path: string; startLine: number; lineCount: number }[];
+};
+
+// Mirrors `server/index.ts`'s own `parseSnippetFiles` and
+// `prebake-wasm.mjs`'s copy of it - the same `// file: path` marker
+// convention this project already uses to represent a multi-file
+// snippet as one block of text. A snippet with no marker at all is
+// treated as a single file named `main.fn`.
+export function parseSnippetFiles(code: string): ParsedSnippet {
+  const lines = code.split(/\r?\n/);
+  const files: Record<string, string> = {};
+  const fileRanges: ParsedSnippet["fileRanges"] = [];
+  let currentPath: string | null = null;
+  let currentLines: string[] = [];
+  let currentStart = 0;
+  let sawMarker = false;
+
+  const flush = () => {
+    if (currentPath && currentLines.length > 0) {
+      files[currentPath] = currentLines.join("\n").replace(/\n+$/, "");
+      fileRanges.push({ path: currentPath, startLine: currentStart, lineCount: currentLines.length });
+    }
+  };
+
+  lines.forEach((line, i) => {
+    const m = line.match(FILE_MARKER_RE);
+    if (m) {
+      flush();
+      sawMarker = true;
+      currentPath = m[1].replace(/^\.?\//, "");
+      currentLines = [];
+      // Content starts the line *after* the marker itself - the
+      // marker's own line never belongs to any split file's content.
+      currentStart = i + 1;
+      return;
+    }
+    if (currentPath === null && !sawMarker) {
+      currentPath = "main.fn";
+      currentStart = i;
+    }
+    currentLines.push(line);
+  });
+  flush();
+
+  if (!sawMarker) {
+    return {
+      files: { "main.fn": code.trimEnd() },
+      entry: "main.fn",
+      fileRanges: [{ path: "main.fn", startLine: 0, lineCount: lines.length }],
+    };
+  }
+  const entry = files["main.fn"] !== undefined ? "main.fn" : Object.keys(files)[0];
+  return { files, entry, fileRanges };
+}
+
+// The split file (and the position's own *local* line within it)
+// that a combined-editor `globalLine` falls in - the forward half of
+// `RunCodeBlock.tsx`'s own position mapping. Clamped to the last
+// file's own range rather than returning nothing for a position past
+// every known range (a trailing blank line after the last file's own
+// content, say), the same "best effort over `null`" every other fls
+// position lookup in this project already prefers.
+export function fileAtLine(
+  ranges: ParsedSnippet["fileRanges"],
+  globalLine: number,
+): { path: string; localLine: number } {
+  for (const r of ranges) {
+    if (globalLine >= r.startLine && globalLine < r.startLine + r.lineCount) {
+      return { path: r.path, localLine: globalLine - r.startLine };
+    }
+  }
+  const last = ranges[ranges.length - 1];
+  if (!last) return { path: "main.fn", localLine: globalLine };
+  return { path: last.path, localLine: Math.max(0, globalLine - last.startLine) };
+}
+
+// The reverse of `fileAtLine`: a split file's own local line, back to
+// the combined editor's real line number - needed to place a
+// diagnostic (fetched per split file, each with its own local
+// positions) at the right spot in the one continuous editor a
+// runnable example actually shows.
+export function lineToGlobal(ranges: ParsedSnippet["fileRanges"], path: string, localLine: number): number {
+  const r = ranges.find((x) => x.path === path);
+  return r ? r.startLine + localLine : localLine;
+}

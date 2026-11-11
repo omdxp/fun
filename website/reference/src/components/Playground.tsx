@@ -1,241 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { EditorState, StateField, StateEffect, type Text } from "@codemirror/state";
-import {
-  EditorView,
-  keymap,
-  lineNumbers,
-  highlightActiveLine,
-  hoverTooltip,
-  showTooltip,
-  Decoration,
-  type DecorationSet,
-  WidgetType,
-  type Tooltip,
-} from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { syntaxHighlighting, indentUnit } from "@codemirror/language";
-import { linter, lintGutter, type Diagnostic as CMDiagnostic } from "@codemirror/lint";
-import { autocompletion, type CompletionSource, type Completion } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 
-import { funLanguage, funHighlightDark, funHighlightLight, funEditorTheme } from "../utils/funLanguage";
 import {
   FunCompileError,
   runEditedCode,
-  getDiagnostics,
-  getHover,
-  getCompletions,
+  parseSnippetFiles,
   getDefinition,
-  getSignatureHelp,
-  getInlayHints,
   warmPlaygroundRuntime,
   fetchStdlibSource,
 } from "../utils/compileInBrowser";
-
-// Fun Web/Fun Web Light (the same two editor themes this project ships
-// for VS Code) rather than CodeMirror's own generic default style, so
-// the Playground's colors match what the rest of the site already
-// uses for every other code sample.
-function isDarkTheme(): boolean {
-  const explicit = document.documentElement.dataset.theme;
-  if (explicit === "light") return false;
-  if (explicit === "dark") return true;
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true;
-}
-
-// LSP's own `CompletionItemKind` numbering (the only part of the LSP
-// response shape a plain `any` doesn't self-document) mapped to
-// CodeMirror's own completion `type` strings, which drive its built-in
-// per-kind icon.
-function completionKind(kind: number | undefined): string {
-  switch (kind) {
-    case 3: return "function";
-    case 2: return "method";
-    case 5: return "property";
-    case 6: return "variable";
-    case 7: return "class";
-    case 8: return "interface";
-    case 9: return "module";
-    case 13: return "enum";
-    case 20: return "enum-member";
-    case 14: return "keyword";
-    case 21: return "constant";
-    default: return "text";
-  }
-}
-
-// A hover/signature-help result's `contents` can be a plain string, a
-// `{language, value}` pair, or (fls's own shape) `{kind, value}`
-// markdown - every form reduces to one string either way.
-function contentsToText(contents: any): string {
-  if (!contents) return "";
-  if (typeof contents === "string") return contents;
-  if (typeof contents.value === "string") return contents.value;
-  if (Array.isArray(contents)) return contents.map(contentsToText).join("\n\n");
-  return "";
-}
-
-// One `textDocument/inlayHint` result rendered as CodeMirror ghost
-// text - a `let`-inferred local's own real type, a call's own
-// parameter name, exactly as VS Code already shows them for the same
-// server. `InlayHintKind` (LSP's own numbering): 2 is a parameter
-// name, anything else (1, or absent) a type.
-class InlayHintWidget extends WidgetType {
-  constructor(
-    private readonly label: string,
-    private readonly kind: number | undefined,
-  ) {
-    super();
-  }
-  eq(other: InlayHintWidget) {
-    return other.label === this.label && other.kind === this.kind;
-  }
-  toDOM() {
-    const span = document.createElement("span");
-    span.className = "pg-inlay-hint" + (this.kind === 2 ? " pg-inlay-hint-param" : "");
-    span.textContent = this.label;
-    return span;
-  }
-  ignoreEvent() {
-    return true;
-  }
-}
-
-const setInlayHints = StateEffect.define<DecorationSet>();
-const inlayHintsField = StateField.define<DecorationSet>({
-  create: () => Decoration.none,
-  update(value, tr) {
-    for (const e of tr.effects) {
-      if (e.is(setInlayHints)) return e.value;
-    }
-    // An edit without a fresh response yet (still in flight, or this
-    // file isn't the active fls session) keeps showing the last known
-    // hints, remapped across the change, rather than flashing empty -
-    // the same tolerance every other fls-backed feature here already
-    // has for a stale-but-still-roughly-right answer.
-    return value.map(tr.changes);
-  },
-  provide: (f) => EditorView.decorations.from(f),
-});
-
-// Inline markdown within one line/paragraph: a link (`[label](url)`,
-// fls's own "See also" footer wraps the label in backticks too, which
-// this strips rather than rendering literally) and a code span
-// (`` `x` ``). Deliberately narrow - this only ever renders text fls
-// itself generates, not arbitrary user markdown - so a small regex
-// pass is enough, and building real DOM nodes (never `innerHTML`)
-// keeps it safe regardless.
-function appendInlineMarkdown(parent: HTMLElement, text: string, onLink: (href: string) => void) {
-  const re = /\[`?([^\]]+?)`?\]\(([^)]+)\)|`([^`]+)`/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
-    if (m[2] !== undefined) {
-      // `href`/`label` are their own `const`s, not read off `m` inside
-      // the listener - `m` is one `let` reused by every loop iteration
-      // (reassigned by the next `re.exec` call, `null` once the loop
-      // ends), so every link's listener would otherwise close over the
-      // same binding and see `null` by the time anyone actually clicks.
-      const href = m[2];
-      const label = m[1];
-      const a = document.createElement("a");
-      a.href = href;
-      a.textContent = label;
-      a.addEventListener("click", (e) => {
-        e.preventDefault();
-        onLink(href);
-      });
-      parent.appendChild(a);
-    } else if (m[3] !== undefined) {
-      const code = document.createElement("code");
-      code.textContent = m[3];
-      parent.appendChild(code);
-    }
-    last = re.lastIndex;
-  }
-  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
-}
-
-// Renders fls's own hover/completion-doc markdown (plain paragraphs,
-// fenced code blocks, a `---` rule, and the "See also" footer's
-// links) as real DOM - CodeMirror's tooltips and completion `info`
-// panels take a DOM node directly, not React, so this builds one by
-// hand rather than pulling in a full markdown library for a handful
-// of block types fls itself is the only producer of.
-function renderDocMarkdown(text: string, onLink: (href: string) => void): HTMLElement {
-  const root = document.createElement("div");
-  root.className = "pg-md";
-  const lines = text.split("\n");
-  let para: string[] = [];
-  const flushPara = () => {
-    if (para.length === 0) return;
-    const p = document.createElement("p");
-    appendInlineMarkdown(p, para.join(" ").trim(), onLink);
-    root.appendChild(p);
-    para = [];
-  };
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (/^```/.test(line)) {
-      flushPara();
-      const codeLines: string[] = [];
-      i += 1;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-        codeLines.push(lines[i]);
-        i += 1;
-      }
-      i += 1;
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      code.textContent = codeLines.join("\n");
-      pre.appendChild(code);
-      root.appendChild(pre);
-      continue;
-    }
-    if (/^---\s*$/.test(line)) {
-      flushPara();
-      root.appendChild(document.createElement("hr"));
-      i += 1;
-      continue;
-    }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      flushPara();
-      // Every level maps to the same small, bold block rather than a
-      // real h1..h6 - a hover tooltip is a few hundred pixels wide at
-      // most, so a doc's own `#`/`##` structure is never deep enough
-      // here to need visually distinct sizes.
-      const h = document.createElement("div");
-      h.className = "pg-md-heading";
-      appendInlineMarkdown(h, heading[2].trim(), onLink);
-      root.appendChild(h);
-      i += 1;
-      continue;
-    }
-    if (/^[-*]\s+/.test(line)) {
-      flushPara();
-      const ul = document.createElement("ul");
-      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
-        const li = document.createElement("li");
-        appendInlineMarkdown(li, lines[i].replace(/^[-*]\s+/, "").trim(), onLink);
-        ul.appendChild(li);
-        i += 1;
-      }
-      root.appendChild(ul);
-      continue;
-    }
-    if (line.trim() === "") {
-      flushPara();
-      i += 1;
-      continue;
-    }
-    para.push(line.trim());
-    i += 1;
-  }
-  flushPara();
-  return root;
-}
+import {
+  isDarkTheme,
+  buildBaseFunEditorExtensions,
+  buildFunEditorExtensions,
+  offsetFor,
+  posFor,
+  refreshInlayHints,
+  type FunEditorOptions,
+} from "../utils/funEditorExtensions";
 
 type ProjectFiles = Record<string, string>;
 
@@ -243,46 +26,12 @@ type Sample = { title: string; code: string };
 
 type RunOutcome = { stdout: string; stderr: string };
 
-const FILE_MARKER_RE = /^\s*\/\/\s*file:\s*(.+?)\s*$/i;
-
-// Mirrors `server/index.ts`'s own `parseSnippetFiles` and
-// `prebake-wasm.mjs`'s copy of it - the same `// file: path` marker
-// convention this project already uses to represent a multi-file
-// snippet as one block of text. A sample with no marker at all is
-// treated as a single file named `main.fn`.
+// `parseSnippetFiles` (compileInBrowser.ts) already does the real
+// splitting work, shared with `RunCodeBlock.tsx`; this just drops the
+// `fileRanges` it also returns, which only a single-editor runnable
+// example (not a real multi-tab project like this one) ever needs.
 function parseSample(code: string): { files: ProjectFiles; entry: string } {
-  const lines = code.split(/\r?\n/);
-  const files: ProjectFiles = {};
-  let currentPath: string | null = null;
-  let currentLines: string[] = [];
-  let sawMarker = false;
-
-  const flush = () => {
-    if (currentPath && currentLines.length > 0) {
-      files[currentPath] = currentLines.join("\n").replace(/\n+$/, "");
-    }
-  };
-
-  for (const line of lines) {
-    const m = line.match(FILE_MARKER_RE);
-    if (m) {
-      flush();
-      sawMarker = true;
-      currentPath = m[1].replace(/^\.?\//, "");
-      currentLines = [];
-      continue;
-    }
-    if (currentPath === null && !sawMarker) {
-      currentPath = "main.fn";
-    }
-    currentLines.push(line);
-  }
-  flush();
-
-  if (!sawMarker) {
-    return { files: { "main.fn": code.trimEnd() }, entry: "main.fn" };
-  }
-  const entry = files["main.fn"] !== undefined ? "main.fn" : Object.keys(files)[0];
+  const { files, entry } = parseSnippetFiles(code);
   return { files, entry };
 }
 
@@ -475,6 +224,16 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   const NAV_HISTORY_LIMIT = 50;
   const [hasBack, setHasBack] = useState(false);
 
+  // Every position "Go back" moved away from, most recent last - what
+  // "Go forward" (`goForward` below) pops from, the standard back/
+  // forward pairing every browser/IDE history already gives: going
+  // back then forward again lands exactly where "back" left from. A
+  // fresh jump through `jumpTo` (anything other than "Go forward"
+  // itself) clears this, the same "new navigation discards whatever
+  // was ahead" rule that pairing already follows elsewhere.
+  const forwardHistoryRef = useRef<{ path: string; line: number; character: number }[]>([]);
+  const [hasForward, setHasForward] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     warmPlaygroundRuntime().flsReady.then(() => {
@@ -495,25 +254,6 @@ export default function Playground({ samples }: { samples: Sample[] }) {
 
   const tree = useMemo(() => buildTree(Object.keys(files)), [files]);
 
-  // LSP positions are `{line, character}` (0-indexed); CodeMirror wants
-  // a flat document offset. Clamped to the document's own current
-  // length - the diagnostics call is async and debounced, so by the
-  // time a response comes back the document the position was computed
-  // against may already be shorter.
-  const offsetFor = (doc: Text, line: number, character: number): number => {
-    const clampedLine = Math.min(Math.max(line, 0), doc.lines - 1);
-    const lineInfo = doc.line(clampedLine + 1);
-    return Math.min(lineInfo.from + Math.max(character, 0), lineInfo.to);
-  };
-
-  const posFor = (doc: Text, offset: number): { line: number; character: number } => {
-    const lineInfo = doc.lineAt(offset);
-    return { line: lineInfo.number - 1, character: offset - lineInfo.from };
-  };
-
-  const severityFor = (n: number): "error" | "warning" | "info" =>
-    n === 2 ? "warning" : n >= 3 ? "info" : "error";
-
   // Shared by `gotoDefinition` and `navigateToDocLink`: jumps within
   // the same file directly; a different project file sets
   // `pendingJumpRef` and switches to it (the sync effect applies the
@@ -526,9 +266,24 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   // somewhere to actually show it rather than a silent no-op. Any
   // other target outside the project (nothing recognized as `stdlib/`)
   // is still a no-op - there's no source for it to fetch.
+  // `fromLine`/`fromCharacter` is the position the jump was actually
+  // invoked *from* - the caller's own job to capture, at the moment
+  // the jump was triggered, not re-derived here from `view.state.
+  // selection.main.head`. That distinction is real, not defensive:
+  // every caller (`gotoDefinition` chief among them) awaits an async
+  // fls round-trip between reading the trigger position and calling
+  // this function, and a Cmd/Ctrl+click's own `event.preventDefault()`
+  // deliberately stops the browser from ever moving the live selection
+  // to the clicked spot - so by the time this runs, `main.head` is
+  // wherever the cursor was sitting *before* that click, not where the
+  // reader actually clicked. Pushing that stale position onto history
+  // used to mean "Back" after a jump never actually returned to the
+  // real click site.
   const jumpTo = async (
     view: EditorView,
     currentPath: string,
+    fromLine: number,
+    fromCharacter: number,
     targetPath: string,
     targetLine: number,
     targetCharacter: number,
@@ -538,16 +293,33 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     // that just bounces back to the same spot isn't worth leaving on
     // the stack.
     const pushHistory = () => {
-      const from = posFor(view.state.doc, view.state.selection.main.head);
-      navHistoryRef.current.push({ path: currentPath, line: from.line, character: from.character });
+      navHistoryRef.current.push({ path: currentPath, line: fromLine, character: fromCharacter });
       if (navHistoryRef.current.length > NAV_HISTORY_LIMIT) {
         navHistoryRef.current.shift();
       }
       setHasBack(true);
+      // A fresh jump discards whatever "Go forward" could have
+      // returned to - `goForward` itself never reaches this function
+      // (it moves the view directly, the same way `goBack` already
+      // does), so every call here really is a *new* branch of
+      // navigation, not a replay of one "Go back" already visited.
+      if (forwardHistoryRef.current.length > 0) {
+        forwardHistoryRef.current = [];
+        setHasForward(false);
+      }
     };
     if (targetPath === currentPath) {
-      pushHistory();
       const off = offsetFor(view.state.doc, targetLine, targetCharacter);
+      const fromOff = offsetFor(view.state.doc, fromLine, fromCharacter);
+      // Goto-definition invoked while already standing on the
+      // definition itself (or invoked twice in a row without moving)
+      // resolves to this exact spot - nothing to jump to, and
+      // nothing worth remembering: pushing history anyway would leave
+      // a dead "Back" entry that just bounces right back to here.
+      if (off === fromOff) {
+        return;
+      }
+      pushHistory();
       // `scrollIntoView: true` only scrolls the minimum distance needed -
       // a jump landing just past the bottom edge of the viewport stays
       // pinned there instead of settling in view the way a real editor's
@@ -578,30 +350,100 @@ export default function Playground({ samples }: { samples: Sample[] }) {
   // reference file especially has nowhere else to return to, since it
   // never appears in the project tree (see `externalFiles`' own
   // comment) - the only way back to one is this stack.
+  //
+  // Where we are *right now*, snapshotted once before any popping
+  // below, is pushed onto `forwardHistoryRef` so "Go forward" can
+  // return here afterward - but only once per call, when a hop
+  // actually lands somewhere, not once per stale project-file skip
+  // (several deleted files in a row would otherwise leave several
+  // bogus forward entries for what's really just one move).
   const goBack = (view: EditorView, currentPath: string) => {
-    const prev = navHistoryRef.current.pop();
-    setHasBack(navHistoryRef.current.length > 0);
-    if (!prev) return;
-    if (prev.path === currentPath) {
-      const off = offsetFor(view.state.doc, prev.line, prev.character);
-      view.dispatch({
-        selection: { anchor: off },
-        effects: EditorView.scrollIntoView(off, { y: "center" }),
-      });
-      view.focus();
-      return;
-    }
-    if (filesRef.current[prev.path] === undefined && externalFilesRef.current[prev.path] === undefined) {
-      // Gone - a project file the person deleted since. Nothing to
-      // return to; try the entry before it instead.
-      goBack(view, currentPath);
-      return;
-    }
-    pendingJumpRef.current = { line: prev.line, character: prev.character };
-    setActiveFile(prev.path);
+    const from = posFor(view.state.doc, view.state.selection.main.head);
+    let forwardPushed = false;
+    const pushForwardOnce = () => {
+      if (forwardPushed) return;
+      forwardPushed = true;
+      forwardHistoryRef.current.push({ path: currentPath, line: from.line, character: from.character });
+      setHasForward(true);
+    };
+    const step = () => {
+      const prev = navHistoryRef.current.pop();
+      setHasBack(navHistoryRef.current.length > 0);
+      if (!prev) return;
+      if (prev.path === currentPath) {
+        pushForwardOnce();
+        const off = offsetFor(view.state.doc, prev.line, prev.character);
+        view.dispatch({
+          selection: { anchor: off },
+          effects: EditorView.scrollIntoView(off, { y: "center" }),
+        });
+        view.focus();
+        return;
+      }
+      if (filesRef.current[prev.path] === undefined && externalFilesRef.current[prev.path] === undefined) {
+        // Gone - a project file the person deleted since. Nothing to
+        // return to; try the entry before it instead.
+        step();
+        return;
+      }
+      pushForwardOnce();
+      pendingJumpRef.current = { line: prev.line, character: prev.character };
+      setActiveFile(prev.path);
+    };
+    step();
+  };
+
+  // The mirror image of `goBack`: pops the most recent position "Go
+  // back" moved away from (`forwardHistoryRef`) and returns there,
+  // pushing where we are now back onto `navHistoryRef` so "Go back"
+  // still works afterward - the same back/forward pairing every
+  // browser/IDE history already gives. Deliberately does not go
+  // through `jumpTo` (which would clear this very stack, reading a
+  // "forward" hop as a brand-new branch of navigation instead of a
+  // replay of one "Go back" already visited).
+  const goForward = (view: EditorView, currentPath: string) => {
+    const from = posFor(view.state.doc, view.state.selection.main.head);
+    let backPushed = false;
+    const pushBackOnce = () => {
+      if (backPushed) return;
+      backPushed = true;
+      navHistoryRef.current.push({ path: currentPath, line: from.line, character: from.character });
+      if (navHistoryRef.current.length > NAV_HISTORY_LIMIT) {
+        navHistoryRef.current.shift();
+      }
+      setHasBack(true);
+    };
+    const step = () => {
+      const next = forwardHistoryRef.current.pop();
+      setHasForward(forwardHistoryRef.current.length > 0);
+      if (!next) return;
+      if (next.path === currentPath) {
+        pushBackOnce();
+        const off = offsetFor(view.state.doc, next.line, next.character);
+        view.dispatch({
+          selection: { anchor: off },
+          effects: EditorView.scrollIntoView(off, { y: "center" }),
+        });
+        view.focus();
+        return;
+      }
+      if (filesRef.current[next.path] === undefined && externalFilesRef.current[next.path] === undefined) {
+        // Gone - same recovery as `goBack`'s own identical case.
+        step();
+        return;
+      }
+      pushBackOnce();
+      pendingJumpRef.current = { line: next.line, character: next.character };
+      setActiveFile(next.path);
+    };
+    step();
   };
 
   const gotoDefinition = async (view: EditorView, path: string, atPos?: number) => {
+    // Captured now, before the `await` below - see `jumpTo`'s own
+    // comment on why re-reading `view.state.selection.main.head` once
+    // the fls round-trip finishes instead would silently drift from
+    // where this was actually invoked.
     const pos = atPos ?? view.state.selection.main.head;
     const { line, character } = posFor(view.state.doc, pos);
     const result = await getDefinition(filesRef.current, path, line, character, textFor(path));
@@ -610,7 +452,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     const targetPath = String(loc.uri).replace(/^file:\/\/\//, "").replace(/^\/+/, "");
     const targetLine = loc.range.start.line ?? 0;
     const targetCharacter = loc.range.start.character ?? 0;
-    await jumpTo(view, path, targetPath, targetLine, targetCharacter);
+    await jumpTo(view, path, line, character, targetPath, targetLine, targetCharacter);
   };
 
   // A hover/completion doc's own "See also" link (`file:///path#L3`,
@@ -624,215 +466,52 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     if (!m) return;
     const targetPath = decodeURIComponent(m[1]);
     const targetLine = m[2] ? Math.max(0, parseInt(m[2], 10) - 1) : 0;
-    void jumpTo(view, currentPath, targetPath, targetLine, 0);
+    const from = posFor(view.state.doc, view.state.selection.main.head);
+    void jumpTo(view, currentPath, from.line, from.character, targetPath, targetLine, 0);
   };
 
-  // Whatever's actually scrolled into view, not the whole document - a
-  // long file would otherwise pay for (and show stale types for)
-  // hundreds of off-screen lines every single edit. Component-level
-  // rather than closed over inside `stateFor` so both an edit/scroll
-  // (through the state's own updateListener) and a fresh mount/file
-  // switch (no update event of its own to hook) can call the same
-  // function instead of duplicating it.
-  const refreshInlayHints = async (view: EditorView, path: string) => {
-    if (!flsReadyRef.current) return;
-    const firstLine = view.state.doc.lineAt(view.viewport.from).number - 1;
-    const lastLine = view.state.doc.lineAt(view.viewport.to).number - 1;
-    const hints = await getInlayHints(filesRef.current, path, firstLine, lastLine, textFor(path));
-    if (!Array.isArray(hints) || hints.length === 0) {
-      view.dispatch({ effects: setInlayHints.of(Decoration.none) });
-      return;
-    }
-    const decorations = hints
-      .filter((h) => h?.position)
-      .map((h) => {
-        const pos = offsetFor(view.state.doc, h.position.line, h.position.character);
-        const label = (h.paddingLeft ? " " : "") + String(h.label) + (h.paddingRight ? " " : "");
-        return Decoration.widget({ widget: new InlayHintWidget(label, h.kind), side: 1 }).range(pos);
-      })
-      .sort((a, b) => a.from - b.from);
-    view.dispatch({ effects: setInlayHints.of(Decoration.set(decorations)) });
-  };
+  // Every option `buildFunEditorExtensions` (and `refreshInlayHints`,
+  // called directly on mount/file-switch below) needs for `path` -
+  // one place building it so `stateFor` and the mount effect can't
+  // drift apart on what "this document, as fls sees it" means.
+  const funEditorOptionsFor = (path: string): FunEditorOptions => ({
+    path,
+    isDark: isDarkTheme(),
+    isExternal: externalFilesRef.current[path] !== undefined,
+    getFiles: () => filesRef.current,
+    getFlsReady: () => flsReadyRef.current,
+    getText: () => textFor(path),
+    onDocChanged: (text) => setFiles((prev) => ({ ...prev, [path]: text })),
+    onDocLink: (view, href) => navigateToDocLink(view, path, href),
+    onGotoDefinition: (view, pos) => { void gotoDefinition(view, path, pos); },
+    onGoBack: (view) => goBack(view, path),
+    onGoForward: (view) => goForward(view, path),
+  });
 
   const stateFor = (path: string, content: string): EditorState => {
     const existing = statesRef.current.get(path);
     if (existing) return existing;
 
-    // A stdlib reference file (see `externalFiles`' own comment) is
-    // read-only display, nothing more - fls has no mounted content
-    // for it to analyze (mounting it would reproduce the exact hang
-    // `externalFiles` exists to avoid), so every fls-backed feature
-    // below is skipped outright for it rather than firing requests
-    // that would either hang or answer against the wrong document.
-    const isExternal = externalFilesRef.current[path] !== undefined;
-
-    const setSignatureTooltip = StateEffect.define<Tooltip | null>();
-    const signatureTooltipField = StateField.define<Tooltip | null>({
-      create: () => null,
-      update(value, tr) {
-        for (const e of tr.effects) {
-          if (e.is(setSignatureTooltip)) return e.value;
-        }
-        return value;
-      },
-      provide: (f) => showTooltip.from(f),
-    });
-
-    const completionSource: CompletionSource = async (context) => {
-      if (!flsReadyRef.current || isExternal) return null;
-      const { line, character } = posFor(context.state.doc, context.pos);
-      const result = await getCompletions(filesRef.current, path, line, character);
-      const items = Array.isArray(result) ? result : result?.items;
-      if (!Array.isArray(items) || items.length === 0) return null;
-      const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/);
-      const from = word ? word.from : context.pos;
-      const options: Completion[] = items.map((it: any) => ({
-        label: it.label,
-        type: completionKind(it.kind),
-        detail: it.detail,
-        info: () => {
-          const text = contentsToText(it.documentation);
-          if (!text) return null;
-          const view = context.view ?? viewRef.current;
-          const dom = renderDocMarkdown(text, (href) => {
-            if (view) navigateToDocLink(view, path, href);
-          });
-          return { dom };
-        },
-        apply: it.insertText || it.label,
-      }));
-      return { from, options };
-    };
-
-    let signatureTimer: number | undefined;
-    let inlayHintTimer: number | undefined;
-
+    const opts = funEditorOptionsFor(path);
     const state = EditorState.create({
       doc: content,
       extensions: [
-        lineNumbers(),
-        history(),
-        highlightActiveLine(),
-        syntaxHighlighting(isDarkTheme() ? funHighlightDark : funHighlightLight, { fallback: true }),
-        funEditorTheme(isDarkTheme()),
-        funLanguage,
-        indentUnit.of("  "),
-        EditorState.readOnly.of(isExternal),
-        keymap.of([
-          { key: "F12", run: (view) => { gotoDefinition(view, path); return true; } },
-          { key: "Alt-d", run: (view) => { gotoDefinition(view, path); return true; } },
-          { key: "Alt-ArrowLeft", run: (view) => { goBack(view, path); return true; } },
-          ...defaultKeymap,
-          ...historyKeymap,
-          indentWithTab,
-        ]),
-        EditorView.lineWrapping,
-        lintGutter(),
-        linter(
-          async (view) => {
-            if (!flsReadyRef.current || isExternal) return [];
-            const diags = await getDiagnostics(filesRef.current, path);
-            const out: CMDiagnostic[] = [];
-            for (const d of diags) {
-              const from = offsetFor(view.state.doc, d.from.line, d.from.character);
-              const to = Math.max(from, offsetFor(view.state.doc, d.to.line, d.to.character));
-              out.push({ from, to, severity: severityFor(d.severity), message: d.message });
-            }
-            return out;
-          },
-          { delay: 600 },
-        ),
-        hoverTooltip(async (view, pos) => {
-          if (!flsReadyRef.current) return null;
-          const { line, character } = posFor(view.state.doc, pos);
-          const result = await getHover(filesRef.current, path, line, character, textFor(path));
-          const text = contentsToText(result?.contents);
-          if (!text) return null;
-          const range = result?.range;
-          const from = range ? offsetFor(view.state.doc, range.start.line, range.start.character) : pos;
-          const to = range ? offsetFor(view.state.doc, range.end.line, range.end.character) : pos;
-          return {
-            pos: from,
-            end: Math.max(from, to),
-            above: true,
-            create: () => {
-              const dom = renderDocMarkdown(text, (href) => navigateToDocLink(view, path, href));
-              dom.classList.add("pg-hover-tooltip");
-              return { dom };
-            },
-          };
-        }),
-        autocompletion({ override: [completionSource] }),
-        // Cmd/Ctrl+click as the primary goto-definition gesture - the
-        // standard one in every mainstream editor, and it sidesteps
-        // `F12`'s own real-world problem: most browsers treat it as a
-        // global DevTools shortcut and a page's own key handler never
-        // sees it, keybinding or not.
-        EditorView.domEventHandlers({
-          mousedown: (event, view) => {
-            if (!event.metaKey && !event.ctrlKey) return false;
-            const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-            if (pos == null) return false;
-            event.preventDefault();
-            gotoDefinition(view, path, pos);
-            return true;
-          },
-        }),
-        signatureTooltipField,
-        inlayHintsField,
+        ...buildBaseFunEditorExtensions(opts.isDark, opts.isExternal),
+        ...buildFunEditorExtensions(opts),
+        // `stateFor` caches one `EditorState` per path and reuses it
+        // unconditionally on every later visit to that file (so undo
+        // history/selection survive a switch away and back) - but a
+        // transaction produces a brand new, immutable `EditorState`
+        // object each time, so without re-caching it here, every
+        // live edit effectively vanishes the moment the user leaves
+        // the file: switching back resurrects the *original*,
+        // pre-edit object instead. Confirmed directly as a real,
+        // severe, pre-existing bug - `files` (the React-visible copy
+        // used for compiling/saving) stayed correct the whole time,
+        // only the editor's own cached state silently reverted.
         EditorView.updateListener.of((update) => {
-          // `stateFor` caches one `EditorState` per path and reuses it
-          // unconditionally on every later visit to that file (so undo
-          // history/selection survive a switch away and back) - but a
-          // transaction produces a brand new, immutable `EditorState`
-          // object each time, so without re-caching it here, every
-          // live edit effectively vanishes the moment the user leaves
-          // the file: switching back resurrects the *original*,
-          // pre-edit object instead. Confirmed directly as a real,
-          // severe, pre-existing bug - `files` (the React-visible copy
-          // used for compiling/saving) stayed correct the whole time,
-          // only the editor's own cached state silently reverted.
           if (update.docChanged || update.selectionSet) {
             statesRef.current.set(path, update.state);
-          }
-          if (update.docChanged) {
-            const text = update.state.doc.toString();
-            setFiles((prev) => ({ ...prev, [path]: text }));
-          }
-          if (update.docChanged || update.selectionSet) {
-            window.clearTimeout(signatureTimer);
-            signatureTimer = window.setTimeout(async () => {
-              if (!flsReadyRef.current) return;
-              const view = update.view;
-              const pos = view.state.selection.main.head;
-              const { line, character } = posFor(view.state.doc, pos);
-              const result = await getSignatureHelp(filesRef.current, path, line, character, textFor(path));
-              const sig = result?.signatures?.[result.activeSignature ?? 0];
-              if (!sig) {
-                view.dispatch({ effects: setSignatureTooltip.of(null) });
-                return;
-              }
-              view.dispatch({
-                effects: setSignatureTooltip.of({
-                  pos,
-                  above: true,
-                  create: () => {
-                    const dom = document.createElement("div");
-                    dom.className = "pg-signature-tooltip";
-                    dom.textContent = sig.label;
-                    return { dom };
-                  },
-                }),
-              });
-            }, 400);
-          }
-          // Re-requested on scroll too (`viewportChanged`, with no doc
-          // edit), not just on edit - a file long enough to scroll
-          // means the lines just scrolled into view were never in any
-          // earlier request's own range.
-          if (update.docChanged || update.viewportChanged) {
-            window.clearTimeout(inlayHintTimer);
-            inlayHintTimer = window.setTimeout(() => refreshInlayHints(update.view, path), 400);
           }
         }),
       ],
@@ -880,7 +559,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     // yet - nothing dispatches an update here, so without this a newly
     // opened or switched-to file would stay blank until the next edit
     // or scroll.
-    refreshInlayHints(view, activeFile);
+    void refreshInlayHints(view, funEditorOptionsFor(activeFile));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeFile, generation, flsReady]);
 
@@ -975,6 +654,8 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setExternalFiles({});
     navHistoryRef.current = [];
     setHasBack(false);
+    forwardHistoryRef.current = [];
+    setHasForward(false);
     statesRef.current.clear();
     setGeneration((g) => g + 1);
     setHasRun(false);
@@ -989,6 +670,8 @@ export default function Playground({ samples }: { samples: Sample[] }) {
     setExternalFiles({});
     navHistoryRef.current = [];
     setHasBack(false);
+    forwardHistoryRef.current = [];
+    setHasForward(false);
     statesRef.current.clear();
     setGeneration((g) => g + 1);
     setHasRun(false);
@@ -1090,18 +773,35 @@ export default function Playground({ samples }: { samples: Sample[] }) {
       <div className="pg-main">
         <div className="pg-toolbar">
           <span className="pg-toolbar-left">
-            {hasBack && (
-              <button
-                type="button"
-                className="ghost pg-back-button"
-                onClick={() => {
-                  if (viewRef.current) goBack(viewRef.current, activeFile);
-                }}
-                title="Go back (Alt+Left)"
-              >
-                ← Back
-              </button>
-            )}
+            {
+              // Always present, just disabled with nothing to go to -
+              // VS Code's own back/forward pair never pops in or out
+              // of its toolbar either, so clicking through several
+              // jumps doesn't also shift everything else in this row
+              // sideways each time.
+            }
+            <button
+              type="button"
+              className="ghost pg-nav-button"
+              disabled={!hasBack}
+              onClick={() => {
+                if (viewRef.current) goBack(viewRef.current, activeFile);
+              }}
+              title="Go back (Alt+Left)"
+            >
+              ← Back
+            </button>
+            <button
+              type="button"
+              className="ghost pg-nav-button"
+              disabled={!hasForward}
+              onClick={() => {
+                if (viewRef.current) goForward(viewRef.current, activeFile);
+              }}
+              title="Go forward (Alt+Right)"
+            >
+              Forward →
+            </button>
             <span className="pg-active-file">
               {activeFile}
               {externalFiles[activeFile] !== undefined && (
@@ -1132,7 +832,7 @@ export default function Playground({ samples }: { samples: Sample[] }) {
           </div>
         </div>
         <div className="pg-hint">
-          Cmd/Ctrl+click or F12 to jump to a definition, Alt+Left to go back &middot; hover a symbol for its docs &middot; start typing for completions
+          Cmd/Ctrl+click or F12 to jump to a definition, Alt+Left/Alt+Right to go back/forward &middot; hold Cmd/Ctrl and hover a symbol to see it's jumpable &middot; hover a symbol for its docs &middot; start typing for completions
         </div>
         <div ref={editorHostRef} className="pg-editor-host" />
         {hasRun && (

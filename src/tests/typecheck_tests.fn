@@ -3565,6 +3565,39 @@ test "operator overloading: unary op_neg and op_not dispatch to the impl method"
   );
 }
 
+test "a function-typed field is callable through dot-call syntax, same as docs/language.md's own example" {
+  // `resolve_method_call_with_receiver` only ever looks for a real
+  // method, so `o.op(6, 7)` through a compound field declared `fun(
+  // num, num) num op;` fell straight to "Ops has no method 'op'" -
+  // even though the field itself, read into a local first (`let f =
+  // o.op; f(6, 7);`), already worked fine. `check_field_function_call`
+  // closes the gap directly on the dot-call shape.
+  accepts(
+    `fun add(num a, num b) num { ret a + b; }
+    `compound Ops {
+    `  fun(num, num) num op;
+    `}
+    `fun main() {
+    `  Ops o = .{op = add};
+    `  num r = o.op(6, 7);
+    `}`,
+    "expected o.op(6, 7) to resolve through the field's own declared signature"
+  );
+  str msg = check(
+    `fun add(num a, num b) num { ret a + b; }
+    `compound Ops {
+    `  fun(num, num) num op;
+    `}
+    `fun main() {
+    `  Ops o = .{op = add};
+    `  num r = o.op(6);
+    `}`
+  );
+  assert !equals(msg, ""), "expected an arity mismatch through the field to still be rejected";
+  assert contains(msg, "op") && contains(msg, "1") && contains(msg, "2"),
+  "expected the error to name the field and both the given and expected argument counts";
+}
+
 test "operator overloading: op_index dispatches a[i] through the impl method" {
   accepts(
     `compound Vec3 { num x; num y; num z; }

@@ -515,60 +515,18 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .run-editor {
   position: relative;
   display: flex;
+  flex-direction: column;
   width: 100%;
   background: var(--code-surface);
 }
 
-.run-gutter {
-  flex: 0 0 auto;
-  padding: 12px 10px 12px 14px;
-  text-align: right;
-  font: 500 13px/1.5 var(--mono);
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.02);
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
-  user-select: none;
-  white-space: pre;
-}
-
-.run-surface {
-  position: relative;
-  flex: 1 1 auto;
-  display: grid;
-  min-width: 0;
-}
-
-.run-surface pre,
-.run-surface textarea {
-  grid-area: 1 / 1;
-  margin: 0;
-  padding: 12px 14px;
-  font: 500 13px/1.5 var(--mono);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border: none;
-  border-radius: 0;
-}
-
-.run-surface pre {
-  background: transparent;
-  color: #e9eeff;
-  pointer-events: none;
-}
-
-.run-surface textarea {
-  width: 100%;
-  resize: none;
-  overflow: hidden;
-  background: transparent;
-  color: transparent;
-  caret-color: #e9eeff;
-  -webkit-text-fill-color: transparent;
-}
-
-.run-surface textarea::selection {
-  background: rgba(106, 164, 255, 0.35);
-}
+/* `Playground.tsx`'s own `.pg-toolbar` sized for a full-page shell;
+   a runnable doc example is much smaller, so this trims the padding
+   rather than reusing it at full size. `.pg-static-actions` (shared
+   with `Playground.tsx`) already keeps Copy/Reset/Run in normal
+   flow instead of the plain `.run-actions` float-on-hover this block
+   used before CodeMirror replaced the old textarea overlay. */
+.run-toolbar { padding: 5px 10px; min-height: 30px; }
 
 /* Shiki emits `--shiki-light`/`--shiki-dark` custom properties per token
    (dual-theme mode, sourced directly from editors/vscode/themes/fun-web*)
@@ -656,21 +614,20 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
   background: var(--surface-2);
 }
 
-:root[data-theme="light"] .run-gutter {
-  background: var(--surface-3);
-  border-right-color: var(--border-soft);
-}
-
-:root[data-theme="light"] .run-surface pre {
+/* `.pg-nav-button`'s own base styling (dark navy fill, light text)
+   assumes a dark toolbar - true of neither host in light mode: both
+   `.run-editor` above and `Playground.tsx`'s own `.pg-shell` (see its
+   light override further down) switch to a light surface, leaving
+   Back/Forward a pale, low-contrast navy island next to Copy/Reset/
+   Run (or Full screen/Reset/Run), which already get this same
+   treatment via `.run-actions button`'s own light override just
+   above - `.pg-nav-button` is shared by both toolbars (`Playground.
+   tsx` uses the identical class), so this isn't scoped to either
+   one specifically. */
+:root[data-theme="light"] .pg-nav-button {
+  background: rgba(255, 255, 255, 0.7);
+  border-color: var(--border-strong);
   color: var(--text);
-}
-
-:root[data-theme="light"] .run-surface textarea {
-  caret-color: var(--text);
-}
-
-:root[data-theme="light"] .run-surface textarea::selection {
-  background: rgba(47, 75, 134, 0.18);
 }
 
 .pg-shell {
@@ -817,7 +774,28 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .pg-toolbar-left { display: flex; align-items: center; gap: 10px; }
 .pg-active-file { font: 500 13px var(--mono); color: var(--muted); }
-.pg-back-button { padding: 3px 10px; font-size: 0.78rem; cursor: pointer; }
+/* Base (dark-mode) look, same shape as `.run-actions button`'s own
+   base rule - both toolbars this sits in (`.run-editor`, `Playground.
+   tsx`'s own `.pg-shell`) switch to a light surface in light mode
+   (see each one's own light-theme override), so this alone would go
+   low-contrast there; the `[data-theme="light"] .pg-nav-button`
+   override further down is what actually adapts it, the same as
+   `.run-actions button`'s own light override handles Copy/Reset/Run.
+   Never had its own background/color/border at all before - relying
+   on each browser's own default button chrome, which looked wrong (an
+   odd light box in the middle of a dark toolbar) the moment these
+   became always-visible instead of only appearing after a jump. */
+.pg-nav-button {
+  padding: 3px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(14, 20, 38, 0.6);
+  color: #dce6ff;
+}
+.pg-nav-button:hover:not(:disabled) { border-color: var(--accent); }
+.pg-nav-button:disabled { opacity: 0.45; cursor: not-allowed; }
 .pg-loading-badge {
   margin-left: 10px;
   padding: 2px 8px;
@@ -887,6 +865,51 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 .pg-editor-host .cm-lintRange-info { background-image: none; border-bottom: 2px solid var(--accent); }
 .pg-editor-host .cm-gutterLintMarker { width: 14px; }
 
+/* `.run-cm-host` carries `.pg-editor-host` too (shared `.cm-*` rules
+   above), which sizes its own `.cm-editor` to fill a full-page
+   shell's own flex row (`height: 100%`) and keeps a 320px floor for
+   the same reason - neither fits a runnable doc example, which
+   should size to its own content the way the plain textarea it
+   replaced already did. Placed after `.pg-editor-host`'s own rules
+   above (not just given a `.run-cm-host`-only selector) specifically
+   so source order breaks the tie in this block's favor - the two
+   classes combine on one element, so without this ordering, equal-
+   specificity selectors would fall back to whichever sits later in
+   the file, silently reverting every override here back to
+   `.pg-editor-host`'s own fixed sizing. */
+.run-cm-host { min-height: 0; }
+.run-cm-host .cm-editor { height: auto; }
+.run-cm-host .cm-scroller { overflow: visible; }
+.run-cm-host .cm-content { padding: 10px 0; }
+
+/* A goto-definition/"See also" jump into stdlib source shows a real
+   file this example never wrote and has no reason to size around -
+   some are hundreds of lines long, which the content-sized rules
+   above would otherwise stretch this block to in full, dwarfing the
+   actual example above it. While `.pg-active-file`'s own read-only
+   badge is showing, this reinstates `.pg-editor-host`'s original
+   fixed-height-plus-internal-scroll behavior (the same pane
+   `Playground.tsx`'s own project view already uses for every file),
+   rather than the content-sized rules immediately above. Three
+   classes beats the two-class selectors above regardless of source
+   order, so this always wins while the state is active. */
+/* An explicit `height`, not `max-height` - `.cm-editor`/`.cm-scroller`'s
+   own `height: 100%` (CodeMirror's default base theme, confirmed via
+   its own source) only resolves against a containing block with a
+   *specified* height. `max-height` alone never qualifies, even once
+   it visibly clips this element's own box: per CSS2.1 a block's
+   `height: auto` passes nothing definite to percentage-height
+   children, which then compute to `auto` too and grow to fit content
+   - confirmed directly: `.cm-scroller` measured ~18000px tall here
+   with only `max-height` set, completely ignoring the cap, because
+   `.run-editor` above it is an unbounded flex column (no ancestor
+   bounding its own height the way `Playground.tsx`'s own `.pg-shell`
+   does for the identical `.pg-editor-host` pane). */
+.run-cm-host.viewing-stdlib { height: min(60vh, 480px); }
+.run-cm-host.viewing-stdlib .cm-editor { height: 100%; }
+.run-cm-host.viewing-stdlib .cm-scroller { overflow: auto; }
+.run-cm-host.viewing-stdlib .cm-content { padding: 12px 0; }
+
 /* Every tooltip (lint, hover, signature help, autocomplete) mounts as
    a `position: fixed` descendant of `.cm-editor` itself (confirmed
    directly, not assumed - not a `document.body` portal as an earlier
@@ -913,6 +936,15 @@ h1 { margin-top: 0; letter-spacing: -0.02em; }
 }
 .cm-diagnostic-error { border-left-color: var(--accent-strong); }
 .cm-diagnostic-warning { border-left-color: #e0a63a; }
+
+/* The VS Code-style "hold Cmd/Ctrl, the symbol under the mouse
+   underlines and the cursor becomes a hand" affordance - purely
+   visual feedback that it's a goto-definition target, not a real
+   link. */
+.cm-fun-def-link {
+  text-decoration: underline;
+  cursor: pointer;
+}
 
 .pg-hover-tooltip, .pg-signature-tooltip {
   font: 500 12.5px/1.5 var(--mono);
