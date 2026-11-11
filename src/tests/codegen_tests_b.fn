@@ -3200,3 +3200,22 @@ test "operator overloading: a nested operand near a generic Map<str, Vec<str>> s
   );
   assert equals(out, "0 has=false 11 22 33\n"), "expected the Map<str, Vec<str>> and the operator overload to both work correctly side by side";
 }
+
+test "a closure captures its own local by value, not a live alias" {
+  str src = `use std.c.io;
+  `fun main() num {
+  `  num x = 5;
+  `  closure() void c = fun() {
+  `    printf("x=%lld\n", x);
+  `  };
+  `  x = 99;
+  `  c();
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_captures_by_value",
+    "a closure snapshots a captured local at the moment it's created, not a live alias to it"
+  );
+  assert equals(out, "x=5\n"), "expected the closure to print the value captured before 'x' was reassigned to 99, not 99 itself";
+}

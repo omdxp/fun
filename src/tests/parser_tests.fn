@@ -604,6 +604,33 @@ test "free_node_tree frees a tree touching every major node shape without corrup
   }
 }
 
+test "a closure literal parses as an expression, with or without an explicit return type" {
+  str src = `fun main() {
+  `  closure() void c = fun() { _ = 1; };
+  `  closure() num d = fun() num { ret 2; };
+  `  c.fn;
+  `  d.fn;
+  `}`;
+  ParseState st = parse_ok(src);
+  free_node_tree(&st.nodes);
+}
+
+test "a closure literal rejects a non-empty parameter list at parse time" {
+  assert parse_fails(
+    `fun main() {
+    `  closure() void c = fun(num a) { _ = a; };
+    `}`
+  ), "expected 'fun(num a) {...}' to be rejected - a closure literal takes no call-time parameters";
+}
+
+test "a closure literal requires a real body, never a bodyless prototype form" {
+  assert parse_fails(
+    `fun main() {
+    `  closure() void c = fun();
+    `}`
+  ), "expected a bodyless closure literal to be rejected";
+}
+
 test "generic-heavy source parses whole" {
   // What the original's timing assertion guarded was that nesting
   // generics does not make the parser lose its place. Stated as

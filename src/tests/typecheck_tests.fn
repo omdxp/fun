@@ -4228,3 +4228,59 @@ test "expand_type_aliases does not double-free a bound-list alias's own alternat
   state.global_symbols.free();
   free_parse_state_internal(&state);
 }
+
+test "a closure body sees its enclosing function's own locals" {
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  closure() void c = fun() {
+    `    _ = x;
+    `  };
+    `  c();
+    `}`,
+    "expected the closure body to resolve 'x' from its enclosing scope"
+  );
+}
+
+test "a closure's own return type is checked against its own body, not its enclosing function's" {
+  accepts(
+    `fun main() num {
+    `  closure() str c = fun() str {
+    `    ret "ok";
+    `  };
+    `  c();
+    `  ret 1;
+    `}`,
+    "expected the closure's own str return to check against its own declared type, not main's num"
+  );
+  rejects(
+    `fun main() {
+    `  closure() void c = fun() {
+    `    ret 1;
+    `  };
+    `  c();
+    `}`,
+    "expected returning a value from a void closure to be rejected"
+  );
+}
+
+test "has_closure_sig is never assignable to a plain fun(...) slot, or the reverse" {
+  rejects(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  closure() num c = add;
+    `}`,
+    "expected a bare named function (plain fun(...) value) to be rejected where a closure is declared - different runtime shapes"
+  );
+}
+
+test "a closure literal assigned to a mismatched declared return type is rejected" {
+  rejects(
+    `fun main() {
+    `  closure() void c = fun() num {
+    `    ret 1;
+    `  };
+    `}`,
+    "expected a closure() num literal to be rejected where closure() void is declared"
+  );
+}

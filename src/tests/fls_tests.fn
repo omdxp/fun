@@ -10614,3 +10614,97 @@ test "a let local inferred from an array-indexed field access gets the field's o
     hints
   );
 }
+
+test "hover on a closure value's own .fn/.env fields describes what they are, not a bogus unrelated field" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///closurefields.fn";
+  doc.path = "closurefields.fn";
+  doc.text = `fun main() {
+  `  num x = 1;
+  `  closure() void c = fun() {
+  `    _ = x;
+  `  };
+  `  c.fn;
+  `  c.env;
+  `}`;
+  doc.version = 1;
+
+  // Hover on 'fn' (line 5 "  c.fn;", col 4).
+  str fn_hover = hover(&reads, doc, 5, 4);
+  assert contains(fn_hover, "closure's own underlying function pointer"), format(
+    "expected a real doc describing the closure's own .fn field, got: {str}",
+    fn_hover
+  );
+  // Hover on 'env' (line 6 "  c.env;", col 4).
+  str env_hover = hover(&reads, doc, 6, 4);
+  assert contains(env_hover, "closure's own captured environment"), format(
+    "expected a real doc describing the closure's own .env field, got: {str}",
+    env_hover
+  );
+}
+
+test "hover on the 'closure' keyword itself shows real doc text" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///closurekw.fn";
+  doc.path = "closurekw.fn";
+  doc.text = `fun main() {
+  `  closure() void c = fun() {};
+  `  c.fn;
+  `}`;
+  doc.version = 1;
+
+  // Hover on 'closure' (line 1 "  closure() void c = ...;", col 2).
+  str kw_hover = hover(&reads, doc, 1, 2);
+  assert contains(kw_hover, "capturing closure"), format(
+    "expected real doc text for the 'closure' keyword, got: {str}",
+    kw_hover
+  );
+}
+
+test "goto-definition on a closure value's own .fn/.env is a clean no-op, never a crash" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///closuregoto.fn";
+  doc.path = "closuregoto.fn";
+  doc.text = `fun main() {
+  `  closure() void c = fun() {};
+  `  c.fn;
+  `  c.env;
+  `}`;
+  doc.version = 1;
+
+  str fn_def = definition(&reads, doc, 2, 4);
+  assert equals(fn_def, "[]"), format("expected no real location for .fn, got: {str}", fn_def);
+  str env_def = definition(&reads, doc, 3, 4);
+  assert equals(env_def, "[]"), format(
+    "expected no real location for .env, got: {str}",
+    env_def
+  );
+}
+
+test "dot-completion on a closure value offers only fn/env, never anything else" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///closurecompletion.fn";
+  doc.path = "closurecompletion.fn";
+  doc.text = `fun main() {
+  `  closure() void c = fun() {};
+  `  c.
+  `}`;
+  doc.version = 1;
+
+  // Right after the dot on line 2, "  c.".
+  str out = completion(&reads, doc, 2, 4, true);
+  assert contains(out, `"label":"fn"`), format("expected 'fn' to be offered, got: {str}", out);
+  assert contains(out, `"label":"env"`), format("expected 'env' to be offered, got: {str}", out);
+  assert !contains(out, `"label":"tag_value"`), format(
+    "expected no unrelated builtin (tag_value is enum-only) to leak into a closure's own completions, got: {str}",
+    out
+  );
+}
