@@ -1,3 +1,239 @@
+## [0.74.0] - 2026-11-12
+
+### 🚀 Features
+
+- EOF/SEEK_*/EXIT_SUCCESS/EXIT_FAILURE get real declarations
+- *(fls)* Inlay hints show a generic call's own inferred type args
+
+### 🐛 Bug Fixes
+
+- *(ci)* Reference site build was missing prebake:stdlib-src
+- *(generics)* Explicit call-site type args checked/substituted, closures let-inferred, website links stay in-app
+- *(codegen)* Discard a bare propagation statement's own unused value with (void)
+- *(tests)* The new void-cast regression test only checked the GNU shape
+
+### 📚 Documentation
+
+- *(examples)* Add closures, ternary, operator overloading, and other missing-feature examples
+- *(examples)* Add missing-feature examples, fix 3 real bugs found writing them (#237)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.74.0
+## [0.73.0] - 2026-11-12
+
+### 🚀 Features
+
+- Wrap an over-long call's own argument list, one per line
+- Playground goto-definition/doc-links resolve into stdlib source
+- Hover, goto-def, signature help, and inlay hints work in stdlib reference files
+- Playground goto-definition has a navigation history, Go back
+- Reject a fixed-size array's own constant index out of range at compile time, for both a read and an assignment through it
+- Playground-style forward/back nav, fls features, and goto-def in every runnable doc example
+- Closures and a new std.thread_spawn.spawn built on them
+- A real std.builtins module and real declarations across std.c.*
+
+### 🐛 Bug Fixes
+
+- Fls completion/signature-help/goto-def gaps around chained receivers
+- Playground goto-definition centers the target, not just the bottom edge
+- Dot-completion on a bare call's result inside a fit statement's own subject
+- Fit over a non-enum result reaches typecheck, not a codegen crash
+- Playground editor no longer breaks the page layout on a long file
+- Narrow the enum-variant-pattern check to avoid flagging a still-abstract type parameter
+- Extend the enum-variant-pattern check to tuples and function-typed values
+- A generic FUNCTION's own call-site return type was never substituted
+- A bare compound literal with no declared type is rejected, not left to leak into codegen
+- A nonexistent method on a generic enum passed typecheck and crashed codegen
+- The playground's wasmer client and clang package are typed, not any
+- A compiled program's own nonzero exit threw instead of returning its output
+- A compile failure with no stderr read as a real rejection, not a hiccup
+- Arithmetic between two strings passed typecheck and leaked to the C compiler
+- A method's default parameter value referencing self crashed codegen
+- A method's own type param inferred only from a bare argument, not a callback's return
+- A generic impl's operator method never monomorphized through operator syntax
+- A let-bound await result had no case in the let-type inferrer at all
+- A doubly-nested generic return type substituted only its outer level
+- Signature help never answered for a method on a plain local, unclosed call
+- Hover/goto-def never resolved a variant inside a fit arm with an empty body
+- Safari rejected a reconstructed Response for a 304, breaking the worker script
+- Completion mid-generic-type-argument dumped every name instead of filtering to types
+- A let-bound index into a user-defined-element array never typed the local
+- Operator dispatch never resolved a dereferenced-pointer left operand
+- A dotted call through a wholly undeclared identifier crashed codegen
+- A generic function's argument-type inference ignored a nested generic call
+- A generic type param appearing nowhere at all passed typecheck outright
+- A generic function's type param never fell back to the enclosing let's own type
+- A module used without a declared alias was wrongly accepted as alias-qualified
+- A bare compound literal as a function's ret value crashed codegen
+- A generic function's result passed directly as an argument never inferred its type param
+- A generic impl method's own additional type param had no enclosing-let fallback
+- A bare qualified enum-variant reference with no declared type crashed codegen
+- Dot-shorthand completion stopped recognizing a partially-retyped variant name
+- A '?'/'!' propagation's own early return skipped the enclosing function's defer
+- A compound self-referential only through a generic enum wrapper crashed the C compiler
+- A propagation's own deferred cleanup could splice a nested type's forward-declare into the wrong place under MSVC
+- Hover on a fit-destructured payload showed the raw type param, not the concrete type
+- A let-inferred local built from an untyped const read through an import never resolved its own type
+- A zero-parameter function-pointer type wrote a bare () instead of (void) under MSVC
+- A fit arm's second payload binding showed a blank type instead of its own bare type param
+- Signature help never recognized an explicit EnumName.Variant(...) constructor call
+- Signature help never recognized a bare '.Variant(...)' shorthand constructor call either
+- A field access through a dereferenced multi-level pointer picked the wrong '.'/'->' and crashed on a double deref
+- A tuple member that is itself a further-generic type never substituted its own type param
+- Dot-completion on a chain ending in a call never resolved a locally-declared impl method's own return type
+- A top-level const whose own initializer is another const showed a blank inferred type
+- A generic enum's own variant payload that is itself a further-generic type never substituted its own type param
+- A top-level const whose own initializer is a qualified alias.CONST reference showed a blank inferred type too
+- Hover had no token-only fallback at all while the document doesn't parse
+- A propagation's deferred replay could emit a stray mid-line #line directive under debug info
+- A bare multi-level pointer local's own field access always read as a single pointer
+- A generic function's own shape-typed parameter never checked the caller's argument
+- A generic compound implementing a shape that is itself generic never built a vtable
+- A shape-downcast fit arm naming an explicit instantiation of an unbound generic impl was rejected
+- A plain shape-typed parameter broke when its implementor's own position came later in the file
+- An empty shape's early-built struct never got MSVC's empty-struct dummy field
+- Fls shape-downcast field hover and doubly-generic shape method hover never substituted the real instantiation
+- Indexing a multi-level pointer as a field-access receiver double-dereferenced
+- A struct-literal field initializer never coerced a concrete value into a shape-typed field (SIGSEGV)
+- A shape-downcast fit arm against a doubly-generic shape failed entirely
+- Fls dot-completion never substituted a generic receiver's own type param, shape-downcast bindings included
+- A top-level global's own shape-typed initializer never coerced
+- A parenthesized dispatched operand never dispatched its own outer operator
+- A shape-downcast fit arm against a multi-type-param implementor never triggered its own vtable
+- Array literal elements never coerced into a shape-typed element, and a global's own compound literal rejected by real MSVC
+- An explicitly-typed const only ever recognized a builtin scalar type, never a user-defined one
+- Fls's own mangled-instantiation reconstruction only ever handled a single-type-param implementor
+- A top-level global's own bare enum-variant/compound shorthand initializer failed outright, and a let-inferred global's type was never recorded
+- The shape-conformance quick fix always stubbed a generic method's bare type param, never the impl's own concrete instantiation
+- A propagation operator's own unwrapped type threw away a further-generic inner type's concrete args, in both dot-completion and the shared hover/goto-def/signature-help chain walker
+- Real MSVC rejected a let-inferred global's own compound/enum shorthand cast, and a global/const initializer that isn't a C compile-time constant now runs at startup instead of leaking a raw C error
+- A global's own ternary initializer still leaked a raw C compile-time-constant error, and fls's own hover never resolved a let-inferred global's real type past a plain literal
+- A bare '.Variant' shorthand against a generic comparison/call-argument context never substituted the context's own concrete args, matching the shape unresolvable at all for a plain function call
+- Shape coercion never recognized a function call's own return value, only an address-of expression; fls dropped a const's own type for a negative literal and offered zero variants for a generic enum's bare-dot completion
+- Shape coercion still missed a generic call's own mangled return type, a ternary, and a parenthesized operand; fls's own global-const type inference missed every unary operator but minus, and array literals entirely
+- 'fun upgrade' wiped env.sh along with the rest of the previous install's share dir and never regenerated it, breaking every shell that sources it on the next terminal
+- A bound-list type alias ('als X = A | B;') crashed with a double-free the moment anything freed its own program tree, since expansion only ever mutated a detached copy of the declaration, never the real node
+- A bare ternary used only for its own side effects had no statement form at all, failing codegen outright instead of lowering to the equivalent if/else
+- A const-bound generic compound kept a real C 'const' every plain compound was already excluded from (breaking a mutating method's own self pointer), and typecheck never caught assigning to a field through any const-bound receiver at all
+- Typecheck never checked a dereferenced assignment target ('*ptr = v;') against anything at all, leaking a raw C compiler error for any type mismatch instead of a clean diagnostic
+- Dot-completion on a receiver typed as an unclosed outer call's own argument (self. or a chained call) fell back to dumping every keyword and top-level name instead of narrowing to its own members
+- A backward chain scan had no case for an array index (arr[i].field), leaving hover/goto-def blank for any indexed receiver through a fixed-size array or a custom op_index method
+- Completion and signature help through an array-indexed receiver (pts[0].field, pts[0].method() mid-argument) fell back to nothing, since neither's own token-only fallback had any case for an index at all
+- A run of consecutive dereference stars (**pp) inferred its own type one pointer level short, since infer_unary always subtracted exactly 1 regardless of how many stars were written
+- A multi-dimensional array mixing a sized and a bare dimension (num[3][] arr) silently dropped the bare dimension in codegen, leaking a raw C subscript error for any index through it instead of a clean diagnostic
+- The mixed sized/bare array dimension rejection only covered a local variable's own declaration, leaving the identical codegen bug uncaught for a compound field and a function parameter
+- The mixed sized/bare array dimension rejection also covers a function's own return type and an enum variant's own payload type now, generalized into one shared helper instead of re-deriving the same check at every new declaration site
+- A let local inferred from an array-indexed field access (let v = pts[0].x;) took the array's own declared type instead of the field's, since the only code that noticed the index never looked past it for a further .field
+- Closure codegen used a GNU statement expression MSVC rejects outright, and ast_print's own dump missed the new node kind
+- *(zed)* Add the closure keyword/textobject, bump the grammar rev
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove the fmt_bin bootstrap-compatibility shim
+- *(zed)* Bump extension version to 0.1.2
+- Bump version to 0.73.0
+## [0.72.1] - 2026-10-27
+
+### 🐛 Bug Fixes
+
+- Fls completion lost a generic return type's own members entirely
+- Fls signature help had nothing to say while a call's parens were open
+- Fls completion/signature-help gaps for generic return types and live typing (#225)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.72.1
+## [0.72.0] - 2026-10-27
+
+### 🚀 Features
+
+- Formatter wraps over-long method chains, one call per line
+
+### 🐛 Bug Fixes
+
+- Fls hover/goto-def never resolved a variant shorthand in a chained call's own argument
+- Fls signature help never resolved a method called on a chained receiver
+- Fls hover/goto-def/signature-help on chained calls; wrap long chains (#224)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.72.0
+## [0.71.0] - 2026-10-27
+
+### 🚀 Features
+
+- Option/Result unwrap() and unwrap_err() panic on None/Err
+- Option/Result unwrap() and unwrap_err() panic on None/Err (#223)
+
+### 🐛 Bug Fixes
+
+- Wasm vararg width mismatch merged numeric values with their neighbors
+- Driver.fn test helpers crashed on a transient lint/list_dir Err
+- Test runner never flushed stdout, losing output on a crash
+- Run_test_suite raced on setenv/getenv when called concurrently
+- FUN_TEST_INTRA_JOBS priming raced against concurrent getenv reads
+- Assert's own message hoisted out of its if under MSVC, running always
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.71.0
+
+### 💼 Other
+
+- Add FUN_TEST_TRACE to name the test actively running on a crash
+- Re-enable FUN_TEST_TRACE on Windows CI
+- Force Windows intra-file test pool fully sequential
+- Force FUN_TEST_JOBS=1 too, isolating the nested run_test_suite pool
+- Add flushed checkpoints inside the test that crashes on Windows
+- Narrower debug checkpoints around the assert/defer in question
+- Disable the fork-based import-preload pool for every compile
+- Strip format()/unwrap_err() from both asserts in the test entirely
+## [0.70.6] - 2026-10-27
+
+### 🐛 Bug Fixes
+
+- Method chain double-eval, const-compound C warning, const/let fls parity
+- Method chain double-eval, const-compound C warning, const/let fls parity (#220)
+- Fls typo'd double-dot, parsed-path chain gap, const hover sentinel
+- Fls typo'd double-dot, parsed-path chain gap, const hover sentinel (#221)
+- Panic() only type-checked for scalars, never a struct/pointer return
+- Panic() only type-checked for scalars, never a struct/pointer return (#222)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.70.6
+## [0.70.5] - 2026-10-23
+
+### 🐛 Bug Fixes
+
+- Fls dot-completion resolved nothing after a chained method call
+- Fls dot-completion resolved nothing after a chained method call (#218)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.70.5
+## [0.70.4] - 2026-10-23
+
+### 🐛 Bug Fixes
+
+- Fls dot-completion for defaulted params, Logger.fatal never exited
+- Fls dot-completion for defaulted params, Logger.fatal never exited (#217)
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to 0.70.4
+## [0.70.3] - 2026-10-23
+
+### 🐛 Bug Fixes
+
+- Fls never resolved stdlib when spawned bare over PATH
+- Fls never resolved stdlib when spawned bare over PATH (#216)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(docs)* Update CHANGELOG.md
+- Bump version to 0.70.3
 ## [0.70.2] - 2026-10-23
 
 ### 🐛 Bug Fixes
