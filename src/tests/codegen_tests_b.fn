@@ -1472,12 +1472,24 @@ test "a bare propagation statement whose own unwrapped value is never bound disc
   `  run();
   `  ret 0;
   `}`;
+  // GNU mode wraps the whole statement-expression; MSVC mode hoists
+  // the temp/guard as separate statements first and leaves only a
+  // bare value reference at the use site, so only that reference
+  // itself needs the cast there - checked on both shapes, not just
+  // whichever one this host's own default C compiler happens to pick.
   str out = emit_c_with_imports(
     src,
     "bare_propagation_void_cast",
     "a bare propagation statement discards its own unwrapped value with a (void) cast"
   );
-  assert contains(out, "(void)(({ __auto_type"), "expected a bare propagation statement's own GNU statement-expression wrapped in (void) to discard it explicitly";
+  assert contains(out, "(void)(({ __auto_type") || contains(out, "(void)(__fun_try_"), "expected a bare propagation statement's own unwrapped value wrapped in (void) to discard it explicitly";
+
+  str out_msvc = emit_c_with_imports_forcing_msvc(
+    src,
+    "bare_propagation_void_cast_msvc",
+    "a bare propagation statement discards its own unwrapped value with a (void) cast (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "(void)(__fun_try_"), "expected the hoisted MSVC-shaped form's own bare value reference wrapped in (void) too";
 }
 
 test "a '?' propagation's own early return still emits valid C under debug info, on both the GNU and MSVC paths" {
