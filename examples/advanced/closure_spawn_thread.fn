@@ -1,0 +1,32 @@
+// `spawn(closure() void c)` (std.thread_spawn) runs a closure on a new,
+// real OS thread, fire-and-forget - a thin pass-through to std.thread's
+// own Thread.start, since a closure's `{fn, env}` runtime shape already
+// matches what a thread's entry point and argument expect. Reach for
+// `spawn` for genuinely parallel, CPU-bound work; reach for `fork` for
+// many cheap, short-lived concurrent tasks instead.
+
+use std.io;
+use std.thread_spawn;
+use std.c.mem;
+
+fun main() {
+  num* a = malloc(sizeof(num));
+  num* b = malloc(sizeof(num));
+  *a = 0;
+  *b = 0;
+
+  RuntimeAsyncTask task_a = spawn(fun() {
+    *a = *a + 1;
+  });
+  RuntimeAsyncTask task_b = spawn(fun() {
+    *b = *b + 2;
+  });
+
+  task_a.join(nil);
+  task_b.join(nil);
+
+  println_fmt("a={num} b={num}", *a, *b);
+
+  free(a);
+  free(b);
+}

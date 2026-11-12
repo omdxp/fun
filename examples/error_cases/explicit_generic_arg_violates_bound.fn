@@ -1,0 +1,24 @@
+// An explicit call-site type argument (`identity<T>(x)`) is checked
+// against the type parameter's own declared bound directly - not just
+// the argument's inferred type, which can independently satisfy the
+// bound even when the explicit argument doesn't.
+//
+// Run:
+// fun -in examples/error_cases/explicit_generic_arg_violates_bound.fn
+//
+// Expected:
+// - A compile-time error naming the type argument that fails the bound.
+
+use std.io;
+
+fun identity<T: num | flag>(T x) T {
+  ret x;
+}
+
+fun main() {
+  // `5` is a num, which the bound num | flag happily allows on its
+  // own - the explicit <str> is what's rejected, since str isn't in
+  // the declared bound regardless of what the argument's own type is.
+  let y = identity<str>(5);
+  println_fmt("{str}", y);
+}

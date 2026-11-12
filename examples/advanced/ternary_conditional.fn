@@ -1,0 +1,25 @@
+// `cond ? then : else` is a conditional expression, not a statement - it
+// produces a value, usable anywhere an expression can go. Both branches
+// must share a type, and the condition must be a `flag`. `?`/`:` chain
+// right-associatively: `a ? b : c ? d : e` reads as `a ? b : (c ? d : e)`.
+
+use std.io;
+
+fun classify(num x) str {
+  ret x > 10 ? "big" : x > 0 ? "small" : "non-positive";
+}
+
+fun main() {
+  num x = 5;
+  println(classify(x));
+  println(classify(42));
+  println(classify(-3));
+
+  // Usable directly as a call argument, not just bound to a `let` first.
+  flag even = x % 2 == 0;
+  println_fmt("x is {str}", even ? "even" : "odd");
+
+  // Nested in an arithmetic expression.
+  num clamped = x > 100 ? 100 : x;
+  println_fmt("clamped={num}", clamped);
+}

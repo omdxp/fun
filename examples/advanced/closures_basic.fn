@@ -1,0 +1,47 @@
+// Closures: `fun() R { ... }` is an anonymous value, written wherever an
+// expression is expected, that captures every outer local it reads by
+// value at the moment it's created. Its own declared type is `closure()
+// R`, distinct from a plain `fun(...) R` function pointer - a closure's
+// runtime shape is a function pointer plus its own captured environment,
+// wider than a bare function pointer, so the two are never
+// interchangeable.
+
+use std.io;
+use std.c.mem;
+
+fun main() {
+  num x = 1;
+  closure() void snapshot = fun() {
+    println_fmt("snapshot sees x={num}", x);
+  };
+  x = 99;
+  snapshot(); // prints "x=1" - captured a snapshot, not a live alias
+
+  // `let` infers `closure() R` the same way it infers anything else -
+  // writing `closure() R` explicitly is never required. A closure
+  // literal always takes zero call-time parameters; everything it
+  // needs comes from what it captures.
+  num base = 10;
+  let add_base = fun() num {
+    ret base + 1;
+  };
+  println_fmt("add_base={num}", add_base());
+
+  // A closure can return a value too.
+  closure() num doubled = fun() num {
+    ret x * 2;
+  };
+  println_fmt("doubled={num}", doubled());
+
+  // Calling a closure runs it at most once: its captured environment is
+  // freed the moment it finishes. A closure that's created but never
+  // called or spawned needs its own explicit free - there's nothing
+  // else that would free it.
+  num* counter = malloc(sizeof(num));
+  *counter = 5;
+  closure() void unused = fun() {
+    println_fmt("never runs, counter={num}", *counter);
+  };
+  free(unused.env);
+  free(counter);
+}

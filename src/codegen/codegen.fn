@@ -17833,6 +17833,17 @@ impl Codegen {
         }
         ret .None;
       }
+      // Both branches share a type (enforced by typecheck), so either one
+      // resolves it; `then_val` first, falling back to `else_val` for a
+      // branch shape this function can't otherwise resolve on its own
+      // (e.g. a nested ternary whose own `then_val` is itself unresolved).
+      .Ternary(t) -> {
+        let then_type = self.infer_arg_type_name(t.then_val);
+        if then_type.is_some() {
+          ret then_type;
+        }
+        ret self.infer_arg_type_name(t.else_val);
+      }
       _ -> { ret .None; }
     }
   }

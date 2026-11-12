@@ -1,0 +1,17 @@
+// A fixed-size array's own constant index is checked at compile time,
+// for both a read and an assignment through it.
+//
+// Run:
+// fun -in examples/error_cases/array_index_out_of_range.fn
+//
+// Expected:
+// - A compile-time error naming the out-of-range index and the
+// array's declared size.
+
+fun main() {
+  num[3] arr;
+  arr[0] = 1;
+  arr[5] = 2;      // invalid: 5 is out of range for an array of size 3
+  num x = arr[10]; // invalid: 10 is out of range for an array of size 3
+  _ = x;
+}

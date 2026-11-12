@@ -2876,6 +2876,22 @@ test "a duplicate top-level name reports across different kinds too, not just ma
   assert contains(msg, "'Shared' is already declared as a compound"), "expected the diagnostic to name the earlier declaration's own kind";
 }
 
+test "a duplicate shape name reports which kind and where, not a silent registry overwrite" {
+  // A `shape` declaration had no `_check_duplicate_top_level` call at
+  // all, so a second `shape` with the same name silently overwrote the
+  // first's required-method table in the shared registry - any impl
+  // block checked against the first shape's name was then validated
+  // against the SECOND shape's methods instead, surfacing as a
+  // confusing "does not supply" error on a completely unrelated type
+  // that never touched the redeclared shape.
+  str msg = check(
+    `shape Sized { size() num; }
+    `shape Sized { len() num; }
+    `fun main() {}`
+  );
+  assert contains(msg, "'Sized' is already declared as a shape"), "expected the diagnostic to name the symbol and its kind, not corrupt the shared method registry";
+}
+
 test "a tuple literal fits a matching tuple-typed declaration" {
   accepts(
     `fun main() {

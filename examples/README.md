@@ -100,6 +100,13 @@ fun -in examples/<example>.fn
 - advanced/raw_string_literal.fn
 - advanced/method_own_type_param.fn
 - advanced/test_blocks_demo.fn
+- advanced/closures_basic.fn
+- advanced/closure_spawn_thread.fn
+- advanced/ternary_conditional.fn
+- advanced/operator_overloading.fn
+- advanced/shape_generic_downcast.fn
+- advanced/option_result_unwrap_panic.fn
+- advanced/no_cover_basic.fn
 
 ## Imports
 - imports/main.fn
@@ -178,3 +185,5 @@ fun -in examples/<example>.fn
 - error_cases/circular_dependency/circular2.fn
 - error_cases/duplicate_symbols/mod1.fn
 - error_cases/duplicate_symbols/mod2.fn
+- error_cases/array_index_out_of_range.fn
+- error_cases/explicit_generic_arg_violates_bound.fn

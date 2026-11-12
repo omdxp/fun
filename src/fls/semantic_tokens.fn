@@ -309,7 +309,13 @@ fun _identifier_token_type(
     ret TokenKind.EnumMember;
   }
 
-  let next = token_after(tokens, idx + 1);
+  // An explicit generic call (`identity<str>(5)`) puts a `<...>` run
+  // between the name and its own `(`; skip over it the same way the
+  // parser itself does before checking for the paren, or a call
+  // written with its own type arguments spelled out never reads as a
+  // function at all.
+  num after_generic_idx = skip_generic_args_tokens(tokens, idx + 1);
+  let next = token_after(tokens, after_generic_idx);
   flag next_is_paren = next.is_some() && token_is_operator(next.unwrap(), "(");
   // `fork` is a contextual keyword, lexed as a plain identifier like
   // any other: `fork some_call(...)` is the statement, `fork(...)` is

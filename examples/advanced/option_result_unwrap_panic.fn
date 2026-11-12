@@ -1,0 +1,38 @@
+// Option/Result unwrap() and unwrap_err() panic on None/Err - they're
+// for the case you already know holds a value, not a safe default path
+// (that's unwrap_or). Calling the wrong one aborts the program instead
+// of silently continuing with garbage.
+//
+// Run:
+// fun -in examples/advanced/option_result_unwrap_panic.fn
+//
+// Expected:
+// - Only the safe paths run; the program exits normally.
+// - Uncomment either `fail_*` call to see the panic.
+
+use std.io;
+use std.option;
+use std.result;
+use std.error;
+
+fun fail_unwrap_none() {
+  Option<num> none_val = .None;
+  none_val.unwrap(); // panics: called unwrap() on a None value
+}
+
+fun fail_unwrap_err_ok() {
+  Result<num, Error> ok_val = .Ok(1);
+  ok_val.unwrap_err(); // panics: called unwrap_err() on an Ok value
+}
+
+fun main() {
+  Option<num> some_val = .Some(42);
+  println_fmt("unwrap() on Some: {num}", some_val.unwrap());
+
+  Result<num, Error> err_val = .Err(error_new(1, "boom"));
+  println_fmt("unwrap_err() on Err: {str}", err_val.unwrap_err().message);
+
+  // Uncomment to see the panic:
+  // fail_unwrap_none();
+  // fail_unwrap_err_ok();
+}

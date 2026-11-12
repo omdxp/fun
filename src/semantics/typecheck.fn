@@ -6633,6 +6633,9 @@ pub fun typecheck_program_with_aliases(
         }
       }
       .Shape(q) -> {
+        if _check_duplicate_top_level(&checker, q.name, "a shape", node) {
+          ret .Err(checker.error);
+        }
         checker.shapes.add(q.name);
         MethodTable* table = _method_table_new();
         for m : q.methods {
