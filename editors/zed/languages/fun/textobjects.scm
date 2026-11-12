@@ -1,6 +1,7 @@
 (function_declaration body: (_ "{" (_)* @function.inside "}")) @function.around
 (method_declaration body: (_ "{" (_)* @function.inside "}")) @function.around
 (test_declaration body: (_ "{" (_)* @function.inside "}")) @function.around
+(closure_expression body: (_ "{" (_)* @function.inside "}")) @function.around
 (compound_declaration body: (_ "{" (_)* @class.inside "}")) @class.around
 (enum_declaration body: (_ "{" (_)* @class.inside "}")) @class.around
 (shape_declaration body: (_ "{" (_)* @class.inside "}")) @class.around
