@@ -1,14 +1,14 @@
 id = "fun-lang"
 name = "Fun"
 description = "Fun language support: syntax highlighting, outline, run buttons and the fls language server."
-version = "0.1.1"
+version = "0.1.2"
 schema_version = 1
 authors = ["omdxp"]
 repository = "https://github.com/omdxp/fun"
 
 [grammars.fun]
 repository = "https://github.com/omdxp/tree-sitter-fun"
-rev = "e7e19bae16895f89f3a9f65269e805c4102abf05"
+rev = "93df87cb0520a95f506ff57b9c02ce9a618ba5e0"
 
 [language_servers.fls]
 name = "fls"
