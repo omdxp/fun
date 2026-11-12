@@ -154,7 +154,7 @@ fun test file.fn -cover                  # just that file's own tests
   function, or every function in the file, out of the report - the
   same per-function grain `-warn-unused`'s own `allow`/`expect`
   directives already give warnings (see [Warning
-  Controls](language.md#language-warning-controls)), for code that is
+  Controls](language.md#warning-controls)), for code that is
   genuinely unsafe to exercise from an automated test rather than
   merely inconvenient to. Unlike `-cover-exclude`, this is not a
   whole-file concession: the rest of the file still counts normally.

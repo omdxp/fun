@@ -1276,6 +1276,45 @@ export default function App() {
     return () => observer.disconnect();
   }, [tab, activeDocSections, content]);
 
+  // The sidebar's own subitem list scrolls independently of the main
+  // content pane, so switching the active section - whether by an
+  // in-page cross-reference link or the scroll-spy observer above -
+  // only moves the page, never the drawer. Without this, an anchor
+  // link landing deep in a long doc (e.g. Language's "Warning
+  // Controls") highlights a nav entry the reader can't see without
+  // scrolling the drawer themselves.
+  useEffect(() => {
+    if (!activeDocAnchorKey) return;
+    if (typeof document === "undefined") return;
+
+    // The sidebar's subitem list for the newly active tab (built from
+    // `docTocHeadings`) can still be a render behind this key landing on
+    // its final value - e.g. a cross-tab anchor link lands on the new
+    // tab's heading, which sets this key, in the same burst of updates
+    // that first mounts that tab's own subitem list - so the matching
+    // button isn't in the DOM on the very first attempt. Retry briefly
+    // rather than give up, the same tolerance `scrollToDocAnchor`'s own
+    // `tryScroll` already affords the main content pane's heading.
+    let cancelled = false;
+    const trySidebarScroll = (attempt: number) => {
+      if (cancelled) return;
+      const el = document.querySelector<HTMLElement>(
+        `[data-anchor-id="${CSS.escape(activeDocAnchorKey)}"]`,
+      );
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      if (attempt < 8) {
+        window.setTimeout(() => trySidebarScroll(attempt + 1), 40);
+      }
+    };
+    trySidebarScroll(0);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDocAnchorKey]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!selectedVersion) return;
@@ -1606,6 +1645,7 @@ export default function App() {
                           className={`nav-subitem level-${Math.min(h.level, 3)} ${
                             activeDocAnchorKey === h.id ? "active" : ""
                           }`}
+                          data-anchor-id={h.id}
                           onClick={() => {
                             setSelectedDocAnchorKey(h.id);
                             scrollToDocAnchor(h.id, "smooth");

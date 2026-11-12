@@ -50,6 +50,33 @@ function normalizeRepoPath(rawPath: string, sourcePath?: string) {
   return out.join("/");
 }
 
+// Each of the docs the site itself renders as a tab (`App.tsx`'s own
+// `DOC_TABS`), keyed by the same basename a cross-reference between
+// them is actually written with (`[Concurrency](concurrency.md)` in
+// `docs/language.md`, say). A relative link to one of these needs to
+// stay in the app - the tab-switch hash `App.tsx`'s own `hashchange`
+// listener already answers to (`#tabKey?anchor=heading-slug`), not a
+// GitHub blob URL - or clicking it took a reader out to GitHub for a
+// page the site was already showing right there in another tab.
+const INTERNAL_DOC_TABS: Record<string, string> = {
+  "get-started.md": "getStarted",
+  "language.md": "language",
+  "concurrency.md": "concurrency",
+  "tooling.md": "tooling",
+  "platforms.md": "platforms",
+};
+
+function internalDocHref(normalizedPath: string, hashPart?: string): string | null {
+  const basename = normalizedPath.split("/").pop() ?? "";
+  const tabKey = INTERNAL_DOC_TABS[basename];
+  if (!tabKey) return null;
+  // `computeHeadingIdsByLine` prefixes every heading id with its own
+  // tab key (`headingPrefix`), so a link written against the raw
+  // markdown anchor (`language.md#closures`) must gain that same
+  // prefix to land on the id the page actually assigned the heading.
+  return hashPart ? `#${tabKey}?anchor=${tabKey}-${hashPart}` : `#${tabKey}`;
+}
+
 function resolveHref(href: string | undefined, sourcePath?: string) {
   if (!href) return href;
   if (href.startsWith("#")) return href;
@@ -58,6 +85,10 @@ function resolveHref(href: string | undefined, sourcePath?: string) {
   const [pathAndQuery, hashPart] = href.split("#", 2);
   const [pathPart, queryPart] = pathAndQuery.split("?", 2);
   const normalizedPath = normalizeRepoPath(pathPart, sourcePath);
+
+  const internal = internalDocHref(normalizedPath, hashPart);
+  if (internal) return internal;
+
   const isFile = /\.[^/]+$/.test(normalizedPath);
   const mode = isFile ? "blob" : "tree";
 

@@ -193,6 +193,60 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       .Function -> {}
       _ -> { continue; }
     }
+    // The concrete type argument(s) a generic call never wrote out
+    // explicitly (`atomic_new(0)`, not `atomic_new<num>(0)`), shown
+    // right where writing them would go: between the callee name and
+    // its own `(`. Only when every one of the callee's own type
+    // params resolves - a partial hint (one shown, one left blank)
+    // would read as more certain than it is.
+    Vec<str> inferred_args = inferred_call_type_args(
+      &tokens,
+      d,
+      t,
+      &program.nodes,
+      doc.path,
+      src_line
+    );
+    flag all_inferred = inferred_args.len > 0;
+    num ia = 0;
+    for ia < inferred_args.len {
+      if equals(inferred_args.get(ia), "") {
+        all_inferred = false;
+      }
+      ia = ia + 1;
+    }
+    if all_inferred {
+      if any {
+        b.append(",");
+      }
+      any = true;
+      b.append(`{"position":{"line":`);
+      b.append_num(line0);
+      b.append(`,"character":`);
+      b.append_num(byte_col_to_utf16_char(doc.text, line0, t.pos.end_col - 1));
+      b.append(`},"label":`);
+      StringBuilder targs = string_builder_init(16);
+      targs.append("<");
+      num ti = 0;
+      for ti < inferred_args.len {
+        if ti > 0 {
+          targs.append(", ");
+        }
+        targs.append(inferred_args.get(ti));
+        ti = ti + 1;
+      }
+      targs.append(">");
+      str targs_label = targs.build();
+      json_quote_into(&b, targs_label);
+      free(targs_label);
+      b.append(`,"kind":1,"paddingLeft":false,"paddingRight":false}`);
+    }
+    num fia = 0;
+    for fia < inferred_args.len {
+      free(inferred_args.get(fia));
+      fia = fia + 1;
+    }
+    inferred_args.free();
     Vec<str> params = split_signature_params(d.detail);
     defer free_params_vec(&params);
     if params.len == 0 {

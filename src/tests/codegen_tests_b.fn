@@ -3219,3 +3219,50 @@ test "a closure captures its own local by value, not a live alias" {
   );
   assert equals(out, "x=5\n"), "expected the closure to print the value captured before 'x' was reassigned to 99, not 99 itself";
 }
+
+test "a plain function's own declared return type can be closure() R" {
+  // `emit_function_named`'s own return-type write only special-cased
+  // `has_fn_sig` (a plain `fun(...) R` return), never `has_closure_sig`
+  // - a closure-typed return fell through to `write_type`, which wrote
+  // the dtype's own fixed placeholder text ("closure(...)") verbatim
+  // into the generated C instead of the real `__fun_closure_t`
+  // struct, a guaranteed C compile error. `emit_function_prototype`'s
+  // own early-forward-declaration path had the identical gap.
+  str src = `use std.c.io;
+  `fun make_adder(num base) closure() num {
+  `  ret fun() num {
+  `    ret base + 1;
+  `  };
+  `}
+  `fun main() num {
+  `  closure() num c = make_adder(41);
+  `  printf("%lld\n", c());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_typed_return",
+    "a plain function's own closure()-typed return value should compile and run correctly"
+  );
+  assert equals(out, "42\n"), "expected the returned closure, called back in main, to print 42";
+}
+
+test "a generic function's own declared return type can be closure() T" {
+  str src = `use std.c.io;
+  `fun make_getter<T>(T value) closure() T {
+  `  ret fun() T {
+  `    ret value;
+  `  };
+  `}
+  `fun main() num {
+  `  closure() num g = make_getter(42);
+  `  printf("%lld\n", g());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_typed_return_generic",
+    "a generic function's own closure()-typed return value should compile and run correctly, same as a plain function's"
+  );
+  assert equals(out, "42\n"), "expected the generic function's returned closure, called back in main, to print 42";
+}

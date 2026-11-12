@@ -4284,3 +4284,135 @@ test "a closure literal assigned to a mismatched declared return type is rejecte
     "expected a closure() num literal to be rejected where closure() void is declared"
   );
 }
+
+test "an explicit call-site type argument is checked against the type param's own bound" {
+  rejects(
+    `fun identity<T: num | flag>(T x) T { ret x; }
+    `fun main() {
+    `  let y = identity<str>(5);
+    `}`,
+    "expected str to be rejected for a type param bound to num | flag, even written explicitly"
+  );
+  accepts(
+    `fun identity<T: num | flag>(T x) T { ret x; }
+    `fun main() {
+    `  let y = identity<num>(5);
+    `}`,
+    "expected an explicit type argument that matches the bound to be accepted"
+  );
+}
+
+test "an explicit call-site type argument disagreeing with the actual argument is rejected" {
+  rejects(
+    `fun identity<T>(T x) T { ret x; }
+    `fun main() {
+    `  let y = identity<str>(5);
+    `}`,
+    "expected the explicit <str> to be checked against the real num argument, even with no bound at all"
+  );
+  accepts(
+    `fun identity<T>(T x) T { ret x; }
+    `fun main() {
+    `  let y = identity<num>(5);
+    `}`,
+    "expected an explicit type argument that matches what was actually passed to be accepted"
+  );
+}
+
+test "an explicit call-site type argument is substituted into the return type, not just left unreachable" {
+  // `T` here is named nowhere an argument could ever infer it from -
+  // only the return type names it - so before this, nothing in
+  // `inferred_args` ever carried the explicit value through, and the
+  // mismatch below leaked straight to the C compiler instead of a
+  // clean Fun-level diagnostic.
+  rejects(
+    `fun make_zero<T>(num count) T {
+    `  T v;
+    `  ret v;
+    `}
+    `fun main() {
+    `  str z = make_zero<num>(5);
+    `}`,
+    "expected the explicit <num> to make make_zero's own return type num, rejecting the str assignment"
+  );
+  accepts(
+    `fun make_zero<T>(num count) T {
+    `  T v;
+    `  ret v;
+    `}
+    `fun main() {
+    `  num z = make_zero<num>(5);
+    `}`,
+    "expected the explicit <num> to make make_zero's own return type num, matching the num assignment"
+  );
+}
+
+test "explicit call-site type arguments are checked positionally, across multiple type params" {
+  rejects(
+    `fun pair<A, B>(A a, B b) num { ret 0; }
+    `fun main() {
+    `  pair<str, num>(1, "x");
+    `}`,
+    "expected the swapped explicit instantiation to be rejected: argument 1 is num, not str"
+  );
+  accepts(
+    `fun pair<A, B>(A a, B b) num { ret 0; }
+    `fun main() {
+    `  pair<num, str>(1, "x");
+    `}`,
+    "expected the correctly-ordered explicit instantiation to be accepted"
+  );
+}
+
+test "a call can rely on a trailing type param's own declared default, same as a defaulted parameter" {
+  // `FnSig` never carried `type_param_defaults` at all - a type param
+  // with its own default, left out of the call's own explicit
+  // `<...>` list because nothing else could ever infer it either,
+  // reached the "cannot infer type parameter" error outright, as if
+  // no default had ever been declared for it.
+  accepts(
+    `compound Error { str msg; }
+    `fun wrap<T, E = Error>(T v) T { ret v; }
+    `fun main() {
+    `  num a = wrap<num>(5);
+    `}`,
+    "expected E's own declared default (Error) to resolve it, not a 'cannot infer' error"
+  );
+  accepts(
+    `compound Error { str msg; }
+    `fun wrap<T, E = Error>(T v) T { ret v; }
+    `fun main() {
+    `  num a = wrap(5);
+    `}`,
+    "expected T inferred from the argument and E's own default together, with no explicit <...> at all"
+  );
+}
+
+test "an alias used only inside an expression position still expands before typecheck ever runs" {
+  // `_expand_body` only ever dispatched on a STATEMENT kind - an
+  // `.Expression` (a call's own explicit `<...>` instantiation
+  // included), `.CompoundInit`, `.ClosureLiteral`, `.Unary`, and
+  // several statement kinds with their own nested expression (`ret`,
+  // `assert`, an `if`/`for`'s own condition) fell through its catch-
+  // all silently. An alias used only in one of those positions
+  // (`identity<MyNum>(x)`, most directly) reached typecheck as the
+  // literal, unexpanded name - an unregistered type `assignable`
+  // treats the same permissive way a genuinely unresolved one is,
+  // silently accepting a real mismatch instead of rejecting it.
+  rejects(
+    `als MyNum = num;
+    `fun identity<T>(T x) T { ret x; }
+    `fun main() {
+    `  MyNum n = identity<MyNum>("hi");
+    `}`,
+    "expected the alias to expand to num before the explicit instantiation is checked, rejecting the str argument"
+  );
+  accepts(
+    `als MyNum = num;
+    `fun identity<T>(T x) T { ret x; }
+    `fun main() {
+    `  MyNum n = identity<MyNum>(5);
+    `}`,
+    "expected the alias to expand to num, matching the real num argument"
+  );
+}

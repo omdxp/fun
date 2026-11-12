@@ -10855,3 +10855,76 @@ test "hover, goto-definition, and completion resolve a method declared only in a
   assert contains(out, `"label":"fetch_add"`), "expected fetch_add, declared only in impl Atomic<num>, to be offered";
   assert contains(out, `"label":"load"`), "expected load, declared in the generic impl Atomic<T>, still offered too";
 }
+
+test "inlay hints show a generic call's own inferred type argument(s), right before the call's own '('" {
+  // `atomic_new<T: num | flag>(T initial) Atomic<T>` is a real
+  // stdlib generic function whose own type param carries a bound
+  // clause (`T: num | flag`) - exactly the shape that silently broke
+  // `generic_args_of_detail`'s own type-param matching before this
+  // (confirmed directly: hovering the call used to show the bare,
+  // unspecialized template, `Atomic<T>` instead of `Atomic<num>`,
+  // until `_strip_type_param_bound` was added), so it doubles as
+  // regression coverage for that fix.
+  str src = `use std.atomic;
+  `fun pair<A, B>(A a, B b) num { ret 0; }
+  `fun main() {
+  `  Atomic<num> a = atomic_new(0);
+  `  a.load();
+  `  pair(1, "x");
+  `  pair<num, str>(1, "x");
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generic_inlay.fn";
+  doc.path = "generic_inlay.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hints = inlay_hints(&reads, doc, 0, 7);
+  assert contains(hints, `"label":"<num>"`), "expected atomic_new's own inferred <num>";
+  assert contains(hints, `"label":"<num, str>"`), "expected pair's own two inferred type args";
+  // `load()` has no type params of its own (only `self`, already
+  // concrete) - never a hint. The explicit `pair<num, str>(...)` call
+  // never reaches this hint at all: the existing call-site loop this
+  // hooks into already requires an immediate `(` right after the
+  // callee name, which an explicit `<...>` call doesn't have.
+}
+
+test "a let-inferred closure resolves every fls feature a declared closure() R one already does" {
+  // fls's own token-only type inference (`_infer_type_primary`) had
+  // no case for a closure literal at all - `let c = fun() num {
+  // ...};` left `c` unresolved, so hover/completion on `c.fn`/`c.env`
+  // fell through to nothing (completion) or the wrong thing (a bare
+  // `main`/`fn` keyword dump, not the real closure-only members).
+  str src = `fun main() num {
+  `  let c = fun() num { ret 42; };
+  `  c.fn;
+  `  ret 0;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///let_closure.fn";
+  doc.path = "let_closure.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hov_c = hover(&reads, doc, 1, 6);
+  assert contains(hov_c, "closure() num c"), "expected c's own let-inferred type to render as closure() num, same as an explicitly-typed one";
+
+  str hov_field = hover(&reads, doc, 2, 4);
+  assert contains(hov_field, "fn: raw*"), "expected the real .fn field doc, not nothing";
+
+  str comp = completion(&reads, doc, 2, 4, false);
+  assert contains(comp, `"label":"fn"`), "expected fn offered";
+  assert contains(comp, `"label":"env"`), "expected env offered";
+  assert !contains(comp, `"label":"main"`), "expected only fn/env, not every name in scope";
+
+  // Goto-definition is a clean no-op here too, same as the
+  // explicitly-typed case already covers: `.fn`/`.env` are compiler-
+  // synthesized, never a real declared field with a location of its
+  // own.
+  str def = definition(&reads, doc, 2, 4);
+  assert equals(def, "[]"), "expected a clean no-op, never a crash";
+}

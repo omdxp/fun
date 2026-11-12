@@ -18,7 +18,7 @@ import { EditorView } from "@codemirror/view";
 import { tags as t, Tag } from "@lezer/highlight";
 
 const KEYWORDS = new Set([
-  "use", "as", "pub", "fun", "als", "compound", "shape", "impl", "enum",
+  "use", "as", "pub", "fun", "closure", "als", "compound", "shape", "impl", "enum",
   "let", "const", "asm", "volatile", "arch", "if", "elif", "else", "fit",
   "ret", "for", "async", "await", "fork", "break", "continue", "defer",
   "assert", "panic", "test", "sequential", "fuzz", "allow", "expect",

@@ -2771,15 +2771,23 @@ impl Codegen {
           self.state.write(");\n");
           ret .None;
         }
-        let rt = self.write_type(*f.rtype);
-        if rt.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
-        // `write_type` writes a type's own `pointer_depth`, not its
-        // array-decay; see the matching star in `emit_function_named`'s
-        // own return-type write, which this prototype must agree with.
-        if dtype_is_array_as_pointer(*f.rtype) {
-          self.state.write("*");
+        // A closure-typed return is the ordinary `__fun_closure_t`
+        // struct, the same special case `emit_function_named`'s own
+        // return-type write makes first, which this prototype must
+        // agree with.
+        if f.rtype.has_closure_sig {
+          self.state.write("__fun_closure_t");
+        } else {
+          let rt = self.write_type(*f.rtype);
+          if rt.is_none() {
+            ret .Some(.UnsupportedNode);
+          }
+          // `write_type` writes a type's own `pointer_depth`, not its
+          // array-decay; see the matching star in `emit_function_named`'s
+          // own return-type write, which this prototype must agree with.
+          if dtype_is_array_as_pointer(*f.rtype) {
+            self.state.write("*");
+          }
         }
         self.state.write(" ");
         self.state.write(new_name);
@@ -11605,14 +11613,31 @@ impl Codegen {
               let let_idt_opt = self.infer_let_expr_type(v.val);
               if let_idt_opt.is_some() {
                 let let_idt = let_idt_opt.unwrap();
-                let let_wt = self.write_type(let_idt);
-                if let_wt.is_some() {
-                  let let_subst = self.resolve_type_subst(let_idt);
-                  resolved_name = let_wt.unwrap();
-                  resolved_ptr = dtype_is_pointer(let_subst);
-                  resolved_dtype = .Some(let_subst);
+                // Same reason the bookkeeping just below never routes
+                // a closure dtype through `write_type` either: its own
+                // fixed placeholder `type_str` ("closure(...)") was
+                // never meant to resolve through ordinary type
+                // resolution, only ever recognized by checking `has_
+                // closure_sig` first - `write_type` wrote that literal
+                // text as `let c = fun() R {...};`'s own C declaration,
+                // not a real C type at all.
+                if let_idt.has_closure_sig {
+                  self.state.write("__fun_closure_t");
+                  resolved_name = "__fun_closure_t";
+                  resolved_ptr = false;
+                  resolved_dtype = .Some(let_idt);
                   have_resolved = true;
                   let_resolved_via_infer = true;
+                } else {
+                  let let_wt = self.write_type(let_idt);
+                  if let_wt.is_some() {
+                    let let_subst = self.resolve_type_subst(let_idt);
+                    resolved_name = let_wt.unwrap();
+                    resolved_ptr = dtype_is_pointer(let_subst);
+                    resolved_dtype = .Some(let_subst);
+                    have_resolved = true;
+                    let_resolved_via_infer = true;
+                  }
                 }
               }
             }
@@ -11863,13 +11888,23 @@ impl Codegen {
           let inferred = self.infer_let_expr_type(v.val);
           if inferred.is_some() {
             let idt = inferred.unwrap();
-            let resolved = self.resolve_type_name(idt);
-            if resolved.is_some() {
-              let subst_idt = self.resolve_type_subst(idt);
-              resolved_name = resolved.unwrap();
-              resolved_ptr = dtype_is_pointer(subst_idt);
-              resolved_dtype = .Some(subst_idt);
-              have_resolved = true;
+            // Same reason the explicitly-typed branch above never
+            // routes a closure dtype through `resolve_type_name`
+            // either: `closure() R`'s own fixed placeholder `type_str`
+            // ("closure(...)") was never meant to resolve through
+            // ordinary name resolution at all, only ever recognized by
+            // checking `has_closure_sig` first.
+            if idt.has_closure_sig {
+              self.record_local_typed(v.name, "", false, idt);
+            } else {
+              let resolved = self.resolve_type_name(idt);
+              if resolved.is_some() {
+                let subst_idt = self.resolve_type_subst(idt);
+                resolved_name = resolved.unwrap();
+                resolved_ptr = dtype_is_pointer(subst_idt);
+                resolved_dtype = .Some(subst_idt);
+                have_resolved = true;
+              }
             }
           }
         }
@@ -16009,23 +16044,43 @@ impl Codegen {
           self.state = &rtype_scratch;
           self.hoist_insert_pos = .None;
         }
-        let rt = self.write_type(*f.rtype);
-        // `write_type` writes a type's own `pointer_depth`, not its
-        // array-decay: an unsized `str[]` return needs one more star
-        // than `str` alone (`char**`, not `char*`), the same extra star
-        // a field or parameter of the same array type already gets at
-        // its own, separate emission site.
-        if dtype_is_array_as_pointer(*f.rtype) {
-          self.state.write("*");
+        // A closure-typed return is the ordinary two-word
+        // `__fun_closure_t` struct, never a name `write_type`'s own
+        // generic resolution could ever map - `closure() R`'s fixed
+        // placeholder `type_str` ("closure(...)") was never meant to
+        // resolve through it, the same reason `write_named_type`
+        // special-cases this first for a closure-typed parameter.
+        // Missing here, a closure-typed return wrote that placeholder
+        // text verbatim into the generated C (`closure(...) name(...)`),
+        // not a C type at all.
+        str rt_name = "";
+        if f.rtype.has_closure_sig {
+          self.state.write("__fun_closure_t");
+          rt_name = "__fun_closure_t";
+        } else {
+          let rt = self.write_type(*f.rtype);
+          // `write_type` writes a type's own `pointer_depth`, not its
+          // array-decay: an unsized `str[]` return needs one more star
+          // than `str` alone (`char**`, not `char*`), the same extra star
+          // a field or parameter of the same array type already gets at
+          // its own, separate emission site.
+          if dtype_is_array_as_pointer(*f.rtype) {
+            self.state.write("*");
+          }
+          if rt.is_none() {
+            if suppress_direct_rtype_write {
+              self.state = saved_rtype_state;
+              self.hoist_insert_pos = saved_rtype_hoist_pos;
+            }
+            ret .Some(.UnsupportedNode);
+          }
+          rt_name = rt.unwrap();
         }
         if suppress_direct_rtype_write {
           self.state = saved_rtype_state;
           self.hoist_insert_pos = saved_rtype_hoist_pos;
         }
-        if rt.is_none() {
-          ret .Some(.UnsupportedNode);
-        }
-        self.current_fn_rtype_name = rt.unwrap();
+        self.current_fn_rtype_name = rt_name;
         self.current_fn_rtype_dt = .Some(self.resolve_type_subst(*f.rtype));
         // C's `main` must be `int main(void)` or take `argc`/`argv`
         // (optionally `envp`), regardless of the Fun-level signature.
@@ -16322,8 +16377,7 @@ impl Codegen {
           }
           _ -> {}
         }
-        if !is_main && !fn_body_ends_in_return && rt.is_some() &&
-          !equals(rt.unwrap(), "void") {
+        if !is_main && !fn_body_ends_in_return && !equals(rt_name, "void") {
           self.state.write_indent();
           self.state.write("fprintf(stderr_stream(), \"panic: unreachable\\n\"); abort();\n");
         }
@@ -18016,6 +18070,37 @@ impl Codegen {
           }
           _ -> { ret .None; }
         }
+      }
+      // A closure literal's own type: `has_closure_sig`/`closure_sig`,
+      // built the same way `parse_closure_type_datatype` builds one
+      // for the explicit `closure() R` syntax - `let c = fun() R
+      // {...};` needs the exact same shape recorded for `c` as an
+      // explicitly-typed `closure() R c = ...;` already gets, or
+      // nothing downstream (most directly, `emit_call`'s own
+      // closure-dispatch check) ever recognizes `c` as callable
+      // through its own `{fn, env}` pair - it reads as an ordinary,
+      // uncallable struct value instead, confirmed directly as a real
+      // C compile error (calling a `__fun_closure_t` as if it were a
+      // function).
+      .ClosureLiteral(f) -> {
+        FnTypeSig sig = fn_type_sig_new();
+        if f.has_rtype {
+          sig.rtype = f.rtype;
+        } else {
+          DataType* void_dt = malloc(sizeof(DataType));
+          *void_dt = dtype_new();
+          void_dt.kind = .Void;
+          void_dt.type_str = "void";
+          sig.rtype = void_dt;
+        }
+        FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
+        *sig_ptr = sig;
+        DataType dt = dtype_new();
+        dt.kind = .Unknown;
+        dt.closure_sig = sig_ptr;
+        dt.has_closure_sig = true;
+        dt.type_str = "closure(...)";
+        ret .Some(dt);
       }
       // A tuple literal's own type is built structurally, bottom-up from
       // each element's own inferred type - there is no declared target
