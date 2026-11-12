@@ -1,0 +1,37 @@
+// Real declarations for the language's own predeclared names - the
+// ones with no declaration anywhere else. Every entry here is a true
+// predeclared identifier or, for `nil`/`true`/`false`/`panic`, a
+// reserved keyword the parser otherwise never allows as a declaration
+// name; ordinary keywords like if/for/let/pub stay out of this file
+// entirely and have no goto-definition target anywhere - only fls's
+// own hover table documents those.
+//
+// This module is signature-only: nothing here is ever compiled, only
+// read - by a person, and by fls, which resolves hover and
+// goto-definition on `sizeof`/`nil`/`true`/`false`/`panic` through
+// these exact declarations, the same ordinary path any other real
+// declaration already uses. Codegen's own early-prototype pass knows
+// this file by name and skips every node declared in it, the same way
+// it already skips a `std/c/*.fn` binding file, so it never tries to
+// forward-declare `sizeof` as an ordinary C function (a real,
+// confirmed compile error: `sizeof` is a C keyword, not a linkable
+// symbol, so emitting a C prototype for it is illegal syntax).
+
+// The size of a type in bytes, resolved at compile time. Stands for
+// num wherever it is written.
+pub fun sizeof(raw* type_or_value) num;
+
+// The null pointer value. Valid wherever a pointer type is expected.
+pub const raw* nil = 0;
+
+// The boolean value for "yes". A reserved word, like `nil`, rather
+// than an ordinary constant - this declaration exists only so it has
+// a real hover/goto-definition target, the same as `sizeof`'s above.
+pub const flag true = 0 == 0;
+
+// The boolean value for "no". See `true`.
+pub const flag false = 0 != 0;
+
+// Stops the program immediately with `msg` written to stderr. Never
+// returns.
+pub fun panic(str msg) void;

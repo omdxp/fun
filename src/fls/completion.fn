@@ -3328,6 +3328,24 @@ fun _members_of(
   str current_file,
   Vec<str> concrete_args
 ) {
+  // A method declared only in a type-specific impl block (`impl
+  // Atomic<num> { fetch_add... }`, next to the generic `impl
+  // Atomic<T> { load... }`) is stored under its own mangled name
+  // (`"Atomic__num"`, matching `_mangled_dtype_name`'s own convention
+  // in the parser), never the bare `type_name` a receiver resolves to
+  // - see `lookup_method`'s own matching note in symbols.fn.
+  str mangled_type_name = type_name;
+  flag mangled_owned = false;
+  if concrete_args.len > 0 {
+    StringBuilder mnb = string_builder_init(32);
+    mnb.append(type_name);
+    for ma : concrete_args {
+      mnb.append("__");
+      mnb.append(ma);
+    }
+    mangled_type_name = mnb.build();
+    mangled_owned = true;
+  }
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
@@ -3386,7 +3404,8 @@ fun _members_of(
         }
       }
       .Impl(block) -> {
-        if !equals(block.type_name, type_name) {
+        flag is_mangled_match = mangled_owned && equals(block.type_name, mangled_type_name);
+        if !equals(block.type_name, type_name) && !is_mangled_match {
           continue;
         }
         num m = 0;
@@ -3418,6 +3437,27 @@ fun _members_of(
                   filled_method_args
                 );
                 free_filled_args(filled_method_args, concrete_args.len);
+              } elif is_mangled_match {
+                // `self`'s own declared type is `mangled_type_name`
+                // verbatim (codegen's own internal spelling), rewritten
+                // back to how it was actually written (`Atomic<num>`,
+                // not `Atomic__num`) - see `lookup_method`'s own
+                // matching fix in symbols.fn.
+                StringBuilder pb = string_builder_init(32);
+                pb.append(type_name);
+                pb.append("<");
+                num pai = 0;
+                for pai < concrete_args.len {
+                  if pai > 0 {
+                    pb.append(", ");
+                  }
+                  pb.append(concrete_args.get(pai));
+                  pai = pai + 1;
+                }
+                pb.append(">");
+                str pretty_type = pb.build();
+                method_detail = replace_str(method_detail, mangled_type_name, pretty_type);
+                free(pretty_type);
               }
               str method_snippet = _call_snippet(method_name, method_detail, true, snippets);
               items.push(
@@ -3445,6 +3485,9 @@ fun _members_of(
   if starts_with(type_name, "closure(") {
     items.push(_item("fn", .Field, "raw*"));
     items.push(_item("env", .Field, "raw*"));
+  }
+  if mangled_owned {
+    free(mangled_type_name);
   }
 }
 

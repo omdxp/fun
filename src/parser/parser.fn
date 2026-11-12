@@ -1724,6 +1724,59 @@ fun report_expected_identifier(ParseState* state, Option<Token> tok, str fallbac
   free(msg);
 }
 
+// True only inside `std/builtins.fn`, the one file documenting the
+// language's own predeclared names - the sole place a reserved word is
+// ever allowed as a declaration name, so `nil`/`true`/`false`/`panic`
+// can get a real, goto-able declaration the same way `sizeof` already
+// does there, without opening that up as a general loophole anywhere
+// else.
+fun _in_builtins_doc_file(ParseState* state) flag {
+  ret ends_with(state.input_file_path, "/std/builtins.fn") ||
+    ends_with(state.input_file_path, "\\std\\builtins.fn");
+}
+
+// True inside any signature-only doc module: `std/builtins.fn` or a
+// `std/c/*.fn` binding file - mirrors codegen's own
+// `is_signature_only_doc_node` path check. None of these ever reach the
+// generated C (the real symbol, or the language's own grammar, already
+// provides it), so a name colliding with a C reserved word or a C
+// standard header's own name is moot here, unlike everywhere else.
+fun _in_signature_only_doc_file(ParseState* state) flag {
+  ret _in_builtins_doc_file(state) || contains(state.input_file_path, "/std/c/") ||
+    contains(state.input_file_path, "\\std\\c\\");
+}
+
+// The declaration-name text `tok` carries if it is one of the four
+// reserved words `std/builtins.fn` is allowed to declare: `nil`/`panic`
+// lex as `.Keyword` with their own text, `true`/`false` lex as
+// `.Boolean` with no text at all (just the bool value), so both shapes
+// are recovered here rather than at each call site.
+fun _builtins_doc_keyword_name(Token tok) str {
+  if tok.type == .Keyword {
+    fit tok.data {
+      .Sval(s) -> {
+        if equals(s, "nil") || equals(s, "panic") {
+          ret s;
+        }
+        ret "";
+      }
+      _ -> { ret ""; }
+    }
+  }
+  if tok.type == .Boolean {
+    fit tok.data {
+      .Bval(b) -> {
+        if b {
+          ret "true";
+        }
+        ret "false";
+      }
+      _ -> { ret ""; }
+    }
+  }
+  ret "";
+}
+
 // The parser's state, layered on top of the shared `ParseState`: a pointer
 // back to that shared state plus the fields that are genuinely
 // parser-local (current body/function context for `binded` stamping,
@@ -3772,14 +3825,20 @@ impl Parser {
       ret .Some(.InvalidIdentifier);
     }
     let ident_tok = tok.unwrap();
-    if ident_tok.type != .Identifier {
-      report_expected_identifier(self.state, .Some(ident_tok), "expected identifier");
-      ret .Some(.InvalidIdentifier);
-    }
     str name = "";
-    fit ident_tok.data {
-      .Sval(s) -> { name = s; }
-      _ -> {}
+    if ident_tok.type != .Identifier {
+      if _in_builtins_doc_file(self.state) {
+        name = _builtins_doc_keyword_name(ident_tok);
+      }
+      if equals(name, "") {
+        report_expected_identifier(self.state, .Some(ident_tok), "expected identifier");
+        ret .Some(.InvalidIdentifier);
+      }
+    } else {
+      fit ident_tok.data {
+        .Sval(s) -> { name = s; }
+        _ -> {}
+      }
     }
 
     // A parameter, `let`/`const`, or global variable's own name is
@@ -3787,7 +3846,11 @@ impl Parser {
     // reached through its own struct - `foo.for` is fine in C even
     // though `for` alone never would be - so this check only applies
     // here, not to field parsing, which never calls `parse_variable`).
-    if !equals(c_name_collision(name), "") {
+    // A signature-only doc module is the one exception: never emitted
+    // as C at all (see `is_signature_only_doc_node`), so a name like
+    // `NULL` or `nil`/`true`/`false` colliding with a C reserved word
+    // is moot there.
+    if !_in_signature_only_doc_file(self.state) && !equals(c_name_collision(name), "") {
       report_c_reserved_name(self.state, name);
       ret .Some(.InvalidIdentifier);
     }
@@ -4559,14 +4622,20 @@ impl Parser {
       ret .Some(.InvalidIdentifier);
     }
     let ident_tok = tok.unwrap();
-    if ident_tok.type != .Identifier {
-      self.state.err("expected identifier after 'fun'");
-      ret .Some(.InvalidIdentifier);
-    }
     str fname = "";
-    fit ident_tok.data {
-      .Sval(s) -> { fname = s; }
-      _ -> {}
+    if ident_tok.type != .Identifier {
+      if _in_builtins_doc_file(self.state) {
+        fname = _builtins_doc_keyword_name(ident_tok);
+      }
+      if equals(fname, "") {
+        self.state.err("expected identifier after 'fun'");
+        ret .Some(.InvalidIdentifier);
+      }
+    } else {
+      fit ident_tok.data {
+        .Sval(s) -> { fname = s; }
+        _ -> {}
+      }
     }
 
     // A bare, non-generic top-level function's own name is emitted to
@@ -4576,8 +4645,12 @@ impl Parser {
     // concrete type arguments at every monomorphized instantiation,
     // `double<T>` becoming `double__num`/`double__dec` and so on,
     // never a bare `double`) - so only the plain, non-generic shape
-    // risks colliding with one of C's own reserved words.
-    if !self.state.next_token_is_operator("<") && !equals(c_name_collision(fname), "") {
+    // risks colliding with one of C's own reserved words. A
+    // signature-only doc module is exempt for the same reason
+    // `parse_variable`'s own check is.
+    if !_in_signature_only_doc_file(self.state) &&
+      !self.state.next_token_is_operator("<") &&
+      !equals(c_name_collision(fname), "") {
       report_c_reserved_name(self.state, fname);
       ret .Some(.InvalidIdentifier);
     }

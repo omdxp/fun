@@ -1,39 +1,22 @@
 // C implementation limits (limits.h)
 //
-// This module is signature-only.
-//
-// Most limits are preprocessor macros in C (e.g. `INT_MAX`), not functions.
-// In Fun, you use these identifiers directly after importing this module.
+// This module is signature-only: real where a limit's value is the same
+// on every platform Fun targets, prose-only (resolved through
+// `c_builtin_owner`) where it genuinely isn't.
 //
 // Import:
 // - `use std.c.limits;`
-//
-// Integer limits
-// - `CHAR_BIT`:
-// - Bits in a byte.
-// - `MB_LEN_MAX`:
-// - Max bytes in a multibyte character.
-//
-// Signed integer ranges
-// - `SCHAR_MIN`, `SCHAR_MAX`
-// - `SHRT_MIN`, `SHRT_MAX`
-// - `INT_MIN`, `INT_MAX`
-// - `LONG_MIN`, `LONG_MAX`
-// - `LLONG_MIN`, `LLONG_MAX`
-// - `CHAR_MIN`, `CHAR_MAX` (depends on whether `char` is signed)
-//
-// Unsigned integer maxima
-// - `UCHAR_MAX`
-// - `USHRT_MAX`
-// - `UINT_MAX`
-// - `ULONG_MAX`
-// - `ULLONG_MAX`
-//
-// Size/pointer limits (sometimes provided via other headers)
-// - `SIZE_MAX` (commonly from `stdint.h`/`stddef.h`, but often visible with limits)
-// - `PTRDIFF_MIN`, `PTRDIFF_MAX` (commonly from `stdint.h`/`stddef.h`)
-//
-// Notes
-// - The Fun compiler performs best-effort typing for many of these macros as
-// `num` so they can participate in arithmetic and comparisons.
-// - Availability varies by platform and C library.
+
+// Bits in a byte. The same 8 on every platform Fun targets (`CHAR_BIT >
+// 8` exists only on now-obscure historical hardware none of them are).
+pub const num CHAR_BIT = 8;
+
+// Every signed/unsigned integer range below - `SCHAR_MIN`/`MAX` through
+// `ULLONG_MAX`, plus `SIZE_MAX` and `PTRDIFF_MIN`/`MAX` - genuinely
+// varies by platform: `long`, notably, is 32-bit on Windows (LLP64) but
+// 64-bit on Unix (LP64), so a single Fun-level value would be wrong on
+// one of them. `MB_LEN_MAX` (max bytes in a multibyte character) varies
+// by locale and platform too. None of these get a real declaration;
+// `use std.c.limits;` still makes the name available, resolved through
+// `c_builtin_owner`, and whether `char` is signed (which `CHAR_MIN`/
+// `CHAR_MAX` depend on) is itself platform-specific.

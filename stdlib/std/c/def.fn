@@ -1,35 +1,48 @@
 // C standard definitions (stddef.h)
 //
-// This module is signature-only.
-//
-// In Fun, most things from `stddef.h` are provided by C as typedefs/macros, so
-// you typically *use the names directly* after importing this module.
+// This module is signature-only: every name below is real, so hover and
+// goto-definition resolve the same way they would for any other
+// declaration, but nothing here ever reaches the generated C - `size_t`
+// and the rest already exist as real C typedefs once `<stddef.h>` (or
+// whichever header actually defines them) is included, and defining them
+// again here would collide with that.
 //
 // Import:
 // - `use std.c.def;`
+
+// Unsigned integer type used for sizes/lengths.
+pub als size_t = num;
+
+// Signed integer type used for pointer differences.
+pub als ptrdiff_t = num;
+
+// Wide character integer type.
+pub als wchar_t = num;
+
+// Bounds-checked library size type (Annex K), where the platform
+// provides it; numeric-compatible like `size_t`.
+pub als rsize_t = num;
+
+// Signed counterpart to `size_t`, returned by APIs (like `read`/`write`)
+// that need a negative value to signal an error.
+pub als ssize_t = num;
+
+// Opaque type used with `<stdarg.h>`'s variadic-argument macros.
+pub als va_list = raw;
+
+// The null pointer constant. Prefer the `nil` literal for null pointer
+// assignment and comparisons in new code; `NULL` is equivalent, kept for
+// parity with C sources.
+pub const raw* NULL = nil;
+
+// `max_align_t`, an alignment type (usually a struct) available on
+// C11+, and `stddef.h`'s function-like macros such as
+// `offsetof(type, member)`, which need a C type name rather than a
+// runtime value, can't be expressed as a Fun signature and stay
+// undeclared here.
 //
-// Common typedef names (all treated as numeric-compatible in Fun, except
-// `max_align_t` which is an opaque named type)
-// - `size_t`: unsigned integer type used for sizes/lengths.
-// - `ptrdiff_t`: signed integer type used for pointer differences.
-// - `wchar_t`: wide character integer type.
-// - `max_align_t`: an alignment type (usually a struct) available on C11+.
-//
-// Optional / platform-specific typedefs
-// - `rsize_t`: bounds-checked library size type (Annex K), numeric-compatible
-// if provided by the platform.
-//
-// Variadic arguments
-// - `va_list`
-// - Opaque type used with `<stdarg.h>` macros.
-//
-// Common macros
-// - `NULL`
-// - Null pointer constant. In Fun code, prefer the `nil` literal for null
-// pointer assignment and comparisons; `NULL` is also accepted (treated as the
-// literal `0`) for parity with C sources (best-effort).
-//
-// Notes
-// - Function-like macros such as `offsetof(type, member)` require a C type
-// name rather than a runtime value, so they can't be expressed as Fun
-// signatures.
+// `SIZE_MAX`, `RSIZE_MAX`, `PTRDIFF_MIN`/`PTRDIFF_MAX`,
+// `WCHAR_MIN`/`WCHAR_MAX`, and `WINT_MIN`/`WINT_MAX` genuinely vary by
+// platform (their real value depends on how wide the underlying type
+// is), so none of them get a real value here either - `use std.c.def;`
+// still makes the name available, resolved through `c_builtin_owner`.

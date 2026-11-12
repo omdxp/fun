@@ -34,9 +34,9 @@ test "spawn runs a closure on a real thread, capturing a heap counter it mutates
   Atomic<num>* hp = malloc(sizeof(Atomic<num>));
   *hp = atomic_new(0);
   RuntimeAsyncTask task = spawn(fun() {
-      hp.fetch_add(1);
+    hp.fetch_add(1);
   });
-    assert task.join(nil) == 0, "expected the spawned thread to join cleanly";
-    assert hp.load() == 1, "expected the closure to have run exactly once on the spawned thread";
-    free(hp);
+  assert task.join(nil) == 0, "expected the spawned thread to join cleanly";
+  assert hp.load() == 1, "expected the closure to have run exactly once on the spawned thread";
+  free(hp);
 }

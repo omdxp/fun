@@ -4,6 +4,44 @@
 // This module targets POSIX pthread APIs. Function-pointer parameters are
 // modeled as raw*. Unless noted otherwise, these return 0 on success and a
 // nonzero error code on failure (C semantics).
+//
+// Every type below is opaque: its real layout is platform-specific (on
+// Linux `pthread_t` is an unsigned long, on macOS a pointer, and so on),
+// so none of them get a real field - the same `_opaque` placeholder
+// `std.c.io`'s own `FILE` already uses, there purely so the type has a
+// real, goto-able declaration; codegen never emits a definition for it
+// (see `is_signature_only_doc_node`), relying entirely on the real
+// system header's own typedef.
+
+// A thread's own handle, as created by `pthread_create`.
+pub compound pthread_t {
+  num _opaque;
+}
+
+// Attributes a thread is created with (stack size, and so on).
+pub compound pthread_attr_t {
+  num _opaque;
+}
+
+// A mutex, as initialized by `pthread_mutex_init`.
+pub compound pthread_mutex_t {
+  num _opaque;
+}
+
+// Attributes a mutex is initialized with.
+pub compound pthread_mutexattr_t {
+  num _opaque;
+}
+
+// A condition variable, as initialized by `pthread_cond_init`.
+pub compound pthread_cond_t {
+  num _opaque;
+}
+
+// Attributes a condition variable is initialized with.
+pub compound pthread_condattr_t {
+  num _opaque;
+}
 
 // Thread lifecycle
 // Creates a new thread running start_routine(arg), writing its handle to `thread`.

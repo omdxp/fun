@@ -6,6 +6,22 @@
 // multithreaded process. `waitpid`'s status is decoded manually via bit ops
 // (see `pipe`/`waitpid` below) since function-like C macros like
 // `WIFEXITED`/`WEXITSTATUS` can't be bound as Fun signatures.
+//
+// Both types below are opaque: their real layout is platform-specific
+// (`pid_t`, notably, is a 32-bit int - see `posix_spawnp`'s own note -
+// not Fun's 64-bit `num`), so neither gets a real field; same `_opaque`
+// placeholder convention as `std.c.thread`'s own pthread types.
+
+// A process id, as written by `posix_spawnp`.
+pub compound pid_t {
+  num _opaque;
+}
+
+// File actions a spawned child performs before running, as initialized
+// by `posix_spawn_file_actions_init`.
+pub compound posix_spawn_file_actions_t {
+  num _opaque;
+}
 
 // Duplicates `oldfd` onto `newfd`, closing the target first if it was
 // already open. Returns newfd on success, -1 on failure (C semantics).

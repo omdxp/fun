@@ -3,6 +3,19 @@
 // Values follow C `time.h` semantics and platform libc behavior. Some
 // functions return pointers to static storage (C semantics).
 
+// Calendar time, in seconds since the epoch.
+pub als time_t = num;
+
+// Processor time, in an implementation-defined unit; see `clock()` and
+// `CLOCKS_PER_SEC`.
+pub als clock_t = num;
+
+// `clock()`'s own unit: one second of processor time equals this many
+// `clock_t` ticks. Genuinely platform-variant - POSIX mandates
+// 1000000, but the Windows CRT defines it as 1000 - so it stays
+// prose-only; `use std.c.time;` still makes the name available,
+// resolved through `c_builtin_owner`.
+
 // Broken-down local or UTC time components.
 pub compound tm {
   // Seconds after the minute (0..60).

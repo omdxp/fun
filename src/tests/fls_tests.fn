@@ -787,10 +787,11 @@ test "an unmet expect diagnoses as an error, at the expect statement's own posit
   assert d.col == 2, "expected the expect statement's own column, not file start";
 }
 
-test "hover documents sizeof, never a real declared symbol" {
-  // Never a lexer keyword, contextual like fork, resolved purely from
-  // the identifier's own word before ever trying ordinary name
-  // resolution.
+test "hover documents sizeof through its own real declaration in std/builtins.fn" {
+  // `sizeof` is a C reserved word (so nothing else could ever declare
+  // it) with a real, bodyless declaration in `std/builtins.fn`,
+  // resolved regardless of whether this file imports it - see
+  // `_builtins_doc_declaration`.
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -802,8 +803,53 @@ test "hover documents sizeof, never a real declared symbol" {
   doc.version = 1;
 
   str hovered = hover(&reads, doc, 1, 8);
-  assert contains(hovered, "sizeof(Type)"), "expected the sizeof(Type) skeleton";
+  assert contains(hovered, "fun sizeof(raw* type_or_value) num"), "expected sizeof's own real signature";
   assert contains(hovered, "compile time"), "expected the doc explaining it's compile-time";
+
+  str def = definition(&reads, doc, 1, 8);
+  assert contains(def, "std/builtins.fn"), "expected a jump to sizeof's own real declaration";
+}
+
+test "hover and goto-definition on nil/true/false/panic resolve through std/builtins.fn, with no import at all" {
+  // `nil`/`panic` lex as `.Keyword`, `true`/`false` as `.Boolean` -
+  // none of the four would ever reach ordinary identifier resolution,
+  // so both need their own gate in `hover`/`definition`. No `use`
+  // anywhere in this source on purpose: all four are reserved words,
+  // always available, exactly like `sizeof` above.
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///builtins_kw.fn";
+  doc.path = "builtins_kw.fn";
+  doc.text = `fun main() {
+  `  raw* p = nil;
+  `  flag a = true;
+  `  flag b = false;
+  `  if !a {
+  `    panic("unreachable");
+  `  }
+  `}`;
+  doc.version = 1;
+
+  str hov_nil = hover(&reads, doc, 1, 12);
+  assert contains(hov_nil, "null pointer"), "expected nil's own real doc";
+  str def_nil = definition(&reads, doc, 1, 12);
+  assert contains(def_nil, "std/builtins.fn"), "expected a jump to nil's own real declaration";
+
+  str hov_true = hover(&reads, doc, 2, 12);
+  assert contains(hov_true, "flag true"), "expected true's own real signature";
+  str def_true = definition(&reads, doc, 2, 12);
+  assert contains(def_true, "std/builtins.fn"), "expected a jump to true's own real declaration";
+
+  str hov_false = hover(&reads, doc, 3, 13);
+  assert contains(hov_false, "flag false"), "expected false's own real signature";
+  str def_false = definition(&reads, doc, 3, 13);
+  assert contains(def_false, "std/builtins.fn"), "expected a jump to false's own real declaration";
+
+  str hov_panic = hover(&reads, doc, 5, 5);
+  assert contains(hov_panic, "fun panic(str msg)"), "expected panic's own real signature";
+  str def_panic = definition(&reads, doc, 5, 5);
+  assert contains(def_panic, "std/builtins.fn"), "expected a jump to panic's own real declaration";
 }
 
 test "hover documents tag_value() on an enum receiver, never a real declared symbol" {
@@ -3013,11 +3059,13 @@ test "hover, go-to-definition, and completion cover a C builtin the language acc
   doc.text = src;
   doc.version = 1;
 
-  // 'NULL' is never a declared symbol anywhere in the AST at all, the
-  // exact reason ordinary resolution has nothing to offer it.
+  // 'NULL' is never declared in THIS document's own AST, the exact
+  // reason ordinary resolution has nothing to offer it from `declared`
+  // - but it does have a real declaration of its own in `std/c/def.fn`
+  // (see `_c_builtin_real_declaration`), parsed fresh and shown here
+  // even with no `use std.c.def;` anywhere in this source.
   str hovered = hover(&reads, doc, 1, 8);
-  assert contains(hovered, "C builtin"), "expected NULL to be recognized as a C builtin, not silently resolve to nothing";
-  assert contains(hovered, "std.c.def"), "expected the owning module named in the hover";
+  assert contains(hovered, "null pointer"), "expected NULL's own real doc, not the generic C-builtin fallback text";
 
   str def = definition(&reads, doc, 1, 8);
   assert contains(def, "std/c/def.fn"), "expected a jump to the module that documents it";
@@ -3025,6 +3073,28 @@ test "hover, go-to-definition, and completion cover a C builtin the language acc
   str out = completion(&reads, doc, 1, 2, false);
   assert contains(out, `"label":"NULL"`), "expected NULL to be offered in ordinary bare-identifier completion";
   assert contains(out, `"label":"size_t"`), "expected a C builtin typedef to be offered too, not just macro constants";
+}
+
+test "goto-definition on a converted C builtin lands on its own exact line when the file imports it, not just the module's start" {
+  // With `use std.c.def;` present, `NULL` is an ordinary declared
+  // symbol `resolve_at` finds directly - the real improvement a real
+  // declaration buys over the old file-start-only jump, still used as
+  // the fallback in the no-import test just above.
+  str src = `use std.c.def;
+  `fun main() raw* {
+  `  ret NULL;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///cbuiltin_imported.fn";
+  doc.path = "cbuiltin_imported.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str def = definition(&reads, doc, 2, 8);
+  assert contains(def, "std/c/def.fn"), "expected a jump to the module that declares it";
+  assert !contains(def, `"line":0`), "expected the real declaration's own line, not just the module's start";
 }
 
 test "hover shows a doc comment for a method declared in another, imported file" {
@@ -8519,7 +8589,10 @@ test "hover on '?' and postfix '!' shows propagation doc text, prefix '!' does n
   str hov_q = hover(&reads, opt_doc, 3, 15);
   assert contains(hov_q, "Option propagation"), "expected postfix '?' to show propagation doc";
 
-  str hov_prefix_bang = hover(&reads, opt_doc, 7, 12);
+  // Column 11, not 12: `true` now has a real hover of its own (see
+  // `std/builtins.fn`), so querying one column too far right would
+  // land on it instead of `!` and no longer prove anything about `!`.
+  str hov_prefix_bang = hover(&reads, opt_doc, 7, 11);
   assert equals(hov_prefix_bang, "null"), "expected prefix '!' (logical NOT) to get no hover, not propagation doc";
 
   Document res_doc;
@@ -10707,4 +10780,42 @@ test "dot-completion on a closure value offers only fn/env, never anything else"
     "expected no unrelated builtin (tag_value is enum-only) to leak into a closure's own completions, got: {str}",
     out
   );
+}
+
+test "hover, goto-definition, and completion resolve a method declared only in a type-specific impl block, not just the generic one" {
+  // `impl Atomic<num> { fetch_add... }` sits next to the generic `impl
+  // Atomic<T> { load... }`; the parser stores the former under its own
+  // mangled name (`"Atomic__num"`, `_mangled_dtype_name`'s own
+  // convention), never the bare `"Atomic"` a receiver resolves to - so
+  // `lookup_method`/`_members_of` need to try that mangled name too,
+  // or a method declared only in the concrete impl is never found at
+  // all. Exercised both inside a closure body and at ordinary top
+  // level, since this had nothing to do with closures once found -
+  // only the receiver's own resolved type mattered.
+  str src = `use std.atomic;
+  `fun main() {
+  `  Atomic<num>* hp = malloc(sizeof(Atomic<num>));
+  `  *hp = atomic_new(0);
+  `  closure() void c = fun() {
+  `    hp.fetch_add(1);
+  `  };
+  `  c.fn;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///atomic_concrete_impl.fn";
+  doc.path = "atomic_concrete_impl.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 5, 9);
+  assert contains(hovered, "fetch_add(Atomic<num>* self, num delta) num"), "expected fetch_add's own real signature, with the self type written the way it was, not mangled";
+
+  str def = definition(&reads, doc, 5, 9);
+  assert contains(def, "std/atomic.fn"), "expected a jump to the concrete impl's own declaration";
+
+  str out = completion(&reads, doc, 5, 7, false);
+  assert contains(out, `"label":"fetch_add"`), "expected fetch_add, declared only in impl Atomic<num>, to be offered";
+  assert contains(out, `"label":"load"`), "expected load, declared in the generic impl Atomic<T>, still offered too";
 }
