@@ -113,7 +113,9 @@ pub fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
 // `whence` values for `fseek`: fixed by POSIX, and identical on the
 // Windows CRT, so all three are safe as real values here.
 pub const num SEEK_SET = 0;
+// Seek relative to the stream's current position.
 pub const num SEEK_CUR = 1;
+// Seek relative to the end of the stream.
 pub const num SEEK_END = 2;
 
 // Sets the file position indicator of `stream` to `offset` bytes relative

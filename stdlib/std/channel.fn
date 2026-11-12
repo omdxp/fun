@@ -363,21 +363,34 @@ fun channel_cancel_token_flag_ptr(ChannelCancelToken* token) num* {
 // Shared channel return codes. Some APIs intentionally alias meanings to
 // the same numeric code.
 pub const num CHANNEL_RC_OK = 0;
+// The channel has been closed.
 pub const num CHANNEL_RC_CLOSED = 1;
+// A timed operation's own deadline passed before it completed.
 pub const num CHANNEL_RC_TIMEOUT = 2;
+// A non-blocking send found no room in the channel's own buffer.
 pub const num CHANNEL_RC_FULL = 2;
+// A non-blocking receive found nothing ready.
 pub const num CHANNEL_RC_EMPTY = 2;
+// A select's own `_default` variant fired because nothing else was ready.
 pub const num CHANNEL_RC_DEFAULT = 3;
+// The operation's own cancellation token fired.
 pub const num CHANNEL_RC_CANCELLED = 3;
+// A required argument was nil.
 pub const num CHANNEL_RC_NULL_ARG = -1;
+// A blocking send targeted an already-closed channel.
 pub const num CHANNEL_RC_SEND_CLOSED_BLOCKING = -1;
+// An internal allocation failed.
 pub const num CHANNEL_RC_ALLOC_FAILED = -2;
+// Reading the system clock failed.
 pub const num CHANNEL_RC_CLOCK_FAILED = -3;
 
 // Select index helpers for readability.
 pub const num CHANNEL_SELECT_INDEX_DEFAULT = -1;
+// The receiver's own channel was the one ready.
 pub const num CHANNEL_SELECT_INDEX_SELF = 0;
+// The first other channel passed to the select was ready.
 pub const num CHANNEL_SELECT_INDEX_OTHER = 1;
+// The second other channel, in a three-way select, was ready.
 pub const num CHANNEL_SELECT_INDEX_OTHER_B = 2;
 
 // The outcome of a receive, as a value you can `fit` on instead of decoding a raw

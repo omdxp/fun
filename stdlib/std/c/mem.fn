@@ -23,6 +23,7 @@ pub fun free(raw* ptr);
 // The two status codes the C standard itself defines, identical on
 // every platform Fun targets.
 pub const num EXIT_SUCCESS = 0;
+// The standard failure exit code.
 pub const num EXIT_FAILURE = 1;
 
 // Exits the process with the given exit code.

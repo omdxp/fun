@@ -117,7 +117,14 @@ function parseStdFile(filePath, source) {
         implDepth = countChar(rawLine, "{") - countChar(rawLine, "}");
       }
     } else {
-      const methodMatch = line.match(/^pub\s+([^\s(<{]+)\s*\(/);
+      // An `async` method (`pub async recv_async() T { ... }`) has one
+      // extra token between `pub` and its own name - skipped here the
+      // same optional way, or every async method in the whole stdlib
+      // silently never matched at all (the previous name-capture group
+      // stops at the first whitespace, landing on "async" itself, which
+      // then has no `(` right after it either, failing the match
+      // outright rather than just capturing the wrong name).
+      const methodMatch = line.match(/^pub\s+(?:async\s+)?([^\s(<{]+)\s*\(/);
       if (methodMatch) {
         const symbolComment = collectCommentAbove(lines, i);
         const parsedDocs = parseCommentBlock(symbolComment);
@@ -149,8 +156,16 @@ function parseStdFile(filePath, source) {
     // `quirk` and `shape` are the same declaration shape - `shape` is the
     // current spelling, `quirk` only still matters when this script runs
     // against an old git tag's stdlib (release.yml regenerates historical
-    // version snapshots this way), from before the rename.
-    const m = line.match(/^pub\s+(fun|compound|quirk|shape|enum)\s+([^\s(<{]+)/);
+    // version snapshots this way), from before the rename. `als` (a type
+    // alias, generic or not - `Comparator<T>`'s own `<T>` is excluded by
+    // the same `[^\s(<{]+` name-stop every other kind here already uses)
+    // fits this same "name right after the keyword" shape too.
+    // A top-level async function (`pub async fun foo() T { ... }`) has
+    // that same extra `async` token before its own declaration keyword,
+    // skipped here the same optional way as the method case below.
+    const m = line.match(
+      /^pub\s+(?:async\s+)?(fun|compound|quirk|shape|enum|als)\s+([^\s(<{]+)/,
+    );
     if (m) {
       const symbolComment = collectCommentAbove(lines, i);
       const parsedDocs = parseCommentBlock(symbolComment);
@@ -170,6 +185,34 @@ function parseStdFile(filePath, source) {
         fields,
         members,
         variants,
+      });
+    }
+
+    // `pub const <type> <NAME> = ...;` - unlike every kind above, the
+    // name is the SECOND token after the keyword, not the first (the
+    // declared type comes between them), so this needs its own pattern
+    // rather than fitting the shared one. The type itself is read
+    // non-greedily up to the last identifier before `=`, which also
+    // correctly handles a pointer type (`raw*`) with no space of its own
+    // before the name.
+    const constMatch = line.match(
+      /^pub\s+const\s+(.+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=/,
+    );
+    if (constMatch) {
+      const symbolComment = collectCommentAbove(lines, i);
+      const parsedDocs = parseCommentBlock(symbolComment);
+      const symbolDocs = ensureDocs(parsedDocs, line, "const", constMatch[2]);
+      const symbolMarkdown = buildDocsMarkdown(symbolDocs);
+      symbols.push({
+        kind: "const",
+        name: constMatch[2],
+        signature: line,
+        line: i + 1,
+        docs: symbolDocs,
+        docsMarkdown: symbolMarkdown,
+        fields: [],
+        members: [],
+        variants: [],
       });
     }
   }
