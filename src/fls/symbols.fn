@@ -2169,6 +2169,22 @@ pub fun specialize_signature(str signature, Vec<str> type_params, Vec<str> concr
   ret out;
 }
 
+// A declaration head's own type-param piece, its bound clause cut off:
+// "T: num | flag" -> "T". A concrete instantiation's own argument
+// (`"num"`, `"Vec<num>"`) never has a top-level `:` at all - only a
+// bound clause does - so finding one is already unambiguous, no
+// depth-tracking needed within the piece itself. Frees `piece` when it
+// returns something new, otherwise it's the same string handed back.
+fun _strip_type_param_bound(str piece) str {
+  num colon = index_of_char(piece, ':');
+  if colon < 0 {
+    ret piece;
+  }
+  str name = trim(substr(piece, 0, colon));
+  free(piece);
+  ret name;
+}
+
 // The comma-separated generic type arguments in a rendered "Type<Arg1,
 // Arg2> name" declaration detail, depth-aware so a nested generic
 // argument's own comma isn't mistaken for a separator. Empty when
@@ -2201,7 +2217,7 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
       }
     } elif c == '>' {
       if depth == 0 {
-        str piece = trim(substr(detail, start, i - start));
+        str piece = _strip_type_param_bound(trim(substr(detail, start, i - start)));
         if !equals(piece, "") {
           out.push(piece);
         }
@@ -2209,7 +2225,7 @@ pub fun generic_args_of_detail(str detail) Vec<str> {
       }
       depth = depth - 1;
     } elif c == ',' && depth == 0 && paren_depth == 0 {
-      str piece = trim(substr(detail, start, i - start));
+      str piece = _strip_type_param_bound(trim(substr(detail, start, i - start)));
       if !equals(piece, "") {
         out.push(piece);
       }
@@ -4282,6 +4298,120 @@ pub fun specialized_call_signature(
     }
   }
   ret result;
+}
+
+// Every type parameter `f` (a generic function or method) declares,
+// each resolved to the concrete type its own call at `name_tok` infers
+// for it, in declaration order - `""` for one argument-matching
+// couldn't pin down. Empty when `f` isn't generic at all, or
+// `name_tok` isn't actually followed by a call's own `(` (an explicit
+// `name<T>(...)` call has `<` there instead, which this is never even
+// reached for - every caller already gates on a literal `(` first).
+// Its own narrow copy of the same argument-to-parameter matching
+// `specialized_call_signature` above already does, kept separate
+// rather than threading a new output parameter through a function
+// several call sites already depend on for something else (its own
+// fully-specialized signature, all-or-nothing). Used for a generic
+// call's own inlay hint (`inlay_hints.fn`): the concrete type argument
+// list a reader never wrote, shown right before the call's own `(`,
+// the same place writing it out explicitly would put it.
+pub fun inferred_call_type_args(
+  Vec<Token>* tokens,
+  Declaration f,
+  Token name_tok,
+  Vec<Node>* program,
+  str file,
+  num line
+) Vec<str> {
+  Vec<str> empty;
+  empty.init(0);
+  num paren_idx = index_of_char(f.detail, '(');
+  if paren_idx < 0 {
+    ret empty;
+  }
+  str head = substr(f.detail, 0, paren_idx);
+  Vec<str> type_params = generic_args_of_detail(head);
+  free(head);
+  if type_params.len == 0 {
+    empty.free();
+    ret type_params;
+  }
+
+  num name_idx = index_of_token(tokens, name_tok);
+  let lparen_opt = token_after(tokens, name_idx + 1);
+  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+    _free_str_vec_deep(&type_params);
+    ret empty;
+  }
+  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
+
+  Vec<str> params = split_signature_params(f.detail);
+  defer free_params_vec(&params);
+
+  Vec<str> concrete;
+  concrete.init(type_params.len);
+  num ci = 0;
+  for ci < type_params.len {
+    concrete.push(substr("", 0, 0));
+    ci = ci + 1;
+  }
+
+  num depth_p = 0;
+  num arg_idx = 0;
+  flag expecting = true;
+  num k = lparen_idx;
+  for k < tokens.len {
+    Token at = tokens.get(k);
+    k = k + 1;
+    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+    if is_open {
+      depth_p = depth_p + 1;
+      if depth_p == 1 {
+        continue;
+      }
+    } elif is_close {
+      depth_p = depth_p - 1;
+      if depth_p == 0 {
+        break;
+      }
+      continue;
+    } elif depth_p == 1 && token_is_operator(at, ",") {
+      arg_idx = arg_idx + 1;
+      expecting = true;
+      continue;
+    }
+    if depth_p != 1 || !expecting {
+      continue;
+    }
+    if at.type == .Comment || at.type == .NewLine {
+      continue;
+    }
+    expecting = false;
+    if arg_idx >= params.len {
+      continue;
+    }
+    str ptype = _param_type_from_piece(params.get(arg_idx));
+    num ti = 0;
+    for ti < type_params.len {
+      if equals(ptype, type_params.get(ti)) {
+        str existing = concrete.get(ti);
+        if equals(existing, "") {
+          str arg_type = _infer_type(tokens, at, program, file, line, nil, 0);
+          if !equals(arg_type, "") {
+            free(existing);
+            concrete.set(ti, substr(arg_type, 0, len(arg_type)));
+          }
+        }
+      }
+      ti = ti + 1;
+    }
+    free(ptype);
+  }
+
+  _free_str_vec_deep(&type_params);
+  empty.free();
+  ret concrete;
 }
 
 // The type at the end of a dotted chain leading up to (but not
