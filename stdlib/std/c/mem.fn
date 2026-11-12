@@ -19,16 +19,11 @@ pub fun realloc(raw* ptr, num size) raw*;
 pub fun free(raw* ptr);
 
 // Process control
-//
-// `EXIT_SUCCESS` (0) and `EXIT_FAILURE` (1), the two status codes the C
-// standard itself defines, stay prose-only rather than a real
-// declaration: both are reserved by the C standard headers, and this
-// file is in the compiler's own transitive import closure
-// (`src/cli/driver.fn` imports `std.c.mem` directly), so the previous
-// release's own binary - which has no carve-out allowing a
-// signature-only doc file to use a reserved name - has to keep being
-// able to parse it. `use std.c.mem;` still makes both names available,
-// resolved through `c_builtin_owner`.
+
+// The two status codes the C standard itself defines, identical on
+// every platform Fun targets.
+pub const num EXIT_SUCCESS = 0;
+pub const num EXIT_FAILURE = 1;
 
 // Exits the process with the given exit code.
 pub fun exit(num code);
