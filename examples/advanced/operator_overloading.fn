@@ -1,0 +1,98 @@
+// Operator overloading: an `impl` method named `op_add`/`op_eq`/etc. is
+// called for the matching operator instead of being written as a
+// `.method()` call. A type with no matching `impl` method keeps the
+// operator's ordinary builtin meaning unchanged.
+
+use std.io;
+
+compound Vec3 {
+  num x;
+  num y;
+  num z;
+}
+
+impl Vec3 {
+  op_add(Vec3 other) Vec3 {
+    Vec3 r;
+    r.x = self.x + other.x;
+    r.y = self.y + other.y;
+    r.z = self.z + other.z;
+    ret r;
+  }
+  op_mul(num s) Vec3 {
+    Vec3 r;
+    r.x = self.x * s;
+    r.y = self.y * s;
+    r.z = self.z * s;
+    ret r;
+  }
+  op_eq(Vec3 other) flag {
+    ret self.x == other.x && self.y == other.y && self.z == other.z;
+  }
+  op_neg() Vec3 {
+    Vec3 r;
+    r.x = -self.x;
+    r.y = -self.y;
+    r.z = -self.z;
+    ret r;
+  }
+}
+
+// A plain array/compound field with no real array can still define `[]`
+// (read) and `[]=` (write) through `op_index`/`op_index_set`.
+compound Grid {
+  num a;
+  num b;
+  num c;
+}
+
+impl Grid {
+  op_index(num i) num {
+    if i == 0 {
+      ret self.a;
+    }
+    if i == 1 {
+      ret self.b;
+    }
+    ret self.c;
+  }
+  op_index_set(num i, num v) {
+    if i == 0 {
+      self.a = v;
+    } elif i == 1 {
+      self.b = v;
+    } else {
+      self.c = v;
+    }
+  }
+}
+
+fun main() {
+  Vec3 a;
+  a.x = 1;
+  a.y = 2;
+  a.z = 3;
+  Vec3 b;
+  b.x = 10;
+  b.y = 20;
+  b.z = 30;
+
+  // A chained expression and a field access used directly as an
+  // operand both dispatch, not just a bare local.
+  Vec3 sum = a * 2 + b;
+  println_fmt("sum={num},{num},{num}", sum.x, sum.y, sum.z);
+
+  println_fmt("a==a? {flag}  a==b? {flag}", a == a, a == b);
+
+  Vec3 negated = -a;
+  println_fmt("negated={num},{num},{num}", negated.x, negated.y, negated.z);
+
+  Grid g;
+  g.a = 0;
+  g.b = 0;
+  g.c = 0;
+  g[0] = 10;
+  g[1] = 20;
+  g[2] = 30;
+  println_fmt("grid={num},{num},{num}", g[0], g[1], g[2]);
+}

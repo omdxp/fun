@@ -1,5 +1,9 @@
 use std.c.io;
 
+// A NAMED nested function is still rejected - this is distinct from a
+// closure literal (`fun() { ... }`, no name), which IS a valid
+// expression anywhere, including inside another function's body. See
+// advanced/closures_basic.fn.
 fun outer() {
   fun inner() {
     printf("This is an inner function.");

@@ -1,0 +1,64 @@
+// A `fit` downcast arm can name a concrete instantiation of a generic
+// implementor too: `Box<num>(b) -> ...` against `impl Box<num> as HasSize
+// { ... }`. A bare generic name (`Box(b) -> ...`, no `<Args>`)
+// auto-resolves when it's unambiguous - exactly one instantiation of
+// `Box` implements the shape being matched.
+
+use std.io;
+
+shape HasSize {
+  size() num;
+}
+
+compound Box<T> {
+  T value;
+}
+
+impl Box<num> as HasSize {
+  size() num {
+    ret 8;
+  }
+}
+
+impl Box<str> as HasSize {
+  size() num {
+    ret 16;
+  }
+}
+
+compound Single<T> {
+  T value;
+}
+
+impl Single<num> as HasSize {
+  size() num {
+    ret 4;
+  }
+}
+
+fun describe(HasSize s) str {
+  str out = "unknown";
+  fit s {
+    Box<num>(b) -> { out = format("Box<num>, size {num}", b.size()); }
+    Box<str>(b) -> { out = format("Box<str>, size {num}", b.size()); }
+    // `Single` has exactly one instantiation implementing `HasSize`, so
+    // the bare generic name resolves to `Single<num>` without needing
+    // `<num>` spelled out.
+    Single(s2) -> { out = format("Single<num>, size {num}", s2.size()); }
+    _ -> {}
+  }
+  ret out;
+}
+
+fun main() {
+  Box<num> bn;
+  bn.value = 1;
+  Box<str> bs;
+  bs.value = "x";
+  Single<num> sn;
+  sn.value = 1;
+
+  println(describe(&bn));
+  println(describe(&bs));
+  println(describe(&sn));
+}

@@ -113,6 +113,53 @@ pub fun span_of_pos(Pos p, num name_length, str text) Span {
   ret s;
 }
 
+// Skips a balanced `<...>` generic-argument run starting at or after
+// `idx` (trivia in between tolerated, same as `token_after`), returning
+// the index just past its closing `>`/`>>` - or `idx` unchanged when
+// the next real token isn't `<` at all. A raw-token port of
+// `ParseState.skip_generic_args_tokens` for callers with no parse
+// state of their own (fls's own semantic highlighting and inlay
+// hints), kept in lockstep with it: a `>>` closes two levels at once,
+// the same lexer convention `Vec<Vec<num>>` relies on.
+pub fun skip_generic_args_tokens(Vec<Token>* tokens, num idx) num {
+  let first = token_after(tokens, idx);
+  if first.is_none() || !token_is_operator(first.unwrap(), "<") {
+    ret idx;
+  }
+  num cur = index_of_token(tokens, first.unwrap());
+  num depth = 0;
+  for true {
+    let tok_opt = token_after(tokens, cur);
+    if tok_opt.is_none() {
+      ret cur;
+    }
+    let tok = tok_opt.unwrap();
+    num tok_idx = index_of_token(tokens, tok);
+    if token_is_operator(tok, "<") {
+      depth = depth + 1;
+      cur = tok_idx + 1;
+      continue;
+    }
+    if token_is_operator(tok, ">") {
+      depth = depth - 1;
+      cur = tok_idx + 1;
+      if depth == 0 {
+        ret cur;
+      }
+      continue;
+    }
+    if token_is_operator(tok, ">>") {
+      depth = depth - 2;
+      cur = tok_idx + 1;
+      if depth <= 0 {
+        ret cur;
+      }
+      continue;
+    }
+    cur = tok_idx + 1;
+  }
+}
+
 // The index of `t` among `tokens`, or -1. Positions are compared rather
 // than tokens, since a token carries no identity of its own.
 pub fun index_of_token(Vec<Token>* tokens, Token t) num {

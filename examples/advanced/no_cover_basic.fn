@@ -1,0 +1,28 @@
+// `no_cover` is not a detectable condition the way every other warning
+// id is - it's a directive telling `fun test . -cover` to leave the
+// next function (or, plural `no_covers`, the whole file) out of its
+// coverage report entirely, for code that's genuinely unsafe to
+// exercise automatically in a test (for instance, something that would
+// itself have to spawn a subprocess recursively running `fun build`,
+// which can deadlock this project's own parallel test-runner
+// scheduler). Valid only with `allow`, never `expect`/`warning_expect`.
+//
+// Run:
+// fun -in examples/advanced/no_cover_basic.fn
+//
+// Expected:
+// - Runs normally; `no_cover` has no effect outside `fun test . -cover`.
+
+use std.io;
+
+allow no_cover, "would need to spawn a real subprocess to exercise safely";
+fun rebuild_self() num {
+  // In real code this might shell out to `fun build` on the project
+  // itself - not something a test runner should do concurrently with
+  // every other test in the suite.
+  ret 0;
+}
+
+fun main() {
+  println_fmt("rebuild_self()={num}", rebuild_self());
+}

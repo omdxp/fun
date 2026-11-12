@@ -1314,6 +1314,25 @@ test "a function value works as a local, a function's own return type, and a com
   assert contains(out, "13"), "expected the compound field's own call, not a method dispatch, to add correctly";
 }
 
+test "a ternary expression passed directly as a println_fmt vararg prints its real value, not a mistyped int64_t cast" {
+  // `infer_arg_type_name` had no `.Ternary` case, so a ternary used
+  // directly as a vararg (not first bound to a `let`) always fell
+  // through to the "" default, casting a `str` result to `(int64_t)`
+  // and printing garbage instead of the string.
+  str src = `use std.io;
+  `fun main() num {
+  `  flag even = true;
+  `  println_fmt("x is {str}", even ? "even" : "odd");
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "ternary_vararg",
+    "a ternary used directly as a vararg infers its real type, not the int64_t default"
+  );
+  assert contains(out, "x is even"), "expected the ternary's real str value, not a mistyped int64_t cast";
+}
+
 test "a zero-parameter function-pointer type writes a real (void) parameter list everywhere, not a bare ()" {
   // Five independent declarator sites each wrote a function pointer's
   // own parameter list as a bare `()` for a zero-parameter signature

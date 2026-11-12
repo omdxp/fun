@@ -8025,6 +8025,31 @@ test "semantic tokens classify a C builtin correctly against its own naming conv
   assert contains(out, "4,6,0,"), "expected NULL classified as a variable despite being uppercase";
 }
 
+test "semantic tokens classify a call site that spells out its own explicit generic type arguments as a function, not a variable" {
+  // The callee-name lookahead only ever peeked one token past the
+  // name, so `identity<str>(5)` never saw its own `(` at all (the
+  // immediate next token is `<`) and fell through to the plain
+  // naming-convention guess instead - a lowercase name, so "variable"
+  // rather than "function".
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///genericcalltok.fn";
+  doc.path = "genericcalltok.fn";
+  doc.text = `fun identity<T: num | flag>(T x) T {
+  `  ret x;
+  `}
+  `fun main() num {
+  `  let y = identity<num>(5);
+  `  ret y;
+  `}`;
+  doc.version = 1;
+
+  str out = semantic_tokens(&reads, doc);
+  // `identity`'s own call-site token: length 8, type 5 (function).
+  assert contains(out, "8,5,0,"), "expected identity's own explicit-generic call site classified as a function";
+}
+
 test "semantic tokens classify an enum variant's own name as enumMember, not a function call, generic payload included" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();

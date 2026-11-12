@@ -1,19 +1,21 @@
 // Use C stdio via Fun std imports.
-// Demonstrates FILE*, fwrite/fread, fseek, SEEK_SET.
+// Demonstrates FILE*, fwrite/fgets, fseek, SEEK_SET, fgetc + EOF, and
+// EXIT_SUCCESS/EXIT_FAILURE as a real exit status.
 
 use std.c.io;
 use std.c.string;
+use std.c.mem;
 
-fun main() {
+fun main() num {
   str path = "./_fun_c_file_io_demo.txt";
 
   FILE* f = fopen(path, "wb+");
   if f == NULL {
     perror("fopen");
-    ret;
+    ret EXIT_FAILURE;
   }
 
-  str msg = "hello from C stdio\n";
+  str msg = "hi\n";
   num n = strlen(msg);
   fwrite(msg, 1, n, f);
 
@@ -24,5 +26,17 @@ fun main() {
   fgets(buf, 64, f);
   printf("read: %s", buf);
 
+  // Reading byte-by-byte past the end of the stream returns EOF rather
+  // than a real byte.
+  fseek(f, 0, SEEK_SET);
+  num byte_count = 0;
+  num c = fgetc(f);
+  for c != EOF {
+    byte_count = byte_count + 1;
+    c = fgetc(f);
+  }
+  printf("byte_count=%lld\n", byte_count);
+
   fclose(f);
+  ret EXIT_SUCCESS;
 }
