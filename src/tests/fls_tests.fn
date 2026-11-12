@@ -3097,6 +3097,42 @@ test "goto-definition on a converted C builtin lands on its own exact line when 
   assert !contains(def, `"line":0`), "expected the real declaration's own line, not just the module's start";
 }
 
+test "EOF and EXIT_SUCCESS/EXIT_FAILURE resolve through their own real declarations too" {
+  // Converted alongside NULL/size_t/CHAR_BIT/pthread_t once v0.73.0
+  // (which carries the signature-only-doc-file carve-out) became the
+  // bootstrap's own stage 0 - these two specifically live in
+  // std/c/io.fn and std/c/mem.fn, both in the compiler's own
+  // transitive import closure, so they had to wait for that.
+  str src = `fun main() num {
+  `  ret EOF;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///eof_hover.fn";
+  doc.path = "eof_hover.fn";
+  doc.text = src;
+  doc.version = 1;
+
+  str hovered = hover(&reads, doc, 1, 8);
+  assert contains(hovered, "exactly -1"), "expected EOF's own real doc, not the generic C-builtin fallback text";
+
+  str def = definition(&reads, doc, 1, 8);
+  assert contains(def, "std/c/io.fn"), "expected a jump to EOF's own real declaration";
+
+  str exit_src = `fun main() num {
+  `  ret EXIT_SUCCESS;
+  `}`;
+  Document exit_doc;
+  exit_doc.uri = "file:///exit_hover.fn";
+  exit_doc.path = "exit_hover.fn";
+  exit_doc.text = exit_src;
+  exit_doc.version = 1;
+
+  str exit_hovered = hover(&reads, exit_doc, 1, 10);
+  assert contains(exit_hovered, "num EXIT_SUCCESS"), "expected EXIT_SUCCESS's own real signature";
+}
+
 test "hover shows a doc comment for a method declared in another, imported file" {
   str src = `use std.option;
   `fun main() num {
