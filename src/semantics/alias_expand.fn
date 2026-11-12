@@ -434,9 +434,19 @@ fun _expand_function_shaped(
   }
 }
 
-// Walks a function/method body recursively for a local `Variable`
-// declaration's own type - the only DataType-bearing position inside a
-// body, alongside every statement kind that can nest a body of its own.
+// Walks a function/method body recursively for every DataType-bearing
+// position inside it: a local `Variable` declaration's own type, a
+// closure literal's own return type, a compound-literal's own
+// explicit `Type{...}`, and a call's own explicit `name<T>(...)` type
+// arguments - plus every statement and expression shape that can nest
+// one of those further in. Missing the last three used to mean an
+// alias used only in one of those positions (`identity<MyAlias>(x)`,
+// most directly) was never expanded at all: typecheck saw the literal
+// alias name, found no real type registered under it, and treated it
+// the same permissive way a genuinely unresolved name is treated -
+// the call still succeeded, silently ignoring the real mismatch a
+// reader would expect rejected, and leaking straight to the C
+// compiler instead.
 fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
   if stmt == nil {
     ret;
@@ -455,17 +465,30 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
         _expand_body(v.val, resolved, unused);
       }
     }
-    .StatementIf(ifn) -> { _expand_body(ifn.body, resolved, unused); }
-    .StatementElseIf(ein) -> { _expand_body(ein.body, resolved, unused); }
+    .StatementIf(ifn) -> {
+      _expand_body(ifn.condition, resolved, unused);
+      _expand_body(ifn.body, resolved, unused);
+    }
+    .StatementElseIf(ein) -> {
+      _expand_body(ein.condition, resolved, unused);
+      _expand_body(ein.body, resolved, unused);
+    }
     .StatementElse(b) -> { _expand_body(b, resolved, unused); }
     .StatementDefer(inner) -> { _expand_body(inner, resolved, unused); }
     .StatementFor(kind) -> {
       fit kind {
-        .Cond(c) -> { _expand_body(c.body, resolved, unused); }
-        .Iter(it) -> { _expand_body(it.body, resolved, unused); }
+        .Cond(c) -> {
+          _expand_body(c.condition, resolved, unused);
+          _expand_body(c.body, resolved, unused);
+        }
+        .Iter(it) -> {
+          _expand_body(it.iterable, resolved, unused);
+          _expand_body(it.body, resolved, unused);
+        }
       }
     }
     .StatementFit(f) -> {
+      _expand_body(f.exp, resolved, unused);
       num i = 0;
       for i < f.branches.len {
         FitBranch b = f.branches.get(i);
@@ -474,6 +497,46 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
       }
     }
     .StatementFork(inner) -> { _expand_body(inner, resolved, unused); }
+    .StatementReturn(inner) -> { _expand_body(inner, resolved, unused); }
+    .StatementAssert(a) -> {
+      _expand_body(a.condition, resolved, unused);
+      if a.has_message {
+        _expand_body(a.message, resolved, unused);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _expand_body(inner, resolved, unused); }
+    .Unary(u) -> {
+      _expand_body(u.operand, resolved, unused);
+      if u.has_error_arg {
+        _expand_body(u.error_arg, resolved, unused);
+      }
+    }
+    .CompoundInit(ci) -> {
+      if ci.has_dtype {
+        _expand_dtype(ci.init_dtype, resolved, unused);
+      }
+      num fi = 0;
+      for fi < ci.fields.len {
+        _expand_body(ci.fields.get(fi).value, resolved, unused);
+        fi = fi + 1;
+      }
+    }
+    .ClosureLiteral(f) -> { _expand_function_shaped(&f, resolved, unused); }
+    .Expression(e) -> {
+      if e.has_left {
+        _expand_body(e.left, resolved, unused);
+      }
+      if e.has_right {
+        _expand_body(e.right, resolved, unused);
+      }
+      if e.has_generic_args {
+        num gi = 0;
+        for gi < e.generic_args.len {
+          _expand_dtype(e.generic_args.get(gi), resolved, unused);
+          gi = gi + 1;
+        }
+      }
+    }
     _ -> {}
   }
 }

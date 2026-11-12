@@ -1143,7 +1143,12 @@ from a plain `fun(...) R` function pointer: a closure's runtime shape
 bare function pointer, so the two are never interchangeable, in either
 direction. A bare named function can't be assigned where a closure is
 expected, and a closure can't stand in for a plain `fun(...) R`
-parameter.
+parameter. `let c = fun() R { ... };` infers `closure() R` the same
+way any other `let` infers its own declared type - writing `closure()
+R` explicitly is never required, just occasionally clearer to read.
+`R` itself can be a generic function's own type parameter
+(`fun make_getter<T>(T value) closure() T { ... }`), substituted the
+same way any other generic return type already is.
 
 A closure literal always takes zero call-time parameters, `fun()`,
 never `fun(x Type)` - everything it needs comes from what it captures,

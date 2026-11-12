@@ -5557,6 +5557,51 @@ fun _infer_type_primary(
           out_end_idx
         );
       }
+      // A closure literal (`fun() R { ... }`), the same shape `let c
+      // = fun() num {...};` writes - rendered as `"closure() R"`,
+      // matching `render_type`'s own closure-type rendering exactly,
+      // so a let-inferred closure's own hover/completion/goto reads
+      // identically to an explicitly `closure() R`-typed one. Always
+      // zero parameters (see `parse_closure_literal`'s own comment),
+      // so there is no parameter list to read past `()` here either.
+      if equals(token_word(val_tok), "fun") {
+        num fun_idx = index_of_token(tokens, val_tok);
+        let lparen_opt = token_after(tokens, fun_idx + 1);
+        if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+          ret "";
+        }
+        num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
+        let rparen_opt = token_after(tokens, lparen_idx + 1);
+        if rparen_opt.is_none() || !token_is_symbol(rparen_opt.unwrap(), ')') {
+          ret "";
+        }
+        num rparen_idx = index_of_token(tokens, rparen_opt.unwrap());
+        num k = rparen_idx + 1;
+        StringBuilder rtb = string_builder_init(16);
+        flag any_rt = false;
+        for k < tokens.len {
+          Token kt = tokens.get(k);
+          if token_is_symbol(kt, '{') {
+            break;
+          }
+          if kt.type == .NewLine || kt.type == .Comment {
+            k = k + 1;
+            continue;
+          }
+          rtb.append(token_word(kt));
+          any_rt = true;
+          k = k + 1;
+        }
+        *out_end_idx = rparen_idx;
+        str rtype_text = rtb.build();
+        if !any_rt {
+          free(rtype_text);
+          rtype_text = substr("void", 0, 4);
+        }
+        str closure_type_text = format("closure() {str}", rtype_text);
+        free(rtype_text);
+        ret closure_type_text;
+      }
       ret "";
     }
     .Operator -> {

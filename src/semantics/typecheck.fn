@@ -443,6 +443,14 @@ pub compound FnSig {
   Vec<str> type_params;
   Vec<Vec<str>> bounds;
   Vec<str> arg_params;
+  // Each type param's own declared default (`E = Error`), index-
+  // aligned with `type_params`; `checked_unknown()` for one with none.
+  // What a call explicitly naming fewer type arguments than `type_
+  // params.len` falls back to for the trailing, un-named positions -
+  // `wrap<num>(5)` on `fun wrap<T, E = Error>(T v) T` needs `E`
+  // resolved to `Error` from here, the same way a parameter with its
+  // own default may be left off a call's own argument list.
+  Vec<CheckedType> type_param_defaults;
   // `rtype` exactly as written, before any erasure - `unwrap(Result<T,
   // E>* self) T*`'s own `T*`, pointer/array wrapping and all, kept
   // alongside `rtype` itself rather than instead of it: `rtype` gets
@@ -1993,9 +2001,21 @@ fun _signature_of(FunctionNode f) FnSig {
   sig.type_params.init(0);
   sig.bounds.init(0);
   sig.arg_params.init(f.args.len);
+  sig.type_param_defaults.init(0);
   if f.has_type_params {
     for p : f.type_params {
       sig.type_params.push(p);
+    }
+    num tpdi = 0;
+    for tpdi < f.type_params.len {
+      if tpdi < f.type_param_defaults.len && f.type_param_defaults.get(tpdi) != nil {
+        sig.type_param_defaults.push(
+          checked_from_dtype(f.type_param_defaults.get(tpdi))
+        );
+      } else {
+        sig.type_param_defaults.push(checked_unknown());
+      }
+      tpdi = tpdi + 1;
     }
   }
   if f.has_type_param_forced_insts {
@@ -3234,6 +3254,7 @@ impl Checker {
     }
     self.check_arguments(
       node,
+      e,
       method,
       sig,
       args,
@@ -3403,7 +3424,14 @@ impl Checker {
 
   // Checks the types a call supplies for the callee's type parameters
   // against the types each one is allowed to stand for.
-  check_type_bounds(Node* node, str name, FnSig sig, Vec<Node*>* args, TypeEnv* env) {
+  check_type_bounds(
+    Node* node,
+    str name,
+    FnSig sig,
+    Vec<Node*>* args,
+    TypeEnv* env,
+    ExprNode e
+  ) {
     if sig.bounds.len == 0 || sig.type_params.len == 0 {
       ret;
     }
@@ -3423,9 +3451,46 @@ impl Checker {
           allowed.push(combination.get(p));
         }
       }
+      num this_param = p;
       p = p + 1;
       if allowed.len == 0 {
         continue;
+      }
+      // An explicit call-site type argument at this exact position
+      // (`identity<str>(5)`) is checked against the bound directly,
+      // regardless of whether any argument also happens to be
+      // declared as this bare type param - the only way a type param
+      // that's otherwise unreachable from any argument (named only in
+      // the return type, or nowhere at all) ever gets its own
+      // explicit value validated. The ordinary per-argument check
+      // just below (`check_arguments`'s own ordinary assignability
+      // loop, substituted against this same explicit value) is what
+      // catches the call still disagreeing with what it actually
+      // passed (`identity<str>(5)`'s own `5`, an argument), not this
+      // function.
+      if e.has_generic_args && this_param < e.generic_args.len {
+        CheckedType explicit_supplied = checked_from_dtype(e.generic_args.get(this_param));
+        str explicit_name = type_name(explicit_supplied);
+        flag explicit_listed = false;
+        num ea = 0;
+        for ea < allowed.len {
+          str bound = allowed.get(ea);
+          if equals(bound, explicit_name) ||
+            self.implements_shape(
+            explicit_supplied,
+            self.canonical_type_name(self._bare_shape_bound_name(bound))
+          ) {
+            explicit_listed = true;
+          }
+          ea = ea + 1;
+        }
+        if !explicit_listed {
+          self.fail(
+            format("'{str}' does not accept {str} for '{str}'", name, explicit_name, param),
+            node
+          );
+          ret;
+        }
       }
       // The first argument written as this parameter is what it stands
       // for at this call.
@@ -3800,6 +3865,7 @@ impl Checker {
   // structurally, the same way a non-generic callee's argument is.
   check_arguments(
     Node* node,
+    ExprNode e,
     str name,
     FnSig sig,
     Vec<Node*>* args,
@@ -3827,14 +3893,70 @@ impl Checker {
       ret;
     }
     if sig.is_generic {
-      self.check_type_bounds(node, name, sig, args, env);
+      self.check_type_bounds(node, name, sig, args, env, e);
       if self.failed {
         ret;
       }
     }
+    // An explicit call-site type argument (`identity<str>(5)`) for one
+    // of the callee's OWN declared type params (never the receiver's -
+    // a method call's own receiver generics come from `found.receiver.
+    // generic_args` above, already resolved by then), one entry per
+    // `sig.type_params`, `checked_unknown()` for any position nothing
+    // was written for - `substitute` already treats that as "stands
+    // for whatever's supplied", the exact permissive behavior this had
+    // before any explicit argument existed at all. Without this, a
+    // generic callee's own bare-type-param-shaped parameter (`T x`)
+    // matched any argument unconditionally (see the comment on `want`
+    // below), so `identity<str>(5)` passed typecheck outright instead
+    // of rejecting the mismatch between what was written and what was
+    // actually passed.
+    Vec<CheckedType> explicit_as_checked;
+    explicit_as_checked.init(sig.type_params.len);
+    num exi = 0;
+    for exi < sig.type_params.len {
+      if e.has_generic_args && exi < e.generic_args.len {
+        explicit_as_checked.push(checked_from_dtype(e.generic_args.get(exi)));
+      } else {
+        explicit_as_checked.push(checked_unknown());
+      }
+      exi = exi + 1;
+    }
+    defer explicit_as_checked.free();
     num i = 0;
     for i < args.len && i < sig.args.len {
-      CheckedType want = sig.args.get(i);
+      CheckedType want = substitute(
+        sig.args.get(i),
+        &sig.type_params,
+        &explicit_as_checked
+      );
+      // A bare top-level type-param argument (`T x`) is erased to a
+      // nameless Unknown by the time it reaches `sig.args` (`_erase_
+      // type_params`'s own doc comment: only a bare occurrence, never
+      // one nested further in, like a `Vec<T> items` above, which
+      // keeps its own name and so is already handled by `substitute`
+      // above) - `substitute`'s own name-matching can never catch a
+      // bare one, since there's no name left to match against.
+      // `sig.arg_params` records which type param each argument
+      // position was declared as separately, exactly for this.
+      if i < sig.arg_params.len && !equals(sig.arg_params.get(i), "") {
+        num api = 0;
+        for api < sig.type_params.len {
+          if equals(sig.type_params.get(api), sig.arg_params.get(i)) {
+            CheckedType explicit_want = explicit_as_checked.get(api);
+            if !is_unknown(explicit_want) {
+              explicit_want.pointer_depth = explicit_want.pointer_depth + want.pointer_depth;
+              if want.is_array {
+                explicit_want.is_array = true;
+                explicit_want.array_depth = explicit_want.array_depth + want.array_depth;
+              }
+              want = explicit_want;
+            }
+            break;
+          }
+          api = api + 1;
+        }
+      }
       if want.has_fn_sig {
         i = i + 1;
         continue;
@@ -4203,6 +4325,7 @@ impl Checker {
     no_generic_args.init(0);
     self.check_arguments(
       node,
+      e,
       name,
       sig,
       &args,
@@ -4216,19 +4339,28 @@ impl Checker {
     // `sig.rtype` itself is `wrap<T>(T v) MyOpt<T>`'s own return type
     // with `T` already erased to a nameless Unknown by `_signature_of`
     // (every generic function's own type params are, regardless of
-    // whether this call even resolves them) - `check_arguments`'
-    // generic branch (`check_type_bounds`) only ever verifies a type
-    // param's own bounds against what was supplied, never substitutes
-    // anything back into the return type at all, so a generic
-    // function's own call-site result reached every caller still
-    // Unknown, confirmed directly as the reason `wrap(5).unwrap()`
+    // whether this call even resolves them) - substituted back in
+    // below, the same way `check_arguments`' own ordinary argument
+    // check already substitutes an explicit value into `want` - or a
+    // generic function's own call-site result reached every caller
+    // still Unknown, confirmed directly as the reason `wrap(5).unwrap()`
     // (chaining a method call onto a generic function's own result)
     // reached codegen with no real type to work with. Inferred the
     // same way `check_type_bounds` already does: the first argument
     // written as a given type param is what it stands for at this
-    // call - no explicit `<...>` call-site syntax to prefer it over.
+    // call, UNLESS an explicit `<...>` was supplied at that position,
+    // which wins outright - the whole reason writing one exists at
+    // all, the one case this is for being a type param no argument
+    // (or the return type) ever names at all.
     Vec<CheckedType> inferred_args = self._infer_call_generic_args(sig, &args, env);
     defer inferred_args.free();
+    num exp_i = 0;
+    for exp_i < sig.type_params.len {
+      if e.has_generic_args && exp_i < e.generic_args.len {
+        inferred_args.set(exp_i, checked_from_dtype(e.generic_args.get(exp_i)));
+      }
+      exp_i = exp_i + 1;
+    }
     // A type param this call could never infer from anything - no
     // bare argument written as it, nothing nested inside any
     // argument's own declared type, no mention in the return type
@@ -4247,6 +4379,22 @@ impl Checker {
         continue;
       }
       if e.has_generic_args && tpi < e.generic_args.len {
+        tpi = tpi + 1;
+        continue;
+      }
+      // Neither inferred from an argument nor named explicitly at
+      // this position - but `wrap<T, E = Error>(T v) T` called as
+      // `wrap<num>(5)` leaves `E` out on purpose, relying on its own
+      // declared default the same way a trailing parameter with a
+      // default may be left off a call's own argument list. Resolved
+      // here, not just excused from the "unreachable" error below: an
+      // unresolved default would still leave `inferred_args` Unknown
+      // for this position, corrupting `substitute`'s own return-type
+      // substitution two lines down the exact same way an unresolved
+      // explicit argument used to.
+      if tpi < sig.type_param_defaults.len &&
+        !is_unknown(sig.type_param_defaults.get(tpi)) {
+        inferred_args.set(tpi, sig.type_param_defaults.get(tpi));
         tpi = tpi + 1;
         continue;
       }
