@@ -15535,18 +15535,23 @@ impl Codegen {
     }
   }
 
-  // True when `node` was declared in a `std/c/*.fn` binding file, a
-  // signature-only module documenting an existing C header such as
-  // `std/c/time.fn`'s `tm` or `std/c/io.fn`'s `FILE`. Such a declaration
+  // True when `node` was declared in a signature-only doc module: a
+  // `std/c/*.fn` binding file documenting an existing C header (such as
+  // `std/c/time.fn`'s `tm` or `std/c/io.fn`'s `FILE`), or `std/builtins.fn`
+  // documenting the language's own predeclared names (such as `sizeof`,
+  // a C keyword with no linkable symbol of its own). Such a declaration
   // exists so call sites and field accesses can typecheck against it; the
-  // system header remains the sole source of truth, so codegen must never
-  // emit competing C text for one of these nodes.
-  is_std_c_signature_node(Node node) flag {
+  // real symbol, or the language's own grammar, remains the sole source
+  // of truth, so codegen must never emit competing C text for one of
+  // these nodes.
+  is_signature_only_doc_node(Node node) flag {
     if !node.has_pos {
       ret false;
     }
     ret contains(node.pos.filename, "/std/c/") ||
-      contains(node.pos.filename, "\\std\\c\\");
+      contains(node.pos.filename, "\\std\\c\\") ||
+      ends_with(node.pos.filename, "/std/builtins.fn") ||
+      ends_with(node.pos.filename, "\\std\\builtins.fn");
   }
 
   // Emits the wrapper C functions an `async` function or method needs
@@ -16664,7 +16669,7 @@ impl Codegen {
   // A sized array field (`T[3]`) gets no special treatment here, unlike
   // an unsized one.
   emit_compound(Node node) Option<CodegenErrorKind> {
-    if self.is_std_c_signature_node(node) {
+    if self.is_signature_only_doc_node(node) {
       ret .None;
     }
     fit node.kind {
@@ -16862,7 +16867,7 @@ impl Codegen {
   // before impls and functions, so a global used in any body is already
   // declared textually earlier; globals get no forward-declaration pass.
   emit_global_variable(Node node) Option<CodegenErrorKind> {
-    if self.is_std_c_signature_node(node) {
+    if self.is_signature_only_doc_node(node) {
       ret .None;
     }
     fit node.kind {
@@ -21818,7 +21823,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Compound(c) -> {
-          if !c.has_type_params && !self.is_std_c_signature_node(n) {
+          if !c.has_type_params && !self.is_signature_only_doc_node(n) {
             self.state.write("typedef struct ");
             self.state.write(c.name);
             self.state.write(" ");
@@ -21917,7 +21922,7 @@ impl Codegen {
     for n : nodes {
       fit n.kind {
         .Function(f) -> {
-          if !f.has_type_params && !self.is_std_c_signature_node(n) &&
+          if !f.has_type_params && !self.is_signature_only_doc_node(n) &&
             !equals(f.name, "main") && !f.is_variadic &&
             self.function_prototype_is_safe_early(n) {
             self.hoist_insert_pos = .Some(self.state.out.len());
@@ -21930,7 +21935,7 @@ impl Codegen {
         .Impl(i) -> {
           if !i.has_type_params {
             for m : i.methods {
-              if self.is_std_c_signature_node(*m) ||
+              if self.is_signature_only_doc_node(*m) ||
                 !self.function_prototype_is_safe_early(*m) {
                 continue;
               }

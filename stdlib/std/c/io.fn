@@ -11,6 +11,18 @@ pub compound FILE {
   num _opaque;
 }
 
+// `EOF` (the value most of this module's functions return on
+// end-of-file or error) stays prose-only rather than a real
+// declaration, even though every libc Fun targets (glibc, musl, the
+// macOS libc, MSVCRT) defines it as exactly -1: `EOF` is reserved by
+// the C standard headers, and this file is in the compiler's own
+// transitive import closure (`src/parser/parser.fn` and
+// `src/fls/analysis.fn` both import `std.c.io` directly), so the
+// previous release's own binary - which has no carve-out allowing a
+// signature-only doc file to use a reserved name - has to keep being
+// able to parse it. `use std.c.io;` still makes it available, resolved
+// through `c_builtin_owner`.
+
 // Prints formatted output to stdout. Returns the number of characters
 // written, or negative on error (C semantics).
 pub fun printf(str fmt, ...) num;
@@ -103,6 +115,12 @@ pub fun fread(raw* ptr, num size, num nmemb, FILE* stream) num;
 // Writes `nmemb` elements of `size` bytes each from `ptr` into a stream.
 // Returns the number of elements written (C semantics).
 pub fun fwrite(raw* ptr, num size, num nmemb, FILE* stream) num;
+
+// `SEEK_SET`/`SEEK_CUR`/`SEEK_END` (`fseek`'s `whence` values: fixed by
+// POSIX, and identical on the Windows CRT) stay prose-only too, for
+// the exact same reason `EOF` above does - this file is in the
+// compiler's own transitive import closure, and all three names are
+// reserved by the C standard headers.
 
 // Sets the file position indicator of `stream` to `offset` bytes relative
 // to `whence` (e.g. SEEK_SET). Returns 0 on success, nonzero on failure (C

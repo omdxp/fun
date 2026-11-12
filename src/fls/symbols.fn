@@ -1789,13 +1789,32 @@ pub fun lookup_method(
   str method_name,
   Vec<str> concrete_args
 ) Option<Declaration> {
+  // `impl Atomic<num> { fetch_add... }`, written for one concrete
+  // instantiation rather than the generic `impl Atomic<T> { load... }`,
+  // is stored under its own mangled name (`"Atomic__num"`, matching
+  // `_mangled_dtype_name`'s own convention in the parser), never the
+  // bare `type_name` a receiver resolves to - so a method declared
+  // only in a type-specific impl block needs this second name tried
+  // too, or it's never found at all.
+  str mangled_type_name = type_name;
+  flag mangled_owned = false;
+  if concrete_args.len > 0 {
+    StringBuilder mb = string_builder_init(32);
+    mb.append(type_name);
+    for a : concrete_args {
+      mb.append("__");
+      mb.append(a);
+    }
+    mangled_type_name = mb.build();
+    mangled_owned = true;
+  }
   num i = 0;
   for i < program.len {
     Node n = program.get(i);
     i = i + 1;
     fit n.kind {
       .Impl(im) -> {
-        if !equals(im.type_name, type_name) {
+        if !equals(im.type_name, type_name) && !equals(im.type_name, mangled_type_name) {
           continue;
         }
         num m = 0;
@@ -1817,6 +1836,28 @@ pub fun lookup_method(
                   );
                   signature = specialize_signature(signature, im.type_params, filled_args);
                   free_filled_args(filled_args, concrete_args.len);
+                } elif mangled_owned && equals(im.type_name, mangled_type_name) {
+                  // Matched through the mangled fallback above: `self`'s
+                  // own declared type is `mangled_type_name` verbatim
+                  // (codegen's own internal spelling, baked in by the
+                  // parser since this impl is concrete, never meant for
+                  // a reader), rewritten back to how it was actually
+                  // written (`Atomic<num>`, not `Atomic__num`).
+                  StringBuilder pb = string_builder_init(32);
+                  pb.append(type_name);
+                  pb.append("<");
+                  num ai = 0;
+                  for ai < concrete_args.len {
+                    if ai > 0 {
+                      pb.append(", ");
+                    }
+                    pb.append(concrete_args.get(ai));
+                    ai = ai + 1;
+                  }
+                  pb.append(">");
+                  str pretty_type = pb.build();
+                  signature = replace_str(signature, mangled_type_name, pretty_type);
+                  free(pretty_type);
                 }
                 Declaration d = _declaration_vis(
                   method_name,
@@ -1826,6 +1867,9 @@ pub fun lookup_method(
                   method.flags.is_public
                 );
                 d.container = type_name;
+                if mangled_owned {
+                  free(mangled_type_name);
+                }
                 ret .Some(d);
               }
             }
@@ -1835,6 +1879,9 @@ pub fun lookup_method(
       }
       _ -> {}
     }
+  }
+  if mangled_owned {
+    free(mangled_type_name);
   }
   // `type_name` names a shape directly, not a concrete type with its own
   // impl block, whenever the receiver itself is shape-typed (`AsyncCounter

@@ -87,6 +87,18 @@ pub compound FmtState {
   // codebase - unlike a boolean chain or a fit arm's own conditions,
   // which pack as many as fit.
   Vec<flag> call_arg_wrap;
+  // `open_delims`'s own value at the moment each still-open non-
+  // literal `{` (a function/decl/enum/fit body, one entry per nesting
+  // level) started - a statement inside that body is never a
+  // continuation of whatever call or condition the brace itself sits
+  // inside (`spawn(fun() { stmt; })`'s own `stmt` is not a
+  // continuation of `spawn(`'s still-open paren, even though it is
+  // one), since the body's own indent already accounts for that
+  // nesting on its own. Continuation only ever means delimiters opened
+  // *since* the innermost such brace, so the formula below subtracts
+  // this stack's own top rather than comparing `open_delims` to zero
+  // outright.
+  Vec<num> open_delims_at_block;
   // True when the token just written was a prefix operator.
   flag prev_unary;
   // A space owed to the previous token, written only if the line
@@ -129,6 +141,7 @@ pub fun fmt_state_new() FmtState {
   s.bool_chain_wrap = false;
   s.method_chain_wrap = false;
   s.call_arg_wrap.init(4);
+  s.open_delims_at_block.init(4);
   s.prev_unary = false;
   s.pending_space = false;
   s.stmt_first = "";
@@ -601,8 +614,15 @@ fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, flag in_decl_only)
     ret true;
   }
   // A declaration, field, or parameter names what it points at, and the
-  // name is followed by a delimiter rather than an operand.
-  if next.type == .Identifier {
+  // name is followed by a delimiter rather than an operand. The name is
+  // ordinarily an identifier, but `std/builtins.fn` is allowed to
+  // declare `nil`/`true`/`false`/`panic` too (see the parser's own
+  // `_builtins_doc_keyword_name` carve-out) - `nil`/`panic` lex as
+  // `.Keyword`, `true`/`false` as `.Boolean`, never `.Identifier`.
+  flag names_declaration = next.type == .Identifier ||
+    (next.type == .Keyword && (equals(nt, "nil") || equals(nt, "panic"))) ||
+    next.type == .Boolean;
+  if names_declaration {
     num after_idx = _next_significant(tokens, next_idx + 1);
     if after_idx < 0 {
       ret false;
@@ -1839,6 +1859,14 @@ pub fun format_source(str src, str filename) Result<str, str> {
       flag stays = equals(text, ",") || equals(text, ";") || equals(text, ")") ||
         equals(text, "]");
       if stays && s.pending_newlines == 0 {
+        if equals(text, ")") || equals(text, "]") {
+          if s.open_delims > 0 {
+            s.open_delims = s.open_delims - 1;
+          }
+          if s.call_arg_wrap.len > 0 {
+            s.call_arg_wrap.pop();
+          }
+        }
         s.write(text);
         s.has_prev = true;
         s.prev = t;
@@ -2040,6 +2068,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
       flag closed_arm_body = false;
       if s.brace_kinds.len > 0 {
         let kind = s.brace_kinds.pop();
+        if s.open_delims_at_block.len > 0 {
+          s.open_delims_at_block.pop();
+        }
         if kind == 2 && s.function_body_depth > 0 {
           s.function_body_depth = s.function_body_depth - 1;
           closed_arm_body = s.fit_block_depth > 0 && s.fit_body_depth_at_start.len > 0 &&
@@ -2084,9 +2115,13 @@ pub fun format_source(str src, str filename) Result<str, str> {
     s.flush_newlines();
 
     if s.at_line_start {
-      s.continuation = s.open_delims - _leading_closers(&tokens, i) > 0 ||
+      num block_baseline = 0;
+      if s.open_delims_at_block.len > 0 {
+        block_baseline = s.open_delims_at_block.get(s.open_delims_at_block.len - 1);
+      }
+      s.continuation = s.open_delims - block_baseline - _leading_closers(&tokens, i) > 0 ||
         (
-        (s.bool_chain_wrap || s.method_chain_wrap) && s.open_delims == 0
+        (s.bool_chain_wrap || s.method_chain_wrap) && s.open_delims == block_baseline
       );
     }
 
@@ -2259,6 +2294,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         kind = 2;
       }
       s.brace_kinds.push(kind);
+      s.open_delims_at_block.push(s.open_delims);
       s.indent = s.indent + 1;
       s.force_break = true;
       s.pending_newlines = 0;

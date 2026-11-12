@@ -391,11 +391,35 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       if equals(token_word(t), "as") {
         ret _hover_result(_as_keyword_doc(&tokens, t), span_of(t, doc.text));
       }
+      // `nil`/`panic` are reserved words, but also two of
+      // `std/builtins.fn`'s own five real declarations - resolved
+      // through that declaration, the same as `sizeof` below, rather
+      // than `keyword_doc`'s own generic reserved-word text.
+      let nil_or_panic = _builtins_doc_declaration(cache, doc.path, token_word(t));
+      if nil_or_panic.is_some() {
+        ret _builtins_doc_hover(nil_or_panic.unwrap(), span_of(t, doc.text));
+      }
       str doc_text = keyword_doc(token_word(t));
       if equals(doc_text, "") {
         ret NO_HOVER;
       }
       ret _hover_result(doc_text, span_of(t, doc.text));
+    }
+    .Boolean -> {
+      str bool_word = "false";
+      fit t.data {
+        .Bval(bv) -> {
+          if bv {
+            bool_word = "true";
+          }
+        }
+        _ -> {}
+      }
+      let bool_decl = _builtins_doc_declaration(cache, doc.path, bool_word);
+      if bool_decl.is_some() {
+        ret _builtins_doc_hover(bool_decl.unwrap(), span_of(t, doc.text));
+      }
+      ret NO_HOVER;
     }
     .Operator -> {
       str op_word = token_word(t);
@@ -478,14 +502,14 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           ret _hover_result(fork_doc, span_of(t, doc.text));
         }
       }
-      // `sizeof` is recognized the same contextual way `fork` is:
-      // never a lexer keyword, just an identifier the parser treats
-      // specially at a call site, so it never resolves as a declared
-      // symbol either.
+      // `sizeof` has a real declaration in `std/builtins.fn`, resolved
+      // regardless of whether this file imports it - the same as
+      // `nil`/`panic` above - rather than `keyword_doc`'s own generic
+      // text.
       if equals(token_word(t), "sizeof") {
-        str sizeof_doc = keyword_doc("sizeof");
-        if !equals(sizeof_doc, "") {
-          ret _hover_result(sizeof_doc, span_of(t, doc.text));
+        let sizeof_decl = _builtins_doc_declaration(cache, doc.path, "sizeof");
+        if sizeof_decl.is_some() {
+          ret _builtins_doc_hover(sizeof_decl.unwrap(), span_of(t, doc.text));
         }
       }
       // `.tag_value()` is a builtin method available on any enum
@@ -589,24 +613,6 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           span_of(t, doc.text)
         );
       }
-      // A C macro or typedef the language accepts without a
-      // declaration of its own (`NULL`, `size_t`, `EOF`, ...): never
-      // a real declared symbol either, and never represented as one
-      // in the AST at all, so ordinary resolution below would find
-      // nothing no matter what.
-      str builtin_module = c_builtin_owner(token_word(t));
-      if !equals(builtin_module, "") {
-        ret _hover_result(
-          _doc(
-          token_word(t),
-          format(
-          "A C builtin the language accepts without a declaration of its own, documented by {str}.",
-          builtin_module
-          )
-          ),
-          span_of(t, doc.text)
-        );
-      }
       str target = import_target(&tokens, doc.path, line, character);
       if !equals(target, "") {
         ret _import_hover_result(target, span_of(t, doc.text));
@@ -706,6 +712,32 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         free(inferred_type);
         ret result;
       }
+    }
+    // A C macro or typedef the language accepts without a declaration
+    // of its own (`NULL`, `size_t`, `EOF`, ...), tried only now that
+    // ordinary resolution has genuinely found nothing - most commonly
+    // because this file never imports its owning module at all, which
+    // never stops the name from being usable. A name this session
+    // converted to a real declaration (see `std/c/def.fn` and its
+    // siblings) still resolves through it, parsed fresh the same way
+    // `std/builtins.fn`'s own five names do; the generic text below is
+    // only the fallback for the names that stay prose-only.
+    str builtin_module = c_builtin_owner(token_word(t));
+    if !equals(builtin_module, "") {
+      let real_builtin = _c_builtin_real_declaration(cache, doc.path, token_word(t));
+      if real_builtin.is_some() {
+        ret _builtins_doc_hover(real_builtin.unwrap(), span_of(t, doc.text));
+      }
+      ret _hover_result(
+        _doc(
+        token_word(t),
+        format(
+        "A C builtin the language accepts without a declaration of its own, documented by {str}.",
+        builtin_module
+        )
+        ),
+        span_of(t, doc.text)
+      );
     }
     ret NO_HOVER;
   }
@@ -827,22 +859,55 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
     ret NO_LOCATION;
   }
   Token t = found.unwrap();
+  // `nil`/`panic` (`.Keyword`) and `true`/`false` (`.Boolean`) are
+  // never a declared symbol anywhere else - they're reserved words,
+  // impossible to shadow - so goto-definition on one of them only
+  // ever means its own real declaration in `std/builtins.fn`, checked
+  // here before the ordinary `.Identifier`-only gate below would
+  // otherwise bail on them outright.
   fit t.type {
     .Identifier -> {}
+    .Keyword -> {
+      if !equals(token_word(t), "nil") && !equals(token_word(t), "panic") {
+        ret NO_LOCATION;
+      }
+    }
+    .Boolean -> {}
     _ -> { ret NO_LOCATION; }
+  }
+  if t.type != .Identifier {
+    str kw_word = token_word(t);
+    if t.type == .Boolean {
+      kw_word = "false";
+      fit t.data {
+        .Bval(bv) -> {
+          if bv {
+            kw_word = "true";
+          }
+        }
+        _ -> {}
+      }
+    }
+    let kw_decl = _builtins_doc_declaration(cache, doc.path, kw_word);
+    if kw_decl.is_some() {
+      ret _location_result(doc, kw_decl.unwrap());
+    }
+    ret NO_LOCATION;
+  }
+  // `sizeof` is a C reserved word too (see `is_c_keyword`), so - like
+  // `nil`/`panic`/`true`/`false` above - nothing else could ever
+  // declare it; always its own real declaration, regardless of
+  // whether this file imports `std.builtins`.
+  if equals(token_word(t), "sizeof") {
+    let sizeof_decl = _builtins_doc_declaration(cache, doc.path, "sizeof");
+    if sizeof_decl.is_some() {
+      ret _location_result(doc, sizeof_decl.unwrap());
+    }
   }
 
   str target = import_target(&tokens, doc.path, line, character);
   if !equals(target, "") && !is_dir(target) {
     ret _file_start_location_result(target);
-  }
-
-  str builtin_module = c_builtin_owner(token_word(t));
-  if !equals(builtin_module, "") {
-    str module_path = resolve_import_path(doc.path, builtin_module);
-    if exists(module_path) {
-      ret _file_start_location_result(module_path);
-    }
   }
 
   let declared = resolve_at(cache, doc, &tokens, t, line);
@@ -907,6 +972,24 @@ pub fun definition(AnalysisCache* cache, Document doc, num line, num character) 
             ret _location_result(doc, member.unwrap());
           }
         }
+      }
+    }
+    // A C macro or typedef the language accepts without a declaration
+    // of its own, tried only now that ordinary resolution has
+    // genuinely found nothing - see hover's own matching fallback for
+    // why this moved below `resolve_at` rather than staying ahead of
+    // it, and for why a name converted to a real declaration this
+    // session still gets tried first, landing on its own exact line
+    // rather than just the module's file start.
+    str builtin_module = c_builtin_owner(token_word(t));
+    if !equals(builtin_module, "") {
+      let real_builtin = _c_builtin_real_declaration(cache, doc.path, token_word(t));
+      if real_builtin.is_some() {
+        ret _location_result(doc, real_builtin.unwrap());
+      }
+      str module_path = resolve_import_path(doc.path, builtin_module);
+      if exists(module_path) {
+        ret _file_start_location_result(module_path);
       }
     }
     ret NO_LOCATION;
@@ -1939,6 +2022,102 @@ fun _import_hover_result(str target, Span s) str {
     free(text);
   }
   ret result;
+}
+
+// True for one of `std/builtins.fn`'s own five declared names -
+// `sizeof`/`nil`/`true`/`false`/`panic` - every one of them always
+// available without an import, the same way a keyword is.
+fun _is_builtins_doc_name(str w) flag {
+  ret equals(w, "sizeof") || equals(w, "nil") || equals(w, "true") || equals(w, "false") ||
+    equals(w, "panic");
+}
+
+// `word`'s own real declaration in whichever file `import_path` names,
+// found regardless of whether `from_file` actually imports that module
+// - hover and goto-definition on a name always available without an
+// import (a reserved word, or a C builtin the language accepts with no
+// declaration of its own) must never depend on the current file's own
+// `use` list. Parses that module fresh rather than requiring it in the
+// current document's own merged program, mirroring
+// `_alias_module_completions_fresh`'s own reasoning for why that's
+// fine: these are small, stable files, and the cost is one extra parse
+// of one per request.
+fun _fresh_module_declaration(
+  AnalysisCache* cache,
+  str from_file,
+  str import_path,
+  str word
+) Option<Declaration> {
+  str module_path = resolve_import_path(from_file, import_path);
+  if !exists(module_path) {
+    ret .None;
+  }
+  str text = read_to_string(module_path);
+  if text == nil {
+    ret .None;
+  }
+  let merged = parse_program_cached(
+    module_path,
+    text,
+    &cache.imports,
+    cache.imports.parallel_preload
+  );
+  if merged.is_err() {
+    free(merged.unwrap_err());
+    free(text);
+    ret .None;
+  }
+  ProgramMergeResult target = merged.unwrap();
+  let found = lookup_top_level(&target.entry_nodes, word);
+  free(text);
+  ret found;
+}
+
+// `word`'s own real declaration in `std/builtins.fn` - see
+// `_fresh_module_declaration`. Scoped to the five names that file
+// actually declares, since every other identifier would just waste a
+// parse of it for nothing.
+fun _builtins_doc_declaration(AnalysisCache* cache, str from_file, str word) Option<Declaration> {
+  if !_is_builtins_doc_name(word) {
+    ret .None;
+  }
+  ret _fresh_module_declaration(cache, from_file, "std.builtins", word);
+}
+
+// `word`'s own real declaration in the `std.c.*` module
+// `c_builtin_owner` says documents it, if that name is one this
+// session converted to a real declaration (`NULL`, `size_t`,
+// `CHAR_BIT`, `pthread_t`, and the rest of their own modules' names) -
+// `.None` for a name that's still prose-only (`INT_MAX`, `SIZE_MAX`,
+// ...), which the caller then falls back to the generic "C builtin"
+// text for, same as before this session's conversions.
+fun _c_builtin_real_declaration(AnalysisCache* cache, str from_file, str word) Option<Declaration> {
+  str owner = c_builtin_owner(word);
+  if equals(owner, "") {
+    ret .None;
+  }
+  ret _fresh_module_declaration(cache, from_file, owner, word);
+}
+
+// Renders `d` (a `std/builtins.fn` declaration found by
+// `_builtins_doc_declaration`) the same way the ordinary hover
+// renderer below shows any other real declaration: its own leading doc
+// comment, then its signature.
+fun _builtins_doc_hover(Declaration d, Span s) str {
+  str source_text = read_to_string(d.pos.filename);
+  str doc_comment = "";
+  if source_text != nil {
+    doc_comment = doc_comment_above(source_text, d.pos.line);
+  }
+  StringBuilder b = string_builder_init(96);
+  if !equals(doc_comment, "") {
+    b.append(doc_comment);
+    b.append("\n\n");
+  }
+  b.append("```fun\n");
+  b.append(d.detail);
+  b.append("\n```");
+  ret _hover_result(b.build(), s);
 }
 
 // `as` reads two different ways depending on the statement it sits

@@ -2169,7 +2169,10 @@ impl Analysis {
 }
 
 // A C macro or typedef the language accepts without a declaration of
-// its own, and the module that documents it.
+// its own at a use site - or, for a name this session gave a real
+// declaration (`NULL`, `size_t`, `CHAR_BIT`, `pthread_t`, and the rest
+// of their own modules' names), the module it was moved into - paired
+// with the module that documents it either way.
 pub compound CBuiltin {
   str name;
   str module;
@@ -2178,9 +2181,13 @@ pub compound CBuiltin {
 // Every C builtin the language recognizes this way, name paired with
 // the module that documents it. The single source of truth both
 // `c_builtin_owner` (a compiler warning: is an import earning its
-// place by naming one of these) and fls (hover/completion on one, at
-// a use site the AST never represents as a declared symbol at all)
-// read from, so the two can never drift apart from each other.
+// place by naming one of these) and fls (hover/goto-definition on
+// one) read from, so the two can never drift apart from each other.
+// fls tries the name's own real declaration first (see
+// `_c_builtin_real_declaration`) and only falls back to this table's
+// generic text for a name that's still genuinely platform-variant and
+// so stays prose-only - this table itself no longer distinguishes the
+// two, since both still need the same name-to-module answer.
 pub fun c_builtins() Vec<CBuiltin> {
   Vec<CBuiltin> out;
   out.init(32);
