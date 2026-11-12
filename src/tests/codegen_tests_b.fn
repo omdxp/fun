@@ -1453,6 +1453,33 @@ test "a '?' propagation's own early return still runs the enclosing function's p
   assert count(out_msvc, "cleanup") == 2, "expected the hoisted MSVC-shaped form to run the defer on both paths too";
 }
 
+test "a bare propagation statement whose own unwrapped value is never bound discards it with a (void) cast" {
+  // `maybe_name()?!(0);` used purely for its side effect, with no `let`
+  // to catch the unwrapped value, still expands to a GNU statement
+  // expression whose own trailing value IS that unwrap (needed when it
+  // is bound) - left bare here, which is a real, intentional discard,
+  // but clang still flags it as -Wunused-value since nothing marks the
+  // discard as deliberate the way an ordinary C idiom would.
+  str src = `use std.option;
+  `fun maybe_name() Option<str> {
+  `  ret .Some("x");
+  `}
+  `fun run() Option<num> {
+  `  maybe_name()?!(0);
+  `  ret .Some(1);
+  `}
+  `fun main() num {
+  `  run();
+  `  ret 0;
+  `}`;
+  str out = emit_c_with_imports(
+    src,
+    "bare_propagation_void_cast",
+    "a bare propagation statement discards its own unwrapped value with a (void) cast"
+  );
+  assert contains(out, "(void)(({ __auto_type"), "expected a bare propagation statement's own GNU statement-expression wrapped in (void) to discard it explicitly";
+}
+
 test "a '?' propagation's own early return still emits valid C under debug info, on both the GNU and MSVC paths" {
   // The fix for the test above wrote the deferred statement's own
   // replay with a bare `"; "` separator on both paths - fine for an

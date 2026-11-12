@@ -11965,11 +11965,26 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
-      .Unary(_) -> {
+      .Unary(u) -> {
         self.state.write_indent();
+        // A bare propagation statement (`maybe_fails()?;`, its unwrapped
+        // value never bound to anything) still expands to a GNU
+        // statement-expression whose own trailing value is that unwrap -
+        // needed when it IS bound, but left as a bare, unused non-void
+        // expression result here, which clang warns about
+        // (`-Wunused-value`) despite the discard being entirely
+        // intentional. Cast the whole thing to void, the ordinary C
+        // idiom for "yes, I know, and I mean to ignore it."
+        flag wrap_void = u.is_left_operanded_unary && is_propagation_op(u.op);
+        if wrap_void {
+          self.state.write("(void)(");
+        }
         let uerr = self.emit_expr(node);
         if uerr.is_some() {
           ret uerr;
+        }
+        if wrap_void {
+          self.state.write(")");
         }
         self.state.write(";\n");
         ret .None;
