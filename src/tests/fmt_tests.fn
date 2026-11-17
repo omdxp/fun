@@ -747,3 +747,15 @@ test "a boolean chain used as a call's own over-long argument now wraps through 
   }
   assert !over_width, "expected every wrapped line to stay within the width budget, the call's own arguments wrapped now";
 }
+
+test "a ternary's own question mark keeps its space before an enum shorthand branch" {
+  // Pressed against the `?`, `t ?.A : .B` reads as a propagation followed
+  // by a member access.
+  str src = `fun main() {
+  `  C d = t ? .A : .B;
+  `  let v = g()?.field;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "t ? .A : .B"), "expected the ternary's shorthand branch spaced like any other operand";
+  assert contains(got, "g()?.field"), "expected a real propagation chain left pressed together";
+}

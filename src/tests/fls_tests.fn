@@ -11058,3 +11058,23 @@ test "completion inside an impl-as-shape body offers the shape's unimplemented m
   str in_body = completion(&reads, doc, 7, 6, true);
   assert !contains(in_body, `"detail":"area() num","insertText"`), "expected no member skeletons offered inside a method's own body";
 }
+
+test "a let initialized with a tuple literal hints the whole tuple type, not its first element" {
+  str src = `compound P { num x; }
+  `fun main() {
+  `  let a = (0, "s");
+  `  let b = (1.5, P{x = 1}, (2, 3));
+  `  let c = (7);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///tuple_let.fn";
+  doc.path = "tuple_let.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 6);
+  assert contains(hints, `"label":": (num, str)"`), "expected a two-element tuple's own type";
+  assert contains(hints, `"label":": (dec, P, (num, num))"`), "expected a nested tuple and a compound element typed too";
+  assert contains(hints, `"label":": num"`), "expected a single parenthesized value to stay its own type";
+}

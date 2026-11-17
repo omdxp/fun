@@ -896,6 +896,14 @@ fun _needs_space_at(
   (equals(p, "ret") || equals(p, "for")) {
     ret true;
   }
+  // The same after a ternary's own `?` (`t ? .A : .B`): pressed against
+  // it, `?.A` reads as a propagation followed by a member access.
+  if _is_dot_run(c) && equals(p, "?") {
+    num q_idx = _prev_significant(tokens, idx);
+    if q_idx >= 0 && _is_ternary_question(tokens, q_idx) {
+      ret true;
+    }
+  }
   if equals(c, "*") && _is_pointer_star(tokens, idx, prev, in_decl_only) {
     ret false;
   }

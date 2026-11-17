@@ -5779,6 +5779,59 @@ fun _infer_type_primary(
         if inner_opt.is_none() {
           ret "";
         }
+        // A top-level comma makes it a tuple literal (`(0, "a")`), typed
+        // element by element (`(num, str)`), never just as its first
+        // element.
+        Vec<num> elem_starts;
+        elem_starts.init(2);
+        defer elem_starts.free();
+        elem_starts.push(index_of_token(tokens, inner_opt.unwrap()));
+        num tdepth = 0;
+        num ti = open_idx + 1;
+        for ti < close_opt.unwrap() {
+          Token tt = tokens.get(ti);
+          if token_is_operator(tt, "(") || token_is_operator(tt, "[") ||
+            token_is_symbol(tt, '{') {
+            tdepth = tdepth + 1;
+          } elif token_is_symbol(tt, ')') || token_is_symbol(tt, ']') ||
+            token_is_symbol(tt, '}') {
+            tdepth = tdepth - 1;
+          } elif tdepth == 0 && token_is_operator(tt, ",") {
+            let next_elem = token_after(tokens, ti + 1);
+            if next_elem.is_some() {
+              elem_starts.push(index_of_token(tokens, next_elem.unwrap()));
+            }
+          }
+          ti = ti + 1;
+        }
+        if elem_starts.len > 1 {
+          StringBuilder tb = string_builder_init(32);
+          tb.append("(");
+          num ei = 0;
+          for ei < elem_starts.len {
+            str et = _infer_full_type(
+              tokens,
+              tokens.get(elem_starts.get(ei)),
+              program,
+              file,
+              line,
+              depth + 1
+            );
+            if equals(et, "") {
+              free(tb.build());
+              ret "";
+            }
+            if ei > 0 {
+              tb.append(", ");
+            }
+            tb.append(et);
+            free(et);
+            ei = ei + 1;
+          }
+          tb.append(")");
+          *out_end_idx = close_opt.unwrap();
+          ret tb.build();
+        }
         str inner_type = _infer_type(
           tokens,
           inner_opt.unwrap(),
