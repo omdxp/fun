@@ -156,12 +156,16 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       continue;
     }
     num name_idx = index_of_token(&tokens, t);
-    let lparen_opt = token_after(&tokens, name_idx + 1);
+    // An explicit generic call (`identity<str>(5)`) still gets its
+    // parameter-name hints; it just never needs the inferred `<...>` one.
+    num after_generic_idx = skip_generic_args_tokens(&tokens, name_idx + 1);
+    flag explicit_type_args = after_generic_idx != name_idx + 1;
+    let lparen_opt = token_after(&tokens, after_generic_idx);
     if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
       continue;
     }
     num lparen_idx = index_of_token(&tokens, lparen_opt.unwrap());
-    if _call_paren_is_declaration(&tokens, name_idx, lparen_idx) {
+    if call_paren_is_declaration(&tokens, name_idx, lparen_idx) {
       continue;
     }
 
@@ -207,7 +211,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
       doc.path,
       src_line
     );
-    flag all_inferred = inferred_args.len > 0;
+    flag all_inferred = inferred_args.len > 0 && !explicit_type_args;
     num ia = 0;
     for ia < inferred_args.len {
       if equals(inferred_args.get(ia), "") {
@@ -327,70 +331,6 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
 
   b.append("]");
   ret b.build();
-}
-
-// True when `name_idx`'s own `identifier(` is a declaration rather
-// than a call: preceded directly by `fun`/`pub`/`async`, or (for a
-// method written with no such keyword) sitting at a statement
-// boundary with only type-shaped tokens between the matching `)` and
-// a following `{`. Anything else, `;`/`.`/`=`/a bare expression
-// context, means this is a call.
-fun _call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx) flag {
-  let prev = token_before(tokens, name_idx);
-  if prev.is_some() {
-    Token p = prev.unwrap();
-    if p.type == .Keyword &&
-      (equals(token_word(p), "fun") || equals(token_word(p), "pub") || equals(
-      token_word(p),
-      "async"
-    )) {
-      ret true;
-    }
-  }
-  flag at_stmt_boundary = prev.is_none();
-  if prev.is_some() {
-    Token p = prev.unwrap();
-    at_stmt_boundary = token_is_symbol(p, '{') || token_is_symbol(p, '}') ||
-      token_is_symbol(
-      p,
-      ';'
-    );
-  }
-  if !at_stmt_boundary {
-    ret false;
-  }
-
-  let rparen_opt = matching_rparen(tokens, lparen_idx);
-  if rparen_opt.is_none() {
-    ret false;
-  }
-  num k_idx = rparen_opt.unwrap() + 1;
-  let k_opt = token_after(tokens, k_idx);
-  num steps = 0;
-  for steps < 8 {
-    if k_opt.is_none() {
-      ret false;
-    }
-    Token k = k_opt.unwrap();
-    if token_is_symbol(k, '{') {
-      ret true;
-    }
-    flag typeish = k.type == .Identifier || k.type == .Keyword ||
-    token_is_operator(
-      k,
-      "*"
-    ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') ||
-      token_is_operator(
-      k,
-      "<"
-    ) || token_is_operator(k, ">") || token_is_operator(k, ",");
-    if !typeish {
-      ret false;
-    }
-    k_opt = token_after(tokens, index_of_token(tokens, k) + 1);
-    steps = steps + 1;
-  }
-  ret false;
 }
 
 // A parameter's own name from one rendered piece of a split signature

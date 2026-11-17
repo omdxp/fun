@@ -9844,7 +9844,7 @@ test "hover and goto-definition resolve a bare variant shorthand passed as a cha
   assert contains(hovered, "Str(str) = 0"), "expected the variant's own signature";
 
   str def = definition(&reads, doc, 4, 35);
-  assert contains(def, "stdlib/std/log.fn"), "expected goto-definition to land in log.fn";
+  assert contains(def, "/std/log.fn"), "expected goto-definition to land in log.fn";
 }
 
 test "goto-definition on a bare 'ret'-value variant shorthand lands on the variant, not the whole enum" {
@@ -9876,7 +9876,7 @@ test "goto-definition on a bare 'ret'-value variant shorthand lands on the varia
 
   // `.Ok` sits at line 2 (0-indexed), right after the dot.
   str def = definition(&reads, doc, 2, 8);
-  assert contains(def, "stdlib/std/result.fn"), "expected goto-definition to land in result.fn";
+  assert contains(def, "/std/result.fn"), "expected goto-definition to land in result.fn";
   assert !contains(def, `"line":29`), "expected the variant's own line, not Result's own enum declaration line";
 }
 
@@ -10952,4 +10952,109 @@ test "a let-inferred closure resolves every fls feature a declared closure() R o
   // own.
   str def = definition(&reads, doc, 2, 4);
   assert equals(def, "[]"), "expected a clean no-op, never a crash";
+}
+
+test "inlay hints and hover specialize a generic call through a pointer-to-generic parameter, and keep a literal's own primitive args" {
+  // A compound literal's `<num>` was dropped (only identifier tokens were
+  // kept, and `num` lexes as a keyword), `&x` rendered as `Node*<num>`,
+  // and a type param was only ever bound when a parameter was exactly
+  // `T` - never `T` inside `Node<T>*` - so none of these calls got their
+  // `<num>` hint and every result read as the bare `Node<T>*` template.
+  str src = `compound Node<T> {
+  `  T value;
+  `  Node<T>* next;
+  `}
+  `fun id<T>(Node<T>* n) Node<T>* {
+  `  ret n;
+  `}
+  `const ga = Node<num>{value = 1, next = nil};
+  `fun main() {
+  `  let la = Node<num>{value = 1, next = nil};
+  `  let lb = id(&la);
+  `  let lc = id(&ga);
+  `  let ld = &la;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///generic_ptr_param.fn";
+  doc.path = "generic_ptr_param.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 14);
+  assert contains(hints, `"label":": Node<num>"`), "expected the literal's own primitive generic arg kept";
+  assert contains(hints, `"label":": Node<num>*"`), "expected the address-of and call results as Node<num>*, star after the args";
+  assert !contains(hints, "Node*<num>"), "expected the star never placed before the args";
+  assert !contains(hints, "Node<T>*"), "expected no unspecialized template left at any call";
+  assert count(hints, `"label":"<num>"`) == 2, "expected both id(...) calls to get their inferred <num> hint";
+  str hovered = hover(&reads, doc, 10, 12);
+  assert contains(hovered, "id(Node<num>* n) Node<num>*"), "expected the call's hover signature fully specialized";
+}
+
+test "an explicit generic call infers its own result and keeps parameter-name hints, without a redundant type-arg hint" {
+  str src = `fun identity<T>(T x) T {
+  `  ret x;
+  `}
+  `fun wrap<T>(T x) T* {
+  `  ret nil;
+  `}
+  `fun main() {
+  `  let a = identity<str>("x");
+  `  let c = wrap<num>(1);
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///explicit_generic_call.fn";
+  doc.path = "explicit_generic_call.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `"label":": str"`), "expected identity<str>(...) to infer str, not the bare function type";
+  assert contains(hints, `"label":": num*"`), "expected wrap<num>(...) to keep its declared pointer return";
+  assert count(hints, `"label":"x:"`) == 2, "expected parameter-name hints on both explicit calls";
+  assert !contains(hints, `"label":"<str>"`), "expected no inferred type-arg hint where the args are already written";
+  assert !contains(hints, "fun(T)"), "expected no call read as a bare function value";
+}
+
+test "completion inside an impl-as-shape body offers the shape's unimplemented members as whole methods" {
+  str src = `shape Area {
+  `  area() num;
+  `  name() str;
+  `  async load(num id) num;
+  `}
+  `compound Sq { num s; }
+  `impl Sq as Area {
+  `  area() num {
+  `    ret self.s * self.s;
+  `  }
+  `  pub async lo
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///impl_members.fn";
+  doc.path = "impl_members.fn";
+  doc.text = src;
+  doc.version = 1;
+  str out = completion(&reads, doc, 10, 14, true);
+  assert contains(out, `"label":"name"`), "expected the unimplemented name() offered";
+  assert contains(out, `"label":"load"`), "expected the unimplemented load() offered";
+  assert !contains(out, `"label":"area"`), "expected the already-implemented area() left out";
+  assert contains(out, `"insertText":"load(num id) num {\n\t$0\n\\}"`), "expected the whole method inserted, with the already-written async not repeated";
+  assert !contains(out, `"label":"use"`), "expected only the shape's members, not every keyword in scope";
+
+  doc.text = `shape Area {
+  `  area() num;
+  `}
+  `compound Sq { num s; }
+  `impl Sq as Area {
+  `  area() num {
+  `    num x = 1;
+  `    ar
+  `  }
+  `}`;
+  doc.version = 2;
+  str in_body = completion(&reads, doc, 7, 6, true);
+  assert !contains(in_body, `"detail":"area() num","insertText"`), "expected no member skeletons offered inside a method's own body";
 }

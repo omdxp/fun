@@ -106,6 +106,10 @@ pub fun completion(
     ret "[]";
   }
 
+  if _try_impl_member_completions(&items, &tokens, doc, cache, line, character, snippets) {
+    ret _reply(&items);
+  }
+
   num source_line = line + 1;
   str receiver = _receiver_before(&tokens, line, character);
 
@@ -857,6 +861,232 @@ fun _abbreviations(Vec<Item>* items, flag snippets) {
 // block's own opening brace, the same depth-tracked outward walk
 // `_enclosing_fit_subject_type_from_tokens` already uses to find an
 // enclosing `fit`.
+// Member-declaration completion inside `impl Type as Shape { ... }`: with
+// the cursor where a new method's own name starts (directly in the
+// impl's body, not inside one of its methods), every member the shape
+// declares that this impl doesn't define yet, each inserted as its whole
+// method - the signature plus an empty body. Token-only up to finding
+// the shape itself, since a half-typed member is exactly when the
+// document doesn't parse; the shape is then resolved from a probe copy
+// of the document with the half-typed word blanked out, so it's found
+// whether declared in this file or an import. True when it offered
+// anything.
+fun _try_impl_member_completions(
+  Vec<Item>* items,
+  Vec<Token>* tokens,
+  Document doc,
+  AnalysisCache* cache,
+  num line,
+  num character,
+  flag snippets
+) flag {
+  num source_line = line + 1;
+  num source_col = character + 1;
+  num last = -1;
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if t.type != .NewLine && t.type != .Comment &&
+      (t.pos.line < source_line || (t.pos.line == source_line && t.pos.end_col <= source_col)) {
+      last = i;
+    }
+    i = i + 1;
+  }
+  if last < 0 {
+    ret false;
+  }
+  num word_start_col = source_col;
+  num word_idx = -1;
+  Token last_tok = tokens.get(last);
+  if last_tok.type == .Identifier && last_tok.pos.line == source_line &&
+    last_tok.pos.end_col == source_col {
+    word_idx = last;
+    word_start_col = last_tok.pos.start_col;
+  }
+  num prev_idx = last;
+  if word_idx >= 0 {
+    prev_idx = _prev_real_index(tokens, word_idx);
+  }
+  // A `pub`/`async` already written ahead of the name: the member slot
+  // starts before it, and the probe below blanks it out too, or the
+  // dangling modifier alone keeps the probe from parsing.
+  num blank_from_line = source_line;
+  flag async_written = false;
+  for prev_idx >= 0 &&
+    (token_is_keyword(tokens.get(prev_idx), "pub") ||
+    token_is_keyword(tokens.get(prev_idx), "async")) {
+    Token modifier = tokens.get(prev_idx);
+    if token_is_keyword(modifier, "async") {
+      async_written = true;
+    }
+    blank_from_line = modifier.pos.line;
+    word_start_col = modifier.pos.start_col;
+    if word_idx < 0 {
+      word_idx = prev_idx;
+    }
+    prev_idx = _prev_real_index(tokens, prev_idx);
+  }
+  if prev_idx < 0 {
+    ret false;
+  }
+  Token prev = tokens.get(prev_idx);
+  if !token_is_symbol(prev, '{') && !token_is_symbol(prev, '}') && !token_is_symbol(prev, ';') {
+    ret false;
+  }
+
+  // The innermost brace still open at the cursor must be the impl's own.
+  num open_idx = -1;
+  num depth = 0;
+  num j = prev_idx;
+  for j >= 0 {
+    Token t = tokens.get(j);
+    if token_is_symbol(t, '}') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '{') {
+      if depth == 0 {
+        open_idx = j;
+        break;
+      }
+      depth = depth - 1;
+    }
+    j = j - 1;
+  }
+  if open_idx < 0 {
+    ret false;
+  }
+  num impl_idx = -1;
+  num k = open_idx - 1;
+  for k >= 0 {
+    Token t = tokens.get(k);
+    if token_is_symbol(t, '{') || token_is_symbol(t, '}') || token_is_symbol(t, ';') {
+      break;
+    }
+    if token_is_keyword(t, "impl") {
+      impl_idx = k;
+      break;
+    }
+    k = k - 1;
+  }
+  if impl_idx < 0 {
+    ret false;
+  }
+  str shape_name = "";
+  num h = impl_idx + 1;
+  for h < open_idx {
+    if token_is_keyword(tokens.get(h), "as") {
+      let shape_tok = _next_real_token(tokens, h);
+      if shape_tok.is_some() && shape_tok.unwrap().type == .Identifier {
+        shape_name = token_word(shape_tok.unwrap());
+      }
+      break;
+    }
+    h = h + 1;
+  }
+  if equals(shape_name, "") {
+    ret false;
+  }
+
+  // Members this impl already defines: a name followed by `(` at the
+  // impl body's own top level, at the start of a member.
+  Set<str> defined = set_init("", 8);
+  defer defined.free();
+  num body_depth = 0;
+  num m = open_idx + 1;
+  for m < tokens.len {
+    Token t = tokens.get(m);
+    if token_is_symbol(t, '{') {
+      body_depth = body_depth + 1;
+    } elif token_is_symbol(t, '}') {
+      if body_depth == 0 {
+        break;
+      }
+      body_depth = body_depth - 1;
+    } elif body_depth == 0 && t.type == .Identifier && m != word_idx {
+      let after = _next_real_token(tokens, m);
+      num before_idx = _prev_real_index(tokens, m);
+      flag at_member_start = before_idx == open_idx;
+      if before_idx >= 0 {
+        Token b = tokens.get(before_idx);
+        at_member_start = at_member_start || token_is_symbol(b, '}') || token_is_symbol(b, ';') ||
+          token_is_keyword(b, "pub") || token_is_keyword(b, "async");
+      }
+      if at_member_start && after.is_some() && token_is_operator(after.unwrap(), "(") {
+        defined.add(token_word(t));
+      }
+    }
+    m = m + 1;
+  }
+
+  // The document with the half-typed word blanked out, parsed fresh.
+  str probe = substr(doc.text, 0, len(doc.text));
+  if word_idx >= 0 {
+    num start_off = _byte_offset_of(doc.text, blank_from_line, word_start_col);
+    num end_off = _byte_offset_of(doc.text, source_line, source_col);
+    num p = start_off;
+    for p >= 0 && p < end_off {
+      probe[p] = ' ';
+      p = p + 1;
+    }
+  }
+  let merged = parse_program_cached(
+    doc.path,
+    probe,
+    &cache.imports,
+    cache.imports.parallel_preload
+  );
+  if merged.is_err() {
+    free(merged.unwrap_err());
+    free(probe);
+    ret false;
+  }
+  ProgramMergeResult program = merged.unwrap();
+  flag offered = false;
+  for n : program.nodes {
+    fit n.kind {
+      .Shape(q) -> {
+        if !equals(q.name, shape_name) {
+          continue;
+        }
+        for ms : q.methods {
+          if defined.has(ms.name) {
+            continue;
+          }
+          str sig = render_shape_method(ms);
+          str body = "";
+          if snippets {
+            StringBuilder sb = string_builder_init(len(sig) + 16);
+            // An `async` already written ahead of the name isn't
+            // inserted a second time.
+            num si = 0;
+            if async_written && ms.is_async {
+              si = len("async ");
+            }
+            for si < len(sig) {
+              chr c = sig[si];
+              if c == '$' || c == '}' || c == '\\' {
+                sb.append_char('\\');
+              }
+              sb.append_char(c);
+              si = si + 1;
+            }
+            sb.append(" {\n\t$0\n\\}");
+            body = sb.build();
+          }
+          items.push(_snippet_item(ms.name, .Method, sig, body));
+          if snippets {
+            free(body);
+          }
+          free(sig);
+          offered = true;
+        }
+      }
+      _ -> {}
+    }
+  }
+  free(probe);
+  ret offered;
+}
+
 fun _enclosing_impl_type_from_tokens(Vec<Token>* tokens, num line, num character) str {
   num source_line = line + 1;
   num source_col = character + 1;

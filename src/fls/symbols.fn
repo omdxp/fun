@@ -1924,7 +1924,7 @@ pub fun shape_method_declaration(
           ShapeMethodSig ms = q.methods.get(m);
           m = m + 1;
           if equals(ms.name, method_name) {
-            str signature = _render_shape_method(ms);
+            str signature = render_shape_method(ms);
             if q.has_type_params {
               Vec<str> filled_args = fill_default_args(
                 &q.type_params,
@@ -1948,7 +1948,7 @@ pub fun shape_method_declaration(
 
 // `m` as a reader would write it inside an `impl` block: no `self`,
 // since a shape method's signature never carries one of its own.
-fun _render_shape_method(ShapeMethodSig m) str {
+pub fun render_shape_method(ShapeMethodSig m) str {
   StringBuilder b = string_builder_init(48);
   if m.is_async {
     b.append("async ");
@@ -3905,6 +3905,356 @@ fun _walk_forward_chain(
 // `out_resolved_args` must already be `.init(0)`-ed by the caller.
 // `depth`: the same recursion cap `_infer_type` enforces, since
 // resolving an argument's own type recurses into it.
+// The number of trailing `*`s on a rendered type (`Node<num>**` -> 2).
+fun _type_text_stars(str t) num {
+  num n = len(t);
+  num stars = 0;
+  num i = n - 1;
+  for i >= 0 {
+    chr c = t[i];
+    if c == '*' {
+      stars = stars + 1;
+    } elif c != ' ' {
+      break;
+    }
+    i = i - 1;
+  }
+  ret stars;
+}
+
+// A rendered type with its trailing `*`s and spaces cut off, as a fresh
+// string (`Node<num>*` -> `Node<num>`).
+fun _type_text_core(str t) str {
+  num end = len(t);
+  for end > 0 && (t[end - 1] == '*' || t[end - 1] == ' ') {
+    end = end - 1;
+  }
+  str cut = substr(t, 0, end);
+  str out = trim(cut);
+  free(cut);
+  ret out;
+}
+
+// A rendered type's own name with no generic args or stars
+// (`Node<num>*` -> `Node`), as a fresh string.
+fun _type_text_base(str t) str {
+  str core = _type_text_core(t);
+  num open = index_of_char(core, '<');
+  if open < 0 {
+    ret core;
+  }
+  str cut = substr(core, 0, open);
+  str out = trim(cut);
+  free(cut);
+  free(core);
+  ret out;
+}
+
+// Binds each of `type_params` that `param` mentions to whatever sits in
+// the same position of `arg`, walking both types structurally: a bare
+// `T` binds to the whole argument type (minus any pointer levels `param`
+// itself writes around it - `T*` against `num**` is `T = num*`), and a
+// generic instantiation recurses into its own arguments pairwise once
+// both sides name the same type with the same pointer depth (`Node<T>*`
+// against `Node<num>*` is `T = num`). The first binding found for a
+// param wins, the same rule every argument-matching loop here used.
+fun _unify_type_text(str param, str arg, Vec<str>* type_params, Vec<str>* resolved) {
+  if equals(arg, "") {
+    ret;
+  }
+  num pstars = _type_text_stars(param);
+  num astars = _type_text_stars(arg);
+  str pcore = _type_text_core(param);
+  defer free(pcore);
+  str acore = _type_text_core(arg);
+  defer free(acore);
+  num ti = 0;
+  for ti < type_params.len {
+    if equals(pcore, type_params.get(ti)) {
+      if astars >= pstars && equals(resolved.get(ti), "") {
+        StringBuilder b = string_builder_init(len(acore) + 4);
+        b.append(acore);
+        num extra = astars - pstars;
+        for extra > 0 {
+          b.append("*");
+          extra = extra - 1;
+        }
+        free(resolved.get(ti));
+        resolved.set(ti, b.build());
+      }
+      ret;
+    }
+    ti = ti + 1;
+  }
+  if pstars != astars {
+    ret;
+  }
+  str pbase = _type_text_base(pcore);
+  str abase = _type_text_base(acore);
+  flag same_base = equals(pbase, abase);
+  free(pbase);
+  free(abase);
+  if !same_base {
+    ret;
+  }
+  Vec<str> pargs = generic_args_of_detail(pcore);
+  Vec<str> aargs = generic_args_of_detail(acore);
+  if pargs.len == aargs.len {
+    num ai = 0;
+    for ai < pargs.len {
+      _unify_type_text(pargs.get(ai), aargs.get(ai), type_params, resolved);
+      ai = ai + 1;
+    }
+  }
+  _free_str_vec_deep(&pargs);
+  _free_str_vec_deep(&aargs);
+}
+
+// `base` with its own generic `args` put back in, any trailing `*`s kept
+// after them (`Node*` + [num] -> `Node<num>*`), as a fresh string.
+// Unchanged (a fresh copy) when there are no args, or `base` already
+// carries its own `<...>`.
+fun _compose_type_text(str base, Vec<str>* args) str {
+  if args.len == 0 || index_of_char(base, '<') >= 0 {
+    ret substr(base, 0, len(base));
+  }
+  num stars = _type_text_stars(base);
+  str core = _type_text_core(base);
+  StringBuilder b = string_builder_init(len(base) + 16);
+  b.append(core);
+  free(core);
+  b.append("<");
+  num i = 0;
+  for i < args.len {
+    if i > 0 {
+      b.append(", ");
+    }
+    b.append(args.get(i));
+    i = i + 1;
+  }
+  b.append(">");
+  for stars > 0 {
+    b.append("*");
+    stars = stars - 1;
+  }
+  ret b.build();
+}
+
+// `tok`'s own expression type in full - generic args and pointer stars
+// both (`&head` -> `Node<num>*`) - which `_infer_type` alone hands back
+// split in two. "" when it doesn't resolve.
+fun _infer_full_type(
+  Vec<Token>* tokens,
+  Token tok,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth
+) str {
+  Vec<str> args;
+  args.init(2);
+  str base = _infer_type(tokens, tok, program, file, line, &args, depth);
+  if equals(base, "") {
+    args.free();
+    ret "";
+  }
+  str out = _compose_type_text(base, &args);
+  args.free();
+  ret out;
+}
+
+// True when `name_idx`'s own `identifier(` is a declaration rather
+// than a call: preceded directly by `fun`/`pub`/`async`, or (for a
+// method written with no such keyword) sitting at a statement
+// boundary with only type-shaped tokens between the matching `)` and
+// a following `{`. Anything else, `;`/`.`/`=`/a bare expression
+// context, means this is a call.
+pub fun call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_idx) flag {
+  let prev = token_before(tokens, name_idx);
+  if prev.is_some() {
+    Token p = prev.unwrap();
+    if p.type == .Keyword &&
+      (equals(token_word(p), "fun") || equals(token_word(p), "pub") || equals(
+      token_word(p),
+      "async"
+    )) {
+      ret true;
+    }
+  }
+  flag at_stmt_boundary = prev.is_none();
+  if prev.is_some() {
+    Token p = prev.unwrap();
+    at_stmt_boundary = token_is_symbol(p, '{') || token_is_symbol(p, '}') ||
+      token_is_symbol(
+      p,
+      ';'
+    );
+  }
+  if !at_stmt_boundary {
+    ret false;
+  }
+
+  let rparen_opt = matching_rparen(tokens, lparen_idx);
+  if rparen_opt.is_none() {
+    ret false;
+  }
+  num k_idx = rparen_opt.unwrap() + 1;
+  let k_opt = token_after(tokens, k_idx);
+  num steps = 0;
+  for steps < 8 {
+    if k_opt.is_none() {
+      ret false;
+    }
+    Token k = k_opt.unwrap();
+    if token_is_symbol(k, '{') {
+      ret true;
+    }
+    flag typeish = k.type == .Identifier || k.type == .Keyword ||
+    token_is_operator(
+      k,
+      "*"
+    ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') ||
+      token_is_operator(
+      k,
+      "<"
+    ) || token_is_operator(k, ">") || token_is_operator(k, ",");
+    if !typeish {
+      ret false;
+    }
+    k_opt = token_after(tokens, index_of_token(tokens, k) + 1);
+    steps = steps + 1;
+  }
+  ret false;
+}
+
+// Each of `f`'s own type params (in declaration order, `*out_type_params`
+// set to them), bound to the concrete type its call at `name_tok`
+// resolves it to - "" for one nothing binds. An explicit call
+// (`identity<str>(5)`) binds from its own written arguments; otherwise
+// every argument's own full type is unified against its parameter's
+// declared type (`_unify_type_text`). Both empty when `f` isn't generic
+// or `name_tok` isn't followed by a call at all. The one shared
+// implementation behind a call's own let-inferred return type
+// (`_call_return_type`), its specialized hover signature
+// (`specialized_call_signature`), and its inlay hint
+// (`inferred_call_type_args`).
+fun _bind_call_type_params(
+  Vec<Token>* tokens,
+  Declaration f,
+  Token name_tok,
+  Vec<Node>* program,
+  str file,
+  num line,
+  num depth,
+  Vec<str>* out_type_params
+) Vec<str> {
+  Vec<str> resolved;
+  resolved.init(2);
+  out_type_params.init(0);
+  num paren_idx = index_of_char(f.detail, '(');
+  if paren_idx < 0 {
+    ret resolved;
+  }
+  str head = substr(f.detail, 0, paren_idx);
+  Vec<str> type_params = generic_args_of_detail(head);
+  free(head);
+  if type_params.len == 0 {
+    type_params.free();
+    ret resolved;
+  }
+  num name_idx = index_of_token(tokens, name_tok);
+  num after_name = skip_generic_args_tokens(tokens, name_idx + 1);
+  let lparen_opt = token_after(tokens, after_name);
+  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+    _free_str_vec_deep(&type_params);
+    ret resolved;
+  }
+  // The declaration itself (`fun make<T, U = num>(T x) T {`) has the
+  // same `name<...>(` shape an explicit generic call does.
+  if call_paren_is_declaration(
+    tokens,
+    name_idx,
+    index_of_token(tokens, lparen_opt.unwrap())
+  ) {
+    _free_str_vec_deep(&type_params);
+    ret resolved;
+  }
+  num tpz = 0;
+  for tpz < type_params.len {
+    resolved.push(substr("", 0, 0));
+    tpz = tpz + 1;
+  }
+  *out_type_params = type_params;
+  if after_name != name_idx + 1 {
+    let lt_opt = token_after(tokens, name_idx + 1);
+    num close_idx = -1;
+    Vec<str> explicit = _collect_generic_arg_texts(
+      tokens,
+      index_of_token(tokens, lt_opt.unwrap()),
+      &close_idx
+    );
+    num ei = 0;
+    for ei < explicit.len && ei < resolved.len {
+      free(resolved.get(ei));
+      resolved.set(ei, explicit.get(ei));
+      ei = ei + 1;
+    }
+    for ei < explicit.len {
+      free(explicit.get(ei));
+      ei = ei + 1;
+    }
+    explicit.free();
+    ret resolved;
+  }
+  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
+  Vec<str> params = split_signature_params(f.detail);
+  defer free_params_vec(&params);
+  num depth_p = 0;
+  num arg_idx = 0;
+  flag expecting = true;
+  num k = lparen_idx;
+  for k < tokens.len {
+    Token at = tokens.get(k);
+    k = k + 1;
+    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
+    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
+    if is_open {
+      depth_p = depth_p + 1;
+      if depth_p == 1 {
+        continue;
+      }
+    } elif is_close {
+      depth_p = depth_p - 1;
+      if depth_p == 0 {
+        break;
+      }
+      continue;
+    } elif depth_p == 1 && token_is_operator(at, ",") {
+      arg_idx = arg_idx + 1;
+      expecting = true;
+      continue;
+    }
+    if depth_p != 1 || !expecting {
+      continue;
+    }
+    if at.type == .Comment || at.type == .NewLine {
+      continue;
+    }
+    expecting = false;
+    if arg_idx >= params.len {
+      continue;
+    }
+    str ptype = _param_type_from_piece(params.get(arg_idx));
+    str arg_type = _infer_full_type(tokens, at, program, file, line, depth + 1);
+    _unify_type_text(ptype, arg_type, out_type_params, &resolved);
+    if !equals(arg_type, "") {
+      free(arg_type);
+    }
+    free(ptype);
+  }
+  ret resolved;
+}
+
 fun _call_return_type(
   Vec<Token>* tokens,
   Declaration f,
@@ -3914,7 +4264,8 @@ fun _call_return_type(
   num line,
   num depth,
   flag* out_substituted,
-  Vec<str>* out_resolved_args
+  Vec<str>* out_resolved_args,
+  str* out_full_type
 ) str {
   *out_substituted = false;
   str rtype = _bare_return_type(f.detail);
@@ -3957,115 +4308,23 @@ fun _call_return_type(
     ret rtype;
   }
 
-  num name_idx = index_of_token(tokens, name_tok);
-  let lparen_opt = token_after(tokens, name_idx + 1);
-  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+  Vec<str> bound_params;
+  Vec<str> resolved = _bind_call_type_params(
+    tokens,
+    f,
+    name_tok,
+    program,
+    file,
+    line,
+    depth,
+    &bound_params
+  );
+  _free_str_vec_deep(&bound_params);
+  if resolved.len == 0 {
+    resolved.free();
     _free_str_vec_deep(&type_params);
     _free_str_vec_deep(&rtype_generic_args);
     ret rtype;
-  }
-  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
-
-  Vec<str> params = split_signature_params(f.detail);
-  defer free_params_vec(&params);
-
-  Vec<str> resolved;
-  resolved.init(type_params.len);
-  num zi = 0;
-  for zi < type_params.len {
-    resolved.push(substr("", 0, 0));
-    zi = zi + 1;
-  }
-
-  num depth_p = 0;
-  num arg_idx = 0;
-  flag expecting = true;
-  num k = lparen_idx;
-  for k < tokens.len {
-    Token at = tokens.get(k);
-    k = k + 1;
-    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
-    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
-    if is_open {
-      depth_p = depth_p + 1;
-      if depth_p == 1 {
-        continue;
-      }
-    } elif is_close {
-      depth_p = depth_p - 1;
-      if depth_p == 0 {
-        break;
-      }
-      continue;
-    } elif depth_p == 1 && token_is_operator(at, ",") {
-      arg_idx = arg_idx + 1;
-      expecting = true;
-      continue;
-    }
-    if depth_p != 1 || !expecting {
-      continue;
-    }
-    if at.type == .Comment || at.type == .NewLine {
-      continue;
-    }
-    expecting = false;
-    if arg_idx >= params.len {
-      continue;
-    }
-    str ptype = _param_type_from_piece(params.get(arg_idx));
-    if index_of_char(ptype, '<') >= 0 {
-      // A compound-shaped parameter (`Pair<L, R> p`), matched against
-      // the argument's own concrete generic args position-by-position
-      // rather than against the whole type name at once (`swap_pair`,
-      // `pick_left`: the parameter is never itself a bare type param
-      // here, only its own arguments are).
-      Vec<str> param_generic_args = generic_args_of_detail(ptype);
-      str arg_type = _infer_type(tokens, at, program, file, line, nil, depth + 1);
-      if !equals(arg_type, "") {
-        Vec<str> arg_generic_args = generic_args_of_detail(arg_type);
-        if arg_generic_args.len == param_generic_args.len {
-          num mi = 0;
-          for mi < param_generic_args.len {
-            num tpk = 0;
-            for tpk < type_params.len {
-              if equals(param_generic_args.get(mi), type_params.get(tpk)) {
-                str existing2 = resolved.get(tpk);
-                if equals(existing2, "") {
-                  str got = arg_generic_args.get(mi);
-                  free(existing2);
-                  resolved.set(tpk, substr(got, 0, len(got)));
-                }
-              }
-              tpk = tpk + 1;
-            }
-            mi = mi + 1;
-          }
-        }
-        _free_str_vec_deep(&arg_generic_args);
-        free(arg_type);
-      }
-      _free_str_vec_deep(&param_generic_args);
-    } else {
-      num tpi = 0;
-      for tpi < type_params.len {
-        if equals(ptype, type_params.get(tpi)) {
-          str existing = resolved.get(tpi);
-          if equals(existing, "") {
-            // Not freed when unresolved: `_infer_type`'s own "" result
-            // is typically a literal, not a heap allocation (see the
-            // note on `_infer_type`'s own binary-operator combination,
-            // the same reasoning applies here).
-            str arg_type2 = _infer_type(tokens, at, program, file, line, nil, depth + 1);
-            if !equals(arg_type2, "") {
-              free(existing);
-              resolved.set(tpi, arg_type2);
-            }
-          }
-        }
-        tpi = tpi + 1;
-      }
-    }
-    free(ptype);
   }
 
   flag any_resolved = false;
@@ -4094,6 +4353,16 @@ fun _call_return_type(
     fi = fi + 1;
   }
 
+  // The full declared return type with every bound param substituted
+  // in, pointer stars and nesting kept as written (`Node<T>*` ->
+  // `Node<num>*`, `T*` -> `num*`) - what a caller displays, where the
+  // bare name alone (or the bare name plus its args) would drop them.
+  if out_full_type != nil {
+    str full_rtype = full_return_type_from_detail(f.detail);
+    str full_sub = specialize_signature(full_rtype, type_params, resolved);
+    *out_full_type = substr(full_sub, 0, len(full_sub));
+  }
+
   if rtype_is_bare_param {
     num match_i = 0;
     for match_i < type_params.len {
@@ -4111,24 +4380,14 @@ fun _call_return_type(
     ret result;
   }
 
+  // Each of the return type's own generic args with the bound params
+  // substituted in - a nested one (`Vec<T>` inside `Box<Vec<T>>`)
+  // included, not only an arg that is itself exactly a bare param.
   num gi = 0;
   for gi < rtype_generic_args.len {
     str garg = rtype_generic_args.get(gi);
-    num match_i = 0;
-    flag found = false;
-    for match_i < type_params.len {
-      if equals(garg, type_params.get(match_i)) {
-        found = true;
-        break;
-      }
-      match_i = match_i + 1;
-    }
-    if found {
-      str resolved_arg = resolved.get(match_i);
-      out_resolved_args.push(substr(resolved_arg, 0, len(resolved_arg)));
-    } else {
-      out_resolved_args.push(substr(garg, 0, len(garg)));
-    }
+    str gsub = specialize_signature(garg, type_params, resolved);
+    out_resolved_args.push(substr(gsub, 0, len(gsub)));
     gi = gi + 1;
   }
   *out_substituted = true;
@@ -4175,76 +4434,22 @@ pub fun specialized_call_signature(
     ret substr(f.detail, 0, len(f.detail));
   }
 
-  num name_idx = index_of_token(tokens, name_tok);
-  let lparen_opt = token_after(tokens, name_idx + 1);
-  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
+  Vec<str> bound_params;
+  Vec<str> concrete = _bind_call_type_params(
+    tokens,
+    f,
+    name_tok,
+    program,
+    file,
+    line,
+    depth,
+    &bound_params
+  );
+  _free_str_vec_deep(&bound_params);
+  if concrete.len == 0 {
+    concrete.free();
     _free_str_vec_deep(&type_params);
     ret substr(f.detail, 0, len(f.detail));
-  }
-  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
-
-  Vec<str> params = split_signature_params(f.detail);
-  defer free_params_vec(&params);
-
-  Vec<str> concrete;
-  concrete.init(type_params.len);
-  num ci = 0;
-  for ci < type_params.len {
-    concrete.push(substr("", 0, 0));
-    ci = ci + 1;
-  }
-
-  num depth_p = 0;
-  num arg_idx = 0;
-  flag expecting = true;
-  num k = lparen_idx;
-  for k < tokens.len {
-    Token at = tokens.get(k);
-    k = k + 1;
-    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
-    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
-    if is_open {
-      depth_p = depth_p + 1;
-      if depth_p == 1 {
-        continue;
-      }
-    } elif is_close {
-      depth_p = depth_p - 1;
-      if depth_p == 0 {
-        break;
-      }
-      continue;
-    } elif depth_p == 1 && token_is_operator(at, ",") {
-      arg_idx = arg_idx + 1;
-      expecting = true;
-      continue;
-    }
-    if depth_p != 1 || !expecting {
-      continue;
-    }
-    if at.type == .Comment || at.type == .NewLine {
-      continue;
-    }
-    expecting = false;
-    if arg_idx >= params.len {
-      continue;
-    }
-    str ptype = _param_type_from_piece(params.get(arg_idx));
-    num ti = 0;
-    for ti < type_params.len {
-      if equals(ptype, type_params.get(ti)) {
-        str existing = concrete.get(ti);
-        if equals(existing, "") {
-          str arg_type = _infer_type(tokens, at, program, file, line, nil, depth + 1);
-          if !equals(arg_type, "") {
-            free(existing);
-            concrete.set(ti, substr(arg_type, 0, len(arg_type)));
-          }
-        }
-      }
-      ti = ti + 1;
-    }
-    free(ptype);
   }
 
   flag all_resolved = true;
@@ -4301,20 +4506,11 @@ pub fun specialized_call_signature(
 }
 
 // Every type parameter `f` (a generic function or method) declares,
-// each resolved to the concrete type its own call at `name_tok` infers
-// for it, in declaration order - `""` for one argument-matching
-// couldn't pin down. Empty when `f` isn't generic at all, or
-// `name_tok` isn't actually followed by a call's own `(` (an explicit
-// `name<T>(...)` call has `<` there instead, which this is never even
-// reached for - every caller already gates on a literal `(` first).
-// Its own narrow copy of the same argument-to-parameter matching
-// `specialized_call_signature` above already does, kept separate
-// rather than threading a new output parameter through a function
-// several call sites already depend on for something else (its own
-// fully-specialized signature, all-or-nothing). Used for a generic
+// each resolved to the concrete type its own call at `name_tok` binds it
+// to, in declaration order - `""` for one nothing pins down. Empty when
+// `f` isn't generic or `name_tok` isn't a call. Used for a generic
 // call's own inlay hint (`inlay_hints.fn`): the concrete type argument
-// list a reader never wrote, shown right before the call's own `(`,
-// the same place writing it out explicitly would put it.
+// list a reader never wrote, shown right before the call's own `(`.
 pub fun inferred_call_type_args(
   Vec<Token>* tokens,
   Declaration f,
@@ -4323,95 +4519,19 @@ pub fun inferred_call_type_args(
   str file,
   num line
 ) Vec<str> {
-  Vec<str> empty;
-  empty.init(0);
-  num paren_idx = index_of_char(f.detail, '(');
-  if paren_idx < 0 {
-    ret empty;
-  }
-  str head = substr(f.detail, 0, paren_idx);
-  Vec<str> type_params = generic_args_of_detail(head);
-  free(head);
-  if type_params.len == 0 {
-    empty.free();
-    ret type_params;
-  }
-
-  num name_idx = index_of_token(tokens, name_tok);
-  let lparen_opt = token_after(tokens, name_idx + 1);
-  if lparen_opt.is_none() || !token_is_operator(lparen_opt.unwrap(), "(") {
-    _free_str_vec_deep(&type_params);
-    ret empty;
-  }
-  num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
-
-  Vec<str> params = split_signature_params(f.detail);
-  defer free_params_vec(&params);
-
-  Vec<str> concrete;
-  concrete.init(type_params.len);
-  num ci = 0;
-  for ci < type_params.len {
-    concrete.push(substr("", 0, 0));
-    ci = ci + 1;
-  }
-
-  num depth_p = 0;
-  num arg_idx = 0;
-  flag expecting = true;
-  num k = lparen_idx;
-  for k < tokens.len {
-    Token at = tokens.get(k);
-    k = k + 1;
-    flag is_open = token_is_operator(at, "(") || token_is_operator(at, "[");
-    flag is_close = token_is_symbol(at, ')') || token_is_symbol(at, ']');
-    if is_open {
-      depth_p = depth_p + 1;
-      if depth_p == 1 {
-        continue;
-      }
-    } elif is_close {
-      depth_p = depth_p - 1;
-      if depth_p == 0 {
-        break;
-      }
-      continue;
-    } elif depth_p == 1 && token_is_operator(at, ",") {
-      arg_idx = arg_idx + 1;
-      expecting = true;
-      continue;
-    }
-    if depth_p != 1 || !expecting {
-      continue;
-    }
-    if at.type == .Comment || at.type == .NewLine {
-      continue;
-    }
-    expecting = false;
-    if arg_idx >= params.len {
-      continue;
-    }
-    str ptype = _param_type_from_piece(params.get(arg_idx));
-    num ti = 0;
-    for ti < type_params.len {
-      if equals(ptype, type_params.get(ti)) {
-        str existing = concrete.get(ti);
-        if equals(existing, "") {
-          str arg_type = _infer_type(tokens, at, program, file, line, nil, 0);
-          if !equals(arg_type, "") {
-            free(existing);
-            concrete.set(ti, substr(arg_type, 0, len(arg_type)));
-          }
-        }
-      }
-      ti = ti + 1;
-    }
-    free(ptype);
-  }
-
-  _free_str_vec_deep(&type_params);
-  empty.free();
-  ret concrete;
+  Vec<str> bound_params;
+  Vec<str> resolved = _bind_call_type_params(
+    tokens,
+    f,
+    name_tok,
+    program,
+    file,
+    line,
+    0,
+    &bound_params
+  );
+  _free_str_vec_deep(&bound_params);
+  ret resolved;
 }
 
 // The type at the end of a dotted chain leading up to (but not
@@ -4651,7 +4771,8 @@ pub fun chain_receiver(
         line,
         depth,
         &substituted,
-        &current_args
+        &current_args,
+        nil
       );
       if !substituted {
         str first_rtype_text = _return_type_text(f.unwrap().detail);
@@ -4881,6 +5002,7 @@ pub fun chain_ending_receiver(
         ret empty;
       }
       flag substituted = false;
+      str call_full_type = "";
       empty.type_name = _call_return_type(
         tokens,
         f.unwrap(),
@@ -4890,35 +5012,11 @@ pub fun chain_ending_receiver(
         line,
         depth,
         &substituted,
-        &empty.generic_args
+        &empty.generic_args,
+        &call_full_type
       );
       if substituted {
-        // Two shapes `_call_return_type` can hand back: a scalar
-        // fully collapsed to its concrete type (`empty.generic_args`
-        // stays empty - `full_type_name` is just that type, same as
-        // `type_name`), or a compound whose own bare name came back
-        // unchanged with its substituted args in `generic_args`
-        // instead (`full_type_name` reconstructs the `<...>` display
-        // form, the same convention `infer_let_local_type`'s own
-        // outer wrapper already uses for a chain-ending field/method
-        // result).
-        if empty.generic_args.len == 0 {
-          empty.full_type_name = substr(empty.type_name, 0, len(empty.type_name));
-        } else {
-          StringBuilder fb = string_builder_init(32);
-          fb.append(empty.type_name);
-          fb.append("<");
-          num fbi = 0;
-          for fbi < empty.generic_args.len {
-            if fbi > 0 {
-              fb.append(", ");
-            }
-            fb.append(empty.generic_args.get(fbi));
-            fbi = fbi + 1;
-          }
-          fb.append(">");
-          empty.full_type_name = fb.build();
-        }
+        empty.full_type_name = call_full_type;
         ret empty;
       }
       empty.full_type_name = full_return_type_from_detail(f.unwrap().detail);
@@ -5092,24 +5190,12 @@ pub fun infer_let_local_type(
   str base = infer_let_local_type_with_args(tokens, name_idx, program, file, line, &args);
   // `base` already carries its own generic args verbatim when it has
   // any (a field/return type resolved through `ChainReceiver.full_type_name`
-  // keeps everything written, `<...>` included) - only append `args`
-  // when it doesn't, or they'd double up.
+  // keeps everything written, `<...>` included) - `_compose_type_text`
+  // only appends `args` when it doesn't, or they'd double up.
   if equals(base, "") || args.len == 0 || index_of_char(base, '<') >= 0 {
     ret base;
   }
-  StringBuilder b = string_builder_init(32);
-  b.append(base);
-  b.append("<");
-  num i = 0;
-  for i < args.len {
-    if i > 0 {
-      b.append(", ");
-    }
-    b.append(args.get(i));
-    i = i + 1;
-  }
-  b.append(">");
-  ret b.build();
+  ret _compose_type_text(base, &args);
 }
 
 // `infer_let_local_type`, also writing the resolved type's own generic
@@ -5494,6 +5580,79 @@ fun _fill_enum_variant_generic_args_from_payload(
   }
   _free_str_vec_deep(&type_params);
   *out_args = filled;
+}
+
+// Each top-level argument of the `<...>` opening at `open_idx`, as the
+// full text it was written with (`num`, `Vec<str>`, `Node*`), never just
+// a bare identifier: a primitive like `num` lexes as a keyword, and a
+// nested or pointer argument spans several tokens. A lexed `>>` closes
+// two levels at once. Sets `*close_idx` to the closing `>`'s own index
+// when the list closes, leaving it untouched (and returning whatever was
+// gathered) when a `;` or the end of the stream comes first.
+fun _collect_generic_arg_texts(Vec<Token>* tokens, num open_idx, num* close_idx) Vec<str> {
+  Vec<str> args;
+  args.init(2);
+  StringBuilder cur = string_builder_init(16);
+  num depth = 0;
+  num scan_idx = open_idx;
+  for true {
+    let scan_opt = token_after(tokens, scan_idx + 1);
+    if scan_opt.is_none() {
+      break;
+    }
+    Token t = scan_opt.unwrap();
+    scan_idx = index_of_token(tokens, t);
+    if token_is_symbol(t, ';') {
+      break;
+    }
+    if token_is_operator(t, "<") {
+      depth = depth + 1;
+      cur.append("<");
+      continue;
+    }
+    num closes = 0;
+    if token_is_operator(t, ">") {
+      closes = 1;
+    } elif token_is_operator(t, ">>") {
+      closes = 2;
+    }
+    if closes > 0 {
+      flag done = false;
+      num c = 0;
+      for c < closes {
+        if depth == 0 {
+          done = true;
+          break;
+        }
+        depth = depth - 1;
+        cur.append(">");
+        c = c + 1;
+      }
+      if done {
+        str last = cur.build();
+        if len(last) > 0 {
+          args.push(last);
+        } else {
+          free(last);
+        }
+        *close_idx = scan_idx;
+        ret args;
+      }
+      continue;
+    }
+    if depth == 0 && token_is_operator(t, ",") {
+      args.push(cur.build());
+      cur = string_builder_init(16);
+      continue;
+    }
+    if token_is_operator(t, ",") {
+      cur.append(", ");
+      continue;
+    }
+    cur.append(token_word(t));
+  }
+  free(cur.build());
+  ret args;
 }
 
 // `_infer_type`'s own single-operand resolution: everything it covers
@@ -5946,7 +6105,10 @@ fun _infer_type_primary(
       Token last_tok = val_tok;
       flag last_is_call = false;
       num cursor_idx = _skip_forward_index_ops(tokens, idx);
-      let after0 = token_after(tokens, cursor_idx + 1);
+      // An explicit generic call (`identity<str>(x)`) puts its own
+      // `<...>` between the name and the `(`; a compound literal's
+      // (`Node<num>{...}`) is followed by `{` instead, never `(`.
+      let after0 = token_after(tokens, skip_generic_args_tokens(tokens, cursor_idx + 1));
       if after0.is_some() && token_is_operator(after0.unwrap(), "(") {
         last_is_call = true;
         let rparen0 = matching_rparen(tokens, index_of_token(tokens, after0.unwrap()));
@@ -5971,7 +6133,10 @@ fun _infer_type_primary(
         last_tok = member_opt.unwrap();
         last_is_call = false;
         cursor_idx = _skip_forward_index_ops(tokens, index_of_token(tokens, last_tok));
-        let after_opt = token_after(tokens, cursor_idx + 1);
+        let after_opt = token_after(
+          tokens,
+          skip_generic_args_tokens(tokens, cursor_idx + 1)
+        );
         if after_opt.is_some() && token_is_operator(after_opt.unwrap(), "(") {
           last_is_call = true;
           let rparen = matching_rparen(
@@ -6012,40 +6177,21 @@ fun _infer_type_primary(
       // q};`): not a bare read of `Name` as a value at all, so falling
       // through to the lookup below would resolve `Name` as its own
       // compound declaration and, worse, render its "compound Name"
-      // detail as though "compound" were a real type. The generic-args
-      // span (if any) is walked with a plain depth count, collecting
-      // each single-identifier top-level arg as it goes (a nested
-      // generic arg, e.g. `Vec<Vec<num>>`, isn't captured this way -
-      // rare enough at a literal site to leave for a future pass
-      // rather than a real type-expression parse here).
+      // detail as though "compound" were a real type. Each top-level
+      // generic arg is kept as the full text it was written with
+      // (`_collect_generic_arg_texts`), a primitive, nested, or pointer
+      // one included.
       let after_cursor = token_after(tokens, cursor_idx + 1);
       num brace_check_idx = cursor_idx;
       Vec<str> literal_args;
-      literal_args.init(2);
       if after_cursor.is_some() && token_is_operator(after_cursor.unwrap(), "<") {
-        num angle_depth = 0;
-        num scan_idx = index_of_token(tokens, after_cursor.unwrap());
-        for true {
-          let scan_opt = token_after(tokens, scan_idx + 1);
-          if scan_opt.is_none() {
-            break;
-          }
-          Token scan_tok = scan_opt.unwrap();
-          scan_idx = index_of_token(tokens, scan_tok);
-          if token_is_operator(scan_tok, "<") {
-            angle_depth = angle_depth + 1;
-          } elif token_is_operator(scan_tok, ">") {
-            if angle_depth == 0 {
-              brace_check_idx = scan_idx;
-              break;
-            }
-            angle_depth = angle_depth - 1;
-          } elif token_is_symbol(scan_tok, ';') {
-            break;
-          } elif angle_depth == 0 && scan_tok.type == .Identifier {
-            literal_args.push(token_word(scan_tok));
-          }
-        }
+        literal_args = _collect_generic_arg_texts(
+          tokens,
+          index_of_token(tokens, after_cursor.unwrap()),
+          &brace_check_idx
+        );
+      } else {
+        literal_args.init(0);
       }
       let brace_opt = token_after(tokens, brace_check_idx + 1);
       if brace_opt.is_some() && token_is_symbol(brace_opt.unwrap(), '{') {
