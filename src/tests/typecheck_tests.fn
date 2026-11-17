@@ -4432,3 +4432,106 @@ test "an alias used only inside an expression position still expands before type
     "expected the alias to expand to num, matching the real num argument"
   );
 }
+
+test "a let- or const-inferred global keeps its real type inside every function body" {
+  // Function bodies seeded every global from its written type alone; an
+  // inferred one has none, so it was Unknown everywhere it was read and
+  // nothing about it was ever checked.
+  rejects(
+    `const k = 7;
+    `fun main() {
+    `  str s = k;
+    `}`,
+    "expected a const-inferred num global to reject a str initializer"
+  );
+  rejects(
+    `compound P { num x; }
+    `let p = P{x = 1};
+    `fun main() {
+    `  str s = p;
+    `}`,
+    "expected a let-inferred compound global to reject a str initializer"
+  );
+  rejects(
+    `compound Node<T> {
+    `  T value;
+    `  Node<T>* next;
+    `}
+    `let head = Node<num>{value = 1, next = nil};
+    `fun relink<T>(Node<T>* n) Node<T>* {
+    `  n.next = head;
+    `  ret n;
+    `}
+    `fun main() {}`,
+    "expected a compound value global assigned to a pointer field to be rejected, even inside a generic body"
+  );
+  accepts(
+    `const a = 2;
+    `const b = a + 1;
+    `fun main() {
+    `  num c = b;
+    `  _ = c;
+    `}`,
+    "expected an inferred global reading an earlier inferred global to resolve"
+  );
+}
+
+test "dereferencing a value that is known not to be a pointer is rejected" {
+  rejects(
+    `compound Node { num v; }
+    `let head = Node{v = 1};
+    `fun main() {
+    `  Node n = Node{v = 2};
+    `  *head = n;
+    `}`,
+    "expected *head to be rejected when head is a Node value"
+  );
+  rejects(
+    `fun main() {
+    `  num x = 1;
+    `  num y = *x;
+    `}`,
+    "expected *x to be rejected when x is a num"
+  );
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  num* p = &x;
+    `  num y = *p;
+    `  _ = y;
+    `}`,
+    "expected dereferencing a real pointer to stay accepted"
+  );
+}
+
+test "a parameter or local may shadow a top-level global, whichever is declared first" {
+  // The parser's redeclaration check searched the global scope too, so a
+  // global written before the function rejected the parameter while one
+  // written after it never did.
+  accepts(
+    `let head = 1;
+    `fun f(num head) num {
+    `  ret head + 1;
+    `}
+    `fun g() num {
+    `  num head = 5;
+    `  ret head;
+    `}
+    `fun main() {}`,
+    "expected a parameter and a local to shadow a global declared before them"
+  );
+  accepts(
+    `fun f(num head) num {
+    `  ret head + 1;
+    `}
+    `let head = 1;
+    `fun main() {}`,
+    "expected a parameter to shadow a global declared after it"
+  );
+  rejects(
+    `let head = 1;
+    `let head = 2;
+    `fun main() {}`,
+    "expected two globals of the same name to still collide"
+  );
+}

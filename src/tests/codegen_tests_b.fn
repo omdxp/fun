@@ -3324,3 +3324,32 @@ test "a generic function's own declared return type can be closure() T" {
   );
   assert equals(out, "42\n"), "expected the generic function's returned closure, called back in main, to print 42";
 }
+
+test "a global holding a generic compound whose impl calls a Fun-bodied variadic function compiles" {
+  // A global `const b = Box<num>{...}` forces `Box<num>`'s own impl
+  // methods to be emitted ahead of the stdlib's function bodies, and the
+  // early prototype pass skipped every variadic function outright - so
+  // `format`, called from `to_string`, had no C prototype yet at that
+  // point ("call to undeclared function 'format'").
+  str src = `use std.io;
+  `use std.shapes;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> as Display {
+  `  to_string() str {
+  `    ret format("Box({})", self.v);
+  `  }
+  `}
+  `const b = Box<num>{v = 7};
+  `fun main() num {
+  `  println(b.to_string());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_generic_variadic_proto",
+    "a global generic compound's impl calling a variadic function compiles"
+  );
+  assert contains(out, "Box(7)"), "expected the variadic call from the early-emitted impl method to compile and run";
+}

@@ -540,6 +540,31 @@ impl ParseState {
     ret nil;
   }
 
+  // What a new declaration of `name` would collide with: any enclosing
+  // local scope, but never the global/root one once inside a function -
+  // a parameter or local may shadow a top-level global (Fun forbids
+  // shadowing only between locals). Searching the root too made this
+  // depend on declaration order: a global written before the function
+  // rejected the parameter, one written after it never did. At the root
+  // itself, two globals of the same name still collide.
+  pub get_redeclared_entity(str name) ScopeEntity* {
+    let s = self.scope_current;
+    if s == nil {
+      ret nil;
+    }
+    if !s.has_parent {
+      ret s.get_entity_by_name(name);
+    }
+    for s.has_parent {
+      let found = s.get_entity_by_name(name);
+      if found != nil {
+        ret found;
+      }
+      s = s.parent;
+    }
+    ret nil;
+  }
+
   // Walks up the current scope chain for the last-declared entity, stopping
   // at (not including) `stop_scope`.
   pub last_scope_entity_stop_at(Scope* stop_scope) ScopeEntity* {
@@ -3855,7 +3880,7 @@ impl Parser {
       ret .Some(.InvalidIdentifier);
     }
 
-    if self.state.get_scope_entity(name) != nil {
+    if self.state.get_redeclared_entity(name) != nil {
       let msg = format("variable '{str}' already declared", name);
       defer free(msg);
       self.state.err(msg);
@@ -3974,7 +3999,7 @@ impl Parser {
         .Sval(s) -> { nname = s; }
         _ -> {}
       }
-      if self.state.get_scope_entity(nname) != nil {
+      if self.state.get_redeclared_entity(nname) != nil {
         let msg = format("variable '{str}' already declared", nname);
         defer free(msg);
         self.state.err(msg);

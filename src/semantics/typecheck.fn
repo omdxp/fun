@@ -1350,6 +1350,11 @@ compound Checker {
   // What each top-level variable offers, so a read from another file can
   // be held to it.
   Map<str, GlobalInfo> globals;
+  // The real type of every top-level `let`/`const` written with no type
+  // of its own, inferred once from its initializer before any function
+  // body is checked - every function seeds its globals from the written
+  // `var_type`, which for an inferred global is only the placeholder.
+  Map<str, CheckedType> global_inferred;
   // Every enum the program declares, whether or not its variants carry
   // payloads. `plain_enums` holds only the ones that read as numbers.
   Set<str> enum_names;
@@ -1409,6 +1414,7 @@ fun _checker_new() Checker {
   c.shape_elem_by_type.init(16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
+  c.global_inferred.init(16);
   c.enum_names = set_init("", 16);
   c.variant_owners.init(16);
   c.variant_payloads.init(16);
@@ -2577,6 +2583,18 @@ impl Checker {
         depth = u.indirection_depth;
       }
       if operand.pointer_depth < depth {
+        // A known, plainly non-pointer operand (`*head` where `head` is a
+        // `Node` value) used to come back as Unknown, which every later
+        // check treats as assignable to anything, so the mistake only
+        // ever surfaced as a raw C error - or never, in an uninstantiated
+        // generic or an unreachable function. An array (decays to a
+        // pointer in C) and an erased/unknown type stay permissive.
+        if !is_unknown(operand) && !operand.is_array {
+          self.fail(
+            format("cannot dereference {str}, which is not a pointer", type_name(operand)),
+            node
+          );
+        }
         ret checked_unknown();
       }
       CheckedType t = operand;
@@ -6428,7 +6446,12 @@ impl Checker {
           // that outlives this call, this one owns it outright and
           // nothing else ever frees it otherwise.
           CheckedType vt = checked_from_dtype(v.var_type);
-          env.bind(v.name, vt, v.is_const);
+          let inferred_global = self.global_inferred.at(v.name);
+          if is_unknown(vt) && inferred_global.is_some() {
+            env.bind(v.name, inferred_global.unwrap(), v.is_const);
+          } else {
+            env.bind(v.name, vt, v.is_const);
+          }
           _free_checked_type_contents(&vt);
         }
         _ -> {}
@@ -6807,6 +6830,55 @@ pub fun typecheck_program_with_aliases(
   if checker.failed {
     ret .Err(checker.error);
   }
+  // Every global is checked once, in source order, against one shared
+  // env before any function body: an inferred one's own initializer may
+  // read an earlier global, and its resolved type is recorded in
+  // `global_inferred` for every function body to see (see
+  // `check_function_with_self`). Typed globals are bound first, so a
+  // forward reference to one still resolves.
+  TypeEnv globals_env = type_env_new();
+  defer globals_env.free();
+  globals_env.push();
+  i = 0;
+  for i < nodes.len {
+    fit nodes.data[i].kind {
+      .Variable(gv) -> {
+        CheckedType gvt = checked_from_dtype(gv.var_type);
+        if !is_unknown(gvt) {
+          globals_env.bind(gv.name, gvt, gv.is_const);
+        }
+        _free_checked_type_contents(&gvt);
+      }
+      _ -> {}
+    }
+    i = i + 1;
+  }
+  i = 0;
+  for i < nodes.len {
+    Node* gnode = &nodes.data[i];
+    i = i + 1;
+    fit gnode.kind {
+      .Variable(gv) -> {
+        checker.current_file = "";
+        if gnode.has_pos {
+          checker.current_file = gnode.pos.filename;
+        }
+        checker.check_variable(gnode, gv, &globals_env);
+        if checker.failed {
+          ret .Err(checker.error);
+        }
+        CheckedType written = checked_from_dtype(gv.var_type);
+        if is_unknown(written) {
+          let resolved = globals_env.lookup(gv.name);
+          if resolved.is_some() {
+            checker.global_inferred.put(gv.name, resolved.unwrap());
+          }
+        }
+        _free_checked_type_contents(&written);
+      }
+      _ -> {}
+    }
+  }
   i = 0;
   for i < nodes.len {
     Node* node = &nodes.data[i];
@@ -6826,14 +6898,6 @@ pub fun typecheck_program_with_aliases(
         }
         checker.check_shape_conformance(block, node);
         checker.check_impl(block, nodes);
-      }
-      .Variable(v) -> {
-        checker.current_file = "";
-        if node.has_pos {
-          checker.current_file = node.pos.filename;
-        }
-        TypeEnv global_env = type_env_new();
-        checker.check_variable(node, v, &global_env);
       }
       _ -> {}
     }
