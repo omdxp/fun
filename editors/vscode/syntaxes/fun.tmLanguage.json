@@ -99,15 +99,17 @@
           "match": "'([^'\\\\]|\\\\.)*'"
         },
         {
-          "comment": "Inline raw string: `` `content` `` closed on the same line -- no escape processing at all.",
+          "comment": "Inline raw string: `` `content` `` closed by a single backtick on the same line; a doubled backtick is the one escape, a literal backtick.",
           "name": "string.quoted.other.fun",
-          "match": "`[^`]*`"
+          "match": "`(?:``|[^`])*`"
         },
         {
-          "comment": "Multi-line raw string: a backtick with no closer on this line starts a block; each continuation line must itself begin (after leading whitespace) with a backtick to keep contributing, ending at the first line that doesn't.",
+          "comment": "Multi-line raw string: a backtick left unclosed on its line starts a block. Each continuation line begins (after leading whitespace) with its own backtick marker; the block ends at an explicit single closing backtick (code may follow it on that line) or at the first line with no marker. Markers and doubled-backtick escapes are inner patterns tried first (applyEndPatternLast), so neither is taken for the closer.",
           "name": "string.quoted.other.multiline.fun",
-          "begin": "`(?=[^`]*$)",
-          "while": "^\\s*`"
+          "begin": "`(?=(?:``|[^`])*$)",
+          "end": "`|^(?!\\s*`)",
+          "applyEndPatternLast": 1,
+          "patterns": [{ "match": "^\\s*`" }, { "match": "``" }]
         }
       ]
     },
@@ -153,6 +155,14 @@
         {
           "name": "meta.function.call.fun",
           "match": "\\b(?!use\\b|as\\b|pub\\b|fun\\b|closure\\b|als\\b|compound\\b|shape\\b|impl\\b|enum\\b|let\\b|const\\b|if\\b|elif\\b|else\\b|fit\\b|ret\\b|for\\b|async\\b|await\\b|fork\\b|break\\b|continue\\b|defer\\b|assert\\b|panic\\b|test\\b|sequential\\b|fuzz\\b|allow\\b|expect\\b|true\\b|false\\b|nil\\b)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.fun" }
+          }
+        },
+        {
+          "comment": "A call spelling out its own generic type arguments (`identity<str>(5)`): a lowercase name, a balanced `<...>` (one level of nesting), then `(`. A capitalized name stays a type, so a downcast arm like `Box<num>(b) ->` is never taken for a call.",
+          "name": "meta.function.call.generic.fun",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)(?=\\s*<(?:[^<>()]|<[^<>()]*>)*>\\s*\\()",
           "captures": {
             "1": { "name": "entity.name.function.fun" }
           }

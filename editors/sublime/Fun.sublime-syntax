@@ -1,9 +1,15 @@
 %YAML 1.2
 ---
+# Mirrors editors/vscode/syntaxes/fun.tmLanguage.json rule for rule, so the
+# two highlight the same source the same way.
 name: Fun
 file_extensions:
   - fn
 scope: source.fun
+
+variables:
+  ident: '[A-Za-z_][A-Za-z0-9_]*'
+  not_keyword: '(?!(?:use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|sequential|fuzz|allow|expect|true|false|nil)\b)'
 
 contexts:
   main:
@@ -12,43 +18,71 @@ contexts:
     - match: /\*
       scope: punctuation.definition.comment.begin.fun
       push: block_comment
-    - match: \b(compound|shape|enum|impl)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*<[^>]+>)?
-      captures:
-        1: keyword.control.fun
-        2: entity.name.type.fun
-        3: entity.name.type.parameters.fun
-    - match: \b([A-Za-z_][A-Za-z0-9_]*)\s*(<[^>]+>)
-      captures:
-        1: entity.name.type.fun
-        2: entity.name.type.parameters.fun
-    - match: \b([A-Z][A-Za-z0-9_]*)\b(?=\s*(?:\*+)?\s*[A-Za-z_][A-Za-z0-9_]*\b)
-      captures:
-        1: entity.name.type.fun
-    - match: (->|::|\+=|-=|\*=|/=|%=|==|!=|<=|>=|&&|\|\||<<|>>|\+\+|--|[+\-*/%=<>!?&|^~.])
-      scope: keyword.operator.fun
-    - match: (;|,|:)
-      scope: punctuation.separator.fun
     - match: '"'
       scope: punctuation.definition.string.begin.fun
       push: double_quoted
     - match: "'"
       scope: punctuation.definition.string.begin.fun
       push: single_quoted
-    - match: '`'
+    # Inline raw string: closed by a single backtick on the same line; a
+    # doubled backtick is the one escape, a literal backtick.
+    - match: '`(?:``|[^`])*`'
+      scope: string.quoted.other.fun
+    # Multi-line raw string: a backtick left unclosed on its line starts a
+    # block (see `raw_block`).
+    - match: '`(?=(?:``|[^`])*$)'
       scope: punctuation.definition.string.begin.fun
-      push: raw_quoted
-    - match: \b(use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b
-      scope: keyword.control.fun
+      push: raw_block
+    - match: \b(0x[0-9a-fA-F]+|\d+(?:\.\d+)?)\b
+      scope: constant.numeric.fun
+    - match: (->|::|\+=|-=|\*=|/=|%=|==|!=|<=|>=|&&|\|\||<<|>>|\+\+|--|[+\-*/%=<>!?&|^~.])
+      scope: keyword.operator.fun
+    - match: (;|,|:)
+      scope: punctuation.separator.fun
+    - match: \b(compound)\s+({{ident}})(\s*<[^>]+>)?
+      captures:
+        1: keyword.control.fun
+        2: entity.name.type.struct.fun
+        3: entity.name.type.parameters.fun
+    - match: \b(enum)\s+({{ident}})(\s*<[^>]+>)?
+      captures:
+        1: keyword.control.fun
+        2: entity.name.type.enum.fun
+        3: entity.name.type.parameters.fun
+    - match: \b(shape)\s+({{ident}})(\s*<[^>]+>)?
+      captures:
+        1: keyword.control.fun
+        2: entity.name.type.interface.fun
+        3: entity.name.type.parameters.fun
+    - match: \b([A-Z][A-Za-z0-9_]*)\s*(<\s*{{ident}}(?:\s*\*+)?(?:\s*,\s*{{ident}}(?:\s*\*+)?)*\s*>)
+      captures:
+        1: entity.name.type.fun
+        2: entity.name.type.parameters.fun
     - match: \b(void|raw|num|dec|f32|f64|str|flag|chr|i[1-9][0-9]*|u[1-9][0-9]*)\b
       scope: storage.type.fun
     - match: \b(size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|time_t|clock_t)\b
       scope: support.type.fun
+    - match: \b([A-Z][A-Za-z0-9_]*)\b(?=\s*(?:\*+)?\s*{{ident}}\b)
+      scope: entity.name.type.fun
+    - match: \b(fun)\s+({{ident}})(\s*<[^>]+>)?\b
+      captures:
+        1: keyword.control.fun
+        2: entity.name.function.fun
+        3: entity.name.type.parameters.fun
+    - match: \b{{not_keyword}}({{ident}})\b(?=\s*\()
+      captures:
+        1: entity.name.function.fun
+    # A call spelling out its own generic type arguments
+    # (`identity<str>(5)`); a capitalized name stays a type.
+    - match: \b([a-z_][A-Za-z0-9_]*)(?=\s*<(?:[^<>()]|<[^<>()]*>)*>\s*\()
+      captures:
+        1: entity.name.function.fun
     - match: \b(true|false)\b
       scope: constant.language.boolean.fun
     - match: \b(nil)\b
       scope: constant.language.null.fun
-    - match: \b\d+(\.\d+)?\b
-      scope: constant.numeric.fun
+    - match: \b(use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b
+      scope: keyword.control.fun
 
   block_comment:
     - meta_scope: comment.block.fun
@@ -66,17 +100,24 @@ contexts:
 
   single_quoted:
     - meta_scope: string.quoted.single.fun
-    - match: "\\.'"
+    - match: '\\.'
       scope: constant.character.escape.fun
     - match: "'"
       scope: punctuation.definition.string.end.fun
       pop: true
 
-  # Raw (backtick) string: no escape processing at all -- a closing
-  # backtick, whenever it's found (possibly several lines later for a
-  # multi-line block), ends the literal.
-  raw_quoted:
-    - meta_scope: string.quoted.other.fun
+  # The rest of a multi-line raw string. Each continuation line begins
+  # (after leading whitespace) with its own backtick marker; the block
+  # ends at an explicit single closing backtick (code may follow it on
+  # that line) or at the first line with no marker. Markers and doubled
+  # backticks are matched first, so neither is taken for the closer.
+  raw_block:
+    - meta_scope: string.quoted.other.multiline.fun
+    - match: '^\s*`'
+    - match: '^(?!\s*`)'
+      pop: true
+    - match: '``'
+      scope: constant.character.escape.fun
     - match: '`'
       scope: punctuation.definition.string.end.fun
       pop: true
