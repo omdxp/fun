@@ -40,7 +40,7 @@ impl Path {
     ret extname(self.value);
   }
 
-  // True when the path is absolute under POSIX rules.
+  // True when the path is absolute on any platform (see `is_abs`).
   pub is_abs() flag {
     ret is_abs(self.value);
   }
@@ -135,7 +135,6 @@ pub fun try_path_join_many(Vec<str>* parts) Result<str, Error> {
   ret .Ok(out);
 }
 
-// True if path is absolute (POSIX rules).
 // True for an absolute path on any platform: a leading `/` or `\`
 // (POSIX root, Windows root-of-drive or `\\server` share), or a Windows
 // drive letter followed by a separator (`C:\`, `C:/`).
