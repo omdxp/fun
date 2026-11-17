@@ -3353,3 +3353,26 @@ test "a global holding a generic compound whose impl calls a Fun-bodied variadic
   );
   assert contains(out, "Box(7)"), "expected the variadic call from the early-emitted impl method to compile and run";
 }
+
+test "a let- or const-inferred global initialized with a qualified enum variant compiles" {
+  // `infer_let_expr_type` read `Color.Green` as a field chain on a value
+  // named `Color`, found nothing, so the enum was never emitted ahead of
+  // the global's own initializer ("unknown identifier 'Color'").
+  str src = `use std.io;
+  `enum Color {
+  `  Red,
+  `  Green,
+  `}
+  `let tint = Color.Green;
+  `const shade = Color.Red;
+  `fun main() num {
+  `  println_fmt("{num} {num}", tint == .Green ? 1 : 0, shade == .Red ? 1 : 0);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_qualified_enum_let",
+    "a qualified enum variant global compiles"
+  );
+  assert contains(out, "1 1"), "expected both inferred enum globals to hold their variants";
+}

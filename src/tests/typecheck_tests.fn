@@ -4535,3 +4535,80 @@ test "a parameter or local may shadow a top-level global, whichever is declared 
     "expected two globals of the same name to still collide"
   );
 }
+
+test "a value typed by an enclosing type param reads as that param, not a literal type named T" {
+  // A local declared `T sum` and a field read through `Node<T>*` both
+  // kept the literal name `T`, while a parameter declared `T` was
+  // erased - so `sum + b` was "not defined between T and unknown".
+  accepts(
+    `fun add<T: num | dec>(T a, T b) T {
+    `  T sum = a;
+    `  sum = sum + b;
+    `  ret sum;
+    `}
+    `fun main() {}`,
+    "expected a T-typed local to support whatever its instantiation does"
+  );
+  accepts(
+    `compound Node<T> {
+    `  T value;
+    `  Node<T>* next;
+    `}
+    `fun total<T: num | dec>(Node<T>* n) T {
+    `  T sum = n.value;
+    `  let cur = n.next;
+    `  for cur != nil {
+    `    sum = sum + cur.value;
+    `    cur = cur.next;
+    `  }
+    `  ret sum;
+    `}
+    `fun main() {}`,
+    "expected a T read through a generic field to combine with a T local"
+  );
+}
+
+test "a generic impl's own method bodies are typechecked, not skipped" {
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  get() T {
+    `    str s = 5;
+    `    ret self.v;
+    `  }
+    `}
+    `fun main() {}`,
+    "expected a plain mismatch inside a generic impl method to be rejected"
+  );
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  get() T {
+    `    undefined_call();
+    `    ret self.v;
+    `  }
+    `}
+    `fun main() {}`,
+    "expected an undefined call inside a generic impl method to be rejected"
+  );
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  get() T {
+    `    T copy = self.v;
+    `    ret copy;
+    `  }
+    `  set(T nv) {
+    `    self.v = nv;
+    `  }
+    `}
+    `fun main() {}`,
+    "expected ordinary T-typed code in a generic impl to stay accepted"
+  );
+}

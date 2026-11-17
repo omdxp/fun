@@ -142,20 +142,24 @@ pub fun op_precedence_for(str op) OpPrecedence {
 // operand rather than ceding it to `op_right`, the operator just found
 // to its right, i.e. whether `(a op_left b) op_right c` is already the
 // correct grouping, rather than `a op_left (b op_right c)`.
-// Same-operator chains group by the operator's own associativity;
-// otherwise a right-associative left operator never yields, and
-// same-or-tighter binding (numerically <=, since lower rank binds
-// tighter) on the left wins.
+// A tighter-binding left operator keeps its operand; a looser one cedes
+// it. Associativity only decides between equal ranks - the operator's
+// own for a same-operator chain, the left operator's for a mixed pair
+// (`?` then `:` keeps, `:` then `?` cedes, which is what nests a chained
+// ternary to the right). A right-associative operator facing a looser
+// one (`:` then `,`) still keeps its operand: ceding it there made a
+// ternary swallow every call argument after it (`f(c ? 1 : 0, 5)` read
+// as `f(c ? 1 : (0, 5))`).
 pub fun left_has_priority(str op_left, str op_right) flag {
   let left = op_precedence_for(op_left);
   let right = op_precedence_for(op_right);
   if equals(op_left, op_right) {
     ret left.assoc == .LeftToRight;
   }
-  if left.assoc == .RightToLeft {
-    ret false;
+  if left.rank != right.rank {
+    ret left.rank < right.rank;
   }
-  ret left.rank <= right.rank;
+  ret left.assoc == .LeftToRight;
 }
 
 // True if `op` is one of the supported prefix unary operators: negation,
@@ -262,10 +266,19 @@ test "left_has_priority chains equal-precedence right-associative operators righ
   assert !left_has_priority("=", "="), "equal-precedence right-associative operators should group right";
 }
 
-test "left_has_priority never yields for a right-associative left operator" {
-  // A right-associative operator (assignment) never keeps grouping
-  // leftward against a different operator either, regardless of rank.
-  assert !left_has_priority("=", "+"), "right-associative left operator should never keep priority";
+test "left_has_priority lets a tighter right operator take a right-associative operator's operand" {
+  // `a = b + c`: the looser '=' cedes `b` to the tighter '+'.
+  assert !left_has_priority("=", "+"), "a looser right-associative left operator should yield to a tighter one";
+}
+
+test "left_has_priority keeps a ternary's else-branch out of a following comma" {
+  // `f(c ? 1 : 0, 5)`: ':' binds tighter than ',', so it keeps `0`
+  // rather than taking `0, 5` as its whole else-branch.
+  assert left_has_priority(":", ","), "':' should keep its operand against a looser ','";
+  assert left_has_priority("=", ","), "'=' should keep its operand against a looser ','";
+  // The equal-rank pair the ternary rotation relies on is unchanged.
+  assert left_has_priority("?", ":"), "'?' should keep its operand against ':'";
+  assert !left_has_priority(":", "?"), "':' should cede to a following '?', nesting a chained ternary rightward";
 }
 
 test "is_unary_operator recognizes the supported prefix operators" {

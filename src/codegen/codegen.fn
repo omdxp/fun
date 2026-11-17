@@ -5191,6 +5191,29 @@ impl Codegen {
     ret .None;
   }
 
+  // `enum_has_variant`, read from the AST rather than from what's been
+  // registered so far - a global's own initializer is written before any
+  // enum is (see `_resolve_unique_plain_enum_for_variant_from_ast`).
+  // Non-generic enums only, the same as that sibling.
+  _plain_enum_has_variant_from_ast(str enum_name, str variant_name) flag {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          if e.has_type_params || !equals(e.name, enum_name) {
+            continue;
+          }
+          for v : e.variants {
+            if equals(v.name, variant_name) {
+              ret true;
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
+  }
+
   // True if `enum_name` is a known enum with a variant named
   // `variant_name`.
   enum_has_variant(str enum_name, str variant_name) flag {
@@ -18189,6 +18212,27 @@ impl Codegen {
         // read needs. Without it `ct` is never a known local and any
         // further field access off it is rejected.
         if equals(e.op, ".") {
+          // A qualified enum variant (`Color.Green`) is the enum itself -
+          // `resolve_field_chain` reads `Color` as a value and finds
+          // nothing, which left a `let`-inferred global's own enum
+          // unemitted when its initializer was written.
+          if e.has_left && e.has_right {
+            fit e.left.kind {
+              .Identifier(qenum) -> {
+                fit e.right.kind {
+                  .Identifier(qvariant) -> {
+                    if self._plain_enum_has_variant_from_ast(qenum, qvariant) {
+                      DataType qdt = dtype_new();
+                      qdt.type_str = qenum;
+                      ret .Some(qdt);
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+              _ -> {}
+            }
+          }
           let r = self.resolve_field_chain(val)?;
           // Keeps the structural type, whose generic arguments a later
           // `for x : value` needs.

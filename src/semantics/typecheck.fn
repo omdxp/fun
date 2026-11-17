@@ -1383,6 +1383,10 @@ compound Checker {
   // for types the checker never sees, so a name among them is a type
   // rather than one nothing declares.
   Vec<str> active_type_params;
+  // The type params of the generic `impl` whose methods are being checked
+  // (`impl Box<T>`'s `T`), empty otherwise - in scope for every method
+  // body exactly the way a method's own type params are.
+  Vec<str> impl_type_params;
   // Parallel to `active_type_params` by index: each entry's own declared
   // bound (empty when unconstrained), so a bound check on a reference to
   // one of these names - still an unresolved type parameter, not yet a
@@ -1405,6 +1409,7 @@ compound Checker {
 fun _checker_new() Checker {
   Checker c;
   c.active_type_params.init(4);
+  c.impl_type_params.init(0);
   c.active_type_param_bounds.init(4);
   c.fns.init(32);
   c.declared_at.init(32);
@@ -1864,7 +1869,7 @@ impl Checker {
 fun _is_builtin_call(str name) flag {
   fit name {
     "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin",
-    "va_arg_chr", "va_arg_str", "va_arg_raw" -> { ret true; }
+    "va_arg_chr", "va_arg_str", "va_arg_raw", "__fun_key_hash", "__fun_key_eq" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -2327,7 +2332,25 @@ fun _flat_allowed_for_param(Vec<Vec<str>> combos, num p) Vec<str> {
 impl Checker {
   // The type a literal, name, or operator expression produces. Anything
   // the checker does not model infers as unknown.
+  // `node`'s type. Whatever an expression resolves to that names one of
+  // the enclosing function's own type params (`cur.value` through a
+  // `Node<T>*`, a method returning `T`) stands for whatever an
+  // instantiation supplies, the same as a parameter declared `T` - erased
+  // here once, at the one place every expression's type passes through,
+  // rather than left as a literal type named `T` that no operator or
+  // value ever matches.
   infer(Node* node, TypeEnv* env) CheckedType {
+    CheckedType t = self._infer_raw(node, env);
+    if self.active_type_params.len > 0 && !equals(t.name, "") && !t.is_tuple &&
+      self.active_type_params.contains(t.name) {
+      CheckedType erased = checked_unknown();
+      erased.pointer_depth = t.pointer_depth;
+      ret erased;
+    }
+    ret t;
+  }
+
+  _infer_raw(Node* node, TypeEnv* env) CheckedType {
     if node == nil {
       ret checked_unknown();
     }
@@ -4262,6 +4285,14 @@ impl Checker {
         self.check_sizeof_operand(node, args.get(0));
         ret checked_of(.Num);
       }
+      // `std.map`'s own key hashing/equality, lowered per key type by
+      // codegen - never declared anywhere a call could resolve against.
+      if equals(name, "__fun_key_hash") {
+        ret checked_of(.Num);
+      }
+      if equals(name, "__fun_key_eq") {
+        ret checked_of(.Bin);
+      }
       ret checked_unknown();
     }
     let known = self.fns.at(name);
@@ -5725,6 +5756,12 @@ impl Checker {
 
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
+    // A local declared as one of the enclosing function's own type params
+    // (`T sum = a;`) stands for whatever an instantiation supplies, the
+    // same as a parameter of that type - erased the same way, rather than
+    // kept as a literal type named `T` no operator or value ever matches.
+    flag declared_is_type_param = !equals(declared.name, "") &&
+      self.active_type_params.contains(declared.name);
     // Owned outright for as long as `declared` still holds this fresh
     // value - `env.bind` below stores its own clone regardless (see
     // its own note on why), so every return path here is this value's
@@ -5859,7 +5896,7 @@ impl Checker {
         }
         declared = value;
         declared_is_fresh = false;
-      } elif !self.assignable(declared, value) {
+      } elif !declared_is_type_param && !self.assignable(declared, value) {
         self.fail(
           format(
           "cannot initialize '{str}' of type {str} with {str}",
@@ -5910,6 +5947,12 @@ impl Checker {
           ret;
         }
       }
+    }
+    if declared_is_type_param {
+      CheckedType erased = checked_unknown();
+      erased.pointer_depth = declared.pointer_depth;
+      env.bind(v.name, erased, v.is_const);
+      ret;
     }
     env.bind(v.name, declared, v.is_const);
   }
@@ -6332,20 +6375,30 @@ impl Checker {
         _ -> {}
       }
     }
-    // A generic impl's methods are written in terms of type parameters
-    // the checker does not substitute, so their bodies are left alone.
-    if block.has_type_params && block.type_params.len > 0 {
-      ret;
+    // A generic impl's own type params are in scope for every method
+    // body, erased wherever an expression's type names one (see
+    // `infer`), the same as a generic function's own - its bodies used
+    // to be skipped outright, so nothing in them was ever checked.
+    Vec<str> previous_impl_params = self.impl_type_params;
+    Vec<str> impl_params;
+    impl_params.init(4);
+    if block.has_type_params {
+      for itp : block.type_params {
+        impl_params.push(itp);
+      }
     }
+    self.impl_type_params = impl_params;
     for m : block.methods {
       fit m.kind {
         .Function(f) -> { self.check_function_with_self(f, nodes, block.type_name); }
         _ -> {}
       }
       if self.failed {
-        ret;
+        break;
       }
     }
+    self.impl_type_params.free();
+    self.impl_type_params = previous_impl_params;
   }
 
   // Reports a method a shape requires that the impl block does not
@@ -6489,6 +6542,9 @@ impl Checker {
         params.push(tp);
       }
     }
+    for itp : self.impl_type_params {
+      params.push(itp);
+    }
     self.active_type_params = params;
 
     Vec<Vec<str>> previous_param_bounds = self.active_type_param_bounds;
@@ -6513,7 +6569,10 @@ impl Checker {
     self.in_async = f.is_async;
     self.rtype = checked_unknown();
     if f.has_rtype {
-      self.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
+      self.rtype = _erase_named(
+        _erase_type_params(f, checked_from_dtype(f.rtype)),
+        &self.impl_type_params
+      );
     }
     self.check_statement(f.body, &env);
     // The rtype just built above (owned outright, not an alias of
