@@ -8,6 +8,9 @@
 - **Comments**: `//` single-line, `/* ... */` block.
 - **Visibility**: prefix a declaration with `pub` to export it; without
   `pub` it is module-private.
+- **Declaration order**: top-level declarations can appear in any order.
+  A function can call a function, name a type, or read a global
+  declared further down the same file.
 
 ### Documentation comments
 
@@ -771,13 +774,15 @@ fun main() {
   itself dispatches (`p[0] + c`, `-a + b`) - these were all resolved
   through a bare local only before, but a chained/field/index/unary
   expression's own type is just as knowable without evaluating
-  anything, so it dispatches too now. **A plain function/method call's
-  own result used directly still doesn't** (`get_vec3() + b`; bind it
-  to its own `let` first) - determining a generic call's return type
-  can trigger instantiating it, a real side effect this speculative
-  check (tried on every operator in the codebase, including deep
-  inside stdlib generics that have nothing to do with operator
-  overloading) can't risk.
+  anything, so it dispatches too now. A compound literal
+  (`Vec3{x = 1} + b`) and a call's own result (`get_vec3() + b`,
+  `p.pos() + b`) dispatch as well, each evaluated exactly once. **A
+  generic function's call result used directly still doesn't** (bind
+  it to its own `let` first) - determining a generic call's return
+  type can trigger instantiating it, a real side effect this
+  speculative check (tried on every operator in the codebase,
+  including deep inside stdlib generics that have nothing to do with
+  operator overloading) can't risk.
 - `[]` assignment (`a[i] = v`) dispatches to `op_index_set(index,
   value)` on a type with no real array/`Vec<T>` field, the write-side
   counterpart to `op_index`. A type with `op_index` but no

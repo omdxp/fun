@@ -3506,3 +3506,87 @@ test "let-inferred array literals of compound literals, local and global, iterat
   );
   assert contains(out_msvc, "43"), "expected real array declarators with no auto type";
 }
+
+test "operator overloading dispatches on a compound literal, a plain call's result, and a method call's result, each evaluated once" {
+  str src = `use std.io;
+  `compound V {
+  `  num x;
+  `}
+  `impl V {
+  `  op_add(V o) V {
+  `    ret V{x = self.x + o.x};
+  `  }
+  `  op_eq(V o) flag {
+  `    ret self.x == o.x;
+  `  }
+  `}
+  `compound Holder {
+  `  V v;
+  `}
+  `impl Holder {
+  `  get() V {
+  `    calls = calls + 1;
+  `    ret self.v;
+  `  }
+  `}
+  `num calls = 0;
+  `fun mk(num x) V {
+  `  calls = calls + 1;
+  `  ret V{x = x};
+  `}
+  `fun main() num {
+  `  V a = V{x = 1};
+  `  Holder h = Holder{v = V{x = 5}};
+  `  let b = V{x = 2} + a;
+  `  let c = mk(3) + a;
+  `  let d = V{x = 4} == mk(4);
+  `  let e = (mk(1) + mk(2)).x;
+  `  let s = h.get() + V{x = 1};
+  `  println_fmt("{num} {num} {flag} {num} {num} {num}", b.x, c.x, d, e, s.x, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "op_dispatch_literal_call",
+    "operators on literal and call-result operands"
+  );
+  assert contains(out, "3 4 true 3 6 5"), "expected every operand dispatched, each call run once";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "op_dispatch_literal_call_msvc",
+    "operators on literal and call-result operands (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "3 4 true 3 6 5"), "expected the same results with no GNU-only constructs";
+}
+
+test "a let holding a comparison, logical, negation, or overloaded operator result keeps its real type" {
+  str src = `use std.io;
+  `compound V {
+  `  num x;
+  `}
+  `impl V {
+  `  op_eq(V o) flag {
+  `    ret self.x == o.x;
+  `  }
+  `}
+  `fun main() num {
+  `  num a = 3;
+  `  dec f = 1.5;
+  `  V v = V{x = 4};
+  `  let c1 = a < 5;
+  `  let c2 = c1 && a > 9;
+  `  let c3 = !c1;
+  `  let c4 = v == V{x = 4};
+  `  let n1 = -f;
+  `  println_fmt("{flag} {flag} {flag} {flag} {dec}", c1, c2, c3, c4, n1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "let_flag_results", "lets holding flag and negated results");
+  assert contains(out, "true false false true -1.5"), "expected flags printed as flags and -f kept a dec";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "let_flag_results_msvc",
+    "lets holding flag and negated results (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "true false false true -1.5"), "expected each let declared with its real C type";
+}
