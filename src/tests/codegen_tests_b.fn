@@ -3460,3 +3460,49 @@ test "a closure-valued expression can be called on the spot" {
   );
   assert contains(out_msvc, "2 3"), "expected the spliced temp form to compile with no GNU statement expression";
 }
+
+test "let-inferred array literals of compound literals, local and global, iterate fully" {
+  str src = `use std.io;
+  `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `compound Box<T> {
+  `  T v;
+  `}
+  `let nums = [1, 2, 3];
+  `let pts = [Point{x = 1, y = 2}, Point{x = 3, y = 4}];
+  `let grid = [[1, 2], [3, 4]];
+  `fun main() num {
+  `  let local_pts = [Point{x = 5, y = 6}];
+  `  let boxes = [Box<num>{v = 7}, Box<num>{v = 8}];
+  `  num total = 0;
+  `  for n : nums {
+  `    total = total + n;
+  `  }
+  `  for p : pts {
+  `    total = total + p.x * p.y;
+  `  }
+  `  for q : local_pts {
+  `    total = total + q.x;
+  `  }
+  `  for b : boxes {
+  `    total = total + b.v;
+  `  }
+  `  total = total + grid[1][0];
+  `  println_fmt("{num}", total);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "let_array_of_compounds",
+    "let-inferred arrays of compound literals"
+  );
+  assert contains(out, "43"), "expected every element of every array visited";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "let_array_of_compounds_msvc",
+    "let-inferred arrays of compound literals (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "43"), "expected real array declarators with no auto type";
+}

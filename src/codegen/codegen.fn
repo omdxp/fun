@@ -8779,6 +8779,14 @@ impl Codegen {
       // carries its type name directly, as in `infer_let_expr_type`.
       .CompoundInit(ci) -> {
         if ci.has_dtype {
+          // A generic literal (`Box<num>{...}`) is its own instantiation,
+          // forced into existence here, never the bare template name.
+          if ci.init_dtype.generic_args.len > 0 {
+            let inst = self.ensure_compound_instantiated(*ci.init_dtype);
+            if inst.is_some() {
+              ret inst.unwrap();
+            }
+          }
           ret ci.init_dtype.type_str;
         }
         ret "int64_t";
@@ -17239,6 +17247,27 @@ impl Codegen {
         if v.is_const && !const_is_ptr_binding && !const_is_compound && !needs_runtime {
           self.state.write("const ");
         }
+        // `let arr = [1, 2];` at the top level needs a real array
+        // declarator, as for a local: `__auto_type` can't take a brace
+        // initializer, and MSVC's guessed scalar type can't either.
+        flag glet_is_bracket_literal = false;
+        str glet_lit_elem_c_type = "int64_t";
+        num glet_lit_depth = 1;
+        if is_let && v.has_val && !needs_runtime {
+          fit v.val.kind {
+            .Bracket(glet_inner) -> {
+              glet_is_bracket_literal = true;
+              glet_lit_elem_c_type = self.infer_array_literal_elem_c_type(glet_inner);
+              let galit_info = self.infer_array_literal_elem_type_and_depth(v.val);
+              if galit_info.is_some() {
+                glet_lit_depth = galit_info.unwrap().depth;
+              } else {
+                glet_lit_depth = self.array_literal_nesting_depth(v.val);
+              }
+            }
+            _ -> {}
+          }
+        }
         if is_let {
           if needs_runtime {
             // `__auto_type` needs a real initializer right here to
@@ -17257,7 +17286,7 @@ impl Codegen {
               ginit_decl_dtype = let_inferred_dtype.unwrap();
             }
             self.write_type(ginit_decl_dtype)?!(.UnsupportedNode);
-          } elif self.msvc_mode && v.has_val {
+          } elif self.msvc_mode && v.has_val && !glet_is_bracket_literal {
             // Reuses `let_inferred_type_name`/`let_inferred_dtype`
             // (already resolved above, before any output) instead of
             // a second, independent `infer_let_expr_type` call - which
@@ -17277,6 +17306,8 @@ impl Codegen {
             if !let_msvc_wrote_real_type {
               self.state.write("int64_t");
             }
+          } elif glet_is_bracket_literal {
+            self.state.write(glet_lit_elem_c_type);
           } else {
             self.state.write("__auto_type");
           }
@@ -17305,9 +17336,13 @@ impl Codegen {
         self.state.write(" ");
         self.state.write(v.name);
         // An array declarator (`[24]`, `[]`) lands after the name in C, as
-        // for a local. Only an explicitly array-typed global is handled;
-        // a bare `let arr = [...]` global gets no literal inference.
-        if !is_let && !arr_as_ptr && v.var_type.is_array {
+        // for a local.
+        if glet_is_bracket_literal {
+          self.state.write("[]");
+          if glet_lit_depth > 1 {
+            self.emit_multidim_inner_declarators(v.val, glet_lit_depth - 1);
+          }
+        } elif !is_let && !arr_as_ptr && v.var_type.is_array {
           if v.var_type.array_brackets.len > 0 {
             for bnode : v.var_type.array_brackets {
               self.state.write("[");
@@ -17840,6 +17875,22 @@ impl Codegen {
       .String(_) -> { ret .Some("str"); }
       .Character(_) -> { ret .Some("chr"); }
       .Boolean(_) -> { ret .Some("flag"); }
+      // `Point{x = 1}` / `Box<num>{v = 1}`: the literal's own written
+      // type, a generic one by its mangled instantiation name - needed
+      // for an array of them (`[Point{...}, ...]`) to have an element
+      // type at all.
+      .CompoundInit(ci) -> {
+        if !ci.has_dtype {
+          ret .None;
+        }
+        if ci.init_dtype.generic_args.len > 0 {
+          let inst = self.ensure_compound_instantiated(*ci.init_dtype);
+          if inst.is_some() {
+            ret inst;
+          }
+        }
+        ret .Some(ci.init_dtype.type_str);
+      }
       .Expression(e) -> {
         // A qualified enum-variant constant (`Job.Quit`) infers `T` as the
         // enum's name. Checked before the `()` call case below, since a
