@@ -896,6 +896,14 @@ fun _needs_space_at(
   (equals(p, "ret") || equals(p, "for")) {
     ret true;
   }
+  // The same after a ternary's own `?` (`t ? .A : .B`): pressed against
+  // it, `?.A` reads as a propagation followed by a member access.
+  if _is_dot_run(c) && equals(p, "?") {
+    num q_idx = _prev_significant(tokens, idx);
+    if q_idx >= 0 && _is_ternary_question(tokens, q_idx) {
+      ret true;
+    }
+  }
   if equals(c, "*") && _is_pointer_star(tokens, idx, prev, in_decl_only) {
     ret false;
   }
@@ -1601,7 +1609,6 @@ fun _asm_statement_end(Vec<Token>* tokens, num i) num {
 // written in.
 enum ChunkKind {
   Import,
-  Global,
   Rest,
 }
 
@@ -1644,7 +1651,15 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
         depth = depth + 1;
       } elif c == '}' {
         depth = depth - 1;
-        ends = depth <= 0;
+        // A depth-0 `}` closes a declaration's body, except when it only
+        // closes an initializer's compound literal (`let head =
+        // Node{...};`) - then the statement still runs on to its own `;`,
+        // and ending here stranded that `;` (and any trailing comment)
+        // as the start of whatever chunk came next.
+        if depth <= 0 {
+          num after = _next_significant(tokens, i + 1);
+          ends = after < 0 || !equals(token_text(tokens.get(after)), ";");
+        }
       } elif c == ';' && depth <= 0 {
         ends = true;
       }
@@ -1664,12 +1679,13 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
       chunk.end = last;
       chunk.kind = .Rest;
       let word = _chunk_keyword(tokens, start, last);
+      // Only imports are hoisted; every other top-level statement,
+      // globals included, stays where it was written - a global moving
+      // above the declarations written before it (and only for `let`
+      // or a builtin-typed one, never `const` or a compound-typed one)
+      // rewrote the file's own order out from under its author.
       if equals(word, "use") {
         chunk.kind = .Import;
-      } elif keyword_is_datatype(word) || equals(word, "let") {
-        // A global written with a builtin type, unlike a declaration
-        // that only qualifies one, which stays where it was written.
-        chunk.kind = .Global;
       }
       if equals(word, "allow") || equals(word, "expect") {
         // A warning control qualifies the statement after it, so the two
@@ -1696,9 +1712,9 @@ fun _top_level_chunks(Vec<Token>* tokens) Vec<Chunk> {
   ret out;
 }
 
-// Rewrites the stream with the imports first, then the globals, then
-// everything else, keeping each group in the order it was written and
-// separating the groups by a blank line.
+// Rewrites the stream with the imports first, then everything else,
+// keeping each group in the order it was written and separating the
+// two by a blank line.
 fun _group_top_level(Vec<Token>* tokens) Vec<Token> {
   Vec<Chunk> chunks = _top_level_chunks(tokens);
   defer chunks.free();
@@ -1722,16 +1738,15 @@ fun _group_top_level(Vec<Token>* tokens) Vec<Token> {
   out.init(tokens.len);
   num written = 0;
   num pass = 0;
-  for pass < 3 {
+  for pass < 2 {
     num k = 0;
     flag any = false;
     for k < chunks.len {
       Chunk chunk = chunks.get(k);
-      num want = 2;
+      num want = 1;
       fit chunk.kind {
         .Import -> { want = 0; }
-        .Global -> { want = 1; }
-        .Rest -> { want = 2; }
+        .Rest -> { want = 1; }
       }
       if want == pass {
         if written > 0 && !any {

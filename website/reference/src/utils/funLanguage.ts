@@ -41,13 +41,32 @@ function isWidthType(word: string): boolean {
 const builtinType = Tag.define();
 const functionName = Tag.define();
 
-type FunState = { inBlockComment: boolean };
+type FunState = { inBlockComment: boolean; inRawBlock: boolean };
+
+// Consumes raw-string content up to and including a single closing
+// backtick (a doubled backtick is the one escape, a literal backtick).
+// True when the closer was found on this line.
+function eatRawContent(stream: StringStream): boolean {
+  stream.match(/^(?:``|[^`])*/);
+  return stream.eat("`") !== undefined;
+}
 
 export const funStreamParser = {
   startState(): FunState {
-    return { inBlockComment: false };
+    return { inBlockComment: false, inRawBlock: false };
   },
   token(stream: StringStream, state: FunState): string | null {
+    // A multi-line raw string: each continuation line begins (after
+    // leading whitespace) with its own backtick marker; the block ends at
+    // an explicit single closing backtick (code may follow it on that
+    // line) or at the first line with no marker.
+    if (state.inRawBlock) {
+      if (stream.sol() && stream.match(/^\s*`/)) {
+        if (eatRawContent(stream)) state.inRawBlock = false;
+        return "string";
+      }
+      if (stream.sol()) state.inRawBlock = false;
+    }
     if (state.inBlockComment) {
       if (stream.match(/^[^*]*\*\//)) {
         state.inBlockComment = false;
@@ -68,8 +87,11 @@ export const funStreamParser = {
     }
     if (stream.match(/^"(?:[^"\\]|\\.)*"?/)) return "string";
     if (stream.match(/^'(?:[^'\\]|\\.)*'?/)) return "string";
-    if (stream.match("`")) {
+    if (stream.match(/^`(?:``|[^`])*`/)) return "string";
+    if (stream.eat("`")) {
+      // Unclosed on this line: the rest of it starts a multi-line block.
       stream.skipToEnd();
+      state.inRawBlock = true;
       return "string";
     }
     if (stream.match(/^0x[0-9a-fA-F]+/)) return "number";
@@ -84,8 +106,11 @@ export const funStreamParser = {
       if (/^[A-Z]/.test(word)) return "typeName";
       // A lowercase identifier directly followed by `(` (ignoring
       // whitespace) is a call or declaration - fun-web colors both the
-      // same way (`entity.name.function`).
-      const ahead = stream.string.slice(stream.pos).match(/^\s*\(/);
+      // same way (`entity.name.function`) - and so is one spelling out
+      // its own generic type arguments first (`identity<str>(5)`).
+      const ahead = stream.string
+        .slice(stream.pos)
+        .match(/^\s*(?:<(?:[^<>()]|<[^<>()]*>)*>\s*)?\(/);
       if (ahead) return "functionName";
       return "variableName";
     }

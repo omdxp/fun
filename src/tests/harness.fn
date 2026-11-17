@@ -523,6 +523,9 @@ fun _run_source_result_mode(str src, str name, str label, flag memcheck) Process
 
   let emitted = memcheck ? transpile_file_memcheck(source_path) : transpile_file(source_path);
   if emitted.is_err() {
+    // A failed assert ends the run before any `defer` gets to clean up,
+    // which left the staged source behind for a later `git add` to pick up.
+    remove_file(source_path);
     allow assert_constant, "reports the stage that rejected the staged source";
     assert false, format("{str}: {str}", label, emitted.unwrap_err());
   }

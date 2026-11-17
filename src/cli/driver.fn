@@ -3907,7 +3907,168 @@ fun _skip_scan_dir(str name) flag {
   }
 }
 
+// One `.gitignore` rule, scoped to the directory its file sits in.
+compound _IgnoreRule {
+  // Absolute directory the rule's own `.gitignore` sits in.
+  str base;
+  str pattern;
+  flag negate;
+  flag dir_only;
+  // Matched against the path relative to `base`, rather than against a
+  // bare name at any depth: a pattern written with a `/` anywhere but
+  // at its very end.
+  flag anchored;
+}
+
+// Appends the rules of `abs_dir`'s own `.gitignore`, when it has one.
+fun _read_ignore_rules(str abs_dir, Vec<_IgnoreRule>* rules) {
+  str ignore_path = format("{str}/.gitignore", abs_dir);
+  if !exists(ignore_path) {
+    ret;
+  }
+  str text = read_to_string(ignore_path);
+  if text == nil {
+    ret;
+  }
+  Vec<str> lines = split(text, '\n');
+  defer lines.free();
+  for entry : lines {
+    str line = trim(entry);
+    if len(line) == 0 || line[0] == '#' {
+      continue;
+    }
+    _IgnoreRule r;
+    r.base = abs_dir;
+    r.negate = false;
+    r.dir_only = false;
+    if line[0] == '!' {
+      r.negate = true;
+      line = substr(line, 1, len(line) - 1);
+    }
+    if len(line) > 0 && line[len(line) - 1] == '/' {
+      r.dir_only = true;
+      line = substr(line, 0, len(line) - 1);
+    }
+    r.anchored = index_of_char(line, '/') >= 0;
+    if len(line) > 0 && line[0] == '/' {
+      line = substr(line, 1, len(line) - 1);
+    }
+    if len(line) == 0 {
+      continue;
+    }
+    r.pattern = line;
+    rules.push(r);
+  }
+}
+
+// Whether `abs_path` (a `name` entry, a directory when `is_directory`)
+// is ignored by `rules`: the last rule that matches decides, the way
+// git reads them, `!` re-including what an earlier one excluded.
+fun _is_ignored(str abs_path, str name, flag is_directory, Vec<_IgnoreRule>* rules) flag {
+  flag ignored = false;
+  for r : rules {
+    if r.dir_only && !is_directory {
+      continue;
+    }
+    str prefix = format("{str}/", r.base);
+    if !starts_with(abs_path, prefix) {
+      continue;
+    }
+    str subject = name;
+    if r.anchored {
+      subject = substr(abs_path, len(prefix), len(abs_path) - len(prefix));
+    }
+    if glob_match(r.pattern, subject) {
+      ignored = !r.negate;
+    }
+  }
+  ret ignored;
+}
+
+// `path` made absolute against the current directory, `/`-separated on
+// every platform (Windows accepts `/` too), with no trailing separator
+// and no `.`/`..` segments. A drive letter (`C:`) stays the leading
+// segment rather than gaining a `/` in front of it.
+fun _absolute_dir(str path) str {
+  str abs = path;
+  if !is_abs(path) {
+    abs = path_join(current_dir(), path);
+  }
+  abs = replace_char(abs, '\\', '/');
+  flag rooted = len(abs) > 0 && abs[0] == '/';
+  Vec<str> parts = split(abs, '/');
+  defer parts.free();
+  Vec<str> kept;
+  kept.init(parts.len);
+  defer kept.free();
+  for part : parts {
+    if equals(part, ".") || len(part) == 0 {
+      continue;
+    }
+    if equals(part, "..") {
+      if kept.len > 1 || (kept.len == 1 && rooted) {
+        kept.pop();
+      }
+      continue;
+    }
+    kept.push(part);
+  }
+  StringBuilder b = string_builder_init(len(abs) + 1);
+  num ki = 0;
+  for ki < kept.len {
+    if ki > 0 || rooted {
+      b.append("/");
+    }
+    b.append(kept.get(ki));
+    ki = ki + 1;
+  }
+  str out = b.build();
+  if len(out) == 0 {
+    ret "/";
+  }
+  ret out;
+}
+
 fun _collect_fun_files(str dir, Vec<str>* out) {
+  // Every `.gitignore` from the enclosing repository's root down to
+  // `dir` applies, the same as it would to git itself: a generated or
+  // copied tree the project ignores (a website build's own copy of
+  // stdlib, a test's left-over staged source) is not the project's
+  // source either, so it is neither tested, linted, nor formatted.
+  str abs = _absolute_dir(dir);
+  Vec<str> chain;
+  chain.init(4);
+  defer chain.free();
+  str cur = abs;
+  for true {
+    chain.push(cur);
+    if exists(path_join(cur, ".git")) {
+      break;
+    }
+    str parent = dirname(cur);
+    // A filesystem root (`/`, `C:`) is its own parent.
+    if len(parent) == 0 || equals(parent, cur) {
+      break;
+    }
+    cur = parent;
+  }
+  Vec<_IgnoreRule> rules;
+  rules.init(8);
+  defer rules.free();
+  num ci = chain.len - 1;
+  for ci > 0 {
+    _read_ignore_rules(chain.get(ci), &rules);
+    ci = ci - 1;
+  }
+  _collect_fun_files_in(dir, abs, &rules, out);
+}
+
+fun _collect_fun_files_in(
+  str dir,
+  str abs_dir,
+  Vec<_IgnoreRule>* rules,
+  Vec<str>* out
+) {
   let listed = list_dir(dir);
   if listed.is_err() {
     ret;
@@ -3915,21 +4076,32 @@ fun _collect_fun_files(str dir, Vec<str>* out) {
   Vec<str> entries = listed.unwrap();
   defer entries.free();
   entries.sort();
+  num rules_before = rules.len;
+  _read_ignore_rules(abs_dir, rules);
 
   num i = 0;
   for i < entries.len {
     str name = entries.get(i);
     i = i + 1;
     str full = path_join(dir, name);
-    if is_dir(full) {
+    str abs_full = format("{str}/{str}", abs_dir, name);
+    flag directory = is_dir(full);
+    if _is_ignored(abs_full, name, directory, rules) {
+      continue;
+    }
+    if directory {
       if !_skip_scan_dir(name) {
-        _collect_fun_files(full, out);
+        _collect_fun_files_in(full, abs_full, rules, out);
       }
       continue;
     }
     if ends_with(name, ".fn") {
       out.push(full);
     }
+  }
+  // This directory's own rules only ever apply below it.
+  for rules.len > rules_before {
+    rules.pop();
   }
 }
 
@@ -5013,4 +5185,45 @@ test "a path is shown relative to the working directory, and only when it really
   assert equals(cover_display_path("C:\\w\\proj\\src\\a.fn", "C:\\w\\proj"), "src/a.fn"), "expected a Windows path to be made relative to a Windows directory";
   assert equals(cover_display_path("/w/project/a.fn", "/w/pro"), "/w/project/a.fn"), "expected a sibling whose name starts the same not to be stripped";
   assert equals(cover_display_path("/other/src/a.fn", "/w/proj"), "/other/src/a.fn"), "expected a path elsewhere to stay absolute";
+}
+
+test "project file discovery honors .gitignore rules, nested ones included" {
+  str dir = _scratch_project("gitignore_scan");
+  make_dir_all(path_join(dir, "gen"));
+  make_dir_all(path_join(dir, "sub"));
+  make_dir_all(path_join(dir, "nested"));
+  write_string(
+    path_join(dir, ".gitignore"),
+    "# generated\ngen/\n*.tmp.fn\n!keep.tmp.fn\n/anchored.fn\n"
+  );
+  write_string(path_join(dir, "nested/.gitignore"), "local.fn\n");
+  Vec<str> names;
+  names.init(8);
+  defer names.free();
+  names.push("a.fn");
+  names.push("gen/b.fn");
+  names.push("x.tmp.fn");
+  names.push("keep.tmp.fn");
+  names.push("anchored.fn");
+  names.push("sub/anchored.fn");
+  names.push("nested/local.fn");
+  names.push("nested/other.fn");
+  names.push("sub/local.fn");
+  for n : names {
+    write_string(path_join(dir, n), "fun main() {}\n");
+  }
+  Vec<str> found;
+  found.init(8);
+  defer found.free();
+  _collect_fun_files(dir, &found);
+  str joined = join(&found, "|");
+  assert contains(joined, "a.fn"), "expected an ordinary file found";
+  assert contains(joined, "keep.tmp.fn"), "expected a ! rule to re-include a file";
+  assert contains(joined, "sub/anchored.fn"), "expected a /-anchored rule to apply at its own level only";
+  assert contains(joined, "nested/other.fn"), "expected a nested .gitignore to leave other files alone";
+  assert contains(joined, "sub/local.fn"), "expected a nested .gitignore's rule to stay inside its own directory";
+  assert !contains(joined, "gen/b.fn"), "expected an ignored directory skipped entirely";
+  assert !contains(joined, "x.tmp.fn"), "expected a glob rule to exclude";
+  assert !contains(joined, format("{str}/anchored.fn", dir)), "expected the anchored file at the root excluded";
+  assert !contains(joined, "nested/local.fn"), "expected a nested .gitignore's own rule applied";
 }

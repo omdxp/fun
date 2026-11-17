@@ -1350,6 +1350,11 @@ compound Checker {
   // What each top-level variable offers, so a read from another file can
   // be held to it.
   Map<str, GlobalInfo> globals;
+  // The real type of every top-level `let`/`const` written with no type
+  // of its own, inferred once from its initializer before any function
+  // body is checked - every function seeds its globals from the written
+  // `var_type`, which for an inferred global is only the placeholder.
+  Map<str, CheckedType> global_inferred;
   // Every enum the program declares, whether or not its variants carry
   // payloads. `plain_enums` holds only the ones that read as numbers.
   Set<str> enum_names;
@@ -1378,6 +1383,15 @@ compound Checker {
   // for types the checker never sees, so a name among them is a type
   // rather than one nothing declares.
   Vec<str> active_type_params;
+  // The type params of the generic `impl` whose methods are being checked
+  // (`impl Box<T>`'s `T`), empty otherwise - in scope for every method
+  // body exactly the way a method's own type params are.
+  Vec<str> impl_type_params;
+  // Parallel to `impl_type_params`: each one's allowed types - the
+  // impl's own written constraint, else the target compound's own bound
+  // for that position (an `impl Vec2<T>`'s `T` is bounded exactly as
+  // `Vec2`'s own is).
+  Vec<Vec<str>> impl_type_param_bounds;
   // Parallel to `active_type_params` by index: each entry's own declared
   // bound (empty when unconstrained), so a bound check on a reference to
   // one of these names - still an unresolved type parameter, not yet a
@@ -1400,6 +1414,8 @@ compound Checker {
 fun _checker_new() Checker {
   Checker c;
   c.active_type_params.init(4);
+  c.impl_type_params.init(0);
+  c.impl_type_param_bounds.init(0);
   c.active_type_param_bounds.init(4);
   c.fns.init(32);
   c.declared_at.init(32);
@@ -1409,6 +1425,7 @@ fun _checker_new() Checker {
   c.shape_elem_by_type.init(16);
   c.plain_enums = set_init("", 16);
   c.globals.init(16);
+  c.global_inferred.init(16);
   c.enum_names = set_init("", 16);
   c.variant_owners.init(16);
   c.variant_payloads.init(16);
@@ -1858,7 +1875,7 @@ impl Checker {
 fun _is_builtin_call(str name) flag {
   fit name {
     "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin",
-    "va_arg_chr", "va_arg_str", "va_arg_raw" -> { ret true; }
+    "va_arg_chr", "va_arg_str", "va_arg_raw", "__fun_key_hash", "__fun_key_eq" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -2319,9 +2336,26 @@ fun _flat_allowed_for_param(Vec<Vec<str>> combos, num p) Vec<str> {
 }
 
 impl Checker {
-  // The type a literal, name, or operator expression produces. Anything
-  // the checker does not model infers as unknown.
+  // The type a literal, name, or operator expression produces; anything
+  // the checker does not model infers as unknown. Whatever it resolves to that names one of
+  // the enclosing function's own type params (`cur.value` through a
+  // `Node<T>*`, a method returning `T`) stands for whatever an
+  // instantiation supplies, the same as a parameter declared `T` - erased
+  // here once, at the one place every expression's type passes through,
+  // rather than left as a literal type named `T` that no operator or
+  // value ever matches.
   infer(Node* node, TypeEnv* env) CheckedType {
+    CheckedType t = self._infer_raw(node, env);
+    if self.active_type_params.len > 0 && !equals(t.name, "") && !t.is_tuple &&
+      self.active_type_params.contains(t.name) {
+      CheckedType erased = checked_unknown();
+      erased.pointer_depth = t.pointer_depth;
+      ret erased;
+    }
+    ret t;
+  }
+
+  _infer_raw(Node* node, TypeEnv* env) CheckedType {
     if node == nil {
       ret checked_unknown();
     }
@@ -2577,6 +2611,18 @@ impl Checker {
         depth = u.indirection_depth;
       }
       if operand.pointer_depth < depth {
+        // A known, plainly non-pointer operand (`*head` where `head` is a
+        // `Node` value) used to come back as Unknown, which every later
+        // check treats as assignable to anything, so the mistake only
+        // ever surfaced as a raw C error - or never, in an uninstantiated
+        // generic or an unreachable function. An array (decays to a
+        // pointer in C) and an erased/unknown type stay permissive.
+        if !is_unknown(operand) && !operand.is_array {
+          self.fail(
+            format("cannot dereference {str}, which is not a pointer", type_name(operand)),
+            node
+          );
+        }
         ret checked_unknown();
       }
       CheckedType t = operand;
@@ -4244,6 +4290,14 @@ impl Checker {
         self.check_sizeof_operand(node, args.get(0));
         ret checked_of(.Num);
       }
+      // `std.map`'s own key hashing/equality, lowered per key type by
+      // codegen - never declared anywhere a call could resolve against.
+      if equals(name, "__fun_key_hash") {
+        ret checked_of(.Num);
+      }
+      if equals(name, "__fun_key_eq") {
+        ret checked_of(.Bin);
+      }
       ret checked_unknown();
     }
     let known = self.fns.at(name);
@@ -5707,6 +5761,12 @@ impl Checker {
 
   check_variable(Node* stmt, VariableNode v, TypeEnv* env) {
     CheckedType declared = checked_from_dtype(v.var_type);
+    // A local declared as one of the enclosing function's own type params
+    // (`T sum = a;`) stands for whatever an instantiation supplies, the
+    // same as a parameter of that type - erased the same way, rather than
+    // kept as a literal type named `T` no operator or value ever matches.
+    flag declared_is_type_param = !equals(declared.name, "") &&
+      self.active_type_params.contains(declared.name);
     // Owned outright for as long as `declared` still holds this fresh
     // value - `env.bind` below stores its own clone regardless (see
     // its own note on why), so every return path here is this value's
@@ -5841,7 +5901,7 @@ impl Checker {
         }
         declared = value;
         declared_is_fresh = false;
-      } elif !self.assignable(declared, value) {
+      } elif !declared_is_type_param && !self.assignable(declared, value) {
         self.fail(
           format(
           "cannot initialize '{str}' of type {str} with {str}",
@@ -5892,6 +5952,12 @@ impl Checker {
           ret;
         }
       }
+    }
+    if declared_is_type_param {
+      CheckedType erased = checked_unknown();
+      erased.pointer_depth = declared.pointer_depth;
+      env.bind(v.name, erased, v.is_const);
+      ret;
     }
     env.bind(v.name, declared, v.is_const);
   }
@@ -6314,20 +6380,53 @@ impl Checker {
         _ -> {}
       }
     }
-    // A generic impl's methods are written in terms of type parameters
-    // the checker does not substitute, so their bodies are left alone.
-    if block.has_type_params && block.type_params.len > 0 {
-      ret;
+    // A generic impl's own type params are in scope for every method
+    // body, erased wherever an expression's type names one (see
+    // `infer`), the same as a generic function's own - its bodies used
+    // to be skipped outright, so nothing in them was ever checked.
+    Vec<str> previous_impl_params = self.impl_type_params;
+    Vec<Vec<str>> previous_impl_bounds = self.impl_type_param_bounds;
+    Vec<str> impl_params;
+    impl_params.init(4);
+    Vec<Vec<str>> impl_bounds;
+    impl_bounds.init(4);
+    if block.has_type_params {
+      let target_info = self.compounds.at(self.canonical_type_name(block.type_name));
+      num ipi = 0;
+      for ipi < block.type_params.len {
+        impl_params.push(block.type_params.get(ipi));
+        if block.has_type_param_forced_insts {
+          impl_bounds.push(_flat_allowed_for_param(block.type_param_forced_insts, ipi));
+        } elif target_info.is_some() {
+          impl_bounds.push(_flat_allowed_for_param(target_info.unwrap().bounds, ipi));
+        } else {
+          Vec<str> none;
+          none.init(0);
+          impl_bounds.push(none);
+        }
+        ipi = ipi + 1;
+      }
     }
+    self.impl_type_params = impl_params;
+    self.impl_type_param_bounds = impl_bounds;
     for m : block.methods {
       fit m.kind {
         .Function(f) -> { self.check_function_with_self(f, nodes, block.type_name); }
         _ -> {}
       }
       if self.failed {
-        ret;
+        break;
       }
     }
+    self.impl_type_params.free();
+    self.impl_type_params = previous_impl_params;
+    num ibi = 0;
+    for ibi < self.impl_type_param_bounds.len {
+      self.impl_type_param_bounds.data[ibi].free();
+      ibi = ibi + 1;
+    }
+    self.impl_type_param_bounds.free();
+    self.impl_type_param_bounds = previous_impl_bounds;
   }
 
   // Reports a method a shape requires that the impl block does not
@@ -6428,7 +6527,12 @@ impl Checker {
           // that outlives this call, this one owns it outright and
           // nothing else ever frees it otherwise.
           CheckedType vt = checked_from_dtype(v.var_type);
-          env.bind(v.name, vt, v.is_const);
+          let inferred_global = self.global_inferred.at(v.name);
+          if is_unknown(vt) && inferred_global.is_some() {
+            env.bind(v.name, inferred_global.unwrap(), v.is_const);
+          } else {
+            env.bind(v.name, vt, v.is_const);
+          }
           _free_checked_type_contents(&vt);
         }
         _ -> {}
@@ -6466,6 +6570,9 @@ impl Checker {
         params.push(tp);
       }
     }
+    for itp : self.impl_type_params {
+      params.push(itp);
+    }
     self.active_type_params = params;
 
     Vec<Vec<str>> previous_param_bounds = self.active_type_param_bounds;
@@ -6483,6 +6590,17 @@ impl Checker {
         tpi = tpi + 1;
       }
     }
+    // The enclosing impl's own params follow the method's own in
+    // `active_type_params` (see above), so their bounds follow here too,
+    // copied since every entry is freed when this function is done.
+    for ib : self.impl_type_param_bounds {
+      Vec<str> ib_copy;
+      ib_copy.init(ib.len);
+      for ibs : ib {
+        ib_copy.push(ibs);
+      }
+      param_bounds.push(ib_copy);
+    }
     self.active_type_param_bounds = param_bounds;
 
     CheckedType previous = self.rtype;
@@ -6490,7 +6608,10 @@ impl Checker {
     self.in_async = f.is_async;
     self.rtype = checked_unknown();
     if f.has_rtype {
-      self.rtype = _erase_type_params(f, checked_from_dtype(f.rtype));
+      self.rtype = _erase_named(
+        _erase_type_params(f, checked_from_dtype(f.rtype)),
+        &self.impl_type_params
+      );
     }
     self.check_statement(f.body, &env);
     // The rtype just built above (owned outright, not an alias of
@@ -6807,6 +6928,55 @@ pub fun typecheck_program_with_aliases(
   if checker.failed {
     ret .Err(checker.error);
   }
+  // Every global is checked once, in source order, against one shared
+  // env before any function body: an inferred one's own initializer may
+  // read an earlier global, and its resolved type is recorded in
+  // `global_inferred` for every function body to see (see
+  // `check_function_with_self`). Typed globals are bound first, so a
+  // forward reference to one still resolves.
+  TypeEnv globals_env = type_env_new();
+  defer globals_env.free();
+  globals_env.push();
+  i = 0;
+  for i < nodes.len {
+    fit nodes.data[i].kind {
+      .Variable(gv) -> {
+        CheckedType gvt = checked_from_dtype(gv.var_type);
+        if !is_unknown(gvt) {
+          globals_env.bind(gv.name, gvt, gv.is_const);
+        }
+        _free_checked_type_contents(&gvt);
+      }
+      _ -> {}
+    }
+    i = i + 1;
+  }
+  i = 0;
+  for i < nodes.len {
+    Node* gnode = &nodes.data[i];
+    i = i + 1;
+    fit gnode.kind {
+      .Variable(gv) -> {
+        checker.current_file = "";
+        if gnode.has_pos {
+          checker.current_file = gnode.pos.filename;
+        }
+        checker.check_variable(gnode, gv, &globals_env);
+        if checker.failed {
+          ret .Err(checker.error);
+        }
+        CheckedType written = checked_from_dtype(gv.var_type);
+        if is_unknown(written) {
+          let resolved = globals_env.lookup(gv.name);
+          if resolved.is_some() {
+            checker.global_inferred.put(gv.name, resolved.unwrap());
+          }
+        }
+        _free_checked_type_contents(&written);
+      }
+      _ -> {}
+    }
+  }
   i = 0;
   for i < nodes.len {
     Node* node = &nodes.data[i];
@@ -6826,14 +6996,6 @@ pub fun typecheck_program_with_aliases(
         }
         checker.check_shape_conformance(block, node);
         checker.check_impl(block, nodes);
-      }
-      .Variable(v) -> {
-        checker.current_file = "";
-        if node.has_pos {
-          checker.current_file = node.pos.filename;
-        }
-        TypeEnv global_env = type_env_new();
-        checker.check_variable(node, v, &global_env);
       }
       _ -> {}
     }

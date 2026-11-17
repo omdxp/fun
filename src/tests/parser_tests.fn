@@ -644,3 +644,25 @@ test "generic-heavy source parses whole" {
   assert err.is_none(), "expected the nested generics to parse";
   assert st.nodes.len == 3, "expected all three declarations";
 }
+
+test "a function can read a global declared further down the file, but not a name only a prototype mentions" {
+  str src = `fun bump() num {
+  `  ret calls + limit + names_len;
+  `}
+  `num calls = 0;
+  `let limit = 4;
+  `Vec<str> names;
+  `const names_len = 2;`;
+  ParseState st = state_from(src);
+  Parser p = parser_new(&st);
+  assert p.parse().is_none(), "expected every later global readable from the function above it";
+
+  str proto_src = `fun f() num {
+  `  ret Proto;
+  `}
+  `fun g() Proto;`;
+  ParseState proto_st = state_from(proto_src);
+  proto_st.emit_stderr = false;
+  Parser proto_p = parser_new(&proto_st);
+  assert proto_p.parse().is_some(), "expected a prototype's return type never to count as a global";
+}

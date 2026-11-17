@@ -581,6 +581,14 @@ pub compound Codegen {
   CodegenState* root_state;
   Option<num> root_hoist_pos;
   Option<num> root_stmt_start_pos;
+  // Bumped each time `emit_statements` starts a statement. Keys
+  // `materialize_operator_operand`'s memo, so an operand rendered more
+  // than once for the same statement (a type query, then the real
+  // emission) is rendered, and its temps hoisted, only once.
+  num stmt_serial;
+  Vec<Node*> op_memo_nodes;
+  Vec<str> op_memo_texts;
+  Vec<num> op_memo_serials;
   // Unique counter for `emit_fit`'s call-subject temp names.
   num fit_subj_temp_counter;
   // Whether any `fork` statement appears in the program, computed once
@@ -821,6 +829,10 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.typedef_hints.init(64);
   g.root_hoist_pos = .None;
   g.root_stmt_start_pos = .None;
+  g.stmt_serial = 0;
+  g.op_memo_nodes.init(0);
+  g.op_memo_texts.init(0);
+  g.op_memo_serials.init(0);
   g.fit_subj_temp_counter = 0;
   g.current_fn_rtype_name = "";
   g.current_fn_rtype_dt = .None;
@@ -1122,6 +1134,14 @@ fun _is_hex_digit(chr c) flag {
 fun is_arithmetic_operator(str op) flag {
   fit op {
     "+", "-", "*", "/", "%" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// A builtin binary operator whose result is always a flag.
+fun _is_flag_result_operator(str op) flag {
+  fit op {
+    "==", "!=", "<", ">", "<=", ">=", "&&", "||" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -2810,7 +2830,11 @@ impl Codegen {
   // "unspecified", not "no parameters").
   emit_prototype_params(FunctionNode f) Option<CodegenErrorKind> {
     if !f.has_args || f.args.len == 0 {
-      self.state.write("void");
+      if f.is_variadic {
+        self._emit_prototype_variadic_tail(f, false);
+      } else {
+        self.state.write("void");
+      }
       ret .None;
     }
     flag first = true;
@@ -2867,7 +2891,25 @@ impl Codegen {
         _ -> { ret .Some(.InvalidNode); }
       }
     }
+    if f.is_variadic {
+      self._emit_prototype_variadic_tail(f, true);
+    }
     ret .None;
+  }
+
+  // A variadic function's trailing C params, matching
+  // `emit_function_named`'s own definition: a Fun-bodied one takes the
+  // `__fun_vtags` tag string before `...`, a bodyless binding is a real
+  // C variadic and takes `...` alone.
+  _emit_prototype_variadic_tail(FunctionNode f, flag after_named) {
+    if after_named {
+      self.state.write(", ");
+    }
+    if f.has_body {
+      self.state.write("const char* __fun_vtags, ...");
+    } else {
+      self.state.write("...");
+    }
   }
 
   // Forward-declares an async generic impl method's
@@ -4954,6 +4996,19 @@ impl Codegen {
   // via `record_local_typed`. `.None` covers both "not a known local" and
   // "recorded via plain `record_local`"; `lookup_local_type_name`
   // distinguishes the two.
+  // `lookup_local_dtype` without its global fallback: a real local or
+  // parameter of the function being emitted, nothing else.
+  _lookup_function_local_dtype(str name) Option<DataType> {
+    num i = self.local_names.len - 1;
+    for i >= 0 {
+      if equals(self.local_names.get(i), name) {
+        ret self.local_dtype.get(i);
+      }
+      i = i - 1;
+    }
+    ret .None;
+  }
+
   lookup_local_dtype(str name) Option<DataType> {
     num i = self.local_names.len - 1;
     for i >= 0 {
@@ -5167,6 +5222,29 @@ impl Codegen {
       ret .Some(found_name);
     }
     ret .None;
+  }
+
+  // `enum_has_variant`, read from the AST rather than from what's been
+  // registered so far - a global's own initializer is written before any
+  // enum is (see `_resolve_unique_plain_enum_for_variant_from_ast`).
+  // Non-generic enums only, the same as that sibling.
+  _plain_enum_has_variant_from_ast(str enum_name, str variant_name) flag {
+    for n : self.all_nodes {
+      fit n.kind {
+        .Enum(e) -> {
+          if e.has_type_params || !equals(e.name, enum_name) {
+            continue;
+          }
+          for v : e.variants {
+            if equals(v.name, variant_name) {
+              ret true;
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
+    ret false;
   }
 
   // True if `enum_name` is a known enum with a variant named
@@ -5516,22 +5594,76 @@ impl Codegen {
       // `resolve_field_chain`'s own identical arm from already doing
       // this for every other receiver position).
       .ExpressionParenthesis(inner) -> { ret self.resolve_operator_operand(inner); }
+      // `Vec2{x = 1} + b`: a compound literal's own written type. Only a
+      // non-generic one, since naming a generic instance can instantiate
+      // it; rendering is left to `materialize_operator_operand`.
+      .CompoundInit(ci) -> {
+        if !ci.has_dtype || ci.init_dtype.generic_args.len > 0 ||
+          !self.compound_names.contains(ci.init_dtype.type_str) {
+          ret .None;
+        }
+        ChainResolution lit_r;
+        lit_r.text = "";
+        lit_r.type_name = ci.init_dtype.type_str;
+        lit_r.is_pointer = false;
+        lit_r.dtype = .Some(*ci.init_dtype);
+        lit_r.is_call_result = true;
+        ret .Some(lit_r);
+      }
       .Expression(inner_e) -> {
-        // Deliberately no `"()"` case: a plain call result used
-        // directly (`get_vec3() + b`, no intermediate `let`) looks
-        // just as safe to resolve speculatively as the field-chain and
-        // nested-operator cases below, since `_resolve_call_rtype`
-        // documents itself as type-only with nothing rendered or
-        // spliced - but for a *generic* function it also calls
-        // `maybe_instantiate_generic_function`, a real instantiation/
-        // registration side effect, not just a type lookup. Confirmed
-        // directly: trying it here reintroduced this same function's
-        // own historical regression (see its own doc comment above),
-        // breaking forward-declaration ordering inside
-        // `Map<str, Vec<str>>` internals again, just from a different
-        // call site this time (`std.cli`'s own generic Map use). Bind
-        // the call to its own `let` first - the same gap the
-        // operator-overloading docs already describe.
+        // A call result used directly (`mk() + b`) resolves only for a
+        // non-generic plain function, whose return type is a pure table
+        // lookup. A generic one would go through
+        // `maybe_instantiate_generic_function`, a real registration side
+        // effect that once broke forward-declaration ordering inside
+        // `Map<str, Vec<str>>` internals when tried speculatively here.
+        if equals(inner_e.op, "()") && inner_e.has_left {
+          fit inner_e.left.kind {
+            .Identifier(call_name) -> {
+              if self.lookup_local_type_name(call_name).is_some() {
+                ret .None;
+              }
+              let call_rt = self.lookup_function_rtype(call_name)?;
+              let call_type_name = self.resolve_type_name(*call_rt)?;
+              if !self.compound_names.contains(call_type_name) {
+                ret .None;
+              }
+              ChainResolution call_r;
+              call_r.text = "";
+              call_r.type_name = call_type_name;
+              call_r.is_pointer = dtype_is_pointer(*call_rt);
+              call_r.dtype = .Some(*call_rt);
+              call_r.is_call_result = true;
+              ret .Some(call_r);
+            }
+            // `p.get() + b`: a method on a receiver that itself resolves
+            // here, typed by the method's own declared return type.
+            .Expression(call_dot) -> {
+              if !equals(call_dot.op, ".") || !call_dot.has_left || !call_dot.has_right {
+                ret .None;
+              }
+              str call_method = "";
+              fit call_dot.right.kind {
+                .Identifier(mname) -> { call_method = mname; }
+                _ -> { ret .None; }
+              }
+              let mrecv = self.resolve_operator_operand(call_dot.left)?;
+              let m_rt = self.lookup_impl_method_rtype(mrecv.type_name, call_method)?;
+              let m_type_name = self.resolve_type_name(*m_rt)?;
+              if !self.compound_names.contains(m_type_name) {
+                ret .None;
+              }
+              ChainResolution mcall_r;
+              mcall_r.text = "";
+              mcall_r.type_name = m_type_name;
+              mcall_r.is_pointer = dtype_is_pointer(*m_rt);
+              mcall_r.dtype = .Some(*m_rt);
+              mcall_r.is_call_result = true;
+              ret .Some(mcall_r);
+            }
+            _ -> { ret .None; }
+          }
+        }
         if equals(inner_e.op, ".") && inner_e.has_left && inner_e.has_right {
           str field_name = "";
           fit inner_e.right.kind {
@@ -5629,6 +5761,24 @@ impl Codegen {
     if !recv_r.is_call_result || !equals(recv_r.text, "") {
       ret .Some(recv_r);
     }
+    // Already rendered for this statement: reuse that text rather than
+    // render again, which would hoist a second, unused copy of every
+    // temp the operand needs, and run its calls again.
+    num memo_i = self.op_memo_nodes.len - 1;
+    for memo_i >= 0 && self.op_memo_serials.get(memo_i) == self.stmt_serial {
+      if self.op_memo_nodes.get(memo_i) == operand {
+        ChainResolution memo_r = recv_r;
+        memo_r.text = self.op_memo_texts.get(memo_i);
+        ret .Some(memo_r);
+      }
+      memo_i = memo_i - 1;
+    }
+    if self.op_memo_nodes.len > 0 &&
+      self.op_memo_serials.get(self.op_memo_serials.len - 1) != self.stmt_serial {
+      self.op_memo_nodes.clear();
+      self.op_memo_texts.clear();
+      self.op_memo_serials.clear();
+    }
     if self.hoist_scratch_depth == 0 {
       self.root_state = self.state;
       self.root_hoist_pos = self.hoist_insert_pos;
@@ -5666,6 +5816,9 @@ impl Codegen {
     r.is_pointer = recv_r.is_pointer;
     r.dtype = recv_r.dtype;
     r.is_call_result = true;
+    self.op_memo_nodes.push(operand);
+    self.op_memo_texts.push(r.text);
+    self.op_memo_serials.push(self.stmt_serial);
     ret .Some(r);
   }
 
@@ -7615,6 +7768,30 @@ impl Codegen {
     // An alias-qualified callee (`cmath.log(x)`) names the C binding
     // directly, so it keeps its raw name; see `effective_function_name`.
     flag callee_is_alias_qualified = false;
+    // A callee that is itself a closure-valued expression rather than a
+    // name: a closure literal called on the spot (`(fun() num {...})()`)
+    // or a call returning one (`make()()`). Rendered once into its own
+    // `__fun_closure_t` temp, spliced before the statement, then called
+    // through it exactly like a closure-typed local - `.fn`/`.env` are
+    // each read off it, which a re-rendered expression can't afford.
+    flag callee_is_name = false;
+    fit e.left.kind {
+      .Identifier(_) -> { callee_is_name = true; }
+      .Expression(dot_e) -> { callee_is_name = equals(dot_e.op, "."); }
+      _ -> {}
+    }
+    if !callee_is_name {
+      let callee_dt = self.infer_let_expr_type(e.left);
+      if callee_dt.is_some() && callee_dt.unwrap().has_closure_sig {
+        let callee_text = self._render_expr_isolated(e.left)?!(.UnsupportedNode);
+        self.closure_counter = self.closure_counter + 1;
+        str tmp_name = format("__fun_closure_call_{num}", self.closure_counter);
+        self._splice_before_statement(
+          format("__fun_closure_t {str} = {str};\n", tmp_name, callee_text)
+        );
+        ret self.emit_closure_call(tmp_name, callee_dt.unwrap().closure_sig, e.right);
+      }
+    }
     fit e.left.kind {
       .Identifier(name) -> { callee_name = name; }
       .Expression(recv_e) -> {
@@ -8697,6 +8874,14 @@ impl Codegen {
       // carries its type name directly, as in `infer_let_expr_type`.
       .CompoundInit(ci) -> {
         if ci.has_dtype {
+          // A generic literal (`Box<num>{...}`) is its own instantiation,
+          // forced into existence here, never the bare template name.
+          if ci.init_dtype.generic_args.len > 0 {
+            let inst = self.ensure_compound_instantiated(*ci.init_dtype);
+            if inst.is_some() {
+              ret inst.unwrap();
+            }
+          }
           ret ci.init_dtype.type_str;
         }
         ret "int64_t";
@@ -9291,7 +9476,10 @@ impl Codegen {
         cap_dtypes.init(4);
         defer cap_dtypes.free();
         for name : free_names.keys() {
-          let dt_opt = self.lookup_local_dtype(name);
+          // Locals only: a global is shared program-wide state, read and
+          // written in place - capturing a snapshot of one made the
+          // closure's own writes to it vanish.
+          let dt_opt = self._lookup_function_local_dtype(name);
           if dt_opt.is_some() {
             cap_names.push(name);
             cap_dtypes.push(dt_opt.unwrap());
@@ -9313,6 +9501,11 @@ impl Codegen {
           }
           self.state.write(";\n");
           ei = ei + 1;
+        }
+        // An empty struct is a GNU extension MSVC rejects outright; a
+        // closure capturing nothing still gets a real (unused) member.
+        if cap_names.len == 0 {
+          self.state.write("  char __fun_no_captures;\n");
         }
         self.state.write("} ");
         self.state.write(env_name);
@@ -9502,7 +9695,7 @@ impl Codegen {
         cl_sb.append(format_num(n));
         cl_sb.append(";\n__fun_closure_val_");
         cl_sb.append(format_num(n));
-        cl_sb.append(".fn = (void*)");
+        cl_sb.append(".fn = (void* (*)(void*))");
         cl_sb.append(entry_name);
         cl_sb.append(";\n__fun_closure_val_");
         cl_sb.append(format_num(n));
@@ -9511,35 +9704,7 @@ impl Codegen {
         cl_sb.append(";\n");
         str cl_text = cl_sb.build();
 
-        let cl_hoist_save = self.hoist_insert_pos;
-        let cl_splice_pos = self.current_stmt_start_pos;
-        self.hoist_insert_pos = cl_splice_pos;
-        // Mirrors `?`/`!` propagation's own identical fallback: a
-        // closure literal evaluated from inside another construct's
-        // own suspended scratch render (nested inside a generic
-        // instantiation, say) has `current_stmt_start_pos` cleared,
-        // same as `hoist_insert_pos` - routed through
-        // `root_stmt_start_pos` instead for the duration of this one
-        // splice.
-        flag cl_routed_via_root_stmt = false;
-        let cl_saved_root_hoist = self.root_hoist_pos;
-        if cl_splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
-          self.root_stmt_start_pos.is_some() {
-          self.root_hoist_pos = self.root_stmt_start_pos;
-          cl_routed_via_root_stmt = true;
-        }
-        self.emit_hoisted(cl_text);
-        if cl_routed_via_root_stmt {
-          self.root_hoist_pos = cl_saved_root_hoist;
-        }
-        if cl_splice_pos.is_some() {
-          cl_hoist_save = adjust_pos_after_splice(
-            cl_hoist_save,
-            cl_splice_pos.unwrap(),
-            len(cl_text)
-          );
-        }
-        self.hoist_insert_pos = cl_hoist_save;
+        self._splice_before_statement(cl_text);
         self.state.write("__fun_closure_val_");
         self.state.write(format_num(n));
         ret .None;
@@ -10170,6 +10335,20 @@ impl Codegen {
       .Identifier(name) -> { field_name = name; }
       _ -> { ret .Some(.UnsupportedNode); }
     }
+    // A closure's own `.fn`, read from Fun code as a `raw*`, is the
+    // union's object-pointer view: ISO C has no conversion between a
+    // function pointer and `void*`.
+    if equals(field_name, "fn") {
+      let fn_recv_dt = self.infer_let_expr_type(e.left);
+      if fn_recv_dt.is_some() && fn_recv_dt.unwrap().has_closure_sig {
+        let fn_recv_err = self.emit_expr(*e.left);
+        if fn_recv_err.is_some() {
+          ret fn_recv_err;
+        }
+        self.state.write(".fn_raw");
+        ret .None;
+      }
+    }
 
     str enum_recv_name = "";
     flag is_bare_shorthand = false;
@@ -10362,6 +10541,20 @@ impl Codegen {
   // `resolve_field_chain` purely to read `.type_name` off it.
   _resolve_call_rtype(ExprNode inner_e) Option<DataType> {
     Option<DataType> call_rtype = .None;
+    // A closure-valued callee that isn't a name (`(fun() num {...})()`,
+    // `make()()`): the call's result is the closure's own return type.
+    flag callee_is_name = false;
+    fit inner_e.left.kind {
+      .Identifier(_) -> { callee_is_name = true; }
+      .Expression(dot_e) -> { callee_is_name = equals(dot_e.op, "."); }
+      _ -> {}
+    }
+    if !callee_is_name {
+      let callee_dt = self.infer_let_expr_type(inner_e.left);
+      if callee_dt.is_some() && callee_dt.unwrap().has_closure_sig {
+        ret .Some(*callee_dt.unwrap().closure_sig.rtype);
+      }
+    }
     fit inner_e.left.kind {
       .Identifier(fn_name) -> {
         let rt = self.lookup_function_rtype(fn_name);
@@ -10578,6 +10771,84 @@ impl Codegen {
     ret .Some(self.lookup_compound_field(t_name, field_name)?.dtype?);
   }
 
+  // `node`'s own C text, rendered into a throwaway buffer rather than
+  // written at the current position. `hoist_insert_pos`/
+  // `current_stmt_start_pos` are suspended for the swap, so a nested
+  // hoisted emission splices into the real buffer rather than this
+  // throwaway one; `suppress_generic_impl_method_draining` additionally
+  // stops a method from being emitted while `self.state` points here (it
+  // is enqueued instead and drained once the real state is restored,
+  // unless an outer drain or probe is already running). `.None` when
+  // `node` doesn't emit.
+  _render_expr_isolated(Node* node) Option<str> {
+    if self.hoist_scratch_depth == 0 {
+      self.root_state = self.state;
+      self.root_hoist_pos = self.hoist_insert_pos;
+      self.root_stmt_start_pos = self.current_stmt_start_pos;
+    }
+    self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+    CodegenState scratch = self.new_scratch_state();
+    CodegenState* saved_state = self.state;
+    let saved_hoist_pos = self.hoist_insert_pos;
+    let saved_stmt_start_pos = self.current_stmt_start_pos;
+    let prev_suppress = self.suppress_generic_impl_method_draining;
+    self.state = &scratch;
+    self.hoist_insert_pos = .None;
+    self.current_stmt_start_pos = .None;
+    self.suppress_generic_impl_method_draining = true;
+    let err = self.emit_expr(*node);
+    self.state = saved_state;
+    self.hoist_insert_pos = saved_hoist_pos;
+    self.current_stmt_start_pos = saved_stmt_start_pos;
+    self.suppress_generic_impl_method_draining = prev_suppress;
+    self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+    if self.hoist_scratch_depth == 0 {
+      // Leaving nested scratch territory. `root_stmt_start_pos` holds the
+      // current position after any splices made during the nested
+      // session and can be ahead of the restored `saved_stmt_start_pos`,
+      // so syncing back to it keeps a further temp hoist after
+      // everything already spliced. `hoist_insert_pos` needs the same
+      // resync, since a nested instantiation advances `root_hoist_pos`
+      // directly.
+      self.current_stmt_start_pos = self.root_stmt_start_pos;
+      self.hoist_insert_pos = self.root_hoist_pos;
+    }
+    if !prev_suppress && !self.draining_generic_impl_methods {
+      self.drain_pending_generic_impl_methods();
+    }
+    if err.is_some() {
+      ret .None;
+    }
+    ret .Some(scratch.out.build());
+  }
+
+  // Splices `text` (whole statements) in right before the statement being
+  // emitted - the portable alternative to a GNU statement expression,
+  // which MSVC rejects. A splice made from inside another construct's own
+  // suspended scratch render, where `current_stmt_start_pos` is cleared,
+  // is routed through `root_stmt_start_pos` instead, the same fallback
+  // `?`/`!` propagation uses.
+  _splice_before_statement(str text) {
+    let hoist_save = self.hoist_insert_pos;
+    let splice_pos = self.current_stmt_start_pos;
+    self.hoist_insert_pos = splice_pos;
+    flag routed_via_root_stmt = false;
+    let saved_root_hoist = self.root_hoist_pos;
+    if splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
+      self.root_stmt_start_pos.is_some() {
+      self.root_hoist_pos = self.root_stmt_start_pos;
+      routed_via_root_stmt = true;
+    }
+    self.emit_hoisted(text);
+    if routed_via_root_stmt {
+      self.root_hoist_pos = saved_root_hoist;
+    }
+    if splice_pos.is_some() {
+      hoist_save = adjust_pos_after_splice(hoist_save, splice_pos.unwrap(), len(text));
+    }
+    self.hoist_insert_pos = hoist_save;
+  }
+
   resolve_field_chain(Node* recv) Option<ChainResolution> {
     fit recv.kind {
       .Identifier(name) -> {
@@ -10606,51 +10877,7 @@ impl Codegen {
           let rdt = self._resolve_call_rtype(inner_e)?;
           let resolved_name = self.resolve_type_name(rdt)?;
 
-          // `hoist_insert_pos`/`current_stmt_start_pos` are suspended for
-          // this scratch-buffer swap, so a nested hoisted emission
-          // splices into the real buffer rather than this throwaway one.
-          // `suppress_generic_impl_method_draining` additionally stops a
-          // method from being emitted while `self.state` points here; it
-          // is enqueued instead and drained once the real state is
-          // restored, unless an outer drain or probe is already running.
-          if self.hoist_scratch_depth == 0 {
-            self.root_state = self.state;
-            self.root_hoist_pos = self.hoist_insert_pos;
-            self.root_stmt_start_pos = self.current_stmt_start_pos;
-          }
-          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-          CodegenState call_scratch = self.new_scratch_state();
-          CodegenState* saved_call_state = self.state;
-          let saved_call_hoist_pos = self.hoist_insert_pos;
-          let saved_call_stmt_start_pos = self.current_stmt_start_pos;
-          let prev_suppress = self.suppress_generic_impl_method_draining;
-          self.state = &call_scratch;
-          self.hoist_insert_pos = .None;
-          self.current_stmt_start_pos = .None;
-          self.suppress_generic_impl_method_draining = true;
-          let cerr = self.emit_expr(*recv);
-          self.state = saved_call_state;
-          self.hoist_insert_pos = saved_call_hoist_pos;
-          self.current_stmt_start_pos = saved_call_stmt_start_pos;
-          self.suppress_generic_impl_method_draining = prev_suppress;
-          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
-          if self.hoist_scratch_depth == 0 {
-            // Leaving nested receiver-chain territory. `root_stmt_start
-            // _pos` holds the current position after any splices made
-            // during the nested session and can be ahead of the restored
-            // `saved_call_stmt_start_pos`, so syncing back to it keeps a
-            // further receiver-temp hoist after everything already
-            // spliced. `hoist_insert_pos` needs the same resync, since a
-            // nested instantiation advances `root_hoist_pos` directly.
-            self.current_stmt_start_pos = self.root_stmt_start_pos;
-            self.hoist_insert_pos = self.root_hoist_pos;
-          }
-          if !prev_suppress && !self.draining_generic_impl_methods {
-            self.drain_pending_generic_impl_methods();
-          }
-          if cerr.is_some() {
-            ret .None;
-          }
+          let call_text = self._render_expr_isolated(recv)?;
 
           // The call's rendered text is an rvalue: fine to embed for a
           // further `.field` read, but not addressable, so a caller
@@ -10659,12 +10886,25 @@ impl Codegen {
           // Hoisting here unconditionally would inject an extra statement
           // for a plain field read that never needs addressing.
           ChainResolution r;
-          r.text = call_scratch.out.build();
+          r.text = call_text;
           r.type_name = resolved_name;
           r.is_pointer = dtype_is_pointer(rdt);
           r.dtype = .Some(rdt);
           r.is_call_result = true;
           ret .Some(r);
+        }
+        // An overloaded operator as the receiver (`(a + b).scale(2)`): it
+        // is a call to `op_add` in all but spelling, resolved the same
+        // type-first, render-once way an operator's own nested operand
+        // already is - left unhandled, the receiver had no type at all
+        // and the method call failed outright.
+        // `[]` keeps its own dedicated case just below (it maps to
+        // `op_index` too, but an ordinary array/pointer index has no
+        // dispatch at all).
+        if !equals(inner_e.op, "[]") && !equals(operator_method_name(inner_e.op), "") &&
+          inner_e.has_left {
+          let op_r0 = self.resolve_operator_operand(recv)?;
+          ret self.materialize_operator_operand(op_r0, recv);
         }
         // An indexed receiver (`arr[0].getV()`): the element is what is
         // addressed, so its type is what the base being indexed is
@@ -15310,6 +15550,7 @@ impl Codegen {
       // triggered it. The swap restores the outer value afterward, as it
       // does for `hoist_insert_pos`.
       self.current_stmt_start_pos = .Some(self.state.out.len());
+      self.stmt_serial = self.stmt_serial + 1;
       flag is_if = false;
       fit stmt.kind {
         .StatementIf(ifn) -> { is_if = true; }
@@ -17116,6 +17357,27 @@ impl Codegen {
         if v.is_const && !const_is_ptr_binding && !const_is_compound && !needs_runtime {
           self.state.write("const ");
         }
+        // `let arr = [1, 2];` at the top level needs a real array
+        // declarator, as for a local: `__auto_type` can't take a brace
+        // initializer, and MSVC's guessed scalar type can't either.
+        flag glet_is_bracket_literal = false;
+        str glet_lit_elem_c_type = "int64_t";
+        num glet_lit_depth = 1;
+        if is_let && v.has_val && !needs_runtime {
+          fit v.val.kind {
+            .Bracket(glet_inner) -> {
+              glet_is_bracket_literal = true;
+              glet_lit_elem_c_type = self.infer_array_literal_elem_c_type(glet_inner);
+              let galit_info = self.infer_array_literal_elem_type_and_depth(v.val);
+              if galit_info.is_some() {
+                glet_lit_depth = galit_info.unwrap().depth;
+              } else {
+                glet_lit_depth = self.array_literal_nesting_depth(v.val);
+              }
+            }
+            _ -> {}
+          }
+        }
         if is_let {
           if needs_runtime {
             // `__auto_type` needs a real initializer right here to
@@ -17134,7 +17396,7 @@ impl Codegen {
               ginit_decl_dtype = let_inferred_dtype.unwrap();
             }
             self.write_type(ginit_decl_dtype)?!(.UnsupportedNode);
-          } elif self.msvc_mode && v.has_val {
+          } elif self.msvc_mode && v.has_val && !glet_is_bracket_literal {
             // Reuses `let_inferred_type_name`/`let_inferred_dtype`
             // (already resolved above, before any output) instead of
             // a second, independent `infer_let_expr_type` call - which
@@ -17154,6 +17416,8 @@ impl Codegen {
             if !let_msvc_wrote_real_type {
               self.state.write("int64_t");
             }
+          } elif glet_is_bracket_literal {
+            self.state.write(glet_lit_elem_c_type);
           } else {
             self.state.write("__auto_type");
           }
@@ -17182,9 +17446,13 @@ impl Codegen {
         self.state.write(" ");
         self.state.write(v.name);
         // An array declarator (`[24]`, `[]`) lands after the name in C, as
-        // for a local. Only an explicitly array-typed global is handled;
-        // a bare `let arr = [...]` global gets no literal inference.
-        if !is_let && !arr_as_ptr && v.var_type.is_array {
+        // for a local.
+        if glet_is_bracket_literal {
+          self.state.write("[]");
+          if glet_lit_depth > 1 {
+            self.emit_multidim_inner_declarators(v.val, glet_lit_depth - 1);
+          }
+        } elif !is_let && !arr_as_ptr && v.var_type.is_array {
           if v.var_type.array_brackets.len > 0 {
             for bnode : v.var_type.array_brackets {
               self.state.write("[");
@@ -17376,7 +17644,9 @@ impl Codegen {
           // declarator - a bare `{...}` is illegal there (C requires
           // the explicit `(Type){...}` cast outside a declaration),
           // the opposite of the declaration case right below.
-          if (!is_let || let_msvc_wrote_real_type) && !needs_runtime {
+          // A bracket-literal `let` global's declarator is a real
+          // array type too (`P pts[] = ...`), so the same holds there.
+          if (!is_let || let_msvc_wrote_real_type || glet_is_bracket_literal) && !needs_runtime {
             self.in_bare_initializer_context = true;
           }
           // A shape-typed global's initializer needs the same
@@ -17717,6 +17987,22 @@ impl Codegen {
       .String(_) -> { ret .Some("str"); }
       .Character(_) -> { ret .Some("chr"); }
       .Boolean(_) -> { ret .Some("flag"); }
+      // `Point{x = 1}` / `Box<num>{v = 1}`: the literal's own written
+      // type, a generic one by its mangled instantiation name - needed
+      // for an array of them (`[Point{...}, ...]`) to have an element
+      // type at all.
+      .CompoundInit(ci) -> {
+        if !ci.has_dtype {
+          ret .None;
+        }
+        if ci.init_dtype.generic_args.len > 0 {
+          let inst = self.ensure_compound_instantiated(*ci.init_dtype);
+          if inst.is_some() {
+            ret inst;
+          }
+        }
+        ret .Some(ci.init_dtype.type_str);
+      }
       .Expression(e) -> {
         // A qualified enum-variant constant (`Job.Quit`) infers `T` as the
         // enum's name. Checked before the `()` call case below, since a
@@ -18108,6 +18394,7 @@ impl Codegen {
       // uncallable struct value instead, confirmed directly as a real
       // C compile error (calling a `__fun_closure_t` as if it were a
       // function).
+      .ExpressionParenthesis(inner) -> { ret self.infer_let_expr_type(inner); }
       .ClosureLiteral(f) -> {
         FnTypeSig sig = fn_type_sig_new();
         if f.has_rtype {
@@ -18167,6 +18454,27 @@ impl Codegen {
         // read needs. Without it `ct` is never a known local and any
         // further field access off it is rejected.
         if equals(e.op, ".") {
+          // A qualified enum variant (`Color.Green`) is the enum itself -
+          // `resolve_field_chain` reads `Color` as a value and finds
+          // nothing, which left a `let`-inferred global's own enum
+          // unemitted when its initializer was written.
+          if e.has_left && e.has_right {
+            fit e.left.kind {
+              .Identifier(qenum) -> {
+                fit e.right.kind {
+                  .Identifier(qvariant) -> {
+                    if self._plain_enum_has_variant_from_ast(qenum, qvariant) {
+                      DataType qdt = dtype_new();
+                      qdt.type_str = qenum;
+                      ret .Some(qdt);
+                    }
+                  }
+                  _ -> {}
+                }
+              }
+              _ -> {}
+            }
+          }
           let r = self.resolve_field_chain(val)?;
           // Keeps the structural type, whose generic arguments a later
           // `for x : value` needs.
@@ -18264,6 +18572,29 @@ impl Codegen {
         // full operator-precedence semantics - correct for the numeric
         // operators this reaches, which is all real tuple-element
         // arithmetic needs.
+        // An overloaded operator is typed by its own method's declared
+        // return type, whatever the operands are.
+        let op_method = operator_method_name(e.op);
+        if !equals(op_method, "") && !equals(e.op, "[]") && e.has_left {
+          let op_recv = self.resolve_operator_operand(e.left);
+          if op_recv.is_some() {
+            let op_rt = self.lookup_impl_method_rtype(
+              op_recv.unwrap().type_name,
+              op_method
+            );
+            if op_rt.is_some() {
+              ret .Some(*op_rt.unwrap());
+            }
+          }
+        }
+        // A builtin comparison or logical operator is always a flag; MSVC
+        // has no `__auto_type` to recover that, so a `{flag}` format of
+        // the result would otherwise print it as a number.
+        if _is_flag_result_operator(e.op) {
+          DataType cmp_dt = dtype_new();
+          cmp_dt.type_str = "flag";
+          ret .Some(cmp_dt);
+        }
         if is_arithmetic_operator(e.op) && e.has_left && e.has_right {
           let left_dt_opt = self.infer_let_expr_type(e.left);
           let right_dt_opt = self.infer_let_expr_type(e.right);
@@ -18409,6 +18740,36 @@ impl Codegen {
       // resolves `pb`'s chain first, then drops one level of
       // `pointer_depth`, a dereferenced pointer being a plain value.
       .Unary(u) -> {
+        if !u.is_left_operanded_unary && equals(u.op, "!") {
+          let not_recv = self.resolve_operator_operand(u.operand);
+          if not_recv.is_some() {
+            let not_rt = self.lookup_impl_method_rtype(
+              not_recv.unwrap().type_name,
+              "op_not"
+            );
+            if not_rt.is_some() {
+              ret .Some(*not_rt.unwrap());
+            }
+          }
+          DataType not_dt = dtype_new();
+          not_dt.type_str = "flag";
+          ret .Some(not_dt);
+        }
+        // `-x`: an overloaded `op_neg`'s own return type, else the
+        // operand's own type.
+        if !u.is_left_operanded_unary && equals(u.op, "-") && !u.has_indirection {
+          let neg_recv = self.resolve_operator_operand(u.operand);
+          if neg_recv.is_some() {
+            let neg_rt = self.lookup_impl_method_rtype(
+              neg_recv.unwrap().type_name,
+              "op_neg"
+            );
+            if neg_rt.is_some() {
+              ret .Some(*neg_rt.unwrap());
+            }
+          }
+          ret self.infer_let_expr_type(u.operand);
+        }
         // `let v = await fn(...);`: `v`'s own type is the awaited
         // call's own declared return type - unresolved otherwise (no
         // case fell through to anything but `.None` here), which left
@@ -19513,11 +19874,13 @@ impl Codegen {
     // identical to a thread entry point's own expected shape
     // (`__fun_thread_start`'s own `entry`/`arg` below), so a closure's
     // `{fn, env}` pair plugs directly into `Thread.start`/`thread_start`
-    // with no translation at all. Unconditional, like every other
+    // with no translation at all. `fn_raw` is the same pointer seen as a
+    // `void*`, which is how Fun code reads `c.fn`, since ISO C has no
+    // conversion between the two. Unconditional, like every other
     // header/helper above - a program with no closures in it just never
     // references the name.
     self.state.write(
-      "typedef struct { void* fn; void* env; } __fun_closure_t;\n"
+      "typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;\n"
     );
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
@@ -22034,8 +22397,7 @@ impl Codegen {
       fit n.kind {
         .Function(f) -> {
           if !f.has_type_params && !self.is_signature_only_doc_node(n) &&
-            !equals(f.name, "main") && !f.is_variadic &&
-            self.function_prototype_is_safe_early(n) {
+            !equals(f.name, "main") && self.function_prototype_is_safe_early(n) {
             self.hoist_insert_pos = .Some(self.state.out.len());
             let ferr = self.emit_function_prototype(n);
             if ferr.is_some() {
@@ -26770,7 +27132,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <ctype.h>
     `#include <limits.h>
     `static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }
-    `typedef struct { void* fn; void* env; } __fun_closure_t;
+    `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }

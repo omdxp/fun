@@ -3324,3 +3324,269 @@ test "a generic function's own declared return type can be closure() T" {
   );
   assert equals(out, "42\n"), "expected the generic function's returned closure, called back in main, to print 42";
 }
+
+test "a global holding a generic compound whose impl calls a Fun-bodied variadic function compiles" {
+  // A global `const b = Box<num>{...}` forces `Box<num>`'s own impl
+  // methods to be emitted ahead of the stdlib's function bodies, and the
+  // early prototype pass skipped every variadic function outright - so
+  // `format`, called from `to_string`, had no C prototype yet at that
+  // point ("call to undeclared function 'format'").
+  str src = `use std.io;
+  `use std.shapes;
+  `compound Box<T> {
+  `  T v;
+  `}
+  `impl Box<T> as Display {
+  `  to_string() str {
+  `    ret format("Box({})", self.v);
+  `  }
+  `}
+  `const b = Box<num>{v = 7};
+  `fun main() num {
+  `  println(b.to_string());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_generic_variadic_proto",
+    "a global generic compound's impl calling a variadic function compiles"
+  );
+  assert contains(out, "Box(7)"), "expected the variadic call from the early-emitted impl method to compile and run";
+}
+
+test "a let- or const-inferred global initialized with a qualified enum variant compiles" {
+  // `infer_let_expr_type` read `Color.Green` as a field chain on a value
+  // named `Color`, found nothing, so the enum was never emitted ahead of
+  // the global's own initializer ("unknown identifier 'Color'").
+  str src = `use std.io;
+  `enum Color {
+  `  Red,
+  `  Green,
+  `}
+  `let tint = Color.Green;
+  `const shade = Color.Red;
+  `fun main() num {
+  `  println_fmt("{num} {num}", tint == .Green ? 1 : 0, shade == .Red ? 1 : 0);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "global_qualified_enum_let",
+    "a qualified enum variant global compiles"
+  );
+  assert contains(out, "1 1"), "expected both inferred enum globals to hold their variants";
+}
+
+test "a method called on a parenthesized overloaded operator resolves its receiver" {
+  // `resolve_field_chain` knew a call receiver and a field chain, never an
+  // `op_add`-dispatched `(a + b)`, so the method call had no receiver
+  // type at all and failed outright - generic or not.
+  str src = `use std.io;
+  `compound Vec2<T: num | dec> {
+  `  T x;
+  `  T y;
+  `}
+  `impl Vec2<T> {
+  `  op_add(Vec2<T> o) Vec2<T> {
+  `    ret Vec2<T>{x = self.x + o.x, y = self.y + o.y};
+  `  }
+  `  scale(T k) Vec2<T> {
+  `    ret Vec2<T>{x = self.x * k, y = self.y * k};
+  `  }
+  `}
+  `fun main() num {
+  `  let a = Vec2<num>{x = 1, y = 2};
+  `  let b = Vec2<num>{x = 10, y = 20};
+  `  let c = (a + b).scale(2);
+  `  let d = ((a + b) + a).scale(2);
+  `  println_fmt("{num} {num}", c.x, d.y);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "paren_operator_receiver",
+    "a method on a parenthesized operator compiles"
+  );
+  assert contains(out, "22 48"), "expected both chained results computed through op_add then scale";
+}
+
+test "a closure writes a global in place rather than a captured snapshot of it" {
+  str src = `use std.io;
+  `let calls = 0;
+  `fun bump() closure() num {
+  `  ret fun() num {
+  `    calls = calls + 1;
+  `    ret calls;
+  `  };
+  `}
+  `fun main() num {
+  `  let r = bump();
+  `  let x = r();
+  `  println_fmt("{num} {num}", x, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_writes_global",
+    "a closure's write to a global is visible after the call"
+  );
+  assert contains(out, "1 1"), "expected the global itself incremented, not a private copy";
+}
+
+test "a closure-valued expression can be called on the spot" {
+  str src = `use std.io;
+  `fun mk() closure() num {
+  `  ret fun() num {
+  `    ret 3;
+  `  };
+  `}
+  `fun main() num {
+  `  let a = (fun() num {
+  `    ret 2;
+  `  })();
+  `  println_fmt("{num} {num}", a, mk()());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_called_on_spot",
+    "a closure literal and a closure-returning call called directly"
+  );
+  assert contains(out, "2 3"), "expected both on-the-spot closure calls to run";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "closure_called_on_spot_msvc",
+    "a closure literal and a closure-returning call called directly (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "2 3"), "expected the spliced temp form to compile with no GNU statement expression";
+}
+
+test "let-inferred array literals of compound literals, local and global, iterate fully" {
+  str src = `use std.io;
+  `compound Point {
+  `  num x;
+  `  num y;
+  `}
+  `compound Box<T> {
+  `  T v;
+  `}
+  `let nums = [1, 2, 3];
+  `let pts = [Point{x = 1, y = 2}, Point{x = 3, y = 4}];
+  `let grid = [[1, 2], [3, 4]];
+  `fun main() num {
+  `  let local_pts = [Point{x = 5, y = 6}];
+  `  let boxes = [Box<num>{v = 7}, Box<num>{v = 8}];
+  `  num total = 0;
+  `  for n : nums {
+  `    total = total + n;
+  `  }
+  `  for p : pts {
+  `    total = total + p.x * p.y;
+  `  }
+  `  for q : local_pts {
+  `    total = total + q.x;
+  `  }
+  `  for b : boxes {
+  `    total = total + b.v;
+  `  }
+  `  total = total + grid[1][0];
+  `  println_fmt("{num}", total);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "let_array_of_compounds",
+    "let-inferred arrays of compound literals"
+  );
+  assert contains(out, "43"), "expected every element of every array visited";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "let_array_of_compounds_msvc",
+    "let-inferred arrays of compound literals (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "43"), "expected real array declarators with no auto type";
+}
+
+test "operator overloading dispatches on a compound literal, a plain call's result, and a method call's result, each evaluated once" {
+  str src = `use std.io;
+  `compound V {
+  `  num x;
+  `}
+  `impl V {
+  `  op_add(V o) V {
+  `    ret V{x = self.x + o.x};
+  `  }
+  `  op_eq(V o) flag {
+  `    ret self.x == o.x;
+  `  }
+  `}
+  `compound Holder {
+  `  V v;
+  `}
+  `impl Holder {
+  `  get() V {
+  `    calls = calls + 1;
+  `    ret self.v;
+  `  }
+  `}
+  `num calls = 0;
+  `fun mk(num x) V {
+  `  calls = calls + 1;
+  `  ret V{x = x};
+  `}
+  `fun main() num {
+  `  V a = V{x = 1};
+  `  Holder h = Holder{v = V{x = 5}};
+  `  let b = V{x = 2} + a;
+  `  let c = mk(3) + a;
+  `  let d = V{x = 4} == mk(4);
+  `  let e = (mk(1) + mk(2)).x;
+  `  let s = h.get() + V{x = 1};
+  `  println_fmt("{num} {num} {flag} {num} {num} {num}", b.x, c.x, d, e, s.x, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "op_dispatch_literal_call",
+    "operators on literal and call-result operands"
+  );
+  assert contains(out, "3 4 true 3 6 5"), "expected every operand dispatched, each call run once";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "op_dispatch_literal_call_msvc",
+    "operators on literal and call-result operands (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "3 4 true 3 6 5"), "expected the same results with no GNU-only constructs";
+}
+
+test "a let holding a comparison, logical, negation, or overloaded operator result keeps its real type" {
+  str src = `use std.io;
+  `compound V {
+  `  num x;
+  `}
+  `impl V {
+  `  op_eq(V o) flag {
+  `    ret self.x == o.x;
+  `  }
+  `}
+  `fun main() num {
+  `  num a = 3;
+  `  dec f = 1.5;
+  `  V v = V{x = 4};
+  `  let c1 = a < 5;
+  `  let c2 = c1 && a > 9;
+  `  let c3 = !c1;
+  `  let c4 = v == V{x = 4};
+  `  let n1 = -f;
+  `  println_fmt("{flag} {flag} {flag} {flag} {dec}", c1, c2, c3, c4, n1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "let_flag_results", "lets holding flag and negated results");
+  assert contains(out, "true false false true -1.5"), "expected flags printed as flags and -f kept a dec";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "let_flag_results_msvc",
+    "lets holding flag and negated results (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "true false false true -1.5"), "expected each let declared with its real C type";
+}

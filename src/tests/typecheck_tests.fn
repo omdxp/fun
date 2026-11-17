@@ -4432,3 +4432,200 @@ test "an alias used only inside an expression position still expands before type
     "expected the alias to expand to num, matching the real num argument"
   );
 }
+
+test "a let- or const-inferred global keeps its real type inside every function body" {
+  // Function bodies seeded every global from its written type alone; an
+  // inferred one has none, so it was Unknown everywhere it was read and
+  // nothing about it was ever checked.
+  rejects(
+    `const k = 7;
+    `fun main() {
+    `  str s = k;
+    `}`,
+    "expected a const-inferred num global to reject a str initializer"
+  );
+  rejects(
+    `compound P { num x; }
+    `let p = P{x = 1};
+    `fun main() {
+    `  str s = p;
+    `}`,
+    "expected a let-inferred compound global to reject a str initializer"
+  );
+  rejects(
+    `compound Node<T> {
+    `  T value;
+    `  Node<T>* next;
+    `}
+    `let head = Node<num>{value = 1, next = nil};
+    `fun relink<T>(Node<T>* n) Node<T>* {
+    `  n.next = head;
+    `  ret n;
+    `}
+    `fun main() {}`,
+    "expected a compound value global assigned to a pointer field to be rejected, even inside a generic body"
+  );
+  accepts(
+    `const a = 2;
+    `const b = a + 1;
+    `fun main() {
+    `  num c = b;
+    `  _ = c;
+    `}`,
+    "expected an inferred global reading an earlier inferred global to resolve"
+  );
+}
+
+test "dereferencing a value that is known not to be a pointer is rejected" {
+  rejects(
+    `compound Node { num v; }
+    `let head = Node{v = 1};
+    `fun main() {
+    `  Node n = Node{v = 2};
+    `  *head = n;
+    `}`,
+    "expected *head to be rejected when head is a Node value"
+  );
+  rejects(
+    `fun main() {
+    `  num x = 1;
+    `  num y = *x;
+    `}`,
+    "expected *x to be rejected when x is a num"
+  );
+  accepts(
+    `fun main() {
+    `  num x = 1;
+    `  num* p = &x;
+    `  num y = *p;
+    `  _ = y;
+    `}`,
+    "expected dereferencing a real pointer to stay accepted"
+  );
+}
+
+test "a parameter or local may shadow a top-level global, whichever is declared first" {
+  // The parser's redeclaration check searched the global scope too, so a
+  // global written before the function rejected the parameter while one
+  // written after it never did.
+  accepts(
+    `let head = 1;
+    `fun f(num head) num {
+    `  ret head + 1;
+    `}
+    `fun g() num {
+    `  num head = 5;
+    `  ret head;
+    `}
+    `fun main() {}`,
+    "expected a parameter and a local to shadow a global declared before them"
+  );
+  accepts(
+    `fun f(num head) num {
+    `  ret head + 1;
+    `}
+    `let head = 1;
+    `fun main() {}`,
+    "expected a parameter to shadow a global declared after it"
+  );
+  rejects(
+    `let head = 1;
+    `let head = 2;
+    `fun main() {}`,
+    "expected two globals of the same name to still collide"
+  );
+}
+
+test "a value typed by an enclosing type param reads as that param, not a literal type named T" {
+  // A local declared `T sum` and a field read through `Node<T>*` both
+  // kept the literal name `T`, while a parameter declared `T` was
+  // erased - so `sum + b` was "not defined between T and unknown".
+  accepts(
+    `fun add<T: num | dec>(T a, T b) T {
+    `  T sum = a;
+    `  sum = sum + b;
+    `  ret sum;
+    `}
+    `fun main() {}`,
+    "expected a T-typed local to support whatever its instantiation does"
+  );
+  accepts(
+    `compound Node<T> {
+    `  T value;
+    `  Node<T>* next;
+    `}
+    `fun total<T: num | dec>(Node<T>* n) T {
+    `  T sum = n.value;
+    `  let cur = n.next;
+    `  for cur != nil {
+    `    sum = sum + cur.value;
+    `    cur = cur.next;
+    `  }
+    `  ret sum;
+    `}
+    `fun main() {}`,
+    "expected a T read through a generic field to combine with a T local"
+  );
+}
+
+test "a generic impl's own method bodies are typechecked, not skipped" {
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  get() T {
+    `    str s = 5;
+    `    ret self.v;
+    `  }
+    `}
+    `fun main() {}`,
+    "expected a plain mismatch inside a generic impl method to be rejected"
+  );
+  rejects(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  get() T {
+    `    undefined_call();
+    `    ret self.v;
+    `  }
+    `}
+    `fun main() {}`,
+    "expected an undefined call inside a generic impl method to be rejected"
+  );
+  accepts(
+    `compound Box<T> {
+    `  T v;
+    `}
+    `impl Box<T> {
+    `  get() T {
+    `    T copy = self.v;
+    `    ret copy;
+    `  }
+    `  set(T nv) {
+    `    self.v = nv;
+    `  }
+    `}
+    `fun main() {}`,
+    "expected ordinary T-typed code in a generic impl to stay accepted"
+  );
+}
+
+test "a generic impl's own type param satisfies its target compound's bound inside the impl" {
+  // `impl Vec2<T>`'s `T` is bounded exactly as `Vec2`'s own `T` is, so a
+  // `Vec2<T>{...}` written inside it must not be rejected for `T`.
+  accepts(
+    `compound Vec2<T: num | dec> {
+    `  T x;
+    `}
+    `impl Vec2<T> {
+    `  twice() Vec2<T> {
+    `    ret Vec2<T>{x = self.x + self.x};
+    `  }
+    `}
+    `fun main() {}`,
+    "expected the impl's own T to satisfy Vec2's bound"
+  );
+}

@@ -540,6 +540,31 @@ impl ParseState {
     ret nil;
   }
 
+  // What a new declaration of `name` would collide with: any enclosing
+  // local scope, but never the global/root one once inside a function -
+  // a parameter or local may shadow a top-level global (Fun forbids
+  // shadowing only between locals). Searching the root too made this
+  // depend on declaration order: a global written before the function
+  // rejected the parameter, one written after it never did. At the root
+  // itself, two globals of the same name still collide.
+  pub get_redeclared_entity(str name) ScopeEntity* {
+    let s = self.scope_current;
+    if s == nil {
+      ret nil;
+    }
+    if !s.has_parent {
+      ret s.get_entity_by_name(name);
+    }
+    for s.has_parent {
+      let found = s.get_entity_by_name(name);
+      if found != nil {
+        ret found;
+      }
+      s = s.parent;
+    }
+    ret nil;
+  }
+
   // Walks up the current scope chain for the last-declared entity, stopping
   // at (not including) `stop_scope`.
   pub last_scope_entity_stop_at(Scope* stop_scope) ScopeEntity* {
@@ -1611,6 +1636,71 @@ impl ParseState {
         _ -> {}
       }
     }
+    self._prescan_forward_global_names();
+  }
+
+  // Every depth-0 statement's own declared variable name: the identifier
+  // right before its first top-level `=` or `;` (`num g = 1;`, `let g =
+  // 2;`, `Vec<str> names;`). Statements that never declare a variable
+  // (`use`, `als`, a `fun` prototype, and any whose head opens a `{`
+  // body) are skipped.
+  _prescan_forward_global_names() {
+    num depth = 0;
+    flag at_start = true;
+    flag skip_stmt = false;
+    num i = 0;
+    for i < self.tokens.len {
+      let t = self.tokens.get(i);
+      i = i + 1;
+      if token_is_nl_or_comment_or_newline_separator(t) {
+        continue;
+      }
+      if at_start {
+        at_start = false;
+        skip_stmt = token_is_keyword(t, "use") || token_is_keyword(t, "als");
+      }
+      if token_is_symbol(t, '{') || token_is_operator(t, "(") || token_is_operator(t, "[") {
+        if depth == 0 && token_is_symbol(t, '{') {
+          skip_stmt = true;
+        }
+        depth = depth + 1;
+        continue;
+      }
+      if token_is_symbol(t, '}') || token_is_symbol(t, ')') || token_is_symbol(t, ']') {
+        if depth > 0 {
+          depth = depth - 1;
+        }
+        if depth == 0 && token_is_symbol(t, '}') {
+          at_start = true;
+          skip_stmt = false;
+        }
+        continue;
+      }
+      if depth != 0 {
+        continue;
+      }
+      // `fun name(...) R;`, a bodyless prototype, declares no variable;
+      // `fun(num) num cb = f;` (a function-typed global) still does.
+      if token_is_keyword(t, "fun") && i < self.tokens.len &&
+        self.tokens.get(i).type == .Identifier {
+        skip_stmt = true;
+      }
+      flag ends_head = token_is_operator(t, "=") || token_is_symbol(t, ';');
+      if ends_head && !skip_stmt && i >= 2 {
+        let name_tok = self.tokens.get(i - 2);
+        if name_tok.type == .Identifier {
+          fit name_tok.data {
+            .Sval(name) -> { self.forward_global_names.put(name, true); }
+            _ -> {}
+          }
+        }
+        skip_stmt = true;
+      }
+      if token_is_symbol(t, ';') {
+        at_start = true;
+        skip_stmt = false;
+      }
+    }
   }
 
   // True when `name` is a top-level `compound`/`enum`/`shape` declared
@@ -2031,7 +2121,8 @@ impl Parser {
           if !is_member_access {
             if !is_sizeof_type_operand && self.state.get_scope_entity(name) == nil {
               if self.state.get_symbol(name).is_none() &&
-                !self.state.global_symbols.has(name) {
+                !self.state.global_symbols.has(name) &&
+                !self.state.forward_global_names.has(name) {
                 if !_is_c_macro_ident(name) {
                   flag is_possible_enum_member_access = self.state.next_token_is_operator(".");
                   if !self.state.next_token_is_operator("(") && !is_possible_enum_member_access &&
@@ -3855,7 +3946,7 @@ impl Parser {
       ret .Some(.InvalidIdentifier);
     }
 
-    if self.state.get_scope_entity(name) != nil {
+    if self.state.get_redeclared_entity(name) != nil {
       let msg = format("variable '{str}' already declared", name);
       defer free(msg);
       self.state.err(msg);
@@ -3974,7 +4065,7 @@ impl Parser {
         .Sval(s) -> { nname = s; }
         _ -> {}
       }
-      if self.state.get_scope_entity(nname) != nil {
+      if self.state.get_redeclared_entity(nname) != nil {
         let msg = format("variable '{str}' already declared", nname);
         defer free(msg);
         self.state.err(msg);

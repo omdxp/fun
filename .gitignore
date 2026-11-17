@@ -2,6 +2,9 @@
 node_modules/
 # Generated C, wherever a build or a manual `-out` puts it.
 *.c
+# A codegen test's own staged source (`name.p<pid>n<n>.fn`), left behind
+# whenever the test fails before it can clean up.
+src/tests/fixtures/*.p[0-9]*n[0-9]*.fn
 website/reference/dist/
 website/reference/dist-server/
 website/reference/src/generated/

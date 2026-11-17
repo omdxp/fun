@@ -40,7 +40,7 @@ impl Path {
     ret extname(self.value);
   }
 
-  // True when the path is absolute under POSIX rules.
+  // True when the path is absolute on any platform (see `is_abs`).
   pub is_abs() flag {
     ret is_abs(self.value);
   }
@@ -135,12 +135,19 @@ pub fun try_path_join_many(Vec<str>* parts) Result<str, Error> {
   ret .Ok(out);
 }
 
-// True if path is absolute (POSIX rules).
+// True for an absolute path on any platform: a leading `/` or `\`
+// (POSIX root, Windows root-of-drive or `\\server` share), or a Windows
+// drive letter followed by a separator (`C:\`, `C:/`).
 pub fun is_abs(str path) flag {
-  if len(path) == 0 {
+  num n = len(path);
+  if n == 0 {
     ret false;
   }
-  ret path[0] == '/';
+  if path[0] == '/' || path[0] == '\\' {
+    ret true;
+  }
+  flag drive_letter = (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z');
+  ret n >= 3 && drive_letter && path[1] == ':' && (path[2] == '/' || path[2] == '\\');
 }
 
 // Last segment of a path.
@@ -272,4 +279,130 @@ pub fun try_change_ext(str path, str new_ext) Result<str, Error> {
     ret err_kind(.Invalid, "change_ext failed", "");
   }
   ret .Ok(out);
+}
+
+// True when `text` matches the glob `pattern`: `*` is any run of
+// characters within one path segment, `**` any run across segments
+// (`**/` also matching no segment at all), `?` one character other
+// than `/`, `[abc]`/`[a-z]` one character from a set (`[!...]` or
+// `[^...]` one character outside it), and `\` takes the next character
+// literally. The same dialect `.gitignore` patterns are written in.
+pub fun glob_match(str pattern, str text) flag {
+  ret _glob_match_at(pattern, 0, text, 0);
+}
+
+fun _glob_match_at(str p, num pi, str t, num ti) flag {
+  num pn = len(p);
+  num tn = len(t);
+  for pi < pn {
+    chr c = p[pi];
+    if c == '*' {
+      flag crosses = pi + 1 < pn && p[pi + 1] == '*';
+      num next = pi + 1;
+      if crosses {
+        next = pi + 2;
+        if next < pn && p[next] == '/' && _glob_match_at(p, next + 1, t, ti) {
+          ret true;
+        }
+      }
+      num k = ti;
+      for k <= tn {
+        if _glob_match_at(p, next, t, k) {
+          ret true;
+        }
+        if k == tn || (!crosses && t[k] == '/') {
+          ret false;
+        }
+        k = k + 1;
+      }
+      ret false;
+    }
+    if ti >= tn {
+      ret false;
+    }
+    if c == '?' {
+      if t[ti] == '/' {
+        ret false;
+      }
+      pi = pi + 1;
+      ti = ti + 1;
+      continue;
+    }
+    if c == '[' {
+      num close = pi + 1;
+      if close < pn && (p[close] == '!' || p[close] == '^') {
+        close = close + 1;
+      }
+      if close < pn && p[close] == ']' {
+        close = close + 1;
+      }
+      for close < pn && p[close] != ']' {
+        close = close + 1;
+      }
+      if close < pn {
+        flag negated = p[pi + 1] == '!' || p[pi + 1] == '^';
+        num ci = pi + 1;
+        if negated {
+          ci = ci + 1;
+        }
+        flag in_set = false;
+        flag first = true;
+        for ci < close {
+          if !first || p[ci] != ']' {
+            if ci + 2 < close && p[ci + 1] == '-' {
+              if t[ti] >= p[ci] && t[ti] <= p[ci + 2] {
+                in_set = true;
+              }
+              ci = ci + 3;
+              first = false;
+              continue;
+            }
+          }
+          if p[ci] == t[ti] {
+            in_set = true;
+          }
+          ci = ci + 1;
+          first = false;
+        }
+        if in_set == negated || t[ti] == '/' {
+          ret false;
+        }
+        pi = close + 1;
+        ti = ti + 1;
+        continue;
+      }
+    }
+    if c == '\\' && pi + 1 < pn {
+      pi = pi + 1;
+      c = p[pi];
+    }
+    if c != t[ti] {
+      ret false;
+    }
+    pi = pi + 1;
+    ti = ti + 1;
+  }
+  ret ti == tn;
+}
+
+test "is_abs recognizes POSIX and Windows absolute paths" {
+  assert is_abs("/usr/lib"), "expected a POSIX root";
+  assert is_abs("C:\\Users\\me") && is_abs("c:/x"), "expected a drive-letter path";
+  assert is_abs("\\\\server\\share"), "expected a UNC share";
+  assert !is_abs("src/main.fn") && !is_abs("C:rel") && !is_abs(""), "expected relative paths rejected";
+}
+
+test "glob_match covers the .gitignore dialect" {
+  assert glob_match("*.c", "main.c"), "expected * within a segment";
+  assert !glob_match("*.c", "src/main.c"), "expected * never to cross a slash";
+  assert glob_match("**/*.c", "src/deep/main.c"), "expected ** to cross segments";
+  assert glob_match("**/*.c", "main.c"), "expected **/ to also match no segment";
+  assert glob_match("src/**", "src/a/b.fn"), "expected a trailing ** to match everything below";
+  assert glob_match("a?c", "abc") && !glob_match("a?c", "a/c"), "expected ? to match one non-slash character";
+  assert glob_match("*.p[0-9]*n[0-9]*.fn", "x.p123n4.fn"), "expected digit ranges";
+  assert !glob_match("*.p[0-9]*n[0-9]*.fn", "x.pAn4.fn"), "expected a range to reject outside characters";
+  assert glob_match("[!a]bc", "xbc") && !glob_match("[!a]bc", "abc"), "expected a negated set";
+  assert glob_match("\\*lit", "*lit") && !glob_match("\\*lit", "xlit"), "expected an escaped star to be literal";
+  assert glob_match("node_modules", "node_modules") &&
+    !glob_match("node_modules", "node_modules2"), "expected a plain name to match exactly";
 }

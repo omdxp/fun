@@ -119,7 +119,7 @@ test "formats pointer and address-of spacing" {
   assert equals(got, format("{str}\n", want)), "expected the formatted layout";
 }
 
-test "groups imports and globals at top" {
+test "groups imports at top, leaving every other top-level statement where it was written" {
   str src = `fun main() num{ret 0;}
   `use std.c.io;
   `num x=1;
@@ -128,14 +128,34 @@ test "groups imports and globals at top" {
   str want = `use std.c.io;
   `use foo.bar;
   `
-  `num x = 1;
-  `num y = 2;
-  `
   `fun main() num {
   `  ret 0;
-  `}`;
+  `}
+  `num x = 1;
+  `num y = 2;`;
   str got = format_source(src, "t.fn").unwrap();
   assert equals(got, format("{str}\n", want)), "expected the formatted layout";
+}
+
+test "a top-level let initialized with a compound literal keeps its position and its own semicolon" {
+  // The chunker ended a top-level statement at any depth-0 `}`, so a
+  // compound-literal initializer split the statement before its `;`,
+  // and a `let` global was also hoisted above everything written
+  // before it - the `;` and trailing comment were left glued to
+  // whatever preceded it.
+  str src = `use std.io;
+  `fun a() {}
+  `let head = Point{x = 1}; // note
+  `fun b() {}`;
+  str want = `use std.io;
+  `
+  `fun a() {
+  `}
+  `let head = Point{x = 1}; // note
+  `fun b() {
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert equals(got, format("{str}\n", want)), "expected the global to stay between a and b, semicolon attached";
 }
 
 test "keeps unused warning controls attached to grouped imports and globals" {
@@ -149,7 +169,6 @@ test "keeps unused warning controls attached to grouped imports and globals" {
   `
   `allow unused_variable, "keep attached";
   `num value = 1;
-  `
   `fun main() {
   `}`;
   str got = format_source(src, "t.fn").unwrap();
@@ -727,4 +746,16 @@ test "a boolean chain used as a call's own over-long argument now wraps through 
     i = i + 1;
   }
   assert !over_width, "expected every wrapped line to stay within the width budget, the call's own arguments wrapped now";
+}
+
+test "a ternary's own question mark keeps its space before an enum shorthand branch" {
+  // Pressed against the `?`, `t ?.A : .B` reads as a propagation followed
+  // by a member access.
+  str src = `fun main() {
+  `  C d = t ? .A : .B;
+  `  let v = g()?.field;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "t ? .A : .B"), "expected the ternary's shorthand branch spaced like any other operand";
+  assert contains(got, "g()?.field"), "expected a real propagation chain left pressed together";
 }
