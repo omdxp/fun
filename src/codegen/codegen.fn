@@ -9695,7 +9695,7 @@ impl Codegen {
         cl_sb.append(format_num(n));
         cl_sb.append(";\n__fun_closure_val_");
         cl_sb.append(format_num(n));
-        cl_sb.append(".fn = (void*)");
+        cl_sb.append(".fn = (void* (*)(void*))");
         cl_sb.append(entry_name);
         cl_sb.append(";\n__fun_closure_val_");
         cl_sb.append(format_num(n));
@@ -10334,6 +10334,20 @@ impl Codegen {
     fit e.right.kind {
       .Identifier(name) -> { field_name = name; }
       _ -> { ret .Some(.UnsupportedNode); }
+    }
+    // A closure's own `.fn`, read from Fun code as a `raw*`, is the
+    // union's object-pointer view: ISO C has no conversion between a
+    // function pointer and `void*`.
+    if equals(field_name, "fn") {
+      let fn_recv_dt = self.infer_let_expr_type(e.left);
+      if fn_recv_dt.is_some() && fn_recv_dt.unwrap().has_closure_sig {
+        let fn_recv_err = self.emit_expr(*e.left);
+        if fn_recv_err.is_some() {
+          ret fn_recv_err;
+        }
+        self.state.write(".fn_raw");
+        ret .None;
+      }
     }
 
     str enum_recv_name = "";
@@ -17630,7 +17644,9 @@ impl Codegen {
           // declarator - a bare `{...}` is illegal there (C requires
           // the explicit `(Type){...}` cast outside a declaration),
           // the opposite of the declaration case right below.
-          if (!is_let || let_msvc_wrote_real_type) && !needs_runtime {
+          // A bracket-literal `let` global's declarator is a real
+          // array type too (`P pts[] = ...`), so the same holds there.
+          if (!is_let || let_msvc_wrote_real_type || glet_is_bracket_literal) && !needs_runtime {
             self.in_bare_initializer_context = true;
           }
           // A shape-typed global's initializer needs the same
@@ -19858,11 +19874,13 @@ impl Codegen {
     // identical to a thread entry point's own expected shape
     // (`__fun_thread_start`'s own `entry`/`arg` below), so a closure's
     // `{fn, env}` pair plugs directly into `Thread.start`/`thread_start`
-    // with no translation at all. Unconditional, like every other
+    // with no translation at all. `fn_raw` is the same pointer seen as a
+    // `void*`, which is how Fun code reads `c.fn`, since ISO C has no
+    // conversion between the two. Unconditional, like every other
     // header/helper above - a program with no closures in it just never
     // references the name.
     self.state.write(
-      "typedef struct { void* fn; void* env; } __fun_closure_t;\n"
+      "typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;\n"
     );
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
@@ -27114,7 +27132,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <ctype.h>
     `#include <limits.h>
     `static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }
-    `typedef struct { void* fn; void* env; } __fun_closure_t;
+    `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
