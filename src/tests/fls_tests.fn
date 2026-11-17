@@ -11103,3 +11103,59 @@ test "inlay hints type a closure call's result, held in a local or called on the
   assert contains(hints, `"label":": str"`), "expected the literal called on the spot typed by its own return";
   assert count(hints, `"label":": closure() num"`) == 1, "expected only r itself to keep the closure type";
 }
+
+test "a channel receive types its let by the channel's own element type" {
+  str src = `compound Channel<T> { T slot; }
+  `compound Item { num qty; }
+  `fun main() {
+  `  Channel<Item> ch;
+  `  Channel<num>* pc;
+  `  let a = <- ch;
+  `  let b = (<- pc) + 1;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///chan_recv.fn";
+  doc.path = "chan_recv.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 8);
+  assert contains(hints, `"label":": Item"`), "expected a receive from Channel<Item> typed Item";
+  assert contains(hints, `"label":": num"`), "expected a receive through a channel pointer typed by its element";
+}
+
+test "a value typed by a bounded type param resolves members through its bound" {
+  str src = `shape Weigh {
+  `  weight() num;
+  `  label() str;
+  `}
+  `fun total<T: Weigh>(T a, T* b) num {
+  `  let w = a.weight();
+  `  let s = b.label();
+  `  ret w;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///bounded_param.fn";
+  doc.path = "bounded_param.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 9);
+  assert contains(hints, `"label":": num"`), "expected a bound method's own return type";
+  assert contains(hints, `"label":": str"`), "expected the same through a pointer to the type param";
+  str h = hover(&reads, doc, 5, 13);
+  assert contains(h, "weight() num"), "expected hover on the method to find the bound's own member";
+
+  doc.text = `shape Weigh {
+  `  weight() num;
+  `}
+  `fun total<T: Weigh>(T a) num {
+  `  a.
+  `  ret 0;
+  `}`;
+  doc.version = 2;
+  str comp = completion(&reads, doc, 4, 4, true);
+  assert contains(comp, `"label":"weight"`), "expected the bound's members offered mid-edit";
+}

@@ -209,6 +209,11 @@ pub fun completion(
         }
         if equals(local_type, "") {
           local_type = _receiver_type_from_tokens(&tokens, receiver);
+          // A bounded type param's own value lists its bound's members.
+          str param_bound = type_param_bound_from_tokens(&tokens, local_type, line);
+          if !equals(param_bound, "") {
+            local_type = param_bound;
+          }
         }
         // Unlike every other source `local_type` can come from here (the
         // receiver's own name, or a token borrowed straight out of

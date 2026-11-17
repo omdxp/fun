@@ -1167,6 +1167,39 @@ pub fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
   ret "";
 }
 
+// The single bound of the nearest type param named `name` declared at
+// or before 0-based `line` (`<T: Weigh>` -> "Weigh"), token-only; ""
+// when that nearest declaration is unbounded or bounded by a union.
+pub fun type_param_bound_from_tokens(Vec<Token>* tokens, str name, num line) str {
+  str bound = "";
+  num i = 1;
+  for i + 1 < tokens.len {
+    Token t = tokens.get(i);
+    if t.pos.line - 1 > line {
+      break;
+    }
+    if t.type == .Identifier && equals(token_word(t), name) {
+      Token prev = tokens.get(i - 1);
+      Token next = tokens.get(i + 1);
+      if token_is_operator(prev, "<") || token_is_operator(prev, ",") {
+        if token_is_operator(next, ":") {
+          bound = "";
+          if i + 3 < tokens.len && tokens.get(i + 2).type == .Identifier {
+            Token after_bound = tokens.get(i + 3);
+            if token_is_operator(after_bound, ">") || token_is_operator(after_bound, ",") {
+              bound = token_word(tokens.get(i + 2));
+            }
+          }
+        } elif token_is_operator(next, ">") || token_is_operator(next, ",") {
+          bound = "";
+        }
+      }
+    }
+    i = i + 1;
+  }
+  ret bound;
+}
+
 // `type_name`'s own declared field named `field_name`, resolved to
 // its own type, token-only: `_receiver_type_from_tokens`'s own
 // backward-from-a-name-token walk answers "what declares this name
@@ -2685,7 +2718,15 @@ pub fun type_name_of_local(
     }
     ret bare_type_expr(inferred);
   }
-  ret bare_type_from_detail(d.detail);
+  str declared = bare_type_from_detail(d.detail);
+  // A value typed by a bounded type param (`T a` in `fun f<T: Weigh>`)
+  // resolves members through its bound.
+  str bound = enclosing_type_param_bound(program, file, line, declared);
+  if equals(bound, "") {
+    ret declared;
+  }
+  free(declared);
+  ret bound;
 }
 
 // `type_expr`'s own bare name, with any generic args or pointer
@@ -5793,6 +5834,54 @@ fun _infer_type_primary(
       ret "";
     }
     .Operator -> {
+      // `<- ch`: a receive yields the channel's own element type, its
+      // first generic argument, whether `ch` is the channel itself or a
+      // pointer to one.
+      if token_is_operator(val_tok, "<-") {
+        let chan_opt = token_after(tokens, index_of_token(tokens, val_tok) + 1);
+        if chan_opt.is_none() {
+          ret "";
+        }
+        Vec<str> chan_args;
+        chan_args.init(2);
+        defer _free_str_vec_deep(&chan_args);
+        num recv_end = -1;
+        str chan_type = _infer_type_primary(
+          tokens,
+          chan_opt.unwrap(),
+          program,
+          file,
+          line,
+          &chan_args,
+          depth + 1,
+          &recv_end
+        );
+        if equals(chan_type, "") {
+          ret "";
+        }
+        str chan_base = _type_text_base(chan_type);
+        flag is_channel = equals(chan_base, "Channel");
+        free(chan_base);
+        // The element type sits in `chan_args`, or in `chan_type` itself
+        // when that already carries its own `<...>`.
+        if chan_args.len == 0 {
+          str chan_core = _type_text_core(chan_type);
+          _free_str_vec_deep(&chan_args);
+          chan_args = generic_args_of_detail(chan_core);
+          free(chan_core);
+        }
+        free(chan_type);
+        if !is_channel || chan_args.len == 0 || recv_end < 0 {
+          ret "";
+        }
+        str elem = substr(chan_args.get(0), 0, len(chan_args.get(0)));
+        // The operand's own extent, so a caller sees what follows it.
+        *out_end_idx = recv_end;
+        if out_args != nil {
+          *out_args = generic_args_of_detail(elem);
+        }
+        ret elem;
+      }
       // `(<expr>)`: unwraps to whatever the inner expression resolves
       // to (itself possibly a further binary expression, handled by
       // `_infer_type`'s own recursive call here), with the outer end
@@ -6834,6 +6923,63 @@ pub fun enclosing_return_dtype(Vec<Node>* program, str file, num line) Option<Da
     }
   }
   ret .None;
+}
+
+// The single declared bound of type param `name` on the function or
+// method enclosing `line` (`fun f<T: Weigh>` -> "Weigh"), as a fresh
+// string; "" when `name` isn't such a param or its bound isn't exactly
+// one type.
+pub fun enclosing_type_param_bound(Vec<Node>* program, str file, num line, str name) str {
+  num i = 0;
+  for i < program.len {
+    Node n = program.get(i);
+    i = i + 1;
+    fit n.kind {
+      .Function(f) -> {
+        if covers(n, f, file, line) {
+          ret _type_param_bound_of(f, name);
+        }
+      }
+      .Impl(im) -> {
+        num mi = 0;
+        for mi < im.methods.len {
+          Node* m = im.methods.get(mi);
+          mi = mi + 1;
+          if m == nil {
+            continue;
+          }
+          fit m.kind {
+            .Function(mf) -> {
+              if covers(*m, mf, file, line) {
+                ret _type_param_bound_of(mf, name);
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      _ -> {}
+    }
+  }
+  ret "";
+}
+
+fun _type_param_bound_of(FunctionNode f, str name) str {
+  if !f.has_type_params || !f.has_type_param_constraints {
+    ret "";
+  }
+  num t = 0;
+  for t < f.type_params.len && t < f.type_param_constraints.len {
+    if equals(f.type_params.get(t), name) {
+      Vec<str> alts = f.type_param_constraints.get(t);
+      if alts.len != 1 {
+        ret "";
+      }
+      ret substr(alts.get(0), 0, len(alts.get(0)));
+    }
+    t = t + 1;
+  }
+  ret "";
 }
 
 // True when `line` falls inside the function `f` declared by `n`, in
