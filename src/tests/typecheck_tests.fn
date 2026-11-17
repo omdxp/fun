@@ -4612,3 +4612,20 @@ test "a generic impl's own method bodies are typechecked, not skipped" {
     "expected ordinary T-typed code in a generic impl to stay accepted"
   );
 }
+
+test "a generic impl's own type param satisfies its target compound's bound inside the impl" {
+  // `impl Vec2<T>`'s `T` is bounded exactly as `Vec2`'s own `T` is, so a
+  // `Vec2<T>{...}` written inside it must not be rejected for `T`.
+  accepts(
+    `compound Vec2<T: num | dec> {
+    `  T x;
+    `}
+    `impl Vec2<T> {
+    `  twice() Vec2<T> {
+    `    ret Vec2<T>{x = self.x + self.x};
+    `  }
+    `}
+    `fun main() {}`,
+    "expected the impl's own T to satisfy Vec2's bound"
+  );
+}

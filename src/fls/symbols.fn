@@ -4978,13 +4978,17 @@ pub fun chain_ending_receiver(
         // an ordinary function's own return type already resolves
         // through.
         str local_fn_type = type_name_of_local(tokens, program, name, file, line);
-        if !starts_with(local_fn_type, "fun(") {
+        // A closure local (`closure() num c`, or a `let` holding one)
+        // is called the same way, its result after the same `)`.
+        flag callable_shape = starts_with(local_fn_type, "fun(") ||
+          starts_with(local_fn_type, "closure(");
+        if !callable_shape {
           let alias = _find_type_alias(program, local_fn_type);
           if alias.is_some() && alias.unwrap().body != nil {
             local_fn_type = render_type(alias.unwrap().body);
           }
         }
-        if starts_with(local_fn_type, "fun(") {
+        if starts_with(local_fn_type, "fun(") || starts_with(local_fn_type, "closure(") {
           num close = _signature_params_close(local_fn_type);
           if close >= 0 {
             str rtype_text = trim(
@@ -5317,6 +5321,31 @@ fun _infer_type(
   );
   if equals(base_type, "") || end_idx < 0 {
     ret base_type;
+  }
+  // A callable value called on the spot (`(fun() num {...})()`,
+  // `make()()`): its result is the callable's own return type, as many
+  // times over as it's called.
+  for starts_with(base_type, "closure(") || starts_with(base_type, "fun(") {
+    let call_open = token_after(tokens, end_idx + 1);
+    if call_open.is_none() || !token_is_operator(call_open.unwrap(), "(") {
+      break;
+    }
+    let call_close = matching_rparen(tokens, index_of_token(tokens, call_open.unwrap()));
+    num params_close = _signature_params_close(base_type);
+    if call_close.is_none() || params_close < 0 {
+      break;
+    }
+    str called_rtype = trim(
+      substr(base_type, params_close + 1, len(base_type) - params_close - 1)
+    );
+    if equals(called_rtype, "") {
+      ret "";
+    }
+    base_type = called_rtype;
+    end_idx = call_close.unwrap();
+    if out_args != nil {
+      *out_args = generic_args_of_detail(called_rtype);
+    }
   }
   let op_tok_opt = token_after(tokens, end_idx + 1);
   if op_tok_opt.is_none() {
@@ -5849,10 +5878,25 @@ fun _infer_type_primary(
         // backward from, so any further chain past the closing paren
         // is continued forward here instead.
         num chain_end = close_opt.unwrap();
+        // Seeded with the inner value's full type (`Vec2<num>`), not its
+        // bare name: a method reached past the `)` is looked up against
+        // the receiver's own generic args, or its return type stays the
+        // unsubstituted template.
+        str walk_start = _infer_full_type(
+          tokens,
+          inner_opt.unwrap(),
+          program,
+          file,
+          line,
+          depth + 1
+        );
+        if equals(walk_start, "") {
+          walk_start = inner_type;
+        }
         str chained = _walk_forward_chain(
           tokens,
           close_opt.unwrap(),
-          inner_type,
+          walk_start,
           program,
           &chain_end,
           out_args

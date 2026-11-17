@@ -3376,3 +3376,87 @@ test "a let- or const-inferred global initialized with a qualified enum variant 
   );
   assert contains(out, "1 1"), "expected both inferred enum globals to hold their variants";
 }
+
+test "a method called on a parenthesized overloaded operator resolves its receiver" {
+  // `resolve_field_chain` knew a call receiver and a field chain, never an
+  // `op_add`-dispatched `(a + b)`, so the method call had no receiver
+  // type at all and failed outright - generic or not.
+  str src = `use std.io;
+  `compound Vec2<T: num | dec> {
+  `  T x;
+  `  T y;
+  `}
+  `impl Vec2<T> {
+  `  op_add(Vec2<T> o) Vec2<T> {
+  `    ret Vec2<T>{x = self.x + o.x, y = self.y + o.y};
+  `  }
+  `  scale(T k) Vec2<T> {
+  `    ret Vec2<T>{x = self.x * k, y = self.y * k};
+  `  }
+  `}
+  `fun main() num {
+  `  let a = Vec2<num>{x = 1, y = 2};
+  `  let b = Vec2<num>{x = 10, y = 20};
+  `  let c = (a + b).scale(2);
+  `  let d = ((a + b) + a).scale(2);
+  `  println_fmt("{num} {num}", c.x, d.y);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "paren_operator_receiver",
+    "a method on a parenthesized operator compiles"
+  );
+  assert contains(out, "22 48"), "expected both chained results computed through op_add then scale";
+}
+
+test "a closure writes a global in place rather than a captured snapshot of it" {
+  str src = `use std.io;
+  `let calls = 0;
+  `fun bump() closure() num {
+  `  ret fun() num {
+  `    calls = calls + 1;
+  `    ret calls;
+  `  };
+  `}
+  `fun main() num {
+  `  let r = bump();
+  `  let x = r();
+  `  println_fmt("{num} {num}", x, calls);
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_writes_global",
+    "a closure's write to a global is visible after the call"
+  );
+  assert contains(out, "1 1"), "expected the global itself incremented, not a private copy";
+}
+
+test "a closure-valued expression can be called on the spot" {
+  str src = `use std.io;
+  `fun mk() closure() num {
+  `  ret fun() num {
+  `    ret 3;
+  `  };
+  `}
+  `fun main() num {
+  `  let a = (fun() num {
+  `    ret 2;
+  `  })();
+  `  println_fmt("{num} {num}", a, mk()());
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_called_on_spot",
+    "a closure literal and a closure-returning call called directly"
+  );
+  assert contains(out, "2 3"), "expected both on-the-spot closure calls to run";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "closure_called_on_spot_msvc",
+    "a closure literal and a closure-returning call called directly (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "2 3"), "expected the spliced temp form to compile with no GNU statement expression";
+}

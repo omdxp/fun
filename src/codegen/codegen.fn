@@ -4976,6 +4976,19 @@ impl Codegen {
   // via `record_local_typed`. `.None` covers both "not a known local" and
   // "recorded via plain `record_local`"; `lookup_local_type_name`
   // distinguishes the two.
+  // `lookup_local_dtype` without its global fallback: a real local or
+  // parameter of the function being emitted, nothing else.
+  _lookup_function_local_dtype(str name) Option<DataType> {
+    num i = self.local_names.len - 1;
+    for i >= 0 {
+      if equals(self.local_names.get(i), name) {
+        ret self.local_dtype.get(i);
+      }
+      i = i - 1;
+    }
+    ret .None;
+  }
+
   lookup_local_dtype(str name) Option<DataType> {
     num i = self.local_names.len - 1;
     for i >= 0 {
@@ -7660,6 +7673,30 @@ impl Codegen {
     // An alias-qualified callee (`cmath.log(x)`) names the C binding
     // directly, so it keeps its raw name; see `effective_function_name`.
     flag callee_is_alias_qualified = false;
+    // A callee that is itself a closure-valued expression rather than a
+    // name: a closure literal called on the spot (`(fun() num {...})()`)
+    // or a call returning one (`make()()`). Rendered once into its own
+    // `__fun_closure_t` temp, spliced before the statement, then called
+    // through it exactly like a closure-typed local - `.fn`/`.env` are
+    // each read off it, which a re-rendered expression can't afford.
+    flag callee_is_name = false;
+    fit e.left.kind {
+      .Identifier(_) -> { callee_is_name = true; }
+      .Expression(dot_e) -> { callee_is_name = equals(dot_e.op, "."); }
+      _ -> {}
+    }
+    if !callee_is_name {
+      let callee_dt = self.infer_let_expr_type(e.left);
+      if callee_dt.is_some() && callee_dt.unwrap().has_closure_sig {
+        let callee_text = self._render_expr_isolated(e.left)?!(.UnsupportedNode);
+        self.closure_counter = self.closure_counter + 1;
+        str tmp_name = format("__fun_closure_call_{num}", self.closure_counter);
+        self._splice_before_statement(
+          format("__fun_closure_t {str} = {str};\n", tmp_name, callee_text)
+        );
+        ret self.emit_closure_call(tmp_name, callee_dt.unwrap().closure_sig, e.right);
+      }
+    }
     fit e.left.kind {
       .Identifier(name) -> { callee_name = name; }
       .Expression(recv_e) -> {
@@ -9336,7 +9373,10 @@ impl Codegen {
         cap_dtypes.init(4);
         defer cap_dtypes.free();
         for name : free_names.keys() {
-          let dt_opt = self.lookup_local_dtype(name);
+          // Locals only: a global is shared program-wide state, read and
+          // written in place - capturing a snapshot of one made the
+          // closure's own writes to it vanish.
+          let dt_opt = self._lookup_function_local_dtype(name);
           if dt_opt.is_some() {
             cap_names.push(name);
             cap_dtypes.push(dt_opt.unwrap());
@@ -9358,6 +9398,11 @@ impl Codegen {
           }
           self.state.write(";\n");
           ei = ei + 1;
+        }
+        // An empty struct is a GNU extension MSVC rejects outright; a
+        // closure capturing nothing still gets a real (unused) member.
+        if cap_names.len == 0 {
+          self.state.write("  char __fun_no_captures;\n");
         }
         self.state.write("} ");
         self.state.write(env_name);
@@ -9556,35 +9601,7 @@ impl Codegen {
         cl_sb.append(";\n");
         str cl_text = cl_sb.build();
 
-        let cl_hoist_save = self.hoist_insert_pos;
-        let cl_splice_pos = self.current_stmt_start_pos;
-        self.hoist_insert_pos = cl_splice_pos;
-        // Mirrors `?`/`!` propagation's own identical fallback: a
-        // closure literal evaluated from inside another construct's
-        // own suspended scratch render (nested inside a generic
-        // instantiation, say) has `current_stmt_start_pos` cleared,
-        // same as `hoist_insert_pos` - routed through
-        // `root_stmt_start_pos` instead for the duration of this one
-        // splice.
-        flag cl_routed_via_root_stmt = false;
-        let cl_saved_root_hoist = self.root_hoist_pos;
-        if cl_splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
-          self.root_stmt_start_pos.is_some() {
-          self.root_hoist_pos = self.root_stmt_start_pos;
-          cl_routed_via_root_stmt = true;
-        }
-        self.emit_hoisted(cl_text);
-        if cl_routed_via_root_stmt {
-          self.root_hoist_pos = cl_saved_root_hoist;
-        }
-        if cl_splice_pos.is_some() {
-          cl_hoist_save = adjust_pos_after_splice(
-            cl_hoist_save,
-            cl_splice_pos.unwrap(),
-            len(cl_text)
-          );
-        }
-        self.hoist_insert_pos = cl_hoist_save;
+        self._splice_before_statement(cl_text);
         self.state.write("__fun_closure_val_");
         self.state.write(format_num(n));
         ret .None;
@@ -10407,6 +10424,20 @@ impl Codegen {
   // `resolve_field_chain` purely to read `.type_name` off it.
   _resolve_call_rtype(ExprNode inner_e) Option<DataType> {
     Option<DataType> call_rtype = .None;
+    // A closure-valued callee that isn't a name (`(fun() num {...})()`,
+    // `make()()`): the call's result is the closure's own return type.
+    flag callee_is_name = false;
+    fit inner_e.left.kind {
+      .Identifier(_) -> { callee_is_name = true; }
+      .Expression(dot_e) -> { callee_is_name = equals(dot_e.op, "."); }
+      _ -> {}
+    }
+    if !callee_is_name {
+      let callee_dt = self.infer_let_expr_type(inner_e.left);
+      if callee_dt.is_some() && callee_dt.unwrap().has_closure_sig {
+        ret .Some(*callee_dt.unwrap().closure_sig.rtype);
+      }
+    }
     fit inner_e.left.kind {
       .Identifier(fn_name) -> {
         let rt = self.lookup_function_rtype(fn_name);
@@ -10623,6 +10654,84 @@ impl Codegen {
     ret .Some(self.lookup_compound_field(t_name, field_name)?.dtype?);
   }
 
+  // `node`'s own C text, rendered into a throwaway buffer rather than
+  // written at the current position. `hoist_insert_pos`/
+  // `current_stmt_start_pos` are suspended for the swap, so a nested
+  // hoisted emission splices into the real buffer rather than this
+  // throwaway one; `suppress_generic_impl_method_draining` additionally
+  // stops a method from being emitted while `self.state` points here (it
+  // is enqueued instead and drained once the real state is restored,
+  // unless an outer drain or probe is already running). `.None` when
+  // `node` doesn't emit.
+  _render_expr_isolated(Node* node) Option<str> {
+    if self.hoist_scratch_depth == 0 {
+      self.root_state = self.state;
+      self.root_hoist_pos = self.hoist_insert_pos;
+      self.root_stmt_start_pos = self.current_stmt_start_pos;
+    }
+    self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
+    CodegenState scratch = self.new_scratch_state();
+    CodegenState* saved_state = self.state;
+    let saved_hoist_pos = self.hoist_insert_pos;
+    let saved_stmt_start_pos = self.current_stmt_start_pos;
+    let prev_suppress = self.suppress_generic_impl_method_draining;
+    self.state = &scratch;
+    self.hoist_insert_pos = .None;
+    self.current_stmt_start_pos = .None;
+    self.suppress_generic_impl_method_draining = true;
+    let err = self.emit_expr(*node);
+    self.state = saved_state;
+    self.hoist_insert_pos = saved_hoist_pos;
+    self.current_stmt_start_pos = saved_stmt_start_pos;
+    self.suppress_generic_impl_method_draining = prev_suppress;
+    self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
+    if self.hoist_scratch_depth == 0 {
+      // Leaving nested scratch territory. `root_stmt_start_pos` holds the
+      // current position after any splices made during the nested
+      // session and can be ahead of the restored `saved_stmt_start_pos`,
+      // so syncing back to it keeps a further temp hoist after
+      // everything already spliced. `hoist_insert_pos` needs the same
+      // resync, since a nested instantiation advances `root_hoist_pos`
+      // directly.
+      self.current_stmt_start_pos = self.root_stmt_start_pos;
+      self.hoist_insert_pos = self.root_hoist_pos;
+    }
+    if !prev_suppress && !self.draining_generic_impl_methods {
+      self.drain_pending_generic_impl_methods();
+    }
+    if err.is_some() {
+      ret .None;
+    }
+    ret .Some(scratch.out.build());
+  }
+
+  // Splices `text` (whole statements) in right before the statement being
+  // emitted - the portable alternative to a GNU statement expression,
+  // which MSVC rejects. A splice made from inside another construct's own
+  // suspended scratch render, where `current_stmt_start_pos` is cleared,
+  // is routed through `root_stmt_start_pos` instead, the same fallback
+  // `?`/`!` propagation uses.
+  _splice_before_statement(str text) {
+    let hoist_save = self.hoist_insert_pos;
+    let splice_pos = self.current_stmt_start_pos;
+    self.hoist_insert_pos = splice_pos;
+    flag routed_via_root_stmt = false;
+    let saved_root_hoist = self.root_hoist_pos;
+    if splice_pos.is_none() && self.hoist_scratch_depth > 0 &&
+      self.root_stmt_start_pos.is_some() {
+      self.root_hoist_pos = self.root_stmt_start_pos;
+      routed_via_root_stmt = true;
+    }
+    self.emit_hoisted(text);
+    if routed_via_root_stmt {
+      self.root_hoist_pos = saved_root_hoist;
+    }
+    if splice_pos.is_some() {
+      hoist_save = adjust_pos_after_splice(hoist_save, splice_pos.unwrap(), len(text));
+    }
+    self.hoist_insert_pos = hoist_save;
+  }
+
   resolve_field_chain(Node* recv) Option<ChainResolution> {
     fit recv.kind {
       .Identifier(name) -> {
@@ -10651,51 +10760,7 @@ impl Codegen {
           let rdt = self._resolve_call_rtype(inner_e)?;
           let resolved_name = self.resolve_type_name(rdt)?;
 
-          // `hoist_insert_pos`/`current_stmt_start_pos` are suspended for
-          // this scratch-buffer swap, so a nested hoisted emission
-          // splices into the real buffer rather than this throwaway one.
-          // `suppress_generic_impl_method_draining` additionally stops a
-          // method from being emitted while `self.state` points here; it
-          // is enqueued instead and drained once the real state is
-          // restored, unless an outer drain or probe is already running.
-          if self.hoist_scratch_depth == 0 {
-            self.root_state = self.state;
-            self.root_hoist_pos = self.hoist_insert_pos;
-            self.root_stmt_start_pos = self.current_stmt_start_pos;
-          }
-          self.hoist_scratch_depth = self.hoist_scratch_depth + 1;
-          CodegenState call_scratch = self.new_scratch_state();
-          CodegenState* saved_call_state = self.state;
-          let saved_call_hoist_pos = self.hoist_insert_pos;
-          let saved_call_stmt_start_pos = self.current_stmt_start_pos;
-          let prev_suppress = self.suppress_generic_impl_method_draining;
-          self.state = &call_scratch;
-          self.hoist_insert_pos = .None;
-          self.current_stmt_start_pos = .None;
-          self.suppress_generic_impl_method_draining = true;
-          let cerr = self.emit_expr(*recv);
-          self.state = saved_call_state;
-          self.hoist_insert_pos = saved_call_hoist_pos;
-          self.current_stmt_start_pos = saved_call_stmt_start_pos;
-          self.suppress_generic_impl_method_draining = prev_suppress;
-          self.hoist_scratch_depth = self.hoist_scratch_depth - 1;
-          if self.hoist_scratch_depth == 0 {
-            // Leaving nested receiver-chain territory. `root_stmt_start
-            // _pos` holds the current position after any splices made
-            // during the nested session and can be ahead of the restored
-            // `saved_call_stmt_start_pos`, so syncing back to it keeps a
-            // further receiver-temp hoist after everything already
-            // spliced. `hoist_insert_pos` needs the same resync, since a
-            // nested instantiation advances `root_hoist_pos` directly.
-            self.current_stmt_start_pos = self.root_stmt_start_pos;
-            self.hoist_insert_pos = self.root_hoist_pos;
-          }
-          if !prev_suppress && !self.draining_generic_impl_methods {
-            self.drain_pending_generic_impl_methods();
-          }
-          if cerr.is_some() {
-            ret .None;
-          }
+          let call_text = self._render_expr_isolated(recv)?;
 
           // The call's rendered text is an rvalue: fine to embed for a
           // further `.field` read, but not addressable, so a caller
@@ -10704,12 +10769,25 @@ impl Codegen {
           // Hoisting here unconditionally would inject an extra statement
           // for a plain field read that never needs addressing.
           ChainResolution r;
-          r.text = call_scratch.out.build();
+          r.text = call_text;
           r.type_name = resolved_name;
           r.is_pointer = dtype_is_pointer(rdt);
           r.dtype = .Some(rdt);
           r.is_call_result = true;
           ret .Some(r);
+        }
+        // An overloaded operator as the receiver (`(a + b).scale(2)`): it
+        // is a call to `op_add` in all but spelling, resolved the same
+        // type-first, render-once way an operator's own nested operand
+        // already is - left unhandled, the receiver had no type at all
+        // and the method call failed outright.
+        // `[]` keeps its own dedicated case just below (it maps to
+        // `op_index` too, but an ordinary array/pointer index has no
+        // dispatch at all).
+        if !equals(inner_e.op, "[]") && !equals(operator_method_name(inner_e.op), "") &&
+          inner_e.has_left {
+          let op_r0 = self.resolve_operator_operand(recv)?;
+          ret self.materialize_operator_operand(op_r0, recv);
         }
         // An indexed receiver (`arr[0].getV()`): the element is what is
         // addressed, so its type is what the base being indexed is
@@ -18153,6 +18231,7 @@ impl Codegen {
       // uncallable struct value instead, confirmed directly as a real
       // C compile error (calling a `__fun_closure_t` as if it were a
       // function).
+      .ExpressionParenthesis(inner) -> { ret self.infer_let_expr_type(inner); }
       .ClosureLiteral(f) -> {
         FnTypeSig sig = fn_type_sig_new();
         if f.has_rtype {

@@ -1387,6 +1387,11 @@ compound Checker {
   // (`impl Box<T>`'s `T`), empty otherwise - in scope for every method
   // body exactly the way a method's own type params are.
   Vec<str> impl_type_params;
+  // Parallel to `impl_type_params`: each one's allowed types - the
+  // impl's own written constraint, else the target compound's own bound
+  // for that position (an `impl Vec2<T>`'s `T` is bounded exactly as
+  // `Vec2`'s own is).
+  Vec<Vec<str>> impl_type_param_bounds;
   // Parallel to `active_type_params` by index: each entry's own declared
   // bound (empty when unconstrained), so a bound check on a reference to
   // one of these names - still an unresolved type parameter, not yet a
@@ -1410,6 +1415,7 @@ fun _checker_new() Checker {
   Checker c;
   c.active_type_params.init(4);
   c.impl_type_params.init(0);
+  c.impl_type_param_bounds.init(0);
   c.active_type_param_bounds.init(4);
   c.fns.init(32);
   c.declared_at.init(32);
@@ -2330,9 +2336,8 @@ fun _flat_allowed_for_param(Vec<Vec<str>> combos, num p) Vec<str> {
 }
 
 impl Checker {
-  // The type a literal, name, or operator expression produces. Anything
-  // the checker does not model infers as unknown.
-  // `node`'s type. Whatever an expression resolves to that names one of
+  // The type a literal, name, or operator expression produces; anything
+  // the checker does not model infers as unknown. Whatever it resolves to that names one of
   // the enclosing function's own type params (`cur.value` through a
   // `Node<T>*`, a method returning `T`) stands for whatever an
   // instantiation supplies, the same as a parameter declared `T` - erased
@@ -6380,14 +6385,30 @@ impl Checker {
     // `infer`), the same as a generic function's own - its bodies used
     // to be skipped outright, so nothing in them was ever checked.
     Vec<str> previous_impl_params = self.impl_type_params;
+    Vec<Vec<str>> previous_impl_bounds = self.impl_type_param_bounds;
     Vec<str> impl_params;
     impl_params.init(4);
+    Vec<Vec<str>> impl_bounds;
+    impl_bounds.init(4);
     if block.has_type_params {
-      for itp : block.type_params {
-        impl_params.push(itp);
+      let target_info = self.compounds.at(self.canonical_type_name(block.type_name));
+      num ipi = 0;
+      for ipi < block.type_params.len {
+        impl_params.push(block.type_params.get(ipi));
+        if block.has_type_param_forced_insts {
+          impl_bounds.push(_flat_allowed_for_param(block.type_param_forced_insts, ipi));
+        } elif target_info.is_some() {
+          impl_bounds.push(_flat_allowed_for_param(target_info.unwrap().bounds, ipi));
+        } else {
+          Vec<str> none;
+          none.init(0);
+          impl_bounds.push(none);
+        }
+        ipi = ipi + 1;
       }
     }
     self.impl_type_params = impl_params;
+    self.impl_type_param_bounds = impl_bounds;
     for m : block.methods {
       fit m.kind {
         .Function(f) -> { self.check_function_with_self(f, nodes, block.type_name); }
@@ -6399,6 +6420,13 @@ impl Checker {
     }
     self.impl_type_params.free();
     self.impl_type_params = previous_impl_params;
+    num ibi = 0;
+    for ibi < self.impl_type_param_bounds.len {
+      self.impl_type_param_bounds.data[ibi].free();
+      ibi = ibi + 1;
+    }
+    self.impl_type_param_bounds.free();
+    self.impl_type_param_bounds = previous_impl_bounds;
   }
 
   // Reports a method a shape requires that the impl block does not
@@ -6561,6 +6589,17 @@ impl Checker {
         param_bounds.push(flat);
         tpi = tpi + 1;
       }
+    }
+    // The enclosing impl's own params follow the method's own in
+    // `active_type_params` (see above), so their bounds follow here too,
+    // copied since every entry is freed when this function is done.
+    for ib : self.impl_type_param_bounds {
+      Vec<str> ib_copy;
+      ib_copy.init(ib.len);
+      for ibs : ib {
+        ib_copy.push(ibs);
+      }
+      param_bounds.push(ib_copy);
     }
     self.active_type_param_bounds = param_bounds;
 

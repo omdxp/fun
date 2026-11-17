@@ -11078,3 +11078,28 @@ test "a let initialized with a tuple literal hints the whole tuple type, not its
   assert contains(hints, `"label":": (dec, P, (num, num))"`), "expected a nested tuple and a compound element typed too";
   assert contains(hints, `"label":": num"`), "expected a single parenthesized value to stay its own type";
 }
+
+test "inlay hints type a closure call's result, held in a local or called on the spot" {
+  str src = `fun mk() closure() num {
+  `  ret fun() num {
+  `    ret 1;
+  `  };
+  `}
+  `fun main() {
+  `  let r = mk();
+  `  let first = r();
+  `  let b = mk()();
+  `  let c = (fun() str { ret "x"; })();
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///closure_call_hint.fn";
+  doc.path = "closure_call_hint.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert count(hints, `"label":": num"`) == 2, "expected r() and mk()() both typed num";
+  assert contains(hints, `"label":": str"`), "expected the literal called on the spot typed by its own return";
+  assert count(hints, `"label":": closure() num"`) == 1, "expected only r itself to keep the closure type";
+}
