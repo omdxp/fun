@@ -3653,3 +3653,62 @@ test "as converts numbers, enums, pointers, and addresses with real C casts" {
   );
   assert contains(out_msvc, "2 44 14 1.5 5 2 true"), "expected the same values with no GNU-only constructs";
 }
+
+test "a Vec of shape values holds and dispatches each pushed implementation, and get_ptr edits in place" {
+  str src = `use std.io;
+  `use std.vec;
+  `shape System {
+  `  run(Vec<num>* hp) num;
+  `}
+  `compound Damage {
+  `  num amount;
+  `}
+  `impl Damage as System {
+  `  run(Vec<num>* hp) num {
+  `    num i = 0;
+  `    for i < hp.len() {
+  `      num* slot = hp.get_ptr(i);
+  `      *slot = *slot - self.amount;
+  `      i++;
+  `    }
+  `    ret self.amount;
+  `  }
+  `}
+  `compound Heal {
+  `  num amount;
+  `}
+  `impl Heal as System {
+  `  run(Vec<num>* hp) num {
+  `    *hp.get_ptr(0) = *hp.get_ptr(0) + self.amount;
+  `    ret 0;
+  `  }
+  `}
+  `fun main() num {
+  `  Vec<num> hp;
+  `  hp.init();
+  `  defer hp.free();
+  `  hp.push(10);
+  `  hp.push(20);
+  `  Damage d = Damage{amount = 3};
+  `  Heal h = Heal{amount = 5};
+  `  Vec<System> systems;
+  `  systems.init();
+  `  defer systems.free();
+  `  systems.push(&d);
+  `  systems.push(&h);
+  `  num dealt = 0;
+  `  for s : systems {
+  `    dealt += s.run(&hp);
+  `  }
+  `  println_fmt("{num} {num} {num}", hp.get(0), hp.get(1), dealt);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "vec_of_shapes", "a Vec of shape values");
+  assert contains(out, "12 17 3"), "expected both systems dispatched and both edits kept";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "vec_of_shapes_msvc",
+    "a Vec of shape values (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "12 17 3"), "expected the same results with no GNU-only constructs";
+}

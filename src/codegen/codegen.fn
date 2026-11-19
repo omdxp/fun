@@ -8734,21 +8734,7 @@ impl Codegen {
           // `ret` initializer gets; without it the argument's concrete
           // pointer would be passed where C expects the shape's
           // fat-pointer struct by value.
-          if self.shape_names.contains(resolved.unwrap()) {
-            let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
-            if arg_concrete.is_some() {
-              self.ensure_generic_impl_shape_vtable_instantiated(
-                arg_concrete.unwrap(),
-                resolved.unwrap()
-              );
-              self.state.write("__fun_coerce_");
-              self.state.write(arg_concrete.unwrap());
-              self.state.write("_");
-              self.state.write(resolved.unwrap());
-              self.state.write("(");
-              arg_did_shape_coerce = true;
-            }
-          }
+          arg_did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
         }
       }
       let aerr = self.emit_expr(*arg);
@@ -9190,7 +9176,39 @@ impl Codegen {
   // generic instantiation - whatever `infer_let_expr_type` already
   // resolves a call's return type as, reused rather than duplicated);
   // `.None` for anything else.
+  // When `target` is a shape and `arg` a pointer to a type implementing
+  // it, writes the opening of the `__fun_coerce_` call that wraps `arg`
+  // and returns true; the caller closes it with `)` after `arg`.
+  _open_shape_coerce(str target, Node* arg) flag {
+    if !self.shape_names.contains(target) {
+      ret false;
+    }
+    let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
+    if arg_concrete.is_none() {
+      ret false;
+    }
+    self.ensure_generic_impl_shape_vtable_instantiated(arg_concrete.unwrap(), target);
+    self.state.write("__fun_coerce_");
+    self.state.write(arg_concrete.unwrap());
+    self.state.write("_");
+    self.state.write(target);
+    self.state.write("(");
+    ret true;
+  }
+
   resolve_shape_coerce_concrete_type(Node* exp) Option<str> {
+    let concrete = self._resolve_shape_coerce_concrete_any(exp)?;
+    // A builtin pointee (`malloc`'s `raw*`, a `num*`) never implements a
+    // shape, so a slot typed `Shape*` receiving one is a plain pointer
+    // store, not a coercion.
+    fit concrete {
+      "raw", "void", "num", "dec", "str", "chr", "flag", "i8", "i16", "i32", "i64", "u8", "u16",
+      "u32", "u64", "f32", "f64" -> { ret .None; }
+      _ -> { ret .Some(concrete); }
+    }
+  }
+
+  _resolve_shape_coerce_concrete_any(Node* exp) Option<str> {
     fit exp.kind {
       .Unary(u) -> {
         if equals(u.op, "&") && !u.is_left_operanded_unary {
@@ -9893,14 +9911,21 @@ impl Codegen {
       let ptype = self.lookup_impl_method_param_type(recv_r.type_name, method_name, arg_idx);
       str prev_expected = self.expected_enum_type;
       str prev_expected_compound = self.expected_compound_type;
+      flag marg_did_shape_coerce = false;
       if ptype.is_some() {
         let resolved = self.resolve_type_name(*ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
           self.expected_compound_type = resolved.unwrap();
+          if !dtype_is_pointer(*ptype.unwrap()) {
+            marg_did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
+          }
         }
       }
       let aerr = self.emit_expr(*arg);
+      if marg_did_shape_coerce {
+        self.state.write(")");
+      }
       self.expected_enum_type = prev_expected;
       self.expected_compound_type = prev_expected_compound;
       if aerr.is_some() {
@@ -14318,6 +14343,11 @@ impl Codegen {
   // shape is registered under its mangled identity (`To__num`), never
   // `dt.type_str` alone.
   _resolve_shape_type_for_dtype(DataType dt) str {
+    // A pointer to a shape value (`T* data` inside `Vec<Shape>`) is
+    // never itself a coercion target, only a shape value is.
+    if dt.pointer_depth > 0 || dt.flags.is_pointer {
+      ret "";
+    }
     str shape_type = dt.type_str;
     if !self.shape_names.contains(shape_type) && dt.generic_args.len > 0 {
       StringBuilder sq_sb = string_builder_init(16);

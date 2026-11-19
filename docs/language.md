@@ -682,7 +682,11 @@ fun main() {
 }
 ```
 
-- Shape values can be used for dynamic dispatch, like trait objects.
+- Shape values can be used for dynamic dispatch, like trait objects. A
+  shape value is built from a pointer to a type implementing it
+  (`HasArea a = &sq;`), and a container of them works the same way:
+  `Vec<HasArea> all; all.push(&sq);`. The shape value keeps pointing at
+  `sq`, so `sq` must outlive it.
 - Shape methods follow normal visibility rules: non-`pub` methods are
   callable inside the declaring module, but not from importing modules.
 - Formatting with `{}` uses `Display.to_string()` only when that method

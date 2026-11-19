@@ -109,6 +109,13 @@ impl Vec<T> {
     ret self.data[i];
   }
 
+  // A pointer to the element at index `i`, for changing it in place
+  // (`es.get_ptr(i).hp -= 1;`). The caller must ensure `0 <= i < len`, and
+  // the pointer is only valid until the vector next grows or shrinks.
+  pub get_ptr(num i) T* {
+    ret &self.data[i];
+  }
+
   // Writes `value` at index `i`. The caller must ensure `0 <= i < len`.
   pub set(num i, T value) {
     self.data[i] = value;

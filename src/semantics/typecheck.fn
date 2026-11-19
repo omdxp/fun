@@ -3804,8 +3804,12 @@ impl Checker {
           _ -> {}
         }
         CheckedType receiver = self.infer(callee.left, env);
-        // A pointer or an array is not the receiver itself, so what it
-        // reaches is judged elsewhere.
+        // A method call through a single pointer reaches the pointee, so
+        // that is what must have the method. A deeper pointer or an
+        // array is not a receiver at all.
+        if receiver.pointer_depth == 1 && !receiver.is_array && receiver.base != .Str {
+          receiver.pointer_depth = 0;
+        }
         if receiver.pointer_depth > 0 || receiver.is_array {
           ret;
         }
@@ -4297,7 +4301,7 @@ impl Checker {
         "cannot convert {str} to {str} with 'as'",
         type_name(got),
         type_name(want)
-      ),
+        ),
         node
       );
     }
