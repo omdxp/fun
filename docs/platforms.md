@@ -11,8 +11,12 @@ with environment variables:
 
 - `FUN_CC`: the exact compiler command to use, in place of the search
   above.
-- `FUN_CC_ARGS`: extra arguments appended after the usual defaults,
-  space-separated.
+- `FUN_CC_ARGS`: extra compiler arguments, space-separated, placed before
+  the generated source. Applies whichever compiler is used.
+- `FUN_LDFLAGS`: extra linker arguments, space-separated, placed after
+  every source so a static library resolves (`FUN_LDFLAGS="vendor/libfoo.a
+  -lm"`). A project can set these in `fun.toml` instead; see
+  `[build]` in Get Started.
 
 Examples:
 

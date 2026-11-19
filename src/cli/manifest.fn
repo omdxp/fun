@@ -103,6 +103,54 @@ pub compound Manifest {
   flag has_cover_min;
   num cover_min_tenths;
   Vec<str> cover_exclude;
+  // `[build]`: what the C compiler and linker get beyond the generated C.
+  BuildSettings build;
+}
+
+// `[build]`'s own settings, each a list as written in `fun.toml`. Paths are
+// relative to the project root.
+pub compound BuildSettings {
+  // Extra C, assembly (`.s`/`.S`), or object files compiled and linked in.
+  Vec<str> sources;
+  // Header search directories (`-I`).
+  Vec<str> include_dirs;
+  // Library search directories (`-L`).
+  Vec<str> lib_dirs;
+  // Libraries to link, by name (`"SDL2"` links `-lSDL2`).
+  Vec<str> links;
+  // Raw flags for the C compiler, placed before the generated source.
+  Vec<str> cflags;
+  // Raw flags for the linker, placed after every source and library.
+  Vec<str> ldflags;
+}
+
+// No `[build]` settings at all.
+pub fun build_settings_new() BuildSettings {
+  BuildSettings b;
+  b.sources.init(0);
+  b.include_dirs.init(0);
+  b.lib_dirs.init(0);
+  b.links.init(0);
+  b.cflags.init(0);
+  b.ldflags.init(0);
+  ret b;
+}
+
+impl BuildSettings {
+  // True when nothing beyond the defaults was asked for.
+  pub is_empty() flag {
+    ret self.sources.len == 0 && self.include_dirs.len == 0 && self.lib_dirs.len == 0 &&
+      self.links.len == 0 && self.cflags.len == 0 && self.ldflags.len == 0;
+  }
+
+  pub free() {
+    self.sources.free();
+    self.include_dirs.free();
+    self.lib_dirs.free();
+    self.links.free();
+    self.cflags.free();
+    self.ldflags.free();
+  }
 }
 
 impl Manifest {
@@ -124,6 +172,7 @@ impl Manifest {
     self.authors.free();
     self.exes.free();
     self.deps.free();
+    self.build.free();
   }
 }
 
@@ -229,17 +278,27 @@ pub fun _parse_string_array(str value) Vec<str> {
     ret out;
   }
   str inner = substr(text, 1, len(text) - 2);
-  Vec<str> parts = split(inner, ',');
-  for part : parts {
-    str item = trim(part);
-    if len(item) >= 2 && item[0] == '"' && item[len(item) - 1] == '"' {
-      item = substr(item, 1, len(item) - 2);
+  // Split on commas outside quotes only: a quoted item may hold commas
+  // of its own (`"-Wl,-rpath,lib"`).
+  num start = 0;
+  flag quoted = false;
+  num i = 0;
+  num n = len(inner);
+  for i <= n {
+    if i < n && inner[i] == '"' {
+      quoted = !quoted;
+    } elif i == n || inner[i] == ',' && !quoted {
+      str item = trim(substr(inner, start, i - start));
+      if len(item) >= 2 && item[0] == '"' && item[len(item) - 1] == '"' {
+        item = substr(item, 1, len(item) - 2);
+      }
+      if !equals(item, "") {
+        out.push(item);
+      }
+      start = i + 1;
     }
-    if !equals(item, "") {
-      out.push(item);
-    }
+    i = i + 1;
   }
-  parts.free();
   ret out;
 }
 
@@ -346,6 +405,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.has_cover_min = false;
   m.cover_min_tenths = 0;
   m.cover_exclude.init(0);
+  m.build = build_settings_new();
 
   let pkg = doc.table("package");
   if pkg.is_none() {
@@ -377,7 +437,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   for ti < doc.tables.len {
     str tname = doc.tables.get(ti).name;
     if !equals(tname, "package") && !equals(tname, "lib") && !equals(tname, "deps") &&
-      !equals(tname, "coverage") {
+      !equals(tname, "coverage") && !equals(tname, "build") {
       ret .Err(format("unknown table `[{str}]`", tname));
     }
     ti = ti + 1;
@@ -410,6 +470,31 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       m.cover_min_tenths = tenths;
     }
     m.cover_exclude = _parse_string_array(cover.unwrap().get_str("exclude"));
+  }
+
+  let build = doc.table("build");
+  if build.is_some() {
+    Vec<str> build_keys = build.unwrap().values.keys();
+    defer build_keys.free();
+    for bk : build_keys {
+      fit bk {
+        "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags" -> {}
+        _ -> {
+          ret .Err(
+            format(
+            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, or ldflags)",
+            bk
+            )
+          );
+        }
+      }
+    }
+    m.build.sources = _parse_string_array(build.unwrap().get_str("sources"));
+    m.build.include_dirs = _parse_string_array(build.unwrap().get_str("include_dirs"));
+    m.build.lib_dirs = _parse_string_array(build.unwrap().get_str("lib_dirs"));
+    m.build.links = _parse_string_array(build.unwrap().get_str("links"));
+    m.build.cflags = _parse_string_array(build.unwrap().get_str("cflags"));
+    m.build.ldflags = _parse_string_array(build.unwrap().get_str("ldflags"));
   }
 
   let lib = doc.table("lib");
@@ -1033,4 +1118,34 @@ test "a string array reads its items and ignores anything else" {
   assert none.len == 0, "expected a non-array to read as empty";
   Vec<str> empty = _parse_string_array("[]");
   assert empty.len == 0, "expected an empty array to read as empty";
+}
+
+test "parses [build] settings, and rejects an unknown key there" {
+  str text = `[package]
+  `name = "game"
+  `
+  `[build]
+  `sources = ["native/glue.c", "boot/start.S"]
+  `include_dirs = ["vendor/include"]
+  `lib_dirs = ["vendor/lib"]
+  `links = ["SDL2", "m"]
+  `cflags = ["-march=native"]
+  `ldflags = ["-Wl,-rpath,vendor/lib"]`;
+  let m = parse_manifest(text).unwrap();
+  assert m.build.sources.len == 2 && equals(m.build.sources.get(1), "boot/start.S"), "expected both sources";
+  assert equals(m.build.include_dirs.get(0), "vendor/include"), "expected the include dir";
+  assert equals(m.build.lib_dirs.get(0), "vendor/lib"), "expected the lib dir";
+  assert m.build.links.len == 2 && equals(m.build.links.get(0), "SDL2"), "expected both libraries";
+  assert equals(m.build.cflags.get(0), "-march=native"), "expected the compiler flag";
+  assert equals(m.build.ldflags.get(0), "-Wl,-rpath,vendor/lib"), "expected the linker flag";
+  assert !m.build.is_empty(), "expected settings present";
+  let bad = parse_manifest(`[package]
+  `name = "game"
+  `
+  `[build]
+  `link = ["SDL2"]`);
+  assert bad.is_err() && contains(bad.unwrap_err(), "unknown key `link` in [build]"), "expected a typo reported";
+  let plain = parse_manifest(`[package]
+  `name = "plain"`).unwrap();
+  assert plain.build.is_empty(), "expected no settings without a [build] table";
 }
