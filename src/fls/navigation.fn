@@ -2720,8 +2720,9 @@ pub fun keyword_doc(str word) str {
   }
   if equals(word, "as") {
     ret _doc(
+      `value as T
       `impl Type as Shape { ... }`,
-      `Names the shape an impl block implements for a type.`
+      `Converts a value to another type (between numbers, plain enums and numbers, pointers, and a pointer and an integer), or names the shape an impl block implements for a type.`
     );
   }
   if equals(word, "enum") {

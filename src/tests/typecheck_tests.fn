@@ -4629,3 +4629,43 @@ test "a generic impl's own type param satisfies its target compound's bound insi
     "expected the impl's own T to satisfy Vec2's bound"
   );
 }
+
+test "as converts numbers, plain enums, pointers, and addresses, and nothing else" {
+  accepts(
+    `enum Color { Red, Green }
+    `compound P { num x; }
+    `fun main() {
+    `  dec d = 2.5;
+    `  num n = d as num;
+    `  u8 b = n as u8;
+    `  u8 c = Color.Green as u8;
+    `  Color k = 1 as Color;
+    `  P p = P{x = 1};
+    `  u64 a = &p as u64;
+    `  P* q = a as P*;
+    `  raw* r = q as raw*;
+    `  let w = p.x as i32 * 2;
+    `}`,
+    "expected every supported conversion accepted"
+  );
+  assert contains(
+    check(
+    `compound P { num x; }
+      `fun main() {
+      `  P p = P{x = 1};
+      `  num n = p as num;
+      `}`
+    ),
+    "cannot convert P to num with 'as'"
+  ), "expected a compound rejected";
+  assert contains(
+    check(
+    `fun main() {
+      `  dec d = 1.5;
+      `  raw* r = d as raw*;
+      `}`
+    ),
+    "cannot convert dec to raw* with 'as'"
+  ), "expected a float address rejected";
+  assert equals(check(`fun main() { num n = 3 as; }`), "parse error"), "expected a missing target type rejected";
+}

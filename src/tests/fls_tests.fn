@@ -11159,3 +11159,24 @@ test "a value typed by a bounded type param resolves members through its bound" 
   str comp = completion(&reads, doc, 4, 4, true);
   assert contains(comp, `"label":"weight"`), "expected the bound's members offered mid-edit";
 }
+
+test "inlay hints type a let by its own as conversion, through a following operator too" {
+  str src = `compound P { num x; }
+  `fun main() {
+  `  P p = P{x = 1};
+  `  let i = p.x as i32 * 2;
+  `  let d = (p.x + 1) as dec / 2.0;
+  `  let q = &p as raw*;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///as_hint.fn";
+  doc.path = "as_hint.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 7);
+  assert contains(hints, `"label":": i32"`), "expected the conversion's target, not the field's own type";
+  assert contains(hints, `"label":": dec"`), "expected a converted parenthesized value typed by its target";
+  assert contains(hints, `"label":": raw*"`), "expected a pointer target kept whole";
+}

@@ -1871,11 +1871,17 @@ impl Checker {
   }
 }
 
+// A pointer, or a string (itself a pointer to its own bytes).
+fun _is_pointer_like(CheckedType t) flag {
+  ret !t.is_array && (t.pointer_depth > 0 || t.base == .Str || t.is_null_literal);
+}
+
 // Calls the language supplies rather than a program declaring them.
 fun _is_builtin_call(str name) flag {
   fit name {
     "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin",
-    "va_arg_chr", "va_arg_str", "va_arg_raw", "__fun_key_hash", "__fun_key_eq" -> { ret true; }
+    "va_arg_chr", "va_arg_str", "va_arg_raw", "__fun_key_hash", "__fun_key_eq",
+    "__fun_as" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -4258,6 +4264,46 @@ impl Checker {
 
   // Checks a call against the callee's signature and reports its return
   // type.
+  // `value as T`: a numeric value converts to any numeric type (or a plain
+  // enum, and back), a pointer to any other pointer, and a pointer and an
+  // integer into each other. Anything else (a compound, a data enum, a
+  // float address) is rejected.
+  check_as_conversion(Node* node, ExprNode e, Vec<Node*> args, TypeEnv* env) CheckedType {
+    CheckedType want = checked_from_dtype(e.generic_args.get(0));
+    if args.len != 1 {
+      self.fail("'as' converts exactly one value", node);
+      ret want;
+    }
+    CheckedType got = self.infer(args.get(0), env);
+    if self.failed || got.base == .Unknown && equals(got.name, "") {
+      ret want;
+    }
+    flag got_ptr = _is_pointer_like(got);
+    flag want_ptr = _is_pointer_like(want);
+    flag got_int = !got_ptr && !got.is_array &&
+      (got.base == .Num || got.base == .Chr || got.base == .Bin);
+    flag want_int = !want_ptr && !want.is_array &&
+      (want.base == .Num || want.base == .Chr || want.base == .Bin);
+    flag got_num = got_int || !got_ptr && !got.is_array && got.base == .Dec;
+    flag want_num = want_int || !want_ptr && !want.is_array && want.base == .Dec;
+    flag got_enum = !got_ptr && self.plain_enums.has(got.name);
+    flag want_enum = !want_ptr && self.plain_enums.has(want.name);
+    flag ok = got_num && want_num || got_ptr && want_ptr || got_ptr && want_int ||
+    got_int && want_ptr || got_enum && want_int || got_int && want_enum ||
+    got_enum && want_enum || self.assignable(want, got);
+    if !ok {
+      self.fail(
+        format(
+        "cannot convert {str} to {str} with 'as'",
+        type_name(got),
+        type_name(want)
+      ),
+        node
+      );
+    }
+    ret want;
+  }
+
   check_call(Node* node, ExprNode e, TypeEnv* env, flag awaited) CheckedType {
     Vec<Node*> args;
     args.init(4);
@@ -4299,6 +4345,9 @@ impl Checker {
       }
       if equals(name, "__fun_key_eq") {
         ret checked_of(.Bin);
+      }
+      if equals(name, "__fun_as") {
+        ret self.check_as_conversion(node, e, args, env);
       }
       ret checked_unknown();
     }

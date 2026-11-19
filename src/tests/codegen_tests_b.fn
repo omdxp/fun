@@ -3615,3 +3615,41 @@ test "fixed-width integers and floats format through their own placeholders and 
   );
   assert contains(out_msvc, want), "expected the same output with hoisted varargs";
 }
+
+test "as converts numbers, enums, pointers, and addresses with real C casts" {
+  str src = `use std.io;
+  `compound P {
+  `  f32 x;
+  `  num n;
+  `}
+  `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `fun main() num {
+  `  f32 f = 2.75;
+  `  num n = f as num;
+  `  u8 b = 300 as u8;
+  `  P p = P{x = 7.9, n = 5};
+  `  let i = p.x as i32 * 2;
+  `  let d = (n + 1) as dec / 2.0;
+  `  u64 addr = &p as u64;
+  `  P* back = addr as P*;
+  `  raw* r = back as raw*;
+  `  P* again = r as P*;
+  `  u8 c = Color.Blue as u8;
+  `  Color k = 1 as Color;
+  `  flag t = (k as num) == 1;
+  `  println_fmt("{num} {u8} {i32} {dec} {num} {u8} {flag}", n, b, i, d, again.n, c, t);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "as_conversions", "as conversions");
+  assert contains(out, "2 44 14 1.5 5 2 true"), "expected every conversion's real value";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "as_conversions_msvc",
+    "as conversions (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "2 44 14 1.5 5 2 true"), "expected the same values with no GNU-only constructs";
+}

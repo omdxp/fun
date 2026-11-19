@@ -1157,6 +1157,23 @@ pub fun node_is_expression_or_parenthesis(Node n) flag {
   }
 }
 
+// True for a `value as T` conversion, which the parser builds as a call
+// to the `__fun_as<T>` builtin.
+pub fun is_as_conversion(Node n) flag {
+  fit n.kind {
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left || !e.has_generic_args || e.generic_args.len != 1 {
+        ret false;
+      }
+      fit e.left.kind {
+        .Identifier(name) -> { ret equals(name, "__fun_as"); }
+        _ -> { ret false; }
+      }
+    }
+    _ -> { ret false; }
+  }
+}
+
 pub fun node_is_value_type(Node n) flag {
   if node_is_expression_or_parenthesis(n) {
     ret true;

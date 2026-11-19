@@ -180,6 +180,39 @@ brackets can repeat for a multi-dimensional array: `num[N][N] m;`.
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
 forward-declared types are supported.
 
+### Conversions (`as`)
+
+`value as T` converts a value explicitly. It binds tighter than any
+binary operator and looser than a prefix one, so `p.x as i32 * 2` is
+`(p.x as i32) * 2` and `&p as u64` converts `&p`.
+
+- Any number converts to any other numeric type. A float truncates toward
+  zero and a wider integer wraps (`300 as u8` is `44`).
+- A plain enum converts to an integer and back (`Color.Blue as u8`).
+- A pointer converts to any other pointer type (`raw* r = p as raw*;`).
+- A pointer and an integer convert into each other, for an address read
+  from hardware or written to a register (`0xB8000 as u16*`).
+
+Anything else, such as a compound or a data-carrying enum, is a compile
+error.
+
+```fun
+use std.io;
+
+compound Header {
+  u32 magic;
+}
+
+fun main() {
+  dec speed = 2.75;
+  num whole = speed as num;
+  Header h = Header{magic = 7};
+  u64 addr = &h as u64;
+  Header* back = addr as Header*;
+  println_fmt("{num} {u32}", whole, back.magic);
+}
+```
+
 ### Tuples
 
 `(T1, T2, ...)` groups two or more differently-typed values into one

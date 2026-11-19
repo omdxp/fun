@@ -8554,6 +8554,18 @@ impl Codegen {
       }
       ret .None;
     }
+    // `value as T`: a plain C cast to `T`'s own C type.
+    if equals(callee_name, "__fun_as") && args.len == 1 && e.generic_args.len == 1 {
+      self.state.write("((");
+      self.write_type(*e.generic_args.get(0))?!(.UnsupportedNode);
+      self.state.write(")(");
+      let as_err = self.emit_expr(*args.get(0));
+      if as_err.is_some() {
+        ret as_err;
+      }
+      self.state.write("))");
+      ret .None;
+    }
     if equals(callee_name, "__fun_key_hash") && args.len == 1 {
       if self._key_arg_is_str(args.get(0)) {
         self.state.write("__fun_str_key_hash((");
@@ -10545,6 +10557,16 @@ impl Codegen {
   // `resolve_field_chain` purely to read `.type_name` off it.
   _resolve_call_rtype(ExprNode inner_e) Option<DataType> {
     Option<DataType> call_rtype = .None;
+    if inner_e.has_generic_args && inner_e.generic_args.len == 1 {
+      fit inner_e.left.kind {
+        .Identifier(as_name) -> {
+          if equals(as_name, "__fun_as") {
+            ret .Some(self.resolve_type_subst(*inner_e.generic_args.get(0)));
+          }
+        }
+        _ -> {}
+      }
+    }
     // A closure-valued callee that isn't a name (`(fun() num {...})()`,
     // `make()()`): the call's result is the closure's own return type.
     flag callee_is_name = false;
@@ -18080,6 +18102,13 @@ impl Codegen {
           }
           ret .None;
         }
+        if is_as_conversion(*arg) {
+          DataType* as_dt = e.generic_args.get(0);
+          if dtype_is_pointer(*as_dt) {
+            ret .Some("raw");
+          }
+          ret .Some(as_dt.type_str);
+        }
         fit e.left.kind {
           .Identifier(callee_name) -> {
             let rt = self.lookup_function_rtype(callee_name);
@@ -18617,6 +18646,9 @@ impl Codegen {
         }
         if !equals(e.op, "()") || !e.has_left {
           ret .None;
+        }
+        if is_as_conversion(*val) {
+          ret .Some(self.resolve_type_subst(*e.generic_args.get(0)));
         }
         fit e.left.kind {
           .Identifier(fn_name) -> {
