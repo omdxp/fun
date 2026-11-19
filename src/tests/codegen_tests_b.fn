@@ -3590,3 +3590,28 @@ test "a let holding a comparison, logical, negation, or overloaded operator resu
   );
   assert contains(out_msvc, "true false false true -1.5"), "expected each let declared with its real C type";
 }
+
+test "fixed-width integers and floats format through their own placeholders and through {num}/{dec}" {
+  str src = `use std.io;
+  `fun main() num {
+  `  u8 b = 112;
+  `  i8 c = -5;
+  `  u16 w = 9;
+  `  i32 i = -70000;
+  `  u32 u = 4000000000;
+  `  u64 big = 18446744073709551615;
+  `  f32 f = 1.5;
+  `  println_fmt("{u8} {i8} {u16} {i32} {u32} {u64} {f32}", b, c, w, i, u, big, f);
+  `  println_fmt("{num} {num} {} {dec}", b, c, big, f);
+  `  ret 0;
+  `}`;
+  str want = "112 -5 9 -70000 4000000000 18446744073709551615 1.5\n112 -5 18446744073709551615 1.5";
+  str out = run_source(src, "fixed_width_fmt", "fixed-width formatting");
+  assert contains(out, want), "expected every width printed as a number, u64 unsigned";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fixed_width_fmt_msvc",
+    "fixed-width formatting (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), "expected the same output with hoisted varargs";
+}

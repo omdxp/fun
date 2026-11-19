@@ -2169,10 +2169,8 @@ fun _fun_format_specs(str fmt) Vec<str> {
       i = i + 2;
       continue;
     }
-    // The placeholder word's own length varies (`flag` is 4 chars,
-    // every other one is 3), so the closing `}` is found by scanning
-    // forward within a short bound rather than assumed at a fixed
-    // offset.
+    // The placeholder word's own length varies, so the closing `}` is
+    // found by scanning forward within a short bound.
     num close = -1;
     num max_word_len = 5;
     num limit = i + 1 + max_word_len;
@@ -2209,6 +2207,10 @@ fun _fun_format_specs(str fmt) Vec<str> {
         out.push("ptr");
       } elif equals(word, "raw") {
         out.push("raw");
+      } elif equals(word, "f32") || equals(word, "f64") {
+        out.push("dec");
+      } elif is_fixed_width_placeholder(word) {
+        out.push("num");
       } else {
         matched = false;
       }

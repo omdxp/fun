@@ -59,6 +59,45 @@ pub fun fmt_num(num n) str {
   ret format_num(n);
 }
 
+// True for a fixed-width numeric placeholder word (`i8` through `u64`,
+// `f32`, `f64`), each formatting exactly like `{num}` or `{dec}`.
+pub fun is_fixed_width_placeholder(str word) flag {
+  fit word {
+    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// True when `{word}` is a typed placeholder in a `format` string.
+pub fun is_placeholder_word(str word) flag {
+  fit word {
+    "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { ret true; }
+    _ -> { ret is_fixed_width_placeholder(word); }
+  }
+}
+
+// Format an unsigned 64-bit integer into a new string buffer.
+pub fun fmt_u64(u64 n) str {
+  str buf = malloc(24);
+  if buf == nil {
+    ret nil;
+  }
+  chr[24] digits;
+  num count = 0;
+  for n > 0 || count == 0 {
+    digits[count] = '0' + n % 10;
+    n = n / 10;
+    count = count + 1;
+  }
+  num i = 0;
+  for i < count {
+    buf[i] = digits[count - 1 - i];
+    i = i + 1;
+  }
+  buf[count] = '\0';
+  ret buf;
+}
+
 // Format a decimal into a new string buffer.
 pub fun fmt_dec(dec d) str {
   str buf = malloc(64);
@@ -131,11 +170,10 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
         continue;
       }
       // `{word}` is a typed placeholder only when `word` names a
-      // recognized type (str/num/dec/flag/chr/ptr/raw); any other
-      // `{word}` is literal text. The word's own length varies (`flag`
-      // is 4 characters, every other one is 3), so the closing `}` is
-      // found by scanning forward within a short bound rather than
-      // assumed at a fixed offset.
+      // recognized type (str/num/dec/flag/chr/ptr/raw, or a fixed-width
+      // numeric type); any other `{word}` is literal text. The closing
+      // `}` is found by scanning forward within a short bound, since the
+      // word's own length varies.
       num close = -1;
       num max_word_len = 5;
       num limit = i + 1 + max_word_len;
@@ -152,9 +190,7 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
       }
       if close > 0 {
         str word = substr(fmt, i + 1, close - i - 1);
-        flag is_typed = equals(word, "str") || equals(word, "num") || equals(word, "dec") ||
-          equals(word, "flag") || equals(word, "chr") || equals(word, "ptr") ||
-          equals(word, "raw");
+        flag is_typed = is_placeholder_word(word);
         free(word);
         if is_typed {
           if arg_i < argc {
@@ -178,7 +214,8 @@ pub fun format_impl(str fmt, Vec<str>* args) str {
   ret out;
 }
 // Format a string using "{}" placeholders: {} or {str} for a string, {num},
-// {dec}, {flag}, {chr}, {ptr} for other types. A `{` that starts none of
+// {dec}, {flag}, {chr}, {ptr} for other types, and {i8} through {u64},
+// {f32}, {f64} for fixed-width numbers. A `{` that starts none of
 // those is written as it stands; write "{{" where one would otherwise be
 // read as a placeholder. A `}` is always written as it stands, so text
 // made of braces, such as JSON, survives being formatted.
@@ -987,4 +1024,10 @@ test "a rotating sink starts a new file when the limit would be passed" {
   remove(path);
   remove("fun-out/io_rotate_test.log.1");
   remove("fun-out/io_rotate_test.log.2");
+}
+
+test "fmt_u64 prints the whole unsigned range" {
+  assert equals(fmt_u64(0), "0"), "expected zero";
+  assert equals(fmt_u64(18446744073709551615), "18446744073709551615"), "expected u64 max";
+  assert equals(format("{u8}-{f32}", 7, 2.5), "7-2.5"), "expected fixed-width placeholders filled";
 }

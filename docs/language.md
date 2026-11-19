@@ -65,6 +65,24 @@ fun main() {
 | `str` | `char*` | Null-terminated string. |
 | `raw` | `void` (`raw*` for `void*`) | Opaque type. |
 
+### Formatting values
+
+`format`, `print_fmt`, and `println_fmt` (from `std.io`) fill `{}`
+placeholders in order. A typed placeholder also checks its argument:
+`{str}`, `{num}`, `{dec}`, `{flag}`, `{chr}`, `{ptr}`, and one per
+fixed-width type (`{i8}` through `{u64}`, `{f32}`, `{f64}`). A `u64`
+prints its full unsigned range.
+
+```fun
+use std.io;
+
+fun main() {
+  u8 level = 3;
+  f32 speed = 2.5;
+  println_fmt("level {u8} at {f32} m/s", level, speed);
+}
+```
+
 ### `nil`
 
 The null pointer/string sentinel (a keyword; lowers to C `NULL`). It

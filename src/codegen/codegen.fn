@@ -1138,6 +1138,18 @@ fun is_arithmetic_operator(str op) flag {
   }
 }
 
+// The C type a vararg is passed as: every integer narrower than 64 bits
+// widens to `int64_t` and `float` to `double`, the widths the callee's
+// `va_arg` reads back, so a `u8` or `f32` argument is never read with
+// the wrong width.
+fun _vararg_c_type(str c_type) str {
+  fit c_type {
+    "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t" -> { ret "int64_t"; }
+    "float" -> { ret "double"; }
+    _ -> { ret c_type; }
+  }
+}
+
 // A builtin binary operator whose result is always a flag.
 fun _is_flag_result_operator(str op) flag {
   fit op {
@@ -7647,7 +7659,7 @@ impl Codegen {
   }
 
   // Counts each typed `{kind}` placeholder in a `format()` literal's
-  // format string (`{str}`/`{num}`/`{dec}`/`{flag}`/`{chr}`/`{ptr}`/`{raw}`),
+  // format string (any word `is_placeholder_word` accepts),
   // mirroring the reference compiler's own placeholder recognition:
   // `{{`/`}}` are escaped braces, and a bare `{}` opts the whole string
   // out of counting (returns `.None`), since it takes the general vararg
@@ -7666,17 +7678,12 @@ impl Codegen {
         if i + 1 < n && fmt[i + 1] == '}' {
           ret .None;
         }
-        // The placeholder word's own length varies (`flag` is 4 chars,
-        // every other one is 3), so the closing `}` is found by
-        // scanning forward rather than assumed at a fixed offset.
+        // The placeholder word's own length varies, so the closing `}`
+        // is found by scanning forward.
         num close = self._format_placeholder_close(fmt, i + 1);
         if close > 0 {
           str word = substr(fmt, i + 1, close - i - 1);
-          flag matched = false;
-          fit word {
-            "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { matched = true; }
-            _ -> {}
-          }
+          flag matched = is_placeholder_word(word);
           free(word);
           if matched {
             count = count + 1;
@@ -7712,7 +7719,7 @@ impl Codegen {
     ret -1;
   }
 
-  // The placeholder type word (`str`/`num`/`dec`/`flag`/`chr`/`ptr`/`raw`)
+  // The placeholder type word (any `is_placeholder_word` accepts)
   // at each vararg position `fmt` requests, in order; `""` for a bare
   // `{}` or anything unparseable at that position. Used so an explicit
   // `{ptr}`/`{raw}` can force raw-pointer formatting for that argument
@@ -7738,12 +7745,7 @@ impl Codegen {
         num close2 = self._format_placeholder_close(fmt, i + 1);
         if close2 > 0 {
           str word = substr(fmt, i + 1, close2 - i - 1);
-          flag known_word = false;
-          fit word {
-            "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { known_word = true; }
-            _ -> {}
-          }
-          if known_word {
+          if is_placeholder_word(word) {
             out.push(word);
             i = close2 + 1;
             continue;
@@ -8113,7 +8115,7 @@ impl Codegen {
           let va_type_opt = self.infer_arg_type_name(va_arg);
           str va_c_type = "int64_t";
           if va_type_opt.is_some() {
-            va_c_type = map_type_to_c(va_type_opt.unwrap());
+            va_c_type = _vararg_c_type(map_type_to_c(va_type_opt.unwrap()));
           }
           if equals(va_c_type, "void") {
             va_c_type = "void*";
@@ -8266,7 +8268,7 @@ impl Codegen {
             let va_m_type_opt = self.infer_arg_type_name(va_arg);
             str va_m_c_type = "int64_t";
             if va_m_type_opt.is_some() {
-              va_m_c_type = map_type_to_c(va_m_type_opt.unwrap());
+              va_m_c_type = _vararg_c_type(map_type_to_c(va_m_type_opt.unwrap()));
             }
             if equals(va_m_c_type, "void") {
               va_m_c_type = "void*";
@@ -8329,7 +8331,7 @@ impl Codegen {
             if va_needs_cast {
               let va_type_opt = self.infer_arg_type_name(va_arg);
               if va_type_opt.is_some() {
-                va_c_type = map_type_to_c(va_type_opt.unwrap());
+                va_c_type = _vararg_c_type(map_type_to_c(va_type_opt.unwrap()));
               }
               if equals(va_c_type, "void") {
                 va_c_type = "void*";
@@ -8424,6 +8426,8 @@ impl Codegen {
               self.state.write("b");
             } elif equals(ctype_for_tag, "char") {
               self.state.write("c");
+            } elif equals(ctype_for_tag, "uint64_t") {
+              self.state.write("u");
             } elif equals(ctype_for_tag, "void*") {
               // `void*` is produced by force-raw (`{ptr}`/`{raw}`) slots and
               // by the `void` → `void*` coercion above; both cases pass a raw
@@ -16499,6 +16503,10 @@ impl Codegen {
           );
           self.state.write_indent_pinned(node.pos);
           self.state.write(
+            "case 'u': vargs.data[__fun_vi] = fmt_u64((uint64_t)va_arg(__fun_ap, unsigned long long)); break;\n"
+          );
+          self.state.write_indent_pinned(node.pos);
+          self.state.write(
             "case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n"
           );
           self.state.write_indent_pinned(node.pos);
@@ -21434,7 +21442,7 @@ impl Codegen {
     // `emit_call` embeds in `__fun_vtags`, which the callee-side
     // unpacking in `emit_function_named` reads back.
     self.state.write(
-      "#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n"
+      "#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'u', unsigned long: 'u', unsigned int: 'n', short: 'n', unsigned short: 'n', signed char: 'n', unsigned char: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n"
     );
     // Frees a variadic function's own `vargs` unpacking: `data` itself
     // (the backing array `emit_function_named` mallocs above), plus
@@ -22132,6 +22140,7 @@ impl Codegen {
                 reachable.add("fmt_chr");
                 reachable.add("fmt_raw");
                 reachable.add("fmt_str");
+                reachable.add("fmt_u64");
               }
             }
           }
@@ -27217,7 +27226,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#endif
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
-    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'u', unsigned long: 'u', unsigned int: 'n', short: 'n', unsigned short: 'n', signed char: 'n', unsigned char: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
     `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }
     `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN
