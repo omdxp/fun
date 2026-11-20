@@ -34,6 +34,10 @@ pub fun host_arch_name() str {
 // Lowercases and maps the handful of spellings each platform actually
 // uses to the names `asm arch` accepts, so callers compare against one
 // canonical set regardless of where the raw string came from.
+pub fun normalize_arch_name(str src) str {
+  ret _normalize_arch(src);
+}
+
 fun _normalize_arch(str src) str {
   str lower = to_lower(trim(src));
   if equals(lower, "x86_64") || equals(lower, "amd64") {
@@ -45,7 +49,10 @@ fun _normalize_arch(str src) str {
   if equals(lower, "i386") || equals(lower, "i686") || equals(lower, "x86") {
     ret "x86";
   }
-  if equals(lower, "arm") {
+  if equals(lower, "i486") || equals(lower, "i586") {
+    ret "x86";
+  }
+  if equals(lower, "arm") || starts_with(lower, "armv") || starts_with(lower, "thumbv") {
     ret "arm";
   }
   ret lower;

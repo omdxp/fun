@@ -1172,6 +1172,13 @@ impl ParseState {
   // `parse_array_brackets`, called explicitly by each site that allows
   // one.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
+    // `volatile T*`: the pointee is volatile.
+    if self.next_token_is_keyword("volatile") {
+      self.token_next();
+      let verr = self.parse_datatype(dt);
+      dt.is_volatile = true;
+      ret verr;
+    }
     if self.next_token_is_keyword("fun") {
       ret self.parse_fn_type_datatype(dt);
     }
@@ -4449,7 +4456,7 @@ impl Parser {
       }
     }
 
-    flag is_explicit_type = (t.type == .Keyword && keyword_is_datatype(kw)) ||
+    flag is_explicit_type = (t.type == .Keyword && keyword_starts_type(kw)) ||
       (t.type == .Identifier && self._bare_type_decl_follows(1));
     if is_explicit_type {
       DataType* dt = malloc(sizeof(DataType));
@@ -5069,10 +5076,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> {
-              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                equals(s, "closure");
-            }
+            .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
             _ -> {}
           }
         }
@@ -6497,10 +6501,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> {
-              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                equals(s, "closure");
-            }
+            .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
             _ -> {}
           }
         }
@@ -7607,7 +7608,7 @@ impl Parser {
         .Sval(s) -> { kw = s; }
         _ -> {}
       }
-      if keyword_is_datatype(kw) || equals(kw, "fun") || equals(kw, "closure") {
+      if keyword_starts_type(kw) {
         ret self._parse_bare_type_variable_declaration(false);
       }
       if equals(kw, "let") {
@@ -8487,10 +8488,7 @@ impl Parser {
           }
           if rt.type == .Keyword {
             fit rt.data {
-              .Sval(s) -> {
-                looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                  equals(s, "closure");
-              }
+              .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
               _ -> {}
             }
           }
@@ -8963,10 +8961,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> {
-              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                equals(s, "closure");
-            }
+            .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
             _ -> {}
           }
         }
@@ -9118,7 +9113,7 @@ impl Parser {
             .Sval(s) -> { nkw = s; }
             _ -> {}
           }
-          if keyword_is_datatype(nkw) {
+          if keyword_is_datatype(nkw) || equals(nkw, "volatile") {
             ret self._parse_bare_type_variable_declaration(true);
           }
           if equals(nkw, "let") {
@@ -9179,7 +9174,7 @@ impl Parser {
         ret self.parse_function(false, false);
       }
 
-      if keyword_is_datatype(kw) {
+      if keyword_starts_type(kw) {
         ret self._parse_bare_type_variable_declaration(false);
       }
     }

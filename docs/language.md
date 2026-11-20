@@ -180,6 +180,11 @@ brackets can repeat for a multi-dimensional array: `num[N][N] m;`.
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
 forward-declared types are supported.
 
+`volatile` in front of a type makes every read and write through it reach
+memory, in order, which a memory-mapped device register needs: `volatile
+u32* uart = 0x10000000 as volatile u32*;`. It works on locals,
+parameters, fields, globals, and conversion targets.
+
 ### Conversions (`as`)
 
 `value as T` converts a value explicitly. It binds tighter than any
@@ -1587,7 +1592,9 @@ fun main() {
 - **Volatile**: `asm volatile { ... };` prevents reordering/elision.
 - **Architecture guard**: `asm arch x86_64 { ... };` errors if the target
   arch mismatches. Supported names: `x86_64`/`amd64`, `x86`/`i386`,
-  `aarch64`/`arm64`, `arm`.
+  `aarch64`/`arm64`, `arm`. The target is the CPU being built for, which
+  a cross build sets with `-arch` or `[build] arch` (see Target
+  architecture in Platforms & Compilers).
 - **Operands & clobbers**: reference named operands in templates with
   `%[name]`. Outputs come first, then inputs, then clobbers (GCC-style
   extended asm).

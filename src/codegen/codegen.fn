@@ -626,6 +626,9 @@ pub compound Codegen {
   // posix_spawnp` link error for spawning) - `transpile` rejects both
   // outright with a real Fun-level message instead.
   flag emscripten_mode;
+  // A bare-metal build (see `is_freestanding_build`): no C library, no
+  // runtime, no `main` wrapper.
+  flag freestanding;
   // What `emit_asm_stmt` checks a program's own `asm arch "..."` block
   // against, resolved by the caller (`host_arch_name()`, `..codegen.
   // host_arch`) before `transpile()` runs rather than imported and
@@ -863,6 +866,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.test_mode = false;
   g.msvc_mode = false;
   g.emscripten_mode = false;
+  g.freestanding = false;
   g.host_arch = "";
   g.prune_unreachable = false;
   g.reachable_names = set_init("", 256);
@@ -1599,6 +1603,9 @@ impl Codegen {
   // generic instantiation that can't be resolved.
   pub write_type(DataType dt) Option<str> {
     str resolved_name = self.resolve_type_name(dt)?;
+    if dt.is_volatile {
+      self.state.write("volatile ");
+    }
     self.write_type_name(resolved_name);
     let rdt = self.resolve_type_subst(dt);
     num ptr_depth = rdt.pointer_depth;
@@ -1627,6 +1634,9 @@ impl Codegen {
     }
     str resolved_name = name_opt.unwrap();
     StringBuilder wtb = string_builder_init(16);
+    if dt.is_volatile {
+      wtb.append("volatile ");
+    }
     fit parse_dynamic_int_datatype(resolved_name) {
       .Some(dyn) -> { wtb.append(dynamic_int_type_to_c(dyn)); }
       .None -> { wtb.append(map_type_to_c(resolved_name)); }
@@ -16695,7 +16705,9 @@ impl Codegen {
         }
         if !is_main && !fn_body_ends_in_return && !equals(rt_name, "void") {
           self.state.write_indent();
-          self.state.write("fprintf(stderr_stream(), \"panic: unreachable\\n\"); abort();\n");
+          self.state.write(
+            "fprintf(stderr_stream(), \"panic: %s\\n\", \"unreachable\"); abort();\n"
+          );
         }
         // Falling off the end of a C function with no `return` is only
         // well-defined for a function literally spelled `main` (C99
@@ -19915,7 +19927,35 @@ impl Codegen {
   // header is unconditional rather than gated on an actual import: import
   // nodes never survive flattening, so there is no way to see which
   // `std.c.*` modules a program used, and an unused header is harmless.
+  // The whole prelude of a freestanding build: only the headers every
+  // freestanding C implementation provides, plus what generated code
+  // itself refers to. A `panic` or failed `assert` calls the program's
+  // own `fun_panic_handler(str message)` when it defines one, then halts.
+  write_freestanding_prelude() {
+    self.state.write(
+      `#include <stdint.h>
+    `#include <stdbool.h>
+    `#include <stddef.h>
+    `#include <stdarg.h>
+    `void fun_panic_handler(char* message) __attribute__((weak));
+    `__attribute__((unused)) static inline void __fun_fs_report(const char* message) { if (fun_panic_handler) { fun_panic_handler((char*)message); } }
+    `__attribute__((unused)) static inline void __fun_fs_halt(void) { for (;;) { __builtin_trap(); } }
+    `#define stderr_stream() 0
+    `#define fprintf(stream, format, message) __fun_fs_report(message)
+    `#define abort() __fun_fs_halt()
+    `__attribute__((unused)) static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; while (*a && *a == *b) { a++; b++; } return *a == *b; }
+    `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
+    `
+    `
+
+    );
+  }
+
   pub write_prelude() {
+    if self.freestanding {
+      self.write_freestanding_prelude();
+      ret;
+    }
     self.state.write(
       `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
@@ -22640,6 +22680,11 @@ impl Codegen {
       }
     }
 
+    // A freestanding build has no startup wrapper to run these.
+    if self.freestanding && self.pending_global_runtime_inits.len > 0 {
+      self.error_note = "a freestanding build has no startup code to initialize a global with a function call or another global's value - give it a constant initializer, or assign it at the start of your entry point";
+      ret .Some(.UnsupportedNode);
+    }
     // Every global/const whose own initializer needs a real C function
     // call - a plain or generic function, a stdlib constructor like
     // `some()`/`ok()`, or a copy of another global's value - buffered
@@ -22673,7 +22718,7 @@ impl Codegen {
     if self.fuzz_mode {
       ret self.emit_fuzz_harness(nodes);
     }
-    if saw_real_main {
+    if saw_real_main && !self.freestanding {
       ret self.emit_main_thread_wrapper();
     }
     ret .None;

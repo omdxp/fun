@@ -86,6 +86,9 @@ pub compound DataType {
   // mirroring how `has_fn_sig`/`fn_sig` already relate to them.
   flag is_tuple;
   Vec<DataType*> tuple_members;
+  // `volatile T`: every read and write through it reaches memory, for a
+  // memory-mapped device register.
+  flag is_volatile;
 }
 
 // Every DataType construction site must go through this constructor (see
@@ -102,6 +105,7 @@ pub fun dtype_new() DataType {
   dt.generic_args.init(0);
   dt.fn_sig = nil;
   dt.has_fn_sig = false;
+  dt.is_volatile = false;
   dt.closure_sig = nil;
   dt.has_closure_sig = false;
   dt.is_tuple = false;

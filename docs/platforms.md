@@ -98,6 +98,54 @@ reference website's own Interactive Playground closes that gap for
 arbitrary, freshly-typed code anyway, without a dedicated WebAssembly
 codegen backend: see "The in-browser Playground" below for how.
 
+### Bare metal (freestanding builds)
+
+`-freestanding` (or `freestanding = true` in `[build]`) builds a kernel,
+bootloader, or firmware image: no C library, no runtime, no threads, and
+no `main` wrapper.
+
+- The generated C includes only the headers every freestanding C
+  implementation provides (`stdint.h`, `stdbool.h`, `stddef.h`,
+  `stdarg.h`), and the C compiler gets `-ffreestanding -nostdlib
+  -fno-stack-protector`. It needs gcc or clang.
+- Your own startup code, usually an assembly file in `[build] sources`,
+  calls your entry point, and a linker script goes in `ldflags`. Name the
+  entry point anything other than `main`, and mark it `pub` so it reads
+  as the public entry it is.
+- `panic` and a failed `assert` call your `fun_panic_handler(str message)`
+  when you define one (print it to a serial port or the screen), then
+  halt the CPU.
+- Only the language itself is available, no `std` module that needs the
+  C library. As with any freestanding C program, the compiler may still
+  call `memcpy`, `memset`, `memmove`, and `memcmp`, so define them.
+- A global needs a constant initializer: there is no startup code to run
+  a function call for it before your entry point.
+
+```toml
+[package]
+name = "kernel"
+
+[build]
+freestanding = true
+arch = "x86_64"
+sources = ["boot/start.S"]
+cflags = ["--target=x86_64-unknown-none-elf", "-mno-red-zone"]
+ldflags = ["-T", "boot/linker.ld"]
+```
+
+### Target architecture
+
+`asm arch` blocks are checked against the CPU being built for, which is
+not always this machine's own:
+
+1. `-arch <name>` or `[build] arch`, when given (`x86_64`, `x86`,
+   `aarch64`, `arm`).
+2. Otherwise the architecture a `--target=` or `-target` triple in
+   `FUN_CC_ARGS` or `[build] cflags` names.
+3. Otherwise a cross compiler's own prefix in `FUN_CC`
+   (`x86_64-elf-gcc` builds for `x86_64`).
+4. Otherwise this machine's own architecture.
+
 ### The in-browser Playground
 
 The reference website's [Interactive

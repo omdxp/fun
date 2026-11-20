@@ -8,6 +8,11 @@
 
 use harness;
 use std.string;
+use std.fs;
+use std.process;
+use std.vec;
+use std.io;
+use std.runtime_backend;
 
 test "generic function specialization emits concrete names" {
   str src = `fun id<T>(T x) T { ret x; }
@@ -3711,4 +3716,97 @@ test "a Vec of shape values holds and dispatches each pushed implementation, and
     "a Vec of shape values (strict MSVC-shaped compile)"
   );
   assert contains(out_msvc, "12 17 3"), "expected the same results with no GNU-only constructs";
+}
+
+test "a freestanding build emits only freestanding headers and no runtime, and compiles with no C library" {
+  str src = `compound Cell {
+  `  u8 ch;
+  `  u8 color;
+  `}
+  `const u64 VGA = 0xB8000;
+  `num col = 0;
+  `fun put(chr c) {
+  `  volatile Cell* vga = VGA as volatile Cell*;
+  `  vga[col] = Cell{ch = c as u8, color = 15};
+  `  col++;
+  `}
+  `pub fun fun_panic_handler(str message) {
+  `  put(message[0]);
+  `}
+  `pub fun kmain() {
+  `  str s = "hi";
+  `  assert equals_text(s, "hi"), "strings compare";
+  `  put(s[0]);
+  `}
+  `fun equals_text(str a, str b) flag {
+  `  ret a == b;
+  `}`;
+  let emitted = transpile_source_freestanding(src);
+  assert emitted.is_ok(), "expected a freestanding program to transpile";
+  str c = emitted.unwrap();
+  assert !contains(c, "<stdio.h>") && !contains(c, "<stdlib.h>") && !contains(c, "pthread"), "expected no hosted headers or threads";
+  assert !contains(c, "int main("), "expected no main wrapper";
+  assert contains(c, "volatile Cell* vga"), "expected the volatile pointer kept";
+  assert contains(c, "void kmain("), "expected the entry point emitted";
+  if runtime_backend_is_windows() {
+    ret;
+  }
+  str c_path = "src/tests/fixtures/freestanding_probe.c";
+  assert write_string(c_path, c), "could not stage the freestanding C";
+  defer remove_file(c_path);
+  Vec<str> argv;
+  argv.init(8);
+  defer argv.free();
+  argv.push(env_or("FUN_CC", "cc"));
+  argv.push("-ffreestanding");
+  argv.push("-fsyntax-only");
+  argv.push("-Wall");
+  argv.push("-Werror");
+  argv.push(c_path);
+  let built = run(argv_from(&argv));
+  assert built.is_ok() && built.unwrap().exit_code == 0, format(
+    "expected the freestanding C to compile cleanly: {str}",
+    built.unwrap().stderr_text
+  );
+}
+
+test "a freestanding build rejects a global that needs startup code to initialize" {
+  let emitted = transpile_source_freestanding(
+    `fun seed() num {
+  `  ret 4;
+  `}
+  `num start = seed();
+  `pub fun kmain() {}`
+  );
+  assert emitted.is_err() &&
+    contains(emitted.unwrap_err(), "freestanding build has no startup code"), "expected a clear error";
+}
+
+test "volatile qualifies pointers, parameters, fields, and conversions" {
+  str src = `use std.io;
+  `compound Regs {
+  `  volatile u32 status;
+  `  u32 data;
+  `}
+  `fun poke(volatile u32* reg, u32 v) {
+  `  *reg = v;
+  `}
+  `fun main() num {
+  `  u32 backing = 0;
+  `  volatile u32* reg = &backing;
+  `  poke(reg, 7);
+  `  *reg = *reg + 1;
+  `  Regs r = Regs{status = 1, data = 2};
+  `  let p = &backing as volatile u32*;
+  `  println_fmt("{u32} {u32} {u32}", *reg, r.status, *p);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "volatile_qualifier", "volatile qualifier");
+  assert contains(out, "8 1 8"), "expected writes through volatile pointers to land";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "volatile_qualifier_msvc",
+    "volatile qualifier (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "8 1 8"), "expected the same with no GNU-only constructs";
 }

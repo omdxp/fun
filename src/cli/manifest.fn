@@ -17,6 +17,7 @@ use ..ast.ast;
 use ..lexer.lexdefs;
 use std.string;
 use std.toml;
+use std.fs;
 use coverage;
 use std.vec;
 use std.option;
@@ -122,6 +123,12 @@ pub compound BuildSettings {
   Vec<str> cflags;
   // Raw flags for the linker, placed after every source and library.
   Vec<str> ldflags;
+  // A freestanding build: no C library and no runtime (see
+  // `is_freestanding_build`).
+  flag freestanding;
+  // The CPU the program is built for (`x86_64`, `aarch64`, ...), when it
+  // isn't this machine's own: what `asm arch` blocks are checked against.
+  str target_arch;
 }
 
 // No `[build]` settings at all.
@@ -133,7 +140,43 @@ pub fun build_settings_new() BuildSettings {
   b.links.init(0);
   b.cflags.init(0);
   b.ldflags.init(0);
+  b.freestanding = false;
+  b.target_arch = "";
   ret b;
+}
+
+// `./fun.toml`'s `[build]` settings, read once per process; empty when
+// there is no manifest here or it doesn't parse (the command that needs
+// the manifest reports that itself).
+flag _project_build_loaded = false;
+BuildSettings _project_build;
+
+pub fun project_build_settings() BuildSettings {
+  if !_project_build_loaded {
+    _project_build_loaded = true;
+    _project_build = build_settings_new();
+    if exists("fun.toml") {
+      let parsed = parse_manifest(read_to_string("fun.toml"));
+      if parsed.is_ok() {
+        _project_build = parsed.unwrap().build;
+      }
+    }
+  }
+  ret _project_build;
+}
+
+// Set by `-freestanding` on the command line.
+flag _freestanding_requested = false;
+
+pub fun request_freestanding_build() {
+  _freestanding_requested = true;
+}
+
+// True when this build targets bare metal: asked for with `-freestanding`
+// or `[build] freestanding = true`. Such a build gets no C library, no
+// runtime, and no `main` wrapper, for a kernel, bootloader, or firmware.
+pub fun is_freestanding_build() flag {
+  ret _freestanding_requested || project_build_settings().freestanding;
 }
 
 impl BuildSettings {
@@ -478,11 +521,12 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     defer build_keys.free();
     for bk : build_keys {
       fit bk {
-        "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags" -> {}
+        "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "freestanding",
+        "arch" -> {}
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, or ldflags)",
+            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, or arch)",
             bk
             )
           );
@@ -495,6 +539,15 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     m.build.links = _parse_string_array(build.unwrap().get_str("links"));
     m.build.cflags = _parse_string_array(build.unwrap().get_str("cflags"));
     m.build.ldflags = _parse_string_array(build.unwrap().get_str("ldflags"));
+    let fs_value = build.unwrap().get("freestanding");
+    if fs_value.is_some() {
+      let fs_flag = fs_value.unwrap().as_bool();
+      if fs_flag.is_none() {
+        ret .Err("[build] `freestanding` must be true or false");
+      }
+      m.build.freestanding = fs_flag.unwrap();
+    }
+    m.build.target_arch = build.unwrap().get_str("arch");
   }
 
   let lib = doc.table("lib");

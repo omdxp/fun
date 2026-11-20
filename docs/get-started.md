@@ -192,6 +192,9 @@ ldflags = ["-Wl,-rpath,vendor/lib"]
 - `cflags` come before the generated source, with `include_dirs`.
 - These apply to every compile in the project: `fun build`, `fun -in`,
   `fun test`, and `fun fuzz`.
+- `freestanding = true` builds for bare metal, and `arch = "x86_64"`
+  names the CPU being built for when it isn't this machine's own. See
+  Bare metal in Platforms & Compilers.
 - Without a `fun.toml`, `FUN_LDFLAGS` adds linker arguments the same
   way, after every source, and `FUN_CC_ARGS` adds compiler arguments
   before it.
