@@ -187,7 +187,10 @@ forward-declared types are supported.
 `volatile` in front of a type makes every read and write through it reach
 memory, in order, which a memory-mapped device register needs: `volatile
 u32* uart = 0x10000000 as volatile u32*;`. It works on locals,
-parameters, fields, globals, and conversion targets.
+parameters, fields, globals, and conversion targets. A `let` copied from
+a volatile pointer stays one (`let p = uart;` is a `volatile u32*`), while
+a `let` copied from a volatile value is an ordinary value (`let v = *uart;`
+is a plain `u32`).
 
 ### Conversions (`as`)
 

@@ -3949,3 +3949,22 @@ test "as applies after an index, a call, a parenthesized right side, and inside 
   );
   assert contains(out_msvc, want), format("expected the same under MSVC, got: {str}", out_msvc);
 }
+
+test "a let copy of a volatile value is an ordinary value, while a volatile pointer stays volatile" {
+  str src = `use std.io;
+  `fun main() num {
+  `  u32 backing = 4;
+  `  volatile u32 reg = 5;
+  `  volatile u32* p = &backing;
+  `  let d = reg;
+  `  let q = p;
+  `  d = d + 1;
+  `  println_fmt("{u32} {u32}", d, *q);
+  `  ret 0;
+  `}`;
+  str c = emit_c(src, "volatile let copies");
+  assert contains(c, "uint32_t d = reg;") && !contains(c, "volatile uint32_t d"), "expected the copy to drop volatile";
+  assert contains(c, "volatile uint32_t* q = p;"), "expected a volatile pointer copy kept volatile";
+  str out = run_source(src, "volatile_let", "volatile let copies");
+  assert contains(out, "6 4"), "expected both values read";
+}

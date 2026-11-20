@@ -12007,6 +12007,11 @@ impl Codegen {
               let let_idt_opt = self.infer_let_expr_type(v.val);
               if let_idt_opt.is_some() {
                 let let_idt = let_idt_opt.unwrap();
+                // A copy of a volatile value is an ordinary value; only a
+                // pointer keeps `volatile`, which qualifies its pointee.
+                if let_idt.is_volatile && !dtype_is_pointer(let_idt) {
+                  let_idt.is_volatile = false;
+                }
                 // Same reason the bookkeeping just below never routes
                 // a closure dtype through `write_type` either: its own
                 // fixed placeholder `type_str` ("closure(...)") was

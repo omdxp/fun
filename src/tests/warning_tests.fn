@@ -1337,3 +1337,18 @@ test "a closure capturing a heap pointer (never a stack address) is not flagged"
     "expected no warning: a malloc'd pointer safely outlives this function, unlike a stack local's address"
   );
 }
+
+test "a local used only as an asm operand is not unused" {
+  str found = notice(
+    `fun load(num* table) {
+    `  num* p = table;
+    `  num out = 0;
+    `  asm volatile (out out: "=r" = out; in p: "r" = p; clobber "memory") {
+    `    nop
+    `  };
+    `}`,
+    true
+  );
+  assert !contains(found, "unused variable 'p'"), "expected an input operand counted as a read";
+  assert !contains(found, "unused variable 'out'"), "expected an output operand counted as a use";
+}

@@ -11225,3 +11225,33 @@ test "hover shows a const's fixed-width type and its value as written" {
   str fn = hover(&reads, doc, 4, 3);
   assert contains(fn, "outb(u16 port, u8 value)"), "expected fixed-width parameter types in a signature";
 }
+
+test "volatile shows in hovers and hints, a let copy of a volatile value is plain, and a pointer indexes to its pointee" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///volatile_let.fn";
+  doc.path = "volatile_let.fn";
+  doc.text = `compound Cell {
+  `  u8 ch;
+  `}
+  `fun main() {
+  `  Cell backing = Cell{ch = 7};
+  `  volatile Cell* vga = &backing as volatile Cell*;
+  `  let a = vga;
+  `  let b = &backing as volatile Cell*;
+  `  let c = vga[0].ch;
+  `  volatile u32 reg = 5;
+  `  let d = reg;
+  `  Cell* ptr = &backing;
+  `  let e = ptr[0];
+  `}`;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 14);
+  assert count(hints, `"label":": volatile Cell*"`) == 2, "expected both volatile pointers hinted whole";
+  assert contains(hints, `"label":": u8"`), "expected a field read through a volatile pointer's index typed";
+  assert contains(hints, `"label":": u32"`) && !contains(hints, `": volatile u32"`), "expected a copy of a volatile value to be plain";
+  assert contains(hints, `"label":": Cell"`), "expected a pointer to index to its pointee";
+  str h = hover(&reads, doc, 5, 18);
+  assert contains(h, "volatile Cell* vga"), "expected volatile in the declaration's hover";
+}
