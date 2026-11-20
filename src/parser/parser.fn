@@ -7026,10 +7026,10 @@ impl Parser {
   // literal or a raw `{ ... }` block.
   pub parse_asm_statement() Option<ParseErrorKind> {
     let asm_tok = self.state.token_peek_next();
-    if !self.has_current_function {
-      self.state.err("asm statement outside of function");
-      ret .Some(.InvalidStatement);
-    }
+    // At file scope, an `asm` block is emitted as it stands among the
+    // program's top-level declarations: interrupt stubs, boot code,
+    // section directives.
+    flag at_file_scope = !self.has_current_function;
     self.state.token_next(); // consume 'asm'
 
     flag is_volatile = false;
@@ -7167,6 +7167,12 @@ impl Parser {
     a.clobbers = clobbers;
     a.is_string_literal = is_string_literal;
 
+    if at_file_scope &&
+      (a.is_volatile || a.outputs.len > 0 || a.inputs.len > 0 ||
+      a.clobbers.len > 0) {
+      self.state.err("an asm block outside a function takes no volatile or operands");
+      ret .Some(.InvalidStatement);
+    }
     Node node = node_new(.StatementAsm(a));
     fit asm_tok {
       .Some(t) -> {

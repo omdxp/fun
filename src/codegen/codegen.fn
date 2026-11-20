@@ -1157,6 +1157,48 @@ fun _vararg_c_type(str c_type) str {
   }
 }
 
+// An extended asm template (one with operands) with every register
+// reference written `%%name`, the spelling C needs once `%` also marks
+// operands: `mov %cr0, %[v]` becomes `mov %%cr0, %[v]`. An operand
+// (`%[v]`, `%0`), an operand with a one-letter modifier (`%w0`,
+// `%b[v]`), and an already-escaped `%%` are left alone.
+fun _escape_asm_registers(str template) str {
+  StringBuilder b = string_builder_init(len(template) + 8);
+  num n = len(template);
+  num i = 0;
+  for i < n {
+    chr c = template[i];
+    if c != '%' || i + 1 >= n {
+      b.append_char(c);
+      i = i + 1;
+      continue;
+    }
+    chr next = template[i + 1];
+    if next == '%' {
+      b.append("%%");
+      i = i + 2;
+      continue;
+    }
+    flag is_letter = (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z');
+    if !is_letter {
+      b.append_char(c);
+      i = i + 1;
+      continue;
+    }
+    chr after = '\0';
+    if i + 2 < n {
+      after = template[i + 2];
+    }
+    flag modifier = next != 'r' && ((after >= '0' && after <= '9') || after == '[');
+    if !modifier {
+      b.append_char('%');
+    }
+    b.append_char(c);
+    i = i + 1;
+  }
+  ret b.build();
+}
+
 // A builtin binary operator whose result is always a flag.
 fun _is_flag_result_operator(str op) flag {
   fit op {
@@ -10094,7 +10136,12 @@ impl Codegen {
       self.state.write(" __volatile__");
     }
     self.state.write("(\"");
-    self.write_asm_escaped(a.template);
+    flag has_operands = a.outputs.len > 0 || a.inputs.len > 0 || a.clobbers.len > 0;
+    if has_operands {
+      self.write_asm_escaped(_escape_asm_registers(a.template));
+    } else {
+      self.write_asm_escaped(a.template);
+    }
     self.state.write("\"");
 
     flag has_outputs = a.outputs.len > 0;
@@ -22594,6 +22641,13 @@ impl Codegen {
           let gerr = self.emit_global_variable(n);
           if gerr.is_some() {
             ret gerr;
+          }
+        }
+        // File-scope `asm`, which depends on no type either.
+        .StatementAsm(fa) -> {
+          let aerr = self.emit_asm_stmt(fa);
+          if aerr.is_some() {
+            ret aerr;
           }
         }
         _ -> {}

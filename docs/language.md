@@ -1625,7 +1625,30 @@ fun main() {
   architecture in Platforms & Compilers).
 - **Operands & clobbers**: reference named operands in templates with
   `%[name]`. Outputs come first, then inputs, then clobbers (GCC-style
-  extended asm).
+  extended asm). In a block with operands, write registers with a single
+  `%` (`mov %cr0, %[v]`): the compiler doubles it to the `%%cr0` C needs,
+  leaving operands (`%[v]`, `%0`) and one-letter operand modifiers
+  (`%w[v]`, `%b0`) as written.
+- **File scope**: an `asm` block outside any function is emitted as it
+  stands among the program's own declarations, for interrupt stubs, boot
+  code, or section directives. It takes no `volatile` and no operands.
+
+```fun
+// fun:no-run
+asm arch x86_64 {
+  .global isr_stub
+  isr_stub:
+    iretq
+};
+
+fun read_cr0() u64 {
+  u64 v = 0;
+  asm volatile arch x86_64 (out v: "=r" = v) {
+    mov %cr0, %[v]
+  };
+  ret v;
+}
+```
 - Asm block contents are preserved as raw text (including whitespace and
   comments). Fun does not validate assembly syntax inside asm blocks;
   correctness is decided by the downstream assembler/dialect (clang/GAS

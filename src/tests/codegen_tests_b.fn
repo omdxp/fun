@@ -3848,3 +3848,38 @@ test "a packed compound has no padding, generic or not, and packed stays an ordi
   );
   assert contains(out_msvc, "8 5 8 9 7 1"), "expected the same layout with no GNU-only constructs";
 }
+
+test "asm at file scope is emitted as it stands, and takes no operands" {
+  str src = `asm {
+  `  .global isr_stub
+  `  isr_stub:
+  `    iretq
+  `};
+  `fun main() {}`;
+  let out = emit_c(src, "file-scope asm");
+  assert contains(out, "__asm__(\"\\n  .global isr_stub\\n  isr_stub:\\n    iretq\\n\");"), "expected a basic asm block at file scope";
+  let rejected = transpile_source(`asm volatile { nop };
+  `fun main() {}`);
+  assert rejected.is_err(), "expected volatile refused outside a function";
+}
+
+test "an extended asm template's register names are escaped, its operands and modifiers left alone" {
+  str src = `fun main() num {
+  `  num v = 0;
+  `  num x = 1;
+  `  asm volatile (out v: "=r" = v; in x: "r" = x) {
+  `    mov %cr0, %[v]
+  `    add %rsp, %r8
+  `    movw %w[x], %ax
+  `    movq %%rbx, %0
+  `  };
+  `  asm { mov %eax, %ebx };
+  `  ret v;
+  `}`;
+  let out = emit_c(src, "asm register escaping");
+  assert contains(out, "mov %%cr0, %[v]"), "expected a control register escaped beside a named operand";
+  assert contains(out, "add %%rsp, %%r8"), "expected r8 read as a register, not a modifier";
+  assert contains(out, "movw %w[x], %%ax"), "expected a modifier operand kept";
+  assert contains(out, "movq %%rbx, %0"), "expected an existing escape and a numbered operand kept";
+  assert contains(out, "mov %eax, %ebx"), "expected a block with no operands left exactly as written";
+}
