@@ -3968,3 +3968,61 @@ test "a let copy of a volatile value is an ordinary value, while a volatile poin
   str out = run_source(src, "volatile_let", "volatile let copies");
   assert contains(out, "6 4"), "expected both values read";
 }
+
+test "unions share storage, align(N) aligns types, fields, globals, and locals, and Set.union still works" {
+  str src = `use std.io;
+  `use std.set;
+  `union Value {
+  `  u32 bits;
+  `  f32 real;
+  `  u8[4] bytes;
+  `}
+  `packed union Tiny {
+  `  u8 a;
+  `  u16 b;
+  `}
+  `union Slot<T> {
+  `  T item;
+  `  u64 raw_bits;
+  `}
+  `align(64) compound Line {
+  `  u8 tag;
+  `}
+  `compound Mixed {
+  `  u8 a;
+  `  align(16) u32 b;
+  `}
+  `align(4096) u8[4096] page;
+  `fun main() num {
+  `  Value v = Value{real = 1.0};
+  `  u32 bits = v.bits;
+  `  Slot<u32> s = Slot<u32>{item = 5};
+  `  align(32) u8[8] local_buf;
+  `  Set<num> a = set_init(0, 4);
+  `  a.add(1);
+  `  Set<num> b = set_init(0, 4);
+  `  b.add(2);
+  `  let both = a.union(&b);
+  `  u64 page_addr = &page as u64;
+  `  u64 buf_addr = &local_buf as u64;
+  `  println_fmt("{u32} {num} {num} {num} {num}", bits, sizeof(Value), sizeof(Tiny), sizeof(Line), sizeof(Mixed));
+  `  println_fmt("{num} {num} {num} {u32}", page_addr % 4096, buf_addr % 32, both.len(), s.item);
+  `  ret 0;
+  `}`;
+  str line1 = "1065353216 4 2 64 32";
+  str line2 = "0 0 2 5";
+  str out = run_source(src, "unions_align", "unions and alignment");
+  assert contains(out, line1) && contains(out, line2), format(
+    "expected union layouts and every alignment honored, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "unions_align_msvc",
+    "unions and alignment (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, line1) && contains(out_msvc, line2), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}

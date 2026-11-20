@@ -622,6 +622,8 @@ compound CompoundInfo {
   // A generic compound's fields mention its type parameters, which
   // stand for whatever an instantiation supplies.
   flag is_generic;
+  // A `union`, whose fields share one storage, so a literal sets one.
+  flag is_union;
 }
 
 // The methods declared on a type, keyed by method name. A shape's
@@ -1915,9 +1917,10 @@ fun _fixed_width_bits(str width) Option<num> {
   ret .Some(bits);
 }
 
-// A pointer, or a string (itself a pointer to its own bytes).
+// A pointer, a string (itself a pointer to its own bytes), or an array
+// (which converts as the address of its first element).
 fun _is_pointer_like(CheckedType t) flag {
-  ret !t.is_array && (t.pointer_depth > 0 || t.base == .Str || t.is_null_literal);
+  ret t.is_array || t.pointer_depth > 0 || t.base == .Str || t.is_null_literal;
 }
 
 // Calls the language supplies rather than a program declaring them.
@@ -2516,6 +2519,19 @@ impl Checker {
       ret built;
     }
     CompoundInfo holder = info.unwrap();
+    // A union holds one field at a time, so a literal naming two would
+    // silently keep only the last.
+    if holder.is_union && init.fields.len > 1 {
+      self.fail(
+        format(
+        "a '{str}' literal sets {num} fields, but a union holds only one at a time",
+        built.name,
+        init.fields.len
+        ),
+        node
+      );
+      ret checked_unknown();
+    }
     for f : init.fields {
       let field_type = holder.fields.at(f.name);
       if field_type.is_some() {
@@ -7011,6 +7027,7 @@ pub fun typecheck_program_with_aliases(
         info.type_params.init(0);
         info.bounds.init(0);
         info.is_generic = c.has_type_params && c.type_params.len > 0;
+        info.is_union = c.is_union;
         if c.has_type_params {
           for p : c.type_params {
             info.type_params.push(p);

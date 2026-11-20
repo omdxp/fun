@@ -89,6 +89,9 @@ pub compound DataType {
   // `volatile T`: every read and write through it reaches memory, for a
   // memory-mapped device register.
   flag is_volatile;
+  // `align(N)` on a declaration: the variable or field this type declares
+  // starts at an address that is a multiple of `N` bytes; 0 when unset.
+  num alignment;
 }
 
 // Every DataType construction site must go through this constructor (see
@@ -106,6 +109,7 @@ pub fun dtype_new() DataType {
   dt.fn_sig = nil;
   dt.has_fn_sig = false;
   dt.is_volatile = false;
+  dt.alignment = 0;
   dt.closure_sig = nil;
   dt.has_closure_sig = false;
   dt.is_tuple = false;
@@ -716,12 +720,19 @@ pub compound CompoundNode {
   // `packed compound`: no padding between or after fields, for a layout
   // fixed by hardware or a file format.
   flag is_packed;
+  // `union Name { ... }`: every field shares the same storage, as in C.
+  flag is_union;
+  // `align(N) compound`: every value of the type starts at a multiple of
+  // `N` bytes; 0 when unset.
+  num alignment;
 }
 
 pub fun compound_node_new() CompoundNode {
   CompoundNode c;
   c.name = "";
   c.is_packed = false;
+  c.is_union = false;
+  c.alignment = 0;
   c.fields.init(0);
   c.type_params.init(0);
   c.has_type_params = false;

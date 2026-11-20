@@ -1175,6 +1175,24 @@ pub fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
   ret "";
 }
 
+// A compound's own declaration head as written, up to its name:
+// `align(64) packed union `, or plain `compound `.
+pub fun compound_head_text(CompoundNode c) str {
+  StringBuilder b = string_builder_init(24);
+  if c.alignment > 0 {
+    b.append(format("align({num}) ", c.alignment));
+  }
+  if c.is_packed {
+    b.append("packed ");
+  }
+  if c.is_union {
+    b.append("union ");
+  } else {
+    b.append("compound ");
+  }
+  ret b.build();
+}
+
 // The type written after the `as` at `as_idx` (`u8`, `Box<num>`, `P*`),
 // as a fresh string, with `out_end` set to its last token; "" when no
 // type follows. A `*` followed by an operand is multiplication, not part
@@ -1293,7 +1311,7 @@ pub fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_nam
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != .Keyword || !equals(token_word(t), "compound") {
+    if !opens_compound_decl(tokens, i - 1) {
       continue;
     }
     if i >= tokens.len || tokens.get(i).type != .Identifier ||
@@ -1561,7 +1579,7 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
       .Compound(c) -> {
         if equals(c.name, name) {
           StringBuilder b = string_builder_init(32);
-          b.append("compound ");
+          b.append(compound_head_text(c));
           b.append(c.name);
           _append_type_params(
             &b,
@@ -9378,7 +9396,7 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
       }
       .Compound(c) -> {
         StringBuilder cb = string_builder_init(32);
-        cb.append("compound ");
+        cb.append(compound_head_text(c));
         cb.append(c.name);
         _append_type_params(
           &cb,

@@ -1458,11 +1458,12 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != .Keyword {
+    flag opens_union = is_union_head_token(tokens, i - 1);
+    if t.type != .Keyword && !opens_union {
       continue;
     }
     str kw = token_word(t);
-    flag is_compound = equals(kw, "compound");
+    flag is_compound = equals(kw, "compound") || opens_union;
     flag is_enum = equals(kw, "enum");
     flag is_methods = equals(kw, "shape") || equals(kw, "impl");
     if !is_compound && !is_enum && !is_methods {
@@ -1563,7 +1564,7 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
       }
       if i > 0 {
         Token prev = tokens.get(i - 1);
-        if token_is_keyword(prev, "compound") && !struct_names.contains(name) {
+        if opens_compound_decl(tokens, i - 1) && !struct_names.contains(name) {
           struct_names.push(name);
         } elif token_is_keyword(prev, "enum") && !enum_names.contains(name) {
           enum_names.push(name);

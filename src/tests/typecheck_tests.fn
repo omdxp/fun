@@ -4708,3 +4708,18 @@ test "a fixed-width type keeps its own name in messages, and an out-of-range lit
     "expected every in-range literal, and an explicit wrap, accepted"
   );
 }
+
+test "a union literal sets one field, and align(N) needs a power of two" {
+  assert contains(
+    check(`union V { u32 a; f32 b; }
+    `fun main() { V v = V{a = 1, b = 2.0}; }`),
+    "a 'V' literal sets 2 fields, but a union holds only one at a time"
+  ), "expected a two-field union literal rejected";
+  accepts(
+    `union V { u32 a; f32 b; }
+  `fun main() { V v = V{b = 2.0}; }`,
+    "expected a one-field union literal accepted"
+  );
+  assert equals(check(`align(24) compound C { u8 x; }
+  `fun main() {}`), "parse error"), "expected a non-power-of-two alignment rejected";
+}
