@@ -179,8 +179,26 @@ expected_content_for() {
 }
 
 # `mapfile`/`readarray` are also bash 4+; a plain read loop works everywhere.
+# A directory under examples/ with its own fun.toml is a whole project
+# (such as examples/kernel, a bare-metal build), built its own way rather
+# than file by file, so its sources are left out here.
+in_own_project() {
+  local dir
+  dir="$(dirname "$1")"
+  while [[ "$dir" != "$REPO_ROOT/examples" && "$dir" != "/" ]]; do
+    if [[ -f "$dir/fun.toml" ]]; then
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
 files=()
 while IFS= read -r f; do
+  if in_own_project "$f"; then
+    continue
+  fi
   files+=("$f")
 done < <(find "$REPO_ROOT/examples" -type f -name '*.fn' | sort)
 
