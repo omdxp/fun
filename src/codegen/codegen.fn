@@ -626,6 +626,14 @@ pub compound Codegen {
   // posix_spawnp` link error for spawning) - `transpile` rejects both
   // outright with a real Fun-level message instead.
   flag emscripten_mode;
+  // Every `packed compound`'s own name, generic templates included.
+  Vec<str> packed_compound_names;
+  // Native code is linked in (`[build] sources`), which may call any of
+  // the program's own `pub` functions by name, so none is pruned.
+  flag keep_public_roots;
+  // A bare-metal build (see `is_freestanding_build`): no C library, no
+  // runtime, no `main` wrapper.
+  flag freestanding;
   // What `emit_asm_stmt` checks a program's own `asm arch "..."` block
   // against, resolved by the caller (`host_arch_name()`, `..codegen.
   // host_arch`) before `transpile()` runs rather than imported and
@@ -863,6 +871,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.test_mode = false;
   g.msvc_mode = false;
   g.emscripten_mode = false;
+  g.packed_compound_names.init(0);
+  g.keep_public_roots = false;
+  g.freestanding = false;
   g.host_arch = "";
   g.prune_unreachable = false;
   g.reachable_names = set_init("", 256);
@@ -943,6 +954,12 @@ fun program_uses_std_c_header(Vec<Node> nodes, str file) flag {
     }
   }
   ret false;
+}
+
+// True for a file from the standard library itself.
+fun _is_stdlib_file(str filename) flag {
+  ret contains(filename, "/std/") || contains(filename, "\\std\\") ||
+    starts_with(filename, "std/");
 }
 
 pub fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
@@ -1134,6 +1151,74 @@ fun _is_hex_digit(chr c) flag {
 fun is_arithmetic_operator(str op) flag {
   fit op {
     "+", "-", "*", "/", "%" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// The C type a vararg is passed as: every integer narrower than 64 bits
+// widens to `int64_t` and `float` to `double`, the widths the callee's
+// `va_arg` reads back, so a `u8` or `f32` argument is never read with
+// the wrong width.
+fun _vararg_c_type(str c_type) str {
+  fit c_type {
+    "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t" -> { ret "int64_t"; }
+    "float" -> { ret "double"; }
+    _ -> { ret c_type; }
+  }
+}
+
+// An extended asm template (one with operands) with every register
+// reference written `%%name`, the spelling C needs once `%` also marks
+// operands: `mov %cr0, %[v]` becomes `mov %%cr0, %[v]`. An operand
+// (`%[v]`, `%0`), an operand with a one-letter modifier (`%w0`,
+// `%b[v]`), and an already-escaped `%%` are left alone.
+fun _escape_asm_registers(str template) str {
+  StringBuilder b = string_builder_init(len(template) + 8);
+  num n = len(template);
+  num i = 0;
+  for i < n {
+    chr c = template[i];
+    if c != '%' || i + 1 >= n {
+      b.append_char(c);
+      i = i + 1;
+      continue;
+    }
+    chr next = template[i + 1];
+    if next == '%' {
+      b.append("%%");
+      i = i + 2;
+      continue;
+    }
+    flag is_letter = (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z');
+    if !is_letter {
+      b.append_char(c);
+      i = i + 1;
+      continue;
+    }
+    chr after = '\0';
+    if i + 2 < n {
+      after = template[i + 2];
+    }
+    flag modifier = next != 'r' && ((after >= '0' && after <= '9') || after == '[');
+    if !modifier {
+      b.append_char('%');
+    }
+    b.append_char(c);
+    i = i + 1;
+  }
+  ret b.build();
+}
+
+// True for an integer literal, parenthesized or not.
+fun _is_int_literal_node(Node* n) flag {
+  fit n.kind {
+    .Number(d) -> {
+      fit d {
+        .Num(_) -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .ExpressionParenthesis(inner) -> { ret _is_int_literal_node(inner); }
     _ -> { ret false; }
   }
 }
@@ -1587,6 +1672,9 @@ impl Codegen {
   // generic instantiation that can't be resolved.
   pub write_type(DataType dt) Option<str> {
     str resolved_name = self.resolve_type_name(dt)?;
+    if dt.is_volatile {
+      self.state.write("volatile ");
+    }
     self.write_type_name(resolved_name);
     let rdt = self.resolve_type_subst(dt);
     num ptr_depth = rdt.pointer_depth;
@@ -1615,6 +1703,9 @@ impl Codegen {
     }
     str resolved_name = name_opt.unwrap();
     StringBuilder wtb = string_builder_init(16);
+    if dt.is_volatile {
+      wtb.append("volatile ");
+    }
     fit parse_dynamic_int_datatype(resolved_name) {
       .Some(dyn) -> { wtb.append(dynamic_int_type_to_c(dyn)); }
       .None -> { wtb.append(map_type_to_c(resolved_name)); }
@@ -2258,12 +2349,17 @@ impl Codegen {
     CodegenState typedef_scratch = self.new_scratch_state();
     CodegenState* saved_state = self.state;
     self.state = &typedef_scratch;
+    flag inst_packed = self.packed_compound_names.contains(dt.type_str);
+    self._open_packed(inst_packed);
     self.state.write("typedef struct ");
     self.state.write(mangled_name);
     self.state.write(" {\n");
     num wi = 0;
     for wi < resolved_field_names.len {
       self.state.write("  ");
+      if field_dtypes.get(wi).is_volatile {
+        self.state.write("volatile ");
+      }
       self.write_type_name(resolved_field_type_names.get(wi));
       // Uses the field's star count, not `resolved_field_is_pointer`'s
       // single boolean.
@@ -2308,8 +2404,10 @@ impl Codegen {
       wi = wi + 1;
     }
     self.state.write("} ");
+    self._mark_packed(inst_packed);
     self.state.write(mangled_name);
     self.state.write(";\n\n");
+    self._close_packed(inst_packed);
     self.state = saved_state;
     self.emit_hoisted(typedef_scratch.out.build());
 
@@ -7355,6 +7453,18 @@ impl Codegen {
         if wrote_own_parens {
           self.state.write("(");
         }
+        // C reads a bare integer literal as a 32-bit `int`, where `num` is
+        // 64-bit: `1 << 40` or `3000000 * 3000000` would overflow before
+        // ever reaching the `num` it is assigned to. A literal shifted, or
+        // combined only with another literal, is widened first.
+        flag widen_left = _is_int_literal_node(e.left) && e.has_right &&
+          (equals(e.op, "<<") || equals(e.op, ">>") ||
+          ((equals(e.op, "*") || equals(e.op, "+") || equals(e.op, "-")) && _is_int_literal_node(
+          e.right
+        )));
+        if widen_left {
+          self.state.write("(int64_t)");
+        }
         let lerr = self.emit_expr(*e.left);
         if lerr.is_some() {
           ret lerr;
@@ -7647,7 +7757,7 @@ impl Codegen {
   }
 
   // Counts each typed `{kind}` placeholder in a `format()` literal's
-  // format string (`{str}`/`{num}`/`{dec}`/`{flag}`/`{chr}`/`{ptr}`/`{raw}`),
+  // format string (any word `is_placeholder_word` accepts),
   // mirroring the reference compiler's own placeholder recognition:
   // `{{`/`}}` are escaped braces, and a bare `{}` opts the whole string
   // out of counting (returns `.None`), since it takes the general vararg
@@ -7666,17 +7776,12 @@ impl Codegen {
         if i + 1 < n && fmt[i + 1] == '}' {
           ret .None;
         }
-        // The placeholder word's own length varies (`flag` is 4 chars,
-        // every other one is 3), so the closing `}` is found by
-        // scanning forward rather than assumed at a fixed offset.
+        // The placeholder word's own length varies, so the closing `}`
+        // is found by scanning forward.
         num close = self._format_placeholder_close(fmt, i + 1);
         if close > 0 {
           str word = substr(fmt, i + 1, close - i - 1);
-          flag matched = false;
-          fit word {
-            "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { matched = true; }
-            _ -> {}
-          }
+          flag matched = is_placeholder_word(word);
           free(word);
           if matched {
             count = count + 1;
@@ -7712,7 +7817,7 @@ impl Codegen {
     ret -1;
   }
 
-  // The placeholder type word (`str`/`num`/`dec`/`flag`/`chr`/`ptr`/`raw`)
+  // The placeholder type word (any `is_placeholder_word` accepts)
   // at each vararg position `fmt` requests, in order; `""` for a bare
   // `{}` or anything unparseable at that position. Used so an explicit
   // `{ptr}`/`{raw}` can force raw-pointer formatting for that argument
@@ -7738,12 +7843,7 @@ impl Codegen {
         num close2 = self._format_placeholder_close(fmt, i + 1);
         if close2 > 0 {
           str word = substr(fmt, i + 1, close2 - i - 1);
-          flag known_word = false;
-          fit word {
-            "str", "num", "dec", "flag", "chr", "ptr", "raw" -> { known_word = true; }
-            _ -> {}
-          }
-          if known_word {
+          if is_placeholder_word(word) {
             out.push(word);
             i = close2 + 1;
             continue;
@@ -8113,7 +8213,7 @@ impl Codegen {
           let va_type_opt = self.infer_arg_type_name(va_arg);
           str va_c_type = "int64_t";
           if va_type_opt.is_some() {
-            va_c_type = map_type_to_c(va_type_opt.unwrap());
+            va_c_type = _vararg_c_type(map_type_to_c(va_type_opt.unwrap()));
           }
           if equals(va_c_type, "void") {
             va_c_type = "void*";
@@ -8266,7 +8366,7 @@ impl Codegen {
             let va_m_type_opt = self.infer_arg_type_name(va_arg);
             str va_m_c_type = "int64_t";
             if va_m_type_opt.is_some() {
-              va_m_c_type = map_type_to_c(va_m_type_opt.unwrap());
+              va_m_c_type = _vararg_c_type(map_type_to_c(va_m_type_opt.unwrap()));
             }
             if equals(va_m_c_type, "void") {
               va_m_c_type = "void*";
@@ -8329,7 +8429,7 @@ impl Codegen {
             if va_needs_cast {
               let va_type_opt = self.infer_arg_type_name(va_arg);
               if va_type_opt.is_some() {
-                va_c_type = map_type_to_c(va_type_opt.unwrap());
+                va_c_type = _vararg_c_type(map_type_to_c(va_type_opt.unwrap()));
               }
               if equals(va_c_type, "void") {
                 va_c_type = "void*";
@@ -8424,6 +8524,8 @@ impl Codegen {
               self.state.write("b");
             } elif equals(ctype_for_tag, "char") {
               self.state.write("c");
+            } elif equals(ctype_for_tag, "uint64_t") {
+              self.state.write("u");
             } elif equals(ctype_for_tag, "void*") {
               // `void*` is produced by force-raw (`{ptr}`/`{raw}`) slots and
               // by the `void` → `void*` coercion above; both cases pass a raw
@@ -8548,6 +8650,18 @@ impl Codegen {
         }
         self.state.write(")) == 0)");
       }
+      ret .None;
+    }
+    // `value as T`: a plain C cast to `T`'s own C type.
+    if equals(callee_name, "__fun_as") && args.len == 1 && e.generic_args.len == 1 {
+      self.state.write("((");
+      self.write_type(*e.generic_args.get(0))?!(.UnsupportedNode);
+      self.state.write(")(");
+      let as_err = self.emit_expr(*args.get(0));
+      if as_err.is_some() {
+        ret as_err;
+      }
+      self.state.write("))");
       ret .None;
     }
     if equals(callee_name, "__fun_key_hash") && args.len == 1 {
@@ -8718,21 +8832,7 @@ impl Codegen {
           // `ret` initializer gets; without it the argument's concrete
           // pointer would be passed where C expects the shape's
           // fat-pointer struct by value.
-          if self.shape_names.contains(resolved.unwrap()) {
-            let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
-            if arg_concrete.is_some() {
-              self.ensure_generic_impl_shape_vtable_instantiated(
-                arg_concrete.unwrap(),
-                resolved.unwrap()
-              );
-              self.state.write("__fun_coerce_");
-              self.state.write(arg_concrete.unwrap());
-              self.state.write("_");
-              self.state.write(resolved.unwrap());
-              self.state.write("(");
-              arg_did_shape_coerce = true;
-            }
-          }
+          arg_did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
         }
       }
       let aerr = self.emit_expr(*arg);
@@ -9174,7 +9274,39 @@ impl Codegen {
   // generic instantiation - whatever `infer_let_expr_type` already
   // resolves a call's return type as, reused rather than duplicated);
   // `.None` for anything else.
+  // When `target` is a shape and `arg` a pointer to a type implementing
+  // it, writes the opening of the `__fun_coerce_` call that wraps `arg`
+  // and returns true; the caller closes it with `)` after `arg`.
+  _open_shape_coerce(str target, Node* arg) flag {
+    if !self.shape_names.contains(target) {
+      ret false;
+    }
+    let arg_concrete = self.resolve_shape_coerce_concrete_type(arg);
+    if arg_concrete.is_none() {
+      ret false;
+    }
+    self.ensure_generic_impl_shape_vtable_instantiated(arg_concrete.unwrap(), target);
+    self.state.write("__fun_coerce_");
+    self.state.write(arg_concrete.unwrap());
+    self.state.write("_");
+    self.state.write(target);
+    self.state.write("(");
+    ret true;
+  }
+
   resolve_shape_coerce_concrete_type(Node* exp) Option<str> {
+    let concrete = self._resolve_shape_coerce_concrete_any(exp)?;
+    // A builtin pointee (`malloc`'s `raw*`, a `num*`) never implements a
+    // shape, so a slot typed `Shape*` receiving one is a plain pointer
+    // store, not a coercion.
+    fit concrete {
+      "raw", "void", "num", "dec", "str", "chr", "flag", "i8", "i16", "i32", "i64", "u8", "u16",
+      "u32", "u64", "f32", "f64" -> { ret .None; }
+      _ -> { ret .Some(concrete); }
+    }
+  }
+
+  _resolve_shape_coerce_concrete_any(Node* exp) Option<str> {
     fit exp.kind {
       .Unary(u) -> {
         if equals(u.op, "&") && !u.is_left_operanded_unary {
@@ -9877,14 +10009,21 @@ impl Codegen {
       let ptype = self.lookup_impl_method_param_type(recv_r.type_name, method_name, arg_idx);
       str prev_expected = self.expected_enum_type;
       str prev_expected_compound = self.expected_compound_type;
+      flag marg_did_shape_coerce = false;
       if ptype.is_some() {
         let resolved = self.resolve_type_name(*ptype.unwrap());
         if resolved.is_some() {
           self.expected_enum_type = resolved.unwrap();
           self.expected_compound_type = resolved.unwrap();
+          if !dtype_is_pointer(*ptype.unwrap()) {
+            marg_did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
+          }
         }
       }
       let aerr = self.emit_expr(*arg);
+      if marg_did_shape_coerce {
+        self.state.write(")");
+      }
       self.expected_enum_type = prev_expected;
       self.expected_compound_type = prev_expected_compound;
       if aerr.is_some() {
@@ -10033,7 +10172,12 @@ impl Codegen {
       self.state.write(" __volatile__");
     }
     self.state.write("(\"");
-    self.write_asm_escaped(a.template);
+    flag has_operands = a.outputs.len > 0 || a.inputs.len > 0 || a.clobbers.len > 0;
+    if has_operands {
+      self.write_asm_escaped(_escape_asm_registers(a.template));
+    } else {
+      self.write_asm_escaped(a.template);
+    }
     self.state.write("\"");
 
     flag has_outputs = a.outputs.len > 0;
@@ -10541,6 +10685,16 @@ impl Codegen {
   // `resolve_field_chain` purely to read `.type_name` off it.
   _resolve_call_rtype(ExprNode inner_e) Option<DataType> {
     Option<DataType> call_rtype = .None;
+    if inner_e.has_generic_args && inner_e.generic_args.len == 1 {
+      fit inner_e.left.kind {
+        .Identifier(as_name) -> {
+          if equals(as_name, "__fun_as") {
+            ret .Some(self.resolve_type_subst(*inner_e.generic_args.get(0)));
+          }
+        }
+        _ -> {}
+      }
+    }
     // A closure-valued callee that isn't a name (`(fun() num {...})()`,
     // `make()()`): the call's result is the closure's own return type.
     flag callee_is_name = false;
@@ -11853,6 +12007,11 @@ impl Codegen {
               let let_idt_opt = self.infer_let_expr_type(v.val);
               if let_idt_opt.is_some() {
                 let let_idt = let_idt_opt.unwrap();
+                // A copy of a volatile value is an ordinary value; only a
+                // pointer keeps `volatile`, which qualifies its pointee.
+                if let_idt.is_volatile && !dtype_is_pointer(let_idt) {
+                  let_idt.is_volatile = false;
+                }
                 // Same reason the bookkeeping just below never routes
                 // a closure dtype through `write_type` either: its own
                 // fixed placeholder `type_str` ("closure(...)") was
@@ -14292,6 +14451,11 @@ impl Codegen {
   // shape is registered under its mangled identity (`To__num`), never
   // `dt.type_str` alone.
   _resolve_shape_type_for_dtype(DataType dt) str {
+    // A pointer to a shape value (`T* data` inside `Vec<Shape>`) is
+    // never itself a coercion target, only a shape value is.
+    if dt.pointer_depth > 0 || dt.flags.is_pointer {
+      ret "";
+    }
     str shape_type = dt.type_str;
     if !self.shape_names.contains(shape_type) && dt.generic_args.len > 0 {
       StringBuilder sq_sb = string_builder_init(16);
@@ -16499,6 +16663,10 @@ impl Codegen {
           );
           self.state.write_indent_pinned(node.pos);
           self.state.write(
+            "case 'u': vargs.data[__fun_vi] = fmt_u64((uint64_t)va_arg(__fun_ap, unsigned long long)); break;\n"
+          );
+          self.state.write_indent_pinned(node.pos);
+          self.state.write(
             "case 'b': vargs.data[__fun_vi] = fmt_flag((bool)va_arg(__fun_ap, int)); break;\n"
           );
           self.state.write_indent_pinned(node.pos);
@@ -16635,7 +16803,9 @@ impl Codegen {
         }
         if !is_main && !fn_body_ends_in_return && !equals(rt_name, "void") {
           self.state.write_indent();
-          self.state.write("fprintf(stderr_stream(), \"panic: unreachable\\n\"); abort();\n");
+          self.state.write(
+            "fprintf(stderr_stream(), \"panic: %s\\n\", \"unreachable\"); abort();\n"
+          );
         }
         // Falling off the end of a C function with no `return` is only
         // well-defined for a function literally spelled `main` (C99
@@ -16978,6 +17148,26 @@ impl Codegen {
   // `ensure_plain_type_emitted` and `emit_global_variable` handle first.
   // A sized array field (`T[3]`) gets no special treatment here, unlike
   // an unsized one.
+  // A packed struct: MSVC brackets it with `#pragma pack`, every other
+  // compiler marks it with `__attribute__((packed))` after its body.
+  _open_packed(flag packed) {
+    if packed && self.msvc_mode {
+      self.state.write("#pragma pack(push, 1)\n");
+    }
+  }
+
+  _mark_packed(flag packed) {
+    if packed && !self.msvc_mode {
+      self.state.write("__attribute__((packed)) ");
+    }
+  }
+
+  _close_packed(flag packed) {
+    if packed && self.msvc_mode {
+      self.state.write("#pragma pack(pop)\n");
+    }
+  }
+
   emit_compound(Node node) Option<CodegenErrorKind> {
     if self.is_signature_only_doc_node(node) {
       ret .None;
@@ -16990,6 +17180,9 @@ impl Codegen {
         field_type_names.init(0);
         Vec<flag> field_is_pointer;
         field_is_pointer.init(0);
+        if c.is_packed {
+          self.packed_compound_names.push(c.name);
+        }
 
         if c.has_type_params {
           Vec<DataType*> field_template_dtypes;
@@ -17013,6 +17206,7 @@ impl Codegen {
 
         Vec<DataType> field_dtypes;
         field_dtypes.init(0);
+        self._open_packed(c.is_packed);
         self.state.write("typedef struct ");
         self.state.write(c.name);
         self.state.write(" {\n");
@@ -17085,8 +17279,10 @@ impl Codegen {
           self.state.write("#ifdef _MSC_VER\n  char __msvc_dummy;\n#endif\n");
         }
         self.state.write("} ");
+        self._mark_packed(c.is_packed);
         self.state.write(c.name);
         self.state.write(";\n\n");
+        self._close_packed(c.is_packed);
         self.record_compound_typed(
           c.name,
           field_names,
@@ -18072,6 +18268,13 @@ impl Codegen {
           }
           ret .None;
         }
+        if is_as_conversion(*arg) {
+          DataType* as_dt = e.generic_args.get(0);
+          if dtype_is_pointer(*as_dt) {
+            ret .Some("raw");
+          }
+          ret .Some(as_dt.type_str);
+        }
         fit e.left.kind {
           .Identifier(callee_name) -> {
             let rt = self.lookup_function_rtype(callee_name);
@@ -18609,6 +18812,9 @@ impl Codegen {
         }
         if !equals(e.op, "()") || !e.has_left {
           ret .None;
+        }
+        if is_as_conversion(*val) {
+          ret .Some(self.resolve_type_subst(*e.generic_args.get(0)));
         }
         fit e.left.kind {
           .Identifier(fn_name) -> {
@@ -19845,7 +20051,35 @@ impl Codegen {
   // header is unconditional rather than gated on an actual import: import
   // nodes never survive flattening, so there is no way to see which
   // `std.c.*` modules a program used, and an unused header is harmless.
+  // The whole prelude of a freestanding build: only the headers every
+  // freestanding C implementation provides, plus what generated code
+  // itself refers to. A `panic` or failed `assert` calls the program's
+  // own `fun_panic_handler(str message)` when it defines one, then halts.
+  write_freestanding_prelude() {
+    self.state.write(
+      `#include <stdint.h>
+    `#include <stdbool.h>
+    `#include <stddef.h>
+    `#include <stdarg.h>
+    `void fun_panic_handler(char* message) __attribute__((weak));
+    `__attribute__((unused)) static inline void __fun_fs_report(const char* message) { if (fun_panic_handler) { fun_panic_handler((char*)message); } }
+    `__attribute__((unused)) static inline void __fun_fs_halt(void) { for (;;) { __builtin_trap(); } }
+    `#define stderr_stream() 0
+    `#define fprintf(stream, format, message) __fun_fs_report(message)
+    `#define abort() __fun_fs_halt()
+    `__attribute__((unused)) static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; while (*a && *a == *b) { a++; b++; } return *a == *b; }
+    `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
+    `
+    `
+
+    );
+  }
+
   pub write_prelude() {
+    if self.freestanding {
+      self.write_freestanding_prelude();
+      ret;
+    }
     self.state.write(
       `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
@@ -21434,7 +21668,7 @@ impl Codegen {
     // `emit_call` embeds in `__fun_vtags`, which the callee-side
     // unpacking in `emit_function_named` reads back.
     self.state.write(
-      "#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n"
+      "#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'u', unsigned long: 'u', unsigned int: 'n', short: 'n', unsigned short: 'n', signed char: 'n', unsigned char: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')\n"
     );
     // Frees a variadic function's own `vargs` unpacking: `data` itself
     // (the backing array `emit_function_named` mallocs above), plus
@@ -22062,6 +22296,13 @@ impl Codegen {
             if equals(f.name, "main") {
               reachable.add("main");
               collect_function_reads(f, &reachable);
+            } elif self.keep_public_roots && n.flags.is_public && f.has_body &&
+              !f.has_type_params && n.has_pos && !_is_stdlib_file(n.pos.filename) {
+              // A `pub` function of the program's own may be called by
+              // name from linked native code (a `[build]` source), which
+              // no Fun read can show.
+              reachable.add(f.name);
+              collect_function_reads(f, &reachable);
             }
           }
           _ -> {}
@@ -22132,6 +22373,7 @@ impl Codegen {
                 reachable.add("fmt_chr");
                 reachable.add("fmt_raw");
                 reachable.add("fmt_str");
+                reachable.add("fmt_u64");
               }
             }
           }
@@ -22449,6 +22691,13 @@ impl Codegen {
             ret gerr;
           }
         }
+        // File-scope `asm`, which depends on no type either.
+        .StatementAsm(fa) -> {
+          let aerr = self.emit_asm_stmt(fa);
+          if aerr.is_some() {
+            ret aerr;
+          }
+        }
         _ -> {}
       }
     }
@@ -22569,6 +22818,11 @@ impl Codegen {
       }
     }
 
+    // A freestanding build has no startup wrapper to run these.
+    if self.freestanding && self.pending_global_runtime_inits.len > 0 {
+      self.error_note = "a freestanding build has no startup code to initialize a global with a function call or another global's value - give it a constant initializer, or assign it at the start of your entry point";
+      ret .Some(.UnsupportedNode);
+    }
     // Every global/const whose own initializer needs a real C function
     // call - a plain or generic function, a stdlib constructor like
     // `some()`/`ok()`, or a copy of another global's value - buffered
@@ -22602,7 +22856,7 @@ impl Codegen {
     if self.fuzz_mode {
       ret self.emit_fuzz_harness(nodes);
     }
-    if saw_real_main {
+    if saw_real_main && !self.freestanding {
       ret self.emit_main_thread_wrapper();
     }
     ret .None;
@@ -27217,7 +27471,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#endif
     `static long long __fun_str_key_hash(const char* s) { long long h = 2166136261LL; if (s) { for (; *s; ++s) { h ^= (unsigned char)*s; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } } if (h < 0) h = -h; return h; }
     `static long long __fun_bytes_key_hash(const void* p, unsigned long n) { long long h = 2166136261LL; const unsigned char* b = (const unsigned char*)p; for (unsigned long i = 0; i < n; ++i) { h ^= b[i]; if (h < 0) h = -h; h = (h % 1000000007LL) * 16777619LL % 1000000007LL; } if (h < 0) h = -h; return h; }
-    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'n', unsigned long: 'n', unsigned int: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
+    `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'u', unsigned long: 'u', unsigned int: 'n', short: 'n', unsigned short: 'n', signed char: 'n', unsigned char: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
     `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }
     `#ifdef _WIN32
     `#ifndef WIN32_LEAN_AND_MEAN

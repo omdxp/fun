@@ -39,6 +39,9 @@ pub compound CheckedType {
   flag is_panic_literal;
   // The written name of a user-defined type, empty for a builtin.
   str name;
+  // A fixed-width number's own spelling (`u8`, `i32`, `f32`), which the
+  // checker otherwise treats as plain `num`/`dec`; empty for those two.
+  str width;
   // The arguments a generic instantiation supplied, in the order the
   // type declares its parameters.
   Vec<CheckedType> generic_args;
@@ -73,6 +76,7 @@ pub fun checked_unknown() CheckedType {
   t.is_null_literal = false;
   t.is_panic_literal = false;
   t.name = "";
+  t.width = "";
   t.generic_args.init(0);
   t.has_fn_sig = false;
   t.fn_sig = nil;
@@ -96,6 +100,10 @@ pub fun checked_from_dtype(DataType* dt) CheckedType {
     ret t;
   }
   t.base = dt.kind;
+  if (t.base == .Num || t.base == .Dec) && !equals(dt.type_str, "num") &&
+    !equals(dt.type_str, "dec") {
+    t.width = dt.type_str;
+  }
   t.is_array = dt.is_array;
   t.array_depth = dt.array_depth;
   // An array written without a size carries no depth of its own, but it
@@ -261,6 +269,9 @@ pub fun type_name(CheckedType t) str {
         base = t.name;
       }
     }
+  }
+  if (t.base == .Num || t.base == .Dec) && !equals(t.width, "") {
+    base = t.width;
   }
   StringBuilder b = string_builder_init(len(base) + 4);
   b.append(base);
@@ -1871,11 +1882,50 @@ impl Checker {
   }
 }
 
+// An integer literal's own value, a leading `-` included.
+fun _integer_literal_value(Node* n) Option<num> {
+  fit n.kind {
+    .Number(d) -> {
+      fit d {
+        .Num(v) -> { ret .Some(v); }
+        _ -> { ret .None; }
+      }
+    }
+    .Unary(u) -> {
+      if u.is_left_operanded_unary || !equals(u.op, "-") || u.has_indirection {
+        ret .None;
+      }
+      let inner = _integer_literal_value(u.operand)?;
+      ret .Some(-inner);
+    }
+    .ExpressionParenthesis(inner) -> { ret _integer_literal_value(inner); }
+    _ -> { ret .None; }
+  }
+}
+
+// The bit width a fixed-width integer spelling names (`u8` is 8).
+fun _fixed_width_bits(str width) Option<num> {
+  if len(width) < 2 || (width[0] != 'i' && width[0] != 'u') {
+    ret .None;
+  }
+  num bits = parse_int(substr(width, 1, len(width) - 1));
+  if bits <= 0 {
+    ret .None;
+  }
+  ret .Some(bits);
+}
+
+// A pointer, or a string (itself a pointer to its own bytes).
+fun _is_pointer_like(CheckedType t) flag {
+  ret !t.is_array && (t.pointer_depth > 0 || t.base == .Str || t.is_null_literal);
+}
+
 // Calls the language supplies rather than a program declaring them.
 fun _is_builtin_call(str name) flag {
   fit name {
     "sizeof", "va_start", "va_end", "va_copy", "va_arg_num", "va_arg_dec", "va_arg_bin",
-    "va_arg_chr", "va_arg_str", "va_arg_raw", "__fun_key_hash", "__fun_key_eq" -> { ret true; }
+    "va_arg_chr", "va_arg_str", "va_arg_raw", "__fun_key_hash", "__fun_key_eq",
+    "__fun_as" -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -2169,10 +2219,8 @@ fun _fun_format_specs(str fmt) Vec<str> {
       i = i + 2;
       continue;
     }
-    // The placeholder word's own length varies (`flag` is 4 chars,
-    // every other one is 3), so the closing `}` is found by scanning
-    // forward within a short bound rather than assumed at a fixed
-    // offset.
+    // The placeholder word's own length varies, so the closing `}` is
+    // found by scanning forward within a short bound.
     num close = -1;
     num max_word_len = 5;
     num limit = i + 1 + max_word_len;
@@ -2209,6 +2257,10 @@ fun _fun_format_specs(str fmt) Vec<str> {
         out.push("ptr");
       } elif equals(word, "raw") {
         out.push("raw");
+      } elif equals(word, "f32") || equals(word, "f64") {
+        out.push("dec");
+      } elif is_fixed_width_placeholder(word) {
+        out.push("num");
       } else {
         matched = false;
       }
@@ -3796,8 +3848,12 @@ impl Checker {
           _ -> {}
         }
         CheckedType receiver = self.infer(callee.left, env);
-        // A pointer or an array is not the receiver itself, so what it
-        // reaches is judged elsewhere.
+        // A method call through a single pointer reaches the pointee, so
+        // that is what must have the method. A deeper pointer or an
+        // array is not a receiver at all.
+        if receiver.pointer_depth == 1 && !receiver.is_array && receiver.base != .Str {
+          receiver.pointer_depth = 0;
+        }
         if receiver.pointer_depth > 0 || receiver.is_array {
           ret;
         }
@@ -4256,6 +4312,91 @@ impl Checker {
 
   // Checks a call against the callee's signature and reports its return
   // type.
+  // `value as T`: a numeric value converts to any numeric type (or a plain
+  // enum, and back), a pointer to any other pointer, and a pointer and an
+  // integer into each other. Anything else (a compound, a data enum, a
+  // float address) is rejected.
+  check_as_conversion(Node* node, ExprNode e, Vec<Node*> args, TypeEnv* env) CheckedType {
+    CheckedType want = checked_from_dtype(e.generic_args.get(0));
+    if args.len != 1 {
+      self.fail("'as' converts exactly one value", node);
+      ret want;
+    }
+    CheckedType got = self.infer(args.get(0), env);
+    if self.failed || got.base == .Unknown && equals(got.name, "") {
+      ret want;
+    }
+    flag got_ptr = _is_pointer_like(got);
+    flag want_ptr = _is_pointer_like(want);
+    flag got_int = !got_ptr && !got.is_array &&
+      (got.base == .Num || got.base == .Chr || got.base == .Bin);
+    flag want_int = !want_ptr && !want.is_array &&
+      (want.base == .Num || want.base == .Chr || want.base == .Bin);
+    flag got_num = got_int || !got_ptr && !got.is_array && got.base == .Dec;
+    flag want_num = want_int || !want_ptr && !want.is_array && want.base == .Dec;
+    flag got_enum = !got_ptr && self.plain_enums.has(got.name);
+    flag want_enum = !want_ptr && self.plain_enums.has(want.name);
+    flag ok = got_num && want_num || got_ptr && want_ptr || got_ptr && want_int ||
+    got_int && want_ptr || got_enum && want_int || got_int && want_enum ||
+    got_enum && want_enum || self.assignable(want, got);
+    if !ok {
+      self.fail(
+        format(
+        "cannot convert {str} to {str} with 'as'",
+        type_name(got),
+        type_name(want)
+        ),
+        node
+      );
+    }
+    ret want;
+  }
+
+  // Fails, and returns true, when `value` is an integer literal that
+  // doesn't fit `want`'s own fixed width (`u8 b = 300;`). Use `as` to
+  // wrap one on purpose.
+  literal_out_of_range(CheckedType want, Node* value, Node* at) flag {
+    if want.base != .Num || want.pointer_depth > 0 || want.is_array ||
+      equals(want.width, "") {
+      ret false;
+    }
+    let lit = _integer_literal_value(value);
+    if lit.is_none() {
+      ret false;
+    }
+    let bits = _fixed_width_bits(want.width);
+    if bits.is_none() || bits.unwrap() > 63 {
+      ret false;
+    }
+    num width_bits = bits.unwrap();
+    flag is_unsigned = want.width[0] == 'u';
+    num lo = 0;
+    num hi = 0;
+    if is_unsigned {
+      hi = (1 << width_bits) - 1;
+    } else {
+      hi = (1 << (width_bits - 1)) - 1;
+      lo = -hi - 1;
+    }
+    num n = lit.unwrap();
+    if n >= lo && n <= hi {
+      ret false;
+    }
+    self.fail(
+      format(
+      "{num} doesn't fit in {str} ({num} to {num}); write `{num} as {str}` to wrap it on purpose",
+      n,
+      want.width,
+      lo,
+      hi,
+      n,
+      want.width
+      ),
+      at
+    );
+    ret true;
+  }
+
   check_call(Node* node, ExprNode e, TypeEnv* env, flag awaited) CheckedType {
     Vec<Node*> args;
     args.init(4);
@@ -4297,6 +4438,9 @@ impl Checker {
       }
       if equals(name, "__fun_key_eq") {
         ret checked_of(.Bin);
+      }
+      if equals(name, "__fun_as") {
+        ret self.check_as_conversion(node, e, args, env);
       }
       ret checked_unknown();
     }
@@ -5901,6 +6045,8 @@ impl Checker {
         }
         declared = value;
         declared_is_fresh = false;
+      } elif !declared_is_type_param && self.literal_out_of_range(declared, v.val, stmt) {
+        ret;
       } elif !declared_is_type_param && !self.assignable(declared, value) {
         self.fail(
           format(

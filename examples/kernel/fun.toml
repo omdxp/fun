@@ -1,0 +1,10 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+
+[build]
+freestanding = true
+arch = "x86"
+sources = ["boot/start.S", "boot/mem.c"]
+cflags = ["--target=i686-unknown-none-elf", "-march=i686", "-fno-pic"]
+ldflags = ["-fuse-ld=lld", "-static", "-Wl,-T,boot/linker.ld", "-Wl,--build-id=none"]

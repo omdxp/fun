@@ -86,6 +86,9 @@ pub compound DataType {
   // mirroring how `has_fn_sig`/`fn_sig` already relate to them.
   flag is_tuple;
   Vec<DataType*> tuple_members;
+  // `volatile T`: every read and write through it reaches memory, for a
+  // memory-mapped device register.
+  flag is_volatile;
 }
 
 // Every DataType construction site must go through this constructor (see
@@ -102,6 +105,7 @@ pub fun dtype_new() DataType {
   dt.generic_args.init(0);
   dt.fn_sig = nil;
   dt.has_fn_sig = false;
+  dt.is_volatile = false;
   dt.closure_sig = nil;
   dt.has_closure_sig = false;
   dt.is_tuple = false;
@@ -709,11 +713,15 @@ pub compound CompoundNode {
   // one param has a default, every later one does too. A default may name
   // earlier params (`B = A`), never itself or a later one.
   Vec<DataType*> type_param_defaults;
+  // `packed compound`: no padding between or after fields, for a layout
+  // fixed by hardware or a file format.
+  flag is_packed;
 }
 
 pub fun compound_node_new() CompoundNode {
   CompoundNode c;
   c.name = "";
+  c.is_packed = false;
   c.fields.init(0);
   c.type_params.init(0);
   c.has_type_params = false;
@@ -1153,6 +1161,23 @@ pub fun node_is_expression_or_parenthesis(Node n) flag {
   fit n.kind {
     .Expression(e) -> { ret true; }
     .ExpressionParenthesis(inner) -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// True for a `value as T` conversion, which the parser builds as a call
+// to the `__fun_as<T>` builtin.
+pub fun is_as_conversion(Node n) flag {
+  fit n.kind {
+    .Expression(e) -> {
+      if !equals(e.op, "()") || !e.has_left || !e.has_generic_args || e.generic_args.len != 1 {
+        ret false;
+      }
+      fit e.left.kind {
+        .Identifier(name) -> { ret equals(name, "__fun_as"); }
+        _ -> { ret false; }
+      }
+    }
     _ -> { ret false; }
   }
 }

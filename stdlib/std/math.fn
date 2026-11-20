@@ -234,6 +234,115 @@ pub fun max_num(num a, num b) num {
   ret b;
 }
 
+// Single-precision math, for code that keeps its numbers in `f32`.
+
+// Sine of `x` (radians), in single precision.
+pub fun sin_f32(f32 x) f32 {
+  ret cmath.sinf(x);
+}
+
+// Cosine of `x` (radians), in single precision.
+pub fun cos_f32(f32 x) f32 {
+  ret cmath.cosf(x);
+}
+
+// Tangent of `x` (radians), in single precision.
+pub fun tan_f32(f32 x) f32 {
+  ret cmath.tanf(x);
+}
+
+// Arcsine of `x`, in radians, in single precision.
+pub fun asin_f32(f32 x) f32 {
+  ret cmath.asinf(x);
+}
+
+// Arccosine of `x`, in radians, in single precision.
+pub fun acos_f32(f32 x) f32 {
+  ret cmath.acosf(x);
+}
+
+// Arctangent of `x`, in radians, in single precision.
+pub fun atan_f32(f32 x) f32 {
+  ret cmath.atanf(x);
+}
+
+// Square root of `x`, in single precision.
+pub fun sqrt_f32(f32 x) f32 {
+  ret cmath.sqrtf(x);
+}
+
+// `e` raised to `x`, in single precision.
+pub fun exp_f32(f32 x) f32 {
+  ret cmath.expf(x);
+}
+
+// Natural logarithm of `x`, in single precision.
+pub fun log_f32(f32 x) f32 {
+  ret cmath.logf(x);
+}
+
+// Largest whole number not greater than `x`, in single precision.
+pub fun floor_f32(f32 x) f32 {
+  ret cmath.floorf(x);
+}
+
+// Smallest whole number not less than `x`, in single precision.
+pub fun ceil_f32(f32 x) f32 {
+  ret cmath.ceilf(x);
+}
+
+// `x` rounded to the nearest whole number, halfway cases away from zero, in single precision.
+pub fun round_f32(f32 x) f32 {
+  ret cmath.roundf(x);
+}
+
+// `x` truncated toward zero, in single precision.
+pub fun trunc_f32(f32 x) f32 {
+  ret cmath.truncf(x);
+}
+
+// Arctangent of `y / x`, using both signs to pick the quadrant, in single precision.
+pub fun atan2_f32(f32 y, f32 x) f32 {
+  ret cmath.atan2f(y, x);
+}
+
+// `x` raised to the power `y`, in single precision.
+pub fun pow_f32(f32 x, f32 y) f32 {
+  ret cmath.powf(x, y);
+}
+
+// Floating-point remainder of `x / y`, in single precision.
+pub fun fmod_f32(f32 x, f32 y) f32 {
+  ret cmath.fmodf(x, y);
+}
+
+// Hypotenuse length `sqrt(x*x + y*y)`, in single precision.
+pub fun hypot_f32(f32 x, f32 y) f32 {
+  ret cmath.hypotf(x, y);
+}
+
+// Smaller of two `f32` values.
+pub fun min_f32(f32 a, f32 b) f32 {
+  if a < b {
+    ret a;
+  }
+  ret b;
+}
+
+// Larger of two `f32` values.
+pub fun max_f32(f32 a, f32 b) f32 {
+  if a > b {
+    ret a;
+  }
+  ret b;
+}
+
+// Linearly interpolate between `a` and `b` by factor `t`, in single
+// precision.
+pub fun lerp_f32(f32 a, f32 b, f32 t) f32 {
+  ret a + (b - a) * t;
+}
+
 // Smaller of two decimals.
 pub fun min_dec(dec a, dec b) dec {
   if a < b {
@@ -384,4 +493,15 @@ test "vectors: length, distance, dot product and normalization" {
   assert _near(unit.x, 0.6) && _near(unit.y, 0.8), "expected a unit vector";
   Vec2 zero = b.normalize();
   assert zero.x == 0.0 && zero.y == 0.0, "expected the zero vector to stay zero";
+}
+
+test "single-precision math stays in f32" {
+  f32 r = sqrt_f32(16.0);
+  assert r == 4.0, "expected sqrt in f32";
+  assert abs(sin_f32(0.0)) < 0.0001, "expected sin(0) near zero";
+  assert pow_f32(2.0, 10.0) == 1024.0, "expected pow in f32";
+  assert floor_f32(2.7) == 2.0 && ceil_f32(2.1) == 3.0, "expected floor and ceil";
+  assert lerp_f32(0.0, 10.0, 0.25) == 2.5, "expected lerp";
+  assert min_f32(1.5, -2.0) == -2.0 && max_f32(1.5, -2.0) == 1.5, "expected min and max";
+  assert abs(atan2_f32(1.0, 1.0) - 0.7853982) < 0.0001, "expected atan2";
 }

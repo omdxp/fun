@@ -346,8 +346,12 @@ pub fun lower_to_c(
   cg.fuzz_target = fuzz_target;
   cg.msvc_mode = msvc_mode;
   cg.emscripten_mode = emscripten_mode;
+  cg.freestanding = is_freestanding_build();
+  cg.keep_public_roots = project_build_settings().sources.len > 0;
   cg.host_arch = host_arch;
-  cg.prune_unreachable = prune_unreachable;
+  // A freestanding entry point is called from the program's own startup
+  // code, never from Fun, so nothing can be pruned as unreachable.
+  cg.prune_unreachable = prune_unreachable && !cg.freestanding;
   cg.debug_info = debug_info;
   cg.memcheck = memcheck;
   cg.memcheck_leaks = memcheck_leaks;

@@ -190,7 +190,19 @@ try {
     'examples\imports\main.fn'                    = @('grand_child', 'child')
   }
 
-  $files = Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'examples') -Recurse -Filter *.fn | Sort-Object FullName
+  # A directory under examples/ with its own fun.toml is a whole project
+  # (such as examples/kernel, a bare-metal build), built its own way rather
+  # than file by file, so its sources are left out here.
+  $examplesRoot = Join-Path $RepoRoot 'examples'
+  $files = Get-ChildItem -LiteralPath $examplesRoot -Recurse -Filter *.fn | Where-Object {
+    $dir = $_.Directory
+    $own = $false
+    while ($dir -and $dir.FullName -ne (Get-Item -LiteralPath $examplesRoot).FullName) {
+      if (Test-Path -LiteralPath (Join-Path $dir.FullName 'fun.toml')) { $own = $true; break }
+      $dir = $dir.Parent
+    }
+    -not $own
+  } | Sort-Object FullName
   $failed = New-Object System.Collections.Generic.List[string]
   $unexpectedPass = New-Object System.Collections.Generic.List[string]
   $expectedFailCount = 0

@@ -389,10 +389,33 @@ impl ParseState {
   pub parse_get_pointer_depth() num {
     num depth = 0;
     for self.next_token_is_operator("*") {
+      if self.in_conversion_type && self._star_is_multiplication() {
+        break;
+      }
       depth = depth + 1;
       self.token_next();
     }
     ret depth;
+  }
+
+  // True when the `*` at the cursor is followed by something that starts
+  // an operand, making it a multiplication rather than a pointer star.
+  _star_is_multiplication() flag {
+    let after = self.token_peek_n(1);
+    if after.is_none() {
+      ret false;
+    }
+    Token t = after.unwrap();
+    fit t.type {
+      .Identifier, .Number, .String, .Boolean -> { ret true; }
+      .Keyword -> { ret token_is_keyword(t, "nil"); }
+      .Operator -> {
+        ret token_is_operator(t, "(") || token_is_operator(t, "-") ||
+          token_is_operator(t, "!") ||
+          token_is_operator(t, "&") || token_is_operator(t, "~");
+      }
+      _ -> { ret false; }
+    }
   }
 
   // Resolves the n-th significant token strictly before physical index
@@ -1149,6 +1172,13 @@ impl ParseState {
   // `parse_array_brackets`, called explicitly by each site that allows
   // one.
   pub parse_datatype(DataType* dt) Option<ParseErrorKind> {
+    // `volatile T*`: the pointee is volatile.
+    if self.next_token_is_keyword("volatile") {
+      self.token_next();
+      let verr = self.parse_datatype(dt);
+      dt.is_volatile = true;
+      ret verr;
+    }
     if self.next_token_is_keyword("fun") {
       ret self.parse_fn_type_datatype(dt);
     }
@@ -1912,6 +1942,9 @@ pub compound Parser {
   // own "apply, then propagate" grouping: `await f()?` is `(await f())?`.
   flag propagation_binds_in_operand;
 
+  // Set right before `parse_compound` runs for `packed compound`.
+  flag pending_packed_compound;
+
   // True while parsing a value expression that must stop at a top-level
   // comma rather than treating it as the comma operator, e.g. a
   // compound-literal field's value (`Point{ x = 1, y = 2 }`); without
@@ -1943,6 +1976,7 @@ pub fun parser_new(ParseState* state) Parser {
   p.in_fit_statement = false;
   p.stop_at_binary_op = false;
   p.propagation_binds_in_operand = false;
+  p.pending_packed_compound = false;
   p.stop_at_comma = false;
   p.pending_call_generic_args.init(0);
   p.has_pending_call_generic_args = false;
@@ -2370,6 +2404,10 @@ impl Parser {
             new_left_e.right = right_exp.left;
             new_left_e.has_right = true;
             new_left_e.op = exp.op;
+            // Explicit generic args belong to the operator they were
+            // written on, so they move with it through the rotation.
+            new_left_e.generic_args = exp.generic_args;
+            new_left_e.has_generic_args = exp.has_generic_args;
 
             Node* new_left = malloc(sizeof(Node));
             *new_left = node_new(.Expression(new_left_e));
@@ -2388,6 +2426,8 @@ impl Parser {
             exp.left = new_left;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
+            exp.generic_args = right_exp.generic_args;
+            exp.has_generic_args = right_exp.has_generic_args;
             node.kind = .Expression(exp);
             free_node_binded_only(old_right);
             free(old_right);
@@ -2420,6 +2460,10 @@ impl Parser {
             completed_e.right = right_exp.left;
             completed_e.has_right = true;
             completed_e.op = exp.op;
+            // Explicit generic args belong to the operator they were
+            // written on, so they move with it through the rotation.
+            completed_e.generic_args = exp.generic_args;
+            completed_e.has_generic_args = exp.has_generic_args;
 
             Node* completed = malloc(sizeof(Node));
             *completed = node_new(.Expression(completed_e));
@@ -2435,6 +2479,8 @@ impl Parser {
             exp.left = completed;
             exp.right = right_exp.right;
             exp.op = right_exp.op;
+            exp.generic_args = right_exp.generic_args;
+            exp.has_generic_args = right_exp.has_generic_args;
             node.kind = .Expression(exp);
             free_node_binded_only(old_right);
             free(old_right);
@@ -2777,6 +2823,18 @@ impl Parser {
           // they compose with surrounding operators/contexts (e.g.
           // `x != nil && y`, `let y = panic("msg");`, `let z = await
           // f();`), not just as their own bare statement.
+          // `value as T`: an explicit conversion, applied to the value
+          // just parsed. Built as a call to the `__fun_as<T>` builtin, so
+          // every pass that already walks a call's arguments and explicit
+          // type arguments handles it with no case of its own.
+          // A prefix operator's own operand ends before `as`, so `&p as
+          // u64` converts `&p`, not `p`.
+          if equals(kw, "as") {
+            if self.propagation_binds_in_operand {
+              ret .None;
+            }
+            ret self.parse_as_conversion(t);
+          }
           if equals(kw, "nil") {
             self.state.token_next(); // consume 'nil'
             Node node = node_new(.Nil);
@@ -2861,9 +2919,24 @@ impl Parser {
       if err.is_some() {
         ret err;
       }
-      if self.state.nodes.len == before {
+      // A primary that replaces the node it extends (`s[0]`, a call)
+      // leaves the count unchanged, but a following `as` still applies
+      // to it.
+      if self.state.nodes.len == before && !self._conversion_follows() {
         ret .None;
       }
+    }
+  }
+
+  // True when the next token is an `as` that converts the value on top
+  // of the node stack, in a position where `as` applies at all.
+  _conversion_follows() flag {
+    if self.propagation_binds_in_operand || !self.state.next_token_is_keyword("as") {
+      ret false;
+    }
+    fit self.state.node_peek_last() {
+      .Some(last) -> { ret node_is_value_type(last); }
+      .None -> { ret false; }
     }
   }
 
@@ -2909,6 +2982,7 @@ impl Parser {
       Node top = maybe_top.unwrap();
       self._fix_chained_tuple_access(&top);
       self._fix_ternary_shape(&top);
+      self._fix_member_conversion(&top);
       self.state.nodes.push(top);
     }
     ret .None;
@@ -3012,6 +3086,160 @@ impl Parser {
   // '?'/':' pair (already rotated to the same shape one level down by
   // the same mechanism) is already a real `.Ternary` by the time the
   // outer one is built from it.
+  // Wraps the value on top of the node stack in a `__fun_as<T>(value)`
+  // call for `value as T`, `as_tok` being the `as` keyword itself.
+  parse_as_conversion(Token as_tok) Option<ParseErrorKind> {
+    flag has_value = false;
+    fit self.state.node_peek_last() {
+      .Some(last) -> {
+        has_value = node_is_value_type(last);
+        fit last.kind {
+          .Nil -> { has_value = true; }
+          .Boolean(_) -> { has_value = true; }
+          _ -> {}
+        }
+      }
+      .None -> {}
+    }
+    if !has_value {
+      self.state.err("expected a value before 'as'");
+      ret .Some(.InvalidExpression);
+    }
+    self.state.token_next(); // consume 'as'
+    DataType* target = malloc(sizeof(DataType));
+    *target = dtype_new();
+    let prev_conversion = self.state.in_conversion_type;
+    self.state.in_conversion_type = true;
+    let derr = self.state.parse_datatype(target);
+    self.state.in_conversion_type = prev_conversion;
+    if derr.is_some() {
+      ret derr;
+    }
+    Node operand = self.state.node_pop().unwrap();
+    Node* operand_ptr = malloc(sizeof(Node));
+    *operand_ptr = operand;
+    Node* args = malloc(sizeof(Node));
+    *args = node_new(.ExpressionParenthesis(operand_ptr));
+    Node* callee = malloc(sizeof(Node));
+    *callee = node_new(.Identifier("__fun_as"));
+    callee.pos = as_tok.pos;
+    callee.has_pos = true;
+    ExprNode call_e = expr_node_new();
+    call_e.left = callee;
+    call_e.has_left = true;
+    call_e.right = args;
+    call_e.has_right = true;
+    call_e.op = "()";
+    call_e.generic_args.push(target);
+    call_e.has_generic_args = true;
+    Node call_node = node_new(.Expression(call_e));
+    call_node.pos = operand.pos;
+    call_node.has_pos = operand.has_pos;
+    self.create_node(&call_node);
+    ret self.parse_additional_expression();
+  }
+
+  // `p.x as T` parses as `p.(x as T)`, since a `.`'s right side is read
+  // greedily; this lifts every such conversion back out to `(p.x) as T`.
+  _fix_member_conversion(Node* node) {
+    if node == nil {
+      ret;
+    }
+    fit node.kind {
+      .Expression(e) -> {
+        if e.has_left {
+          self._fix_member_conversion(e.left);
+        }
+        if e.has_right {
+          self._fix_member_conversion(e.right);
+        }
+        // The reorder pass may already have turned `p.(x as T)` into
+        // method-call shape, `(p.__fun_as<T>)(x)`.
+        if equals(e.op, "()") && e.has_left && e.has_right && e.has_generic_args {
+          fit e.left.kind {
+            .Expression(callee) -> {
+              if !equals(callee.op, ".") || !callee.has_left || !callee.has_right {
+                ret;
+              }
+              flag names_as = false;
+              fit callee.right.kind {
+                .Identifier(cname) -> { names_as = equals(cname, "__fun_as"); }
+                _ -> {}
+              }
+              if !names_as {
+                ret;
+              }
+              fit e.right.kind {
+                .ExpressionParenthesis(marg) -> {
+                  ExprNode mdot = expr_node_new();
+                  mdot.left = callee.left;
+                  mdot.has_left = true;
+                  mdot.right = marg;
+                  mdot.has_right = true;
+                  mdot.op = ".";
+                  Node* mdot_node = malloc(sizeof(Node));
+                  *mdot_node = node_new(.Expression(mdot));
+                  mdot_node.pos = node.pos;
+                  mdot_node.has_pos = node.has_pos;
+                  e.right.kind = .ExpressionParenthesis(mdot_node);
+                  Node* old_callee = e.left;
+                  e.left = callee.right;
+                  free(old_callee);
+                  node.kind = .Expression(e);
+                }
+                _ -> {}
+              }
+            }
+            _ -> {}
+          }
+          ret;
+        }
+        if !equals(e.op, ".") || !e.has_left || !e.has_right ||
+          !is_as_conversion(*e.right) {
+          ret;
+        }
+        Node* cast_ptr = e.right;
+        fit cast_ptr.kind {
+          .Expression(ce) -> {
+            fit ce.right.kind {
+              .ExpressionParenthesis(arg) -> {
+                ExprNode dot = expr_node_new();
+                dot.left = e.left;
+                dot.has_left = true;
+                dot.right = arg;
+                dot.has_right = true;
+                dot.op = ".";
+                Node* dot_node = malloc(sizeof(Node));
+                *dot_node = node_new(.Expression(dot));
+                dot_node.pos = node.pos;
+                dot_node.has_pos = node.has_pos;
+                ce.right.kind = .ExpressionParenthesis(dot_node);
+                node.kind = .Expression(ce);
+                free(cast_ptr);
+              }
+              _ -> {}
+            }
+          }
+          _ -> {}
+        }
+      }
+      .ExpressionParenthesis(inner) -> { self._fix_member_conversion(inner); }
+      .Unary(u) -> { self._fix_member_conversion(u.operand); }
+      .TupleLiteral(tl) -> {
+        for el : tl.elements {
+          self._fix_member_conversion(el);
+        }
+      }
+      .Bracket(inner2) -> { self._fix_member_conversion(inner2); }
+      .Ternary(tn) -> {
+        self._fix_member_conversion(tn.cond);
+        self._fix_member_conversion(tn.then_val);
+        self._fix_member_conversion(tn.else_val);
+      }
+      _ -> {}
+    }
+  }
+
   _fix_ternary_shape(Node* node) {
     if node == nil {
       ret;
@@ -3687,6 +3915,16 @@ impl Parser {
         self.state.err(msg);
         ret .Some(.InvalidOperand);
       }
+      // A right side read through one of the paths above (`(...)`,
+      // `[...]`, a prefix operator) still takes a following `as`, which
+      // belongs to it rather than to the whole binary expression.
+      for self._conversion_follows() {
+        let as_tok = self.state.token_peek_next().unwrap();
+        let cerr = self.parse_as_conversion(as_tok);
+        if cerr.is_some() {
+          ret cerr;
+        }
+      }
     } else {
       let err = self.parse_expressionable();
       if err.is_some() {
@@ -4247,7 +4485,7 @@ impl Parser {
       }
     }
 
-    flag is_explicit_type = (t.type == .Keyword && keyword_is_datatype(kw)) ||
+    flag is_explicit_type = (t.type == .Keyword && keyword_starts_type(kw)) ||
       (t.type == .Identifier && self._bare_type_decl_follows(1));
     if is_explicit_type {
       DataType* dt = malloc(sizeof(DataType));
@@ -4867,10 +5105,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> {
-              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                equals(s, "closure");
-            }
+            .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
             _ -> {}
           }
         }
@@ -6295,10 +6530,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> {
-              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                equals(s, "closure");
-            }
+            .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
             _ -> {}
           }
         }
@@ -6819,10 +7051,10 @@ impl Parser {
   // literal or a raw `{ ... }` block.
   pub parse_asm_statement() Option<ParseErrorKind> {
     let asm_tok = self.state.token_peek_next();
-    if !self.has_current_function {
-      self.state.err("asm statement outside of function");
-      ret .Some(.InvalidStatement);
-    }
+    // At file scope, an `asm` block is emitted as it stands among the
+    // program's top-level declarations: interrupt stubs, boot code,
+    // section directives.
+    flag at_file_scope = !self.has_current_function;
     self.state.token_next(); // consume 'asm'
 
     flag is_volatile = false;
@@ -6960,6 +7192,12 @@ impl Parser {
     a.clobbers = clobbers;
     a.is_string_literal = is_string_literal;
 
+    if at_file_scope &&
+      (a.is_volatile || a.outputs.len > 0 || a.inputs.len > 0 ||
+      a.clobbers.len > 0) {
+      self.state.err("an asm block outside a function takes no volatile or operands");
+      ret .Some(.InvalidStatement);
+    }
     Node node = node_new(.StatementAsm(a));
     fit asm_tok {
       .Some(t) -> {
@@ -7405,7 +7643,7 @@ impl Parser {
         .Sval(s) -> { kw = s; }
         _ -> {}
       }
-      if keyword_is_datatype(kw) || equals(kw, "fun") || equals(kw, "closure") {
+      if keyword_starts_type(kw) {
         ret self._parse_bare_type_variable_declaration(false);
       }
       if equals(kw, "let") {
@@ -7836,6 +8074,8 @@ impl Parser {
     }
 
     CompoundNode cn = compound_node_new();
+    cn.is_packed = self.pending_packed_compound;
+    self.pending_packed_compound = false;
     cn.name = name;
     cn.fields = fields;
     cn.type_params = type_params;
@@ -8285,10 +8525,7 @@ impl Parser {
           }
           if rt.type == .Keyword {
             fit rt.data {
-              .Sval(s) -> {
-                looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                  equals(s, "closure");
-              }
+              .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
               _ -> {}
             }
           }
@@ -8761,10 +8998,7 @@ impl Parser {
         }
         if rt.type == .Keyword {
           fit rt.data {
-            .Sval(s) -> {
-              looks_like_type = keyword_is_datatype(s) || equals(s, "fun") ||
-                equals(s, "closure");
-            }
+            .Sval(s) -> { looks_like_type = keyword_starts_type(s); }
             _ -> {}
           }
         }
@@ -8844,6 +9078,29 @@ impl Parser {
   // expression still needs its trailing `;`. An `asm` declaration or a
   // bare `Identifier name;` reports a clean "not yet supported" error
   // rather than misparsing.
+  // `packed compound Name { ... }`: `packed` is only special right before
+  // `compound`, so it stays usable as an ordinary name. Consumes it and
+  // marks the compound about to be parsed.
+  _at_packed_compound() flag {
+    let first = self.state.token_peek_n(0);
+    let second = self.state.token_peek_n(1);
+    if first.is_none() || second.is_none() || first.unwrap().type != .Identifier ||
+      !token_is_keyword(second.unwrap(), "compound") {
+      ret false;
+    }
+    fit first.unwrap().data {
+      .Sval(w) -> {
+        if !equals(w, "packed") {
+          ret false;
+        }
+      }
+      _ -> { ret false; }
+    }
+    self.state.token_next();
+    self.pending_packed_compound = true;
+    ret true;
+  }
+
   pub parse_top_level_declaration() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -8851,6 +9108,10 @@ impl Parser {
       ret .Some(.InvalidStatement);
     }
     let t = tok.unwrap();
+
+    if self._at_packed_compound() {
+      ret self.parse_compound(false);
+    }
 
     if t.type == .Keyword {
       str kw = "";
@@ -8916,7 +9177,7 @@ impl Parser {
             .Sval(s) -> { nkw = s; }
             _ -> {}
           }
-          if keyword_is_datatype(nkw) {
+          if keyword_is_datatype(nkw) || equals(nkw, "volatile") {
             ret self._parse_bare_type_variable_declaration(true);
           }
           if equals(nkw, "let") {
@@ -8953,6 +9214,9 @@ impl Parser {
             ret self.parse_function(true, false);
           }
         }
+        if self._at_packed_compound() {
+          ret self.parse_compound(true);
+        }
         if nt_is_keyword {
           let msg = format("keyword '{str}' is not yet supported after 'pub'", nkw);
           defer free(msg);
@@ -8977,7 +9241,7 @@ impl Parser {
         ret self.parse_function(false, false);
       }
 
-      if keyword_is_datatype(kw) {
+      if keyword_starts_type(kw) {
         ret self._parse_bare_type_variable_declaration(false);
       }
     }

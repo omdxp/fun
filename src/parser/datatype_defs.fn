@@ -57,6 +57,13 @@ pub fun keyword_is_datatype(str s) flag {
   }
 }
 
+// True if a keyword `s` can start a type: a builtin datatype, a function
+// or closure type, or the `volatile` qualifier.
+pub fun keyword_starts_type(str s) flag {
+  ret keyword_is_datatype(s) || equals(s, "fun") || equals(s, "closure") ||
+    equals(s, "volatile");
+}
+
 // Maps a builtin datatype keyword (or a `iN`/`uN` sized-integer name) to
 // its `DataTypeType`. Returns `.Unknown` for anything else (a
 // user-defined/identifier-based type name).

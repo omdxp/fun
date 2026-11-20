@@ -291,6 +291,7 @@ fun _value_flags() Vec<str> {
   out.push("cover-report");
   out.push("cover-min");
   out.push("cover-exclude");
+  out.push("arch");
   ret out;
 }
 
@@ -335,6 +336,12 @@ pub fun parse_args(str[] argv) Options {
   }
   o.memcheck = parsed.has("memcheck");
   o.memcheck_leaks = parsed.has("memcheck-leaks");
+  if parsed.has("freestanding") {
+    request_freestanding_build();
+  }
+  if parsed.has("arch") {
+    _arch_override = parsed.get_or("arch", "");
+  }
   o.show_ast = parsed.has("ast");
   o.fmt = parsed.has("fmt");
   o.fmt_all = parsed.has("fmt-all");
@@ -599,6 +606,69 @@ pub fun compile_to_c_mode(
   );
 }
 
+// Set by `-arch <name>` on the command line.
+str _arch_override = "";
+
+// The CPU the program is built for, which `asm arch` blocks are checked
+// against: `-arch` or `[build] arch` when given, else the architecture a
+// `--target=`/`-target` triple in `FUN_CC_ARGS` or `[build] cflags`
+// names, else a cross compiler's own prefix (`x86_64-elf-gcc`), else this
+// machine's own.
+pub fun target_arch_name() str {
+  if !equals(_arch_override, "") {
+    ret normalize_arch_name(_arch_override);
+  }
+  BuildSettings b = project_build_settings();
+  if !equals(b.target_arch, "") {
+    ret normalize_arch_name(b.target_arch);
+  }
+  Vec<str> flags;
+  flags.init(4);
+  defer flags.free();
+  _push_env_args(&flags, "FUN_CC_ARGS");
+  for cf : b.cflags {
+    flags.push(cf);
+  }
+  num fi = 0;
+  for fi < flags.len {
+    str f = flags.get(fi);
+    str triple = "";
+    if starts_with(f, "--target=") {
+      triple = substr(f, 9, len(f) - 9);
+    } elif (equals(f, "-target") || equals(f, "--target")) && fi + 1 < flags.len {
+      triple = flags.get(fi + 1);
+    }
+    if !equals(triple, "") {
+      ret _arch_of_triple(triple);
+    }
+    fi = fi + 1;
+  }
+  str cc_name = basename(env_or("FUN_CC", ""));
+  num dash = index_of_char(cc_name, '-');
+  if dash > 0 {
+    str prefix_arch = _arch_of_triple(cc_name);
+    if _is_known_arch(prefix_arch) {
+      ret prefix_arch;
+    }
+  }
+  ret host_arch_name();
+}
+
+// The architecture a target triple's first component names
+// (`x86_64-unknown-none-elf` is `x86_64`).
+fun _arch_of_triple(str triple) str {
+  num dash = index_of_char(triple, '-');
+  if dash < 0 {
+    ret normalize_arch_name(triple);
+  }
+  ret normalize_arch_name(substr(triple, 0, dash));
+}
+
+fun _is_known_arch(str name) flag {
+  ret equals(name, "x86_64") || equals(name, "aarch64") || equals(name, "x86") ||
+    equals(name, "arm");
+}
+
 // `compile_to_c_mode`, optionally instrumented for coverage
 // (`lower.CoverPlan`). The real pipeline lives in `lower.fn`, with no
 // `std.process` dependency - this wrapper's own job is resolving
@@ -636,7 +706,7 @@ pub fun compile_to_c_cover(
     prune_unreachable,
     compiler_is_msvc(cc),
     compiler_is_emscripten(cc),
-    host_arch_name(),
+    target_arch_name(),
     true,
     false,
     memcheck,
@@ -709,6 +779,73 @@ fun _wants_optimization(flag optimize, flag debug_info) flag {
   ret !contains(extra, "-O") && !contains(extra, "/O");
 }
 
+// Raw C flags and header directories, placed before the generated source:
+// `FUN_CC_ARGS` first, then the project's own `[build]` settings.
+fun _push_build_compile_flags(Vec<str>* argv_args, flag msvc) {
+  _push_env_args(argv_args, "FUN_CC_ARGS");
+  BuildSettings b = project_build_settings();
+  for flag_text : b.cflags {
+    argv_args.push(flag_text);
+  }
+  for inc : b.include_dirs {
+    if msvc {
+      argv_args.push(format("/I{str}", inc));
+    } else {
+      argv_args.push(format("-I{str}", inc));
+    }
+  }
+}
+
+// Extra C, assembly, or object files, compiled and linked with the
+// generated source.
+fun _push_build_sources(Vec<str>* argv_args) {
+  BuildSettings b = project_build_settings();
+  for src : b.sources {
+    argv_args.push(src);
+  }
+}
+
+// Library directories, libraries, and raw linker flags, placed after
+// every source so a static library's symbols resolve. Under MSVC these
+// follow `/link`. `FUN_LDFLAGS` adds more the same way, for a build with
+// no `fun.toml`.
+fun _push_build_link_flags(Vec<str>* argv_args, flag msvc) {
+  BuildSettings b = project_build_settings();
+  for dir : b.lib_dirs {
+    if msvc {
+      argv_args.push(format("/LIBPATH:{str}", dir));
+    } else {
+      argv_args.push(format("-L{str}", dir));
+    }
+  }
+  for lib : b.links {
+    if msvc {
+      argv_args.push(format("{str}.lib", lib));
+    } else {
+      argv_args.push(format("-l{str}", lib));
+    }
+  }
+  for flag_text : b.ldflags {
+    argv_args.push(flag_text);
+  }
+  _push_env_args(argv_args, "FUN_LDFLAGS");
+}
+
+// `name`'s own value, split on spaces, each piece pushed as an argument.
+fun _push_env_args(Vec<str>* argv_args, str name) {
+  str extra = env_or(name, "");
+  if equals(extra, "") {
+    ret;
+  }
+  Vec<str> parts = split(extra, ' ');
+  defer parts.free();
+  for part : parts {
+    if !equals(part, "") {
+      argv_args.push(part);
+    }
+  }
+}
+
 fun _append_compile_args(
   Vec<str>* argv_args,
   str cc,
@@ -723,7 +860,9 @@ fun _append_compile_args(
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("/O2");
     }
+    _push_build_compile_flags(argv_args, true);
     argv_args.push(c_path);
+    _push_build_sources(argv_args);
     if debug_info {
       argv_args.push("/Zi");
     }
@@ -740,6 +879,7 @@ fun _append_compile_args(
     // assert the exact literal text of.
     argv_args.push("/link");
     argv_args.push("/STACK:134217728");
+    _push_build_link_flags(argv_args, true);
   } elif compiler_is_emscripten(cc) {
     // emcc is clang-like enough to share the optimize/debug/output flag
     // shapes below, but not the rest.
@@ -812,7 +952,9 @@ fun _append_compile_args(
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
     }
+    _push_build_compile_flags(argv_args, false);
     argv_args.push(c_path);
+    _push_build_sources(argv_args);
     argv_args.push("-o");
     argv_args.push(exe_path);
     if debug_info {
@@ -827,17 +969,29 @@ fun _append_compile_args(
     // program would otherwise produce no output at all. This makes it
     // behave like an ordinary program instead.
     argv_args.push("-sEXIT_RUNTIME=1");
+    _push_build_link_flags(argv_args, false);
   } else {
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
     }
+    _push_build_compile_flags(argv_args, false);
     argv_args.push(c_path);
+    _push_build_sources(argv_args);
     argv_args.push("-o");
     argv_args.push(exe_path);
     if debug_info {
       argv_args.push("-g");
     } else {
       argv_args.push("-g0");
+    }
+    if is_freestanding_build() {
+      // No C library and no startup code: the program supplies its own
+      // entry point (through `[build] sources`) and linker script.
+      argv_args.push("-ffreestanding");
+      argv_args.push("-nostdlib");
+      argv_args.push("-fno-stack-protector");
+      _push_build_link_flags(argv_args, false);
+      ret;
     }
     argv_args.push("-pthread");
     // Windows has no standalone math library to link against (its math
@@ -878,6 +1032,7 @@ fun _append_compile_args(
       argv_args.push("-lssl");
       argv_args.push("-lcrypto");
     }
+    _push_build_link_flags(argv_args, false);
   }
 }
 
@@ -998,6 +1153,17 @@ fun _ensure_msvc_env() {
 // fallback when `_ensure_msvc_env` could not propagate INCLUDE to the current
 // process environment (which happens on some Windows configurations where
 // _putenv_s does not update the Windows environment block for child processes).
+// Each of `args` as ` "arg"`, for a batch-file command line.
+fun _quoted_args(Vec<str>* args) str {
+  StringBuilder b = string_builder_init(16);
+  for a : args {
+    b.append(" \"");
+    b.append(a);
+    b.append("\"");
+  }
+  ret b.build();
+}
+
 fun _compile_with_msvc_bat(
   str vcvarsall,
   str c_path,
@@ -1014,14 +1180,29 @@ fun _compile_with_msvc_bat(
   if _wants_optimization(optimize, debug_info) {
     debug_flag = format("{str} /O2", debug_flag);
   }
+  Vec<str> bat_pre;
+  bat_pre.init(0);
+  defer bat_pre.free();
+  _push_build_compile_flags(&bat_pre, true);
+  Vec<str> bat_sources;
+  bat_sources.init(0);
+  defer bat_sources.free();
+  _push_build_sources(&bat_sources);
+  Vec<str> bat_link;
+  bat_link.init(0);
+  defer bat_link.free();
+  _push_build_link_flags(&bat_link, true);
   if !write_string(
     bat_path,
     format(
-    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17 \"{str}\"{str} \"/Fe:{str}\" /link /STACK:134217728\nexit /b %ERRORLEVEL%\n",
+    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17{str} \"{str}\"{str}{str} \"/Fe:{str}\" /link /STACK:134217728{str}\nexit /b %ERRORLEVEL%\n",
     vcvarsall,
+    _quoted_args(&bat_pre),
     c_path,
+    _quoted_args(&bat_sources),
     debug_flag,
-    exe_path
+    exe_path,
+    _quoted_args(&bat_link)
     )
   ) {
     writeln_to(Sink.Stderr, "could not write MSVC build wrapper");
@@ -1158,10 +1339,9 @@ fun _strip_cl_filename_echo(str text) str {
   ret b.build();
 }
 
-// Compiles with an explicit `cc`, honoring `FUN_CC_ARGS` as extra
-// arguments inserted right after `cc` itself and before the source
-// file (a user override is trusted to know what it's asking for,
-// so this streams the compiler's own output live rather than capturing it).
+// Compiles with an explicit `cc` (a user override is trusted to know what
+// it's asking for, so this streams the compiler's own output live rather
+// than capturing it).
 // For MSVC, output is captured and filename-echo lines are filtered out
 // before printing, so only real diagnostics appear.
 fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info, flag optimize) num {
@@ -1169,21 +1349,6 @@ fun _compile_with_cc(str cc, str c_path, str exe_path, flag debug_info, flag opt
   argv_args.init(0);
   defer argv_args.free();
   argv_args.push(cc);
-
-  str extra = env_or("FUN_CC_ARGS", "");
-  if !equals(extra, "") {
-    Vec<str> extra_parts = split(extra, ' ');
-    defer extra_parts.free();
-    num j = 0;
-    for j < extra_parts.len {
-      str part = extra_parts.get(j);
-      if !equals(part, "") {
-        argv_args.push(part);
-      }
-      j = j + 1;
-    }
-  }
-
   _append_compile_args(&argv_args, cc, c_path, exe_path, debug_info, optimize);
 
   str[] argv = argv_from(&argv_args);
@@ -1227,6 +1392,13 @@ pub fun compile_c_to_exe_mode(str c_path, str exe_path, flag debug_info, flag op
   _ensure_msvc_env();
   str override_cc = env_or("FUN_CC", "");
   if !equals(override_cc, "") {
+    if is_freestanding_build() && compiler_is_msvc(override_cc) {
+      writeln_to(
+        Sink.Stderr,
+        "[Error]\na freestanding build needs gcc or clang; set FUN_CC to one"
+      );
+      ret 1;
+    }
     ret _compile_with_cc(override_cc, c_path, exe_path, debug_info, optimize);
   }
 
@@ -1236,6 +1408,9 @@ pub fun compile_c_to_exe_mode(str c_path, str exe_path, flag debug_info, flag op
   for i < candidates.len {
     str cc = candidates.get(i);
     i = i + 1;
+    if is_freestanding_build() && compiler_is_msvc(cc) {
+      continue;
+    }
 
     // When cl is selected and INCLUDE is still empty after _ensure_msvc_env
     // (env-propagation via _putenv_s is unreliable on some Windows configs),
@@ -1482,6 +1657,8 @@ pub fun help_text() str {
   `  -D name=value     Inject a constant the program can read.
   `  -test             Run -in's own test blocks, in place of a plain compile.
   `  -memcheck         Redirect every allocation through the built-in memory checker, catching leaks, double-frees, and use-after-free.
+  `  -arch <name>      The CPU to build for (x86_64, x86, aarch64, arm), checked by asm arch blocks; defaults to the C compiler's own target.
+  `  -freestanding     Build for bare metal (a kernel, bootloader, or firmware): no C library, no runtime, no main wrapper.
   `  -memcheck-leaks   With -memcheck, also fail on an allocation still live when the program exits (for a long-running program; off by default since a short-lived one never frees everything before exiting anyway).
   `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
   `  -fuzz-target <name>  Which target, when -in declares more than one.

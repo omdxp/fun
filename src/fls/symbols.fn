@@ -173,6 +173,9 @@ pub fun render_type(DataType* dt) str {
     }
     ret b.build();
   }
+  if dt.is_volatile {
+    b.append("volatile ");
+  }
   str base_name = _base_type_name(dt);
   b.append(base_name);
   free(base_name);
@@ -240,6 +243,11 @@ pub fun render_type(DataType* dt) str {
 }
 
 fun _base_type_name(DataType* dt) str {
+  // A fixed-width number (`u16`, `f32`, `i7`) keeps the spelling it was
+  // written with rather than reading as plain `num`/`dec`.
+  if (dt.kind == .Num || dt.kind == .Dec) && !equals(dt.type_str, "") {
+    ret substr(dt.type_str, 0, len(dt.type_str));
+  }
   fit dt.kind {
     .Void -> { ret substr("void", 0, 4); }
     .Raw -> { ret substr("raw", 0, 3); }
@@ -1165,6 +1173,78 @@ pub fun _receiver_type_from_tokens(Vec<Token>* tokens, str name) str {
     i = i + 1;
   }
   ret "";
+}
+
+// The type written after the `as` at `as_idx` (`u8`, `Box<num>`, `P*`),
+// as a fresh string, with `out_end` set to its last token; "" when no
+// type follows. A `*` followed by an operand is multiplication, not part
+// of the type, the same rule the parser applies.
+pub fun conversion_target_text(Vec<Token>* tokens, num as_idx, num* out_end) str {
+  let name_opt = token_after(tokens, as_idx + 1);
+  if name_opt.is_none() {
+    ret "";
+  }
+  Token name_tok = name_opt.unwrap();
+  StringBuilder b = string_builder_init(16);
+  // `as volatile T*`: the qualifier, then the type it qualifies.
+  if token_is_keyword(name_tok, "volatile") {
+    b.append("volatile ");
+    let qualified = token_after(tokens, index_of_token(tokens, name_tok) + 1);
+    if qualified.is_none() {
+      free(b.build());
+      ret "";
+    }
+    name_tok = qualified.unwrap();
+  }
+  if name_tok.type != .Identifier && name_tok.type != .Keyword {
+    free(b.build());
+    ret "";
+  }
+  num name_idx = index_of_token(tokens, name_tok);
+  b.append(token_word(name_tok));
+  num last = name_idx;
+  num after_generic = skip_generic_args_tokens(tokens, name_idx + 1);
+  if after_generic != name_idx + 1 {
+    num gi = name_idx + 1;
+    for gi < after_generic && gi < tokens.len {
+      Token gt = tokens.get(gi);
+      if gt.type != .NewLine && gt.type != .Comment {
+        b.append(token_word(gt));
+        if token_is_operator(gt, ",") {
+          b.append(" ");
+        }
+        last = gi;
+      }
+      gi = gi + 1;
+    }
+  }
+  for true {
+    let star = token_after(tokens, last + 1);
+    if star.is_none() || !token_is_operator(star.unwrap(), "*") {
+      break;
+    }
+    num star_idx = index_of_token(tokens, star.unwrap());
+    let operand = token_after(tokens, star_idx + 1);
+    if operand.is_some() && _token_starts_operand(operand.unwrap()) {
+      break;
+    }
+    b.append("*");
+    last = star_idx;
+  }
+  *out_end = last;
+  ret b.build();
+}
+
+fun _token_starts_operand(Token t) flag {
+  fit t.type {
+    .Identifier, .Number, .String, .Boolean -> { ret true; }
+    .Keyword -> { ret token_is_keyword(t, "nil"); }
+    .Operator -> {
+      ret token_is_operator(t, "(") || token_is_operator(t, "-") || token_is_operator(t, "!") ||
+        token_is_operator(t, "&") || token_is_operator(t, "~");
+    }
+    _ -> { ret false; }
+  }
 }
 
 // The single bound of the nearest type param named `name` declared at
@@ -2736,9 +2816,18 @@ pub fun type_name_of_local(
 pub fun bare_type_expr(str type_expr) str {
   str written = type_expr;
   flag owned = false;
+  // `volatile` qualifies a type; it is never part of the type's name.
+  if starts_with(written, "volatile ") {
+    written = substr(written, 9, len(written) - 9);
+    owned = true;
+  }
   num cut = index_of_char(written, '<');
   if cut > 0 {
+    str uncut = written;
     written = substr(written, 0, cut);
+    if owned {
+      free(uncut);
+    }
     owned = true;
   }
   str spaced = replace_char(written, '*', ' ');
@@ -2755,6 +2844,35 @@ pub fun bare_type_expr(str type_expr) str {
 // precedes the space, up to the first `<`, stars stripped. Shared by
 // `type_name_of_local` and `chain_receiver_type`, since a field's own
 // `Declaration.detail` reads the same shape a local's does.
+// A rendered "Type name" declaration detail's own type as written,
+// pointer stars and generic args kept (`"Cell* ptr"` is `Cell*`), "" for
+// a detail with no type part.
+fun _declared_type_text(str detail) str {
+  str text = detail;
+  if starts_with(text, "const ") {
+    text = substr(text, 6, len(text) - 6);
+  }
+  num depth = 0;
+  num space = -1;
+  num i = 0;
+  num n = len(text);
+  for i < n {
+    chr c = text[i];
+    if c == '(' || c == '<' {
+      depth = depth + 1;
+    } elif c == ')' || c == '>' {
+      depth = depth - 1;
+    } elif c == ' ' && depth == 0 {
+      space = i;
+    }
+    i = i + 1;
+  }
+  if space <= 0 {
+    ret "";
+  }
+  ret trim(substr(text, 0, space));
+}
+
 pub fun bare_type_from_detail(str detail) str {
   // The *last* top-level space, not the first: a tuple's own rendered
   // form (`"(num, str) t"`) or a function type's (`"fun(A, B) R name"`)
@@ -3669,12 +3787,19 @@ fun _apply_chain_index_unwraps(
   Vec<Node>* program,
   str* type_ref,
   Vec<str>* args_ref,
-  num count
+  num count,
+  flag pointer_base = false
 ) flag {
   num level = 0;
   for level < count {
     str t = *type_ref;
     num n = len(t);
+    // A segment declared as a pointer (`Cell* ptr`, its bare type kept
+    // as `Cell`) indexes to what it points at.
+    if level == 0 && pointer_base {
+      level = level + 1;
+      continue;
+    }
     if n > 0 && t[n - 1] == ']' {
       num lb = last_index_of_char(t, '[');
       if lb < 0 {
@@ -4866,11 +4991,20 @@ pub fun chain_receiver(
     current_args = local_generic_args(tokens, program, first.name, file, line);
   }
   if first.index_count > 0 {
+    flag first_is_pointer = false;
+    let first_decl = lookup(tokens, program, first.name, file, line);
+    if first_decl.is_some() {
+      first_is_pointer = ends_with(
+        _declared_type_text(first_decl.unwrap().detail),
+        "*"
+      );
+    }
     if !_apply_chain_index_unwraps(
       program,
       &current_type,
       &current_args,
-      first.index_count
+      first.index_count,
+      first_is_pointer
     ) {
       ret empty;
     }
@@ -4921,13 +5055,15 @@ pub fun chain_receiver(
       current_type = _bare_return_type(m.unwrap().detail);
       str seg_rtype_text = _return_type_text(m.unwrap().detail);
       current_args = generic_args_of_detail(seg_rtype_text);
+      flag returns_pointer = ends_with(trim(seg_rtype_text), "*");
       free(seg_rtype_text);
       if seg.index_count > 0 {
         if !_apply_chain_index_unwraps(
           program,
           &current_type,
           &current_args,
-          seg.index_count
+          seg.index_count,
+          returns_pointer
         ) {
           ret empty;
         }
@@ -4946,7 +5082,8 @@ pub fun chain_receiver(
         program,
         &current_type,
         &current_args,
-        seg.index_count
+        seg.index_count,
+        ends_with(_declared_type_text(field.unwrap().detail), "*")
       ) {
         ret empty;
       }
@@ -5238,9 +5375,19 @@ pub fun infer_let_local_type(
   // keeps everything written, `<...>` included) - `_compose_type_text`
   // only appends `args` when it doesn't, or they'd double up.
   if equals(base, "") || args.len == 0 || index_of_char(base, '<') >= 0 {
-    ret base;
+    ret _without_value_volatile(base);
   }
-  ret _compose_type_text(base, &args);
+  ret _without_value_volatile(_compose_type_text(base, &args));
+}
+
+// A `let` copied from a volatile value (`let d = reg;`) is an ordinary
+// value: only a pointer keeps `volatile`, since there it qualifies what
+// the pointer reaches.
+fun _without_value_volatile(str type_text) str {
+  if !starts_with(type_text, "volatile ") || index_of_char(type_text, '*') >= 0 {
+    ret type_text;
+  }
+  ret substr(type_text, 9, len(type_text) - 9);
 }
 
 // `infer_let_local_type`, also writing the resolved type's own generic
@@ -5393,6 +5540,25 @@ fun _infer_type(
     ret base_type;
   }
   Token op_tok = op_tok_opt.unwrap();
+  // `value as T` (any number of times over) is typed `T`.
+  for token_is_keyword(op_tok, "as") {
+    num conv_end = -1;
+    str target = conversion_target_text(tokens, index_of_token(tokens, op_tok), &conv_end);
+    if equals(target, "") {
+      ret base_type;
+    }
+    free(base_type);
+    base_type = target;
+    end_idx = conv_end;
+    if out_args != nil {
+      *out_args = generic_args_of_detail(target);
+    }
+    let after_conv = token_after(tokens, end_idx + 1);
+    if after_conv.is_none() {
+      ret base_type;
+    }
+    op_tok = after_conv.unwrap();
+  }
   // `cond ? then : else`: shares '?' with the propagation operator
   // below, told apart the same way the real parser does - a pure
   // lookahead for a genuinely matching top-level ':' ahead (see
@@ -6151,6 +6317,14 @@ fun _infer_type_primary(
             if equals(base_type, "str") {
               free(base_type);
               ret substr("chr", 0, 3);
+            }
+            // A pointer indexes to what it points at (`ptr[0]` on a
+            // `Cell*` is a `Cell`).
+            str declared_text = _declared_type_text(base_decl.unwrap().detail);
+            num dlen = len(declared_text);
+            if dlen > 1 && declared_text[dlen - 1] == '*' {
+              free(base_type);
+              ret _without_value_volatile(trim(substr(declared_text, 0, dlen - 1)));
             }
             num base_len = len(base_type);
             if base_len > 0 && base_type[base_len - 1] == ']' {

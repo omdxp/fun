@@ -11159,3 +11159,99 @@ test "a value typed by a bounded type param resolves members through its bound" 
   str comp = completion(&reads, doc, 4, 4, true);
   assert contains(comp, `"label":"weight"`), "expected the bound's members offered mid-edit";
 }
+
+test "inlay hints type a let by its own as conversion, through a following operator too" {
+  str src = `compound P { num x; }
+  `fun main() {
+  `  P p = P{x = 1};
+  `  let i = p.x as i32 * 2;
+  `  let d = (p.x + 1) as dec / 2.0;
+  `  let q = &p as raw*;
+  `}`;
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///as_hint.fn";
+  doc.path = "as_hint.fn";
+  doc.text = src;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 7);
+  assert contains(hints, `"label":": i32"`), "expected the conversion's target, not the field's own type";
+  assert contains(hints, `"label":": dec"`), "expected a converted parenthesized value typed by its target";
+  assert contains(hints, `"label":": raw*"`), "expected a pointer target kept whole";
+}
+
+test "packed reads as a keyword before compound, with its own hover, and volatile documents its type use" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///packed_kw.fn";
+  doc.path = "packed_kw.fn";
+  doc.text = `packed compound Entry {
+  `  volatile u16 limit;
+  `}
+  `fun main() {
+  `  num packed = 1;
+  `  _ = packed;
+  `}`;
+  doc.version = 1;
+  str toks = semantic_tokens(&reads, doc);
+  assert contains(toks, `"data":[0,0,6,0,`), "expected packed classified as a keyword before compound";
+  str h = hover(&reads, doc, 0, 2);
+  assert contains(h, "no padding"), "expected packed's own hover";
+  str hv = hover(&reads, doc, 1, 4);
+  assert contains(hv, "memory-mapped device register"), "expected volatile's type-qualifier meaning documented";
+}
+
+test "hover shows a const's fixed-width type and its value as written" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hexconst.fn";
+  doc.path = "hexconst.fn";
+  doc.text = `const u16 COM1 = 0x3F8;
+  `const u32 FLAGS = 1 << 4;
+  `fun outb(u16 port, u8 value) {}
+  `fun main() {
+  `  outb(COM1, FLAGS as u8);
+  `}`;
+  doc.version = 1;
+  str at_decl = hover(&reads, doc, 0, 11);
+  assert contains(at_decl, "const u16 COM1 = 0x3F8"), "expected u16 and the hex spelling, not num and 1016";
+  str at_use = hover(&reads, doc, 4, 8);
+  assert contains(at_use, "const u16 COM1 = 0x3F8"), "expected the same at a use";
+  str expr = hover(&reads, doc, 1, 11);
+  assert contains(expr, "const u32 FLAGS = 1 << 4"), "expected an initializer expression as written";
+  str fn = hover(&reads, doc, 4, 3);
+  assert contains(fn, "outb(u16 port, u8 value)"), "expected fixed-width parameter types in a signature";
+}
+
+test "volatile shows in hovers and hints, a let copy of a volatile value is plain, and a pointer indexes to its pointee" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///volatile_let.fn";
+  doc.path = "volatile_let.fn";
+  doc.text = `compound Cell {
+  `  u8 ch;
+  `}
+  `fun main() {
+  `  Cell backing = Cell{ch = 7};
+  `  volatile Cell* vga = &backing as volatile Cell*;
+  `  let a = vga;
+  `  let b = &backing as volatile Cell*;
+  `  let c = vga[0].ch;
+  `  volatile u32 reg = 5;
+  `  let d = reg;
+  `  Cell* ptr = &backing;
+  `  let e = ptr[0];
+  `}`;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 14);
+  assert count(hints, `"label":": volatile Cell*"`) == 2, "expected both volatile pointers hinted whole";
+  assert contains(hints, `"label":": u8"`), "expected a field read through a volatile pointer's index typed";
+  assert contains(hints, `"label":": u32"`) && !contains(hints, `": volatile u32"`), "expected a copy of a volatile value to be plain";
+  assert contains(hints, `"label":": Cell"`), "expected a pointer to index to its pointee";
+  str h = hover(&reads, doc, 5, 18);
+  assert contains(h, "volatile Cell* vga"), "expected volatile in the declaration's hover";
+}

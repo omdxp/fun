@@ -22,6 +22,7 @@ syn match funFunction "\v<[A-Za-z_][A-Za-z0-9_]*>\ze\s*\("
 syn match funFunction "\v<[a-z_][A-Za-z0-9_]*>\ze\s*\<([^<>()]|\<[^<>()]*\>)*\>\s*\("
 syn match funFunction "\v<fun\s+\zs[A-Za-z_][A-Za-z0-9_]*>"
 
+syn match funKeyword "\<packed\ze\s\+compound\>"
 syn keyword funKeyword use as pub fun closure als compound shape impl enum let const asm volatile arch defer ret if elif else for fit async await fork break continue assert panic test sequential fuzz allow expect
 syn keyword funType void raw num dec f32 f64 str flag chr
 syn match funType "\v<(i|u)[1-9][0-9]*>"

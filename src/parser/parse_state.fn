@@ -82,6 +82,10 @@ pub compound ParseState {
   // Every top-level variable name in this file, found by the same scan,
   // so a function can read a global declared further down.
   Map<str, flag> forward_global_names;
+  // True while reading the target type of `value as T`, where a `*`
+  // followed by an operand (`x as u8 * 2`) is multiplication, not a
+  // pointer star.
+  flag in_conversion_type;
 
   // Gates `err()`'s stderr output; set false by tests that expect a clean
   // parse failure without polluting test output.
@@ -126,6 +130,7 @@ pub fun parse_state_new(str input_file_path, str input_source) ParseState {
   p.global_symbols.init(8);
   p.forward_type_names.init(8);
   p.forward_global_names.init(8);
+  p.in_conversion_type = false;
   p.forward_type_names_scanned = false;
   p.emit_stderr = true;
   p.error_message = "";

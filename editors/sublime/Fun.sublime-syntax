@@ -81,7 +81,7 @@ contexts:
       scope: constant.language.boolean.fun
     - match: \b(nil)\b
       scope: constant.language.null.fun
-    - match: \b(use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b
+    - match: \b(packed(?=\s+compound\b)|use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|defer|ret|if|elif|else|for|fit|async|await|fork|break|continue|assert|panic|test|sequential|fuzz|allow|expect)\b
       scope: keyword.control.fun
 
   block_comment:

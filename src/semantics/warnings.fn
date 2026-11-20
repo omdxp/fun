@@ -2792,6 +2792,16 @@ pub fun collect_reads(Node* node, Set<str>* out) {
     // compiled clean but linked with "implicit function declaration",
     // since its real definition was never written anywhere).
     .ClosureLiteral(f) -> { collect_reads(f.body, out); }
+    // An asm block's own operands read (an output also writes) the
+    // values they name: `in p: "r" = p` uses `p`.
+    .StatementAsm(a) -> {
+      for op : a.outputs {
+        collect_reads(op.expr, out);
+      }
+      for ip : a.inputs {
+        collect_reads(ip.expr, out);
+      }
+    }
     _ -> {}
   }
 }

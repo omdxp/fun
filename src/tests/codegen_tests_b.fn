@@ -8,6 +8,11 @@
 
 use harness;
 use std.string;
+use std.fs;
+use std.process;
+use std.vec;
+use std.io;
+use std.runtime_backend;
 
 test "generic function specialization emits concrete names" {
   str src = `fun id<T>(T x) T { ret x; }
@@ -3589,4 +3594,377 @@ test "a let holding a comparison, logical, negation, or overloaded operator resu
     "lets holding flag and negated results (strict MSVC-shaped compile)"
   );
   assert contains(out_msvc, "true false false true -1.5"), "expected each let declared with its real C type";
+}
+
+test "fixed-width integers and floats format through their own placeholders and through {num}/{dec}" {
+  str src = `use std.io;
+  `fun main() num {
+  `  u8 b = 112;
+  `  i8 c = -5;
+  `  u16 w = 9;
+  `  i32 i = -70000;
+  `  u32 u = 4000000000;
+  `  u64 big = 18446744073709551615;
+  `  f32 f = 1.5;
+  `  println_fmt("{u8} {i8} {u16} {i32} {u32} {u64} {f32}", b, c, w, i, u, big, f);
+  `  println_fmt("{num} {num} {} {dec}", b, c, big, f);
+  `  ret 0;
+  `}`;
+  // Each line on its own: a Windows build ends its lines with `\r\n`.
+  str line1 = "112 -5 9 -70000 4000000000 18446744073709551615 1.5";
+  str line2 = "112 -5 18446744073709551615 1.5";
+  str out = run_source(src, "fixed_width_fmt", "fixed-width formatting");
+  assert contains(out, line1) && contains(out, line2), format(
+    "expected every width printed as a number, u64 unsigned, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fixed_width_fmt_msvc",
+    "fixed-width formatting (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, line1) && contains(out_msvc, line2), format(
+    "expected the same output with hoisted varargs, got: {str}",
+    out_msvc
+  );
+}
+
+test "as converts numbers, enums, pointers, and addresses with real C casts" {
+  str src = `use std.io;
+  `compound P {
+  `  f32 x;
+  `  num n;
+  `}
+  `enum Color {
+  `  Red,
+  `  Green,
+  `  Blue,
+  `}
+  `fun main() num {
+  `  f32 f = 2.75;
+  `  num n = f as num;
+  `  u8 b = 300 as u8;
+  `  P p = P{x = 7.9, n = 5};
+  `  let i = p.x as i32 * 2;
+  `  let d = (n + 1) as dec / 2.0;
+  `  u64 addr = &p as u64;
+  `  P* back = addr as P*;
+  `  raw* r = back as raw*;
+  `  P* again = r as P*;
+  `  u8 c = Color.Blue as u8;
+  `  Color k = 1 as Color;
+  `  flag t = (k as num) == 1;
+  `  println_fmt("{num} {u8} {i32} {dec} {num} {u8} {flag}", n, b, i, d, again.n, c, t);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "as_conversions", "as conversions");
+  assert contains(out, "2 44 14 1.5 5 2 true"), "expected every conversion's real value";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "as_conversions_msvc",
+    "as conversions (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "2 44 14 1.5 5 2 true"), "expected the same values with no GNU-only constructs";
+}
+
+test "a Vec of shape values holds and dispatches each pushed implementation, and get_ptr edits in place" {
+  str src = `use std.io;
+  `use std.vec;
+  `shape System {
+  `  run(Vec<num>* hp) num;
+  `}
+  `compound Damage {
+  `  num amount;
+  `}
+  `impl Damage as System {
+  `  run(Vec<num>* hp) num {
+  `    num i = 0;
+  `    for i < hp.len() {
+  `      num* slot = hp.get_ptr(i);
+  `      *slot = *slot - self.amount;
+  `      i++;
+  `    }
+  `    ret self.amount;
+  `  }
+  `}
+  `compound Heal {
+  `  num amount;
+  `}
+  `impl Heal as System {
+  `  run(Vec<num>* hp) num {
+  `    *hp.get_ptr(0) = *hp.get_ptr(0) + self.amount;
+  `    ret 0;
+  `  }
+  `}
+  `fun main() num {
+  `  Vec<num> hp;
+  `  hp.init();
+  `  defer hp.free();
+  `  hp.push(10);
+  `  hp.push(20);
+  `  Damage d = Damage{amount = 3};
+  `  Heal h = Heal{amount = 5};
+  `  Vec<System> systems;
+  `  systems.init();
+  `  defer systems.free();
+  `  systems.push(&d);
+  `  systems.push(&h);
+  `  num dealt = 0;
+  `  for s : systems {
+  `    dealt += s.run(&hp);
+  `  }
+  `  println_fmt("{num} {num} {num}", hp.get(0), hp.get(1), dealt);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "vec_of_shapes", "a Vec of shape values");
+  assert contains(out, "12 17 3"), "expected both systems dispatched and both edits kept";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "vec_of_shapes_msvc",
+    "a Vec of shape values (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "12 17 3"), "expected the same results with no GNU-only constructs";
+}
+
+test "a freestanding build emits only freestanding headers and no runtime, and compiles with no C library" {
+  str src = `compound Cell {
+  `  u8 ch;
+  `  u8 color;
+  `}
+  `const u64 VGA = 0xB8000;
+  `num col = 0;
+  `fun put(chr c) {
+  `  volatile Cell* vga = VGA as volatile Cell*;
+  `  vga[col] = Cell{ch = c as u8, color = 15};
+  `  col++;
+  `}
+  `pub fun fun_panic_handler(str message) {
+  `  put(message[0]);
+  `}
+  `pub fun kmain() {
+  `  str s = "hi";
+  `  assert equals_text(s, "hi"), "strings compare";
+  `  put(s[0]);
+  `}
+  `fun equals_text(str a, str b) flag {
+  `  ret a == b;
+  `}`;
+  let emitted = transpile_source_freestanding(src);
+  assert emitted.is_ok(), "expected a freestanding program to transpile";
+  str c = emitted.unwrap();
+  assert !contains(c, "<stdio.h>") && !contains(c, "<stdlib.h>") && !contains(c, "pthread"), "expected no hosted headers or threads";
+  assert !contains(c, "int main("), "expected no main wrapper";
+  assert contains(c, "volatile Cell* vga"), "expected the volatile pointer kept";
+  assert contains(c, "void kmain("), "expected the entry point emitted";
+  if runtime_backend_is_windows() {
+    ret;
+  }
+  str c_path = "src/tests/fixtures/freestanding_probe.c";
+  assert write_string(c_path, c), "could not stage the freestanding C";
+  defer remove_file(c_path);
+  Vec<str> argv;
+  argv.init(8);
+  defer argv.free();
+  argv.push(env_or("FUN_CC", "cc"));
+  argv.push("-ffreestanding");
+  argv.push("-fsyntax-only");
+  argv.push("-Wall");
+  argv.push("-Werror");
+  argv.push(c_path);
+  let built = run(argv_from(&argv));
+  assert built.is_ok() && built.unwrap().exit_code == 0, format(
+    "expected the freestanding C to compile cleanly: {str}",
+    built.unwrap().stderr_text
+  );
+}
+
+test "a freestanding build rejects a global that needs startup code to initialize" {
+  let emitted = transpile_source_freestanding(
+    `fun seed() num {
+  `  ret 4;
+  `}
+  `num start = seed();
+  `pub fun kmain() {}`
+  );
+  assert emitted.is_err() &&
+    contains(emitted.unwrap_err(), "freestanding build has no startup code"), "expected a clear error";
+}
+
+test "volatile qualifies pointers, parameters, fields, and conversions" {
+  str src = `use std.io;
+  `compound Regs {
+  `  volatile u32 status;
+  `  u32 data;
+  `}
+  `fun poke(volatile u32* reg, u32 v) {
+  `  *reg = v;
+  `}
+  `fun main() num {
+  `  u32 backing = 0;
+  `  volatile u32* reg = &backing;
+  `  poke(reg, 7);
+  `  *reg = *reg + 1;
+  `  Regs r = Regs{status = 1, data = 2};
+  `  let p = &backing as volatile u32*;
+  `  println_fmt("{u32} {u32} {u32}", *reg, r.status, *p);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "volatile_qualifier", "volatile qualifier");
+  assert contains(out, "8 1 8"), "expected writes through volatile pointers to land";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "volatile_qualifier_msvc",
+    "volatile qualifier (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "8 1 8"), "expected the same with no GNU-only constructs";
+}
+
+test "a packed compound has no padding, generic or not, and packed stays an ordinary name elsewhere" {
+  str src = `use std.io;
+  `packed compound GdtEntry {
+  `  u16 limit_low;
+  `  u16 base_low;
+  `  u8 base_mid;
+  `  u8 access;
+  `  u8 granularity;
+  `  u8 base_high;
+  `}
+  `packed compound Header<T> {
+  `  u8 tag;
+  `  T value;
+  `}
+  `compound Loose {
+  `  u8 tag;
+  `  u32 value;
+  `}
+  `pub packed compound Wire {
+  `  u8 kind;
+  `  u64 stamp;
+  `}
+  `fun main() num {
+  `  num packed = 1;
+  `  Header<u32> h = Header<u32>{tag = 1, value = 7};
+  `  println_fmt("{num} {num} {num} {num} {u32} {num}", sizeof(GdtEntry), sizeof(Header<u32>), sizeof(Loose), sizeof(Wire), h.value, packed);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "packed_compound", "packed compounds");
+  assert contains(out, "8 5 8 9 7 1"), "expected packed sizes and an unpacked compound left alone";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "packed_compound_msvc",
+    "packed compounds (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "8 5 8 9 7 1"), "expected the same layout with no GNU-only constructs";
+}
+
+test "asm at file scope is emitted as it stands, and takes no operands" {
+  str src = `asm {
+  `  .global isr_stub
+  `  isr_stub:
+  `    iretq
+  `};
+  `fun main() {}`;
+  let out = emit_c(src, "file-scope asm");
+  assert contains(out, "__asm__(\"\\n  .global isr_stub\\n  isr_stub:\\n    iretq\\n\");"), "expected a basic asm block at file scope";
+  let rejected = transpile_source(`asm volatile { nop };
+  `fun main() {}`);
+  assert rejected.is_err(), "expected volatile refused outside a function";
+}
+
+test "an extended asm template's register names are escaped, its operands and modifiers left alone" {
+  str src = `fun main() num {
+  `  num v = 0;
+  `  num x = 1;
+  `  asm volatile (out v: "=r" = v; in x: "r" = x) {
+  `    mov %cr0, %[v]
+  `    add %rsp, %r8
+  `    movw %w[x], %ax
+  `    movq %%rbx, %0
+  `  };
+  `  asm { mov %eax, %ebx };
+  `  ret v;
+  `}`;
+  let out = emit_c(src, "asm register escaping");
+  assert contains(out, "mov %%cr0, %[v]"), "expected a control register escaped beside a named operand";
+  assert contains(out, "add %%rsp, %%r8"), "expected r8 read as a register, not a modifier";
+  assert contains(out, "movw %w[x], %%ax"), "expected a modifier operand kept";
+  assert contains(out, "movq %%rbx, %0"), "expected an existing escape and a numbered operand kept";
+  assert contains(out, "mov %eax, %ebx"), "expected a block with no operands left exactly as written";
+}
+
+test "an integer literal shifted or combined with another literal computes in 64 bits, like num" {
+  str src = `use std.io;
+  `fun main() num {
+  `  num n = 32;
+  `  num a = 1 << n;
+  `  num b = 1 << 40;
+  `  num c = 3000000 * 3000000;
+  `  num d = 2147483647 + 1;
+  `  println_fmt("{num} {num} {num} {num}", a, b, c, d);
+  `  ret 0;
+  `}`;
+  str want = "4294967296 1099511627776 9000000000000 2147483648";
+  str out = run_source(src, "literal_width", "64-bit literal arithmetic");
+  assert contains(out, want), "expected no 32-bit overflow";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "literal_width_msvc",
+    "64-bit literal arithmetic (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), "expected the same under MSVC";
+}
+
+test "as applies after an index, a call, a parenthesized right side, and inside a compound literal field" {
+  str src = `use std.io;
+  `compound P {
+  `  u8 a;
+  `  u8 b;
+  `}
+  `fun seven() num {
+  `  ret 7;
+  `}
+  `fun main() num {
+  `  str s = "hi";
+  `  chr[4] d;
+  `  num n = 7;
+  `  u8 x = s[0] as u8;
+  `  P p = P{a = s[1] as u8, b = seven() as u8};
+  `  d[0] = (48 + n % 10) as chr;
+  `  num y = 0;
+  `  y = (n * 2) as num + 1;
+  `  num z = s[1] as num * 2;
+  `  println_fmt("{u8} {u8} {u8} {chr} {num} {num}", x, p.a, p.b, d[0], y, z);
+  `  ret 0;
+  `}`;
+  str want = "104 105 7 7 15 210";
+  str out = run_source(src, "as_positions", "as in every operand position");
+  assert contains(out, want), format(
+    "expected each conversion bound to its own operand, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "as_positions_msvc",
+    "as in every operand position (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format("expected the same under MSVC, got: {str}", out_msvc);
+}
+
+test "a let copy of a volatile value is an ordinary value, while a volatile pointer stays volatile" {
+  str src = `use std.io;
+  `fun main() num {
+  `  u32 backing = 4;
+  `  volatile u32 reg = 5;
+  `  volatile u32* p = &backing;
+  `  let d = reg;
+  `  let q = p;
+  `  d = d + 1;
+  `  println_fmt("{u32} {u32}", d, *q);
+  `  ret 0;
+  `}`;
+  str c = emit_c(src, "volatile let copies");
+  assert contains(c, "uint32_t d = reg;") && !contains(c, "volatile uint32_t d"), "expected the copy to drop volatile";
+  assert contains(c, "volatile uint32_t* q = p;"), "expected a volatile pointer copy kept volatile";
+  str out = run_source(src, "volatile_let", "volatile let copies");
+  assert contains(out, "6 4"), "expected both values read";
 }

@@ -65,6 +65,28 @@ fun main() {
 | `str` | `char*` | Null-terminated string. |
 | `raw` | `void` (`raw*` for `void*`) | Opaque type. |
 
+An integer literal must fit the fixed-width type it initializes:
+`u8 b = 300;` is a compile error. Write `300 as u8` to wrap it on
+purpose (see Conversions below).
+
+### Formatting values
+
+`format`, `print_fmt`, and `println_fmt` (from `std.io`) fill `{}`
+placeholders in order. A typed placeholder also checks its argument:
+`{str}`, `{num}`, `{dec}`, `{flag}`, `{chr}`, `{ptr}`, and one per
+fixed-width type (`{i8}` through `{u64}`, `{f32}`, `{f64}`). A `u64`
+prints its full unsigned range.
+
+```fun
+use std.io;
+
+fun main() {
+  u8 level = 3;
+  f32 speed = 2.5;
+  println_fmt("level {u8} at {f32} m/s", level, speed);
+}
+```
+
 ### `nil`
 
 The null pointer/string sentinel (a keyword; lowers to C `NULL`). It
@@ -161,6 +183,47 @@ brackets can repeat for a multi-dimensional array: `num[N][N] m;`.
 
 Pointer depth is written `Type*`: `Node* next;`. Self-referential and
 forward-declared types are supported.
+
+`volatile` in front of a type makes every read and write through it reach
+memory, in order, which a memory-mapped device register needs: `volatile
+u32* uart = 0x10000000 as volatile u32*;`. It works on locals,
+parameters, fields, globals, and conversion targets. A `let` copied from
+a volatile pointer stays one (`let p = uart;` is a `volatile u32*`), while
+a `let` copied from a volatile value is an ordinary value (`let v = *uart;`
+is a plain `u32`).
+
+### Conversions (`as`)
+
+`value as T` converts a value explicitly. It binds tighter than any
+binary operator and looser than a prefix one, so `p.x as i32 * 2` is
+`(p.x as i32) * 2` and `&p as u64` converts `&p`.
+
+- Any number converts to any other numeric type. A float truncates toward
+  zero and a wider integer wraps (`300 as u8` is `44`).
+- A plain enum converts to an integer and back (`Color.Blue as u8`).
+- A pointer converts to any other pointer type (`raw* r = p as raw*;`).
+- A pointer and an integer convert into each other, for an address read
+  from hardware or written to a register (`0xB8000 as u16*`).
+
+Anything else, such as a compound or a data-carrying enum, is a compile
+error.
+
+```fun
+use std.io;
+
+compound Header {
+  u32 magic;
+}
+
+fun main() {
+  dec speed = 2.75;
+  num whole = speed as num;
+  Header h = Header{magic = 7};
+  u64 addr = &h as u64;
+  Header* back = addr as Header*;
+  println_fmt("{num} {u32}", whole, back.magic);
+}
+```
 
 ### Tuples
 
@@ -581,6 +644,34 @@ fun main() {
 }
 ```
 
+### Packed compounds
+
+`packed compound` lays its fields out with no padding between or after
+them, for a layout fixed by hardware or a file format: a GDT or IDT
+entry, a device descriptor, a network header. `packed` is only special
+right before `compound`, so it stays an ordinary name everywhere else.
+
+```fun
+use std.io;
+
+packed compound GdtEntry {
+  u16 limit_low;
+  u16 base_low;
+  u8 base_mid;
+  u8 access;
+  u8 granularity;
+  u8 base_high;
+}
+
+fun main() {
+  println_fmt("{num} bytes", sizeof(GdtEntry));
+}
+```
+
+A field of a packed compound may sit at an unaligned address, so taking
+its address with `&` gives a pointer some CPUs can't read through
+directly. Copy the field to a local first when that matters.
+
 ### Private fields (leading `_`)
 
 A compound field whose name begins with an underscore is
@@ -631,7 +722,11 @@ fun main() {
 }
 ```
 
-- Shape values can be used for dynamic dispatch, like trait objects.
+- Shape values can be used for dynamic dispatch, like trait objects. A
+  shape value is built from a pointer to a type implementing it
+  (`HasArea a = &sq;`), and a container of them works the same way:
+  `Vec<HasArea> all; all.push(&sq);`. The shape value keeps pointing at
+  `sq`, so `sq` must outlive it.
 - Shape methods follow normal visibility rules: non-`pub` methods are
   callable inside the declaring module, but not from importing modules.
 - Formatting with `{}` uses `Display.to_string()` only when that method
@@ -1532,10 +1627,35 @@ fun main() {
 - **Volatile**: `asm volatile { ... };` prevents reordering/elision.
 - **Architecture guard**: `asm arch x86_64 { ... };` errors if the target
   arch mismatches. Supported names: `x86_64`/`amd64`, `x86`/`i386`,
-  `aarch64`/`arm64`, `arm`.
+  `aarch64`/`arm64`, `arm`. The target is the CPU being built for, which
+  a cross build sets with `-arch` or `[build] arch` (see Target
+  architecture in Platforms & Compilers).
 - **Operands & clobbers**: reference named operands in templates with
   `%[name]`. Outputs come first, then inputs, then clobbers (GCC-style
-  extended asm).
+  extended asm). In a block with operands, write registers with a single
+  `%` (`mov %cr0, %[v]`): the compiler doubles it to the `%%cr0` C needs,
+  leaving operands (`%[v]`, `%0`) and one-letter operand modifiers
+  (`%w[v]`, `%b0`) as written.
+- **File scope**: an `asm` block outside any function is emitted as it
+  stands among the program's own declarations, for interrupt stubs, boot
+  code, or section directives. It takes no `volatile` and no operands.
+
+```fun
+// fun:no-run
+asm arch x86_64 {
+  .global isr_stub
+  isr_stub:
+    iretq
+};
+
+fun read_cr0() u64 {
+  u64 v = 0;
+  asm volatile arch x86_64 (out v: "=r" = v) {
+    mov %cr0, %[v]
+  };
+  ret v;
+}
+```
 - Asm block contents are preserved as raw text (including whitespace and
   comments). Fun does not validate assembly syntax inside asm blocks;
   correctness is decided by the downstream assembler/dialect (clang/GAS

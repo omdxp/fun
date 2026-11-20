@@ -261,6 +261,25 @@ jobs:
             export FUN_STDLIB_DIR="$PWD/stdlib"
             FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
           fi
+      # A freestanding build is only proven by booting it: this builds the
+      # bare-metal kernel in examples/kernel and boots it in QEMU, which
+      # exits with the kernel's own status through its debug-exit device
+      # (`(status << 1) | 1`, so 1 means every check passed).
+      - name: Boot the bare-metal kernel example in QEMU
+        if: matrix.os == 'ubuntu-24.04'
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update -y > /dev/null
+          sudo apt-get install -y qemu-system-x86 lld clang > /dev/null
+          export FUN_STDLIB_DIR="$PWD/stdlib"
+          cd examples/kernel
+          FUN_CC=clang ../../fun-out/bin/fun build
+          set +e
+          timeout 60 qemu-system-i386 -kernel fun-out/bin/kernel -serial stdio -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 | tee /tmp/kernel.out
+          code=${PIPESTATUS[0]}
+          set -e
+          grep -q "all checks passed" /tmp/kernel.out
+          test "$code" = "1"
   lint:
     runs-on: ubuntu-24.04
     env:

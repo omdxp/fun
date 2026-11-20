@@ -166,6 +166,58 @@ and go-to-definition too, so both names resolve and jump straight to
 the manifest's own `name`/`version` line like any other declared
 constant would.
 
+## Native code and libraries (`[build]`)
+
+A `[build]` table tells the C compiler and linker what the program needs
+beyond its own generated C: a C library to link (SDL, raylib, a vendored
+`.a`), extra C or assembly files, and raw flags. Every key is an
+optional array of strings, and paths are relative to the project root.
+
+```toml
+[build]
+sources = ["native/glue.c", "boot/start.S"]
+include_dirs = ["vendor/include"]
+lib_dirs = ["vendor/lib"]
+links = ["SDL2", "m"]
+cflags = ["-march=native"]
+ldflags = ["-Wl,-rpath,vendor/lib"]
+```
+
+- `sources` are compiled and linked together with the program, so a
+  file there can call into Fun code or be called from it. Every `pub`
+  function of the program's own is kept in the build when there are
+  `sources`, even one no Fun code calls, since native code can only reach
+  it by name.
+- `links` names libraries the way the linker does (`"SDL2"` links
+  `-lSDL2`, or `SDL2.lib` with MSVC). Libraries and `ldflags` come after
+  every source on the command line, so a static library's symbols always
+  resolve.
+- `cflags` come before the generated source, with `include_dirs`.
+- These apply to every compile in the project: `fun build`, `fun -in`,
+  `fun test`, and `fun fuzz`.
+- `freestanding = true` builds for bare metal, and `arch = "x86_64"`
+  names the CPU being built for when it isn't this machine's own. See
+  Bare metal in Platforms & Compilers.
+- Without a `fun.toml`, `FUN_LDFLAGS` adds linker arguments the same
+  way, after every source, and `FUN_CC_ARGS` adds compiler arguments
+  before it.
+
+To call into a C library, declare each function without a body and each
+struct as a compound with the same fields in the same order:
+
+```fun
+compound Vector2 {
+  f32 x;
+  f32 y;
+}
+
+fun vec2_add(Vector2 a, Vector2 b) Vector2;
+fun run_frames(i32 n, fun(f32, raw*) void cb, raw* user) i32;
+```
+
+A Fun function can be passed wherever the C side takes a callback, as
+`run_frames` does above.
+
 ## Dependencies (`[deps]`)
 
 Fun shares libraries straight from git, no central package index to run

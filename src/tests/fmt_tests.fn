@@ -759,3 +759,32 @@ test "a ternary's own question mark keeps its space before an enum shorthand bra
   assert contains(got, "t ? .A : .B"), "expected the ternary's shorthand branch spaced like any other operand";
   assert contains(got, "g()?.field"), "expected a real propagation chain left pressed together";
 }
+
+test "a packed compound formats like any other compound" {
+  str src = `packed compound Entry {
+  `  u16 limit;
+  `  u8 flags;
+  `}
+  `pub packed compound Wire {
+  `  u8 kind;
+  `}
+  `
+  `fun main() {
+  `  num packed = 1;
+  `  _ = packed;
+  `}
+  `
+;
+  assert equals(format_source(src, "t.fn").unwrap(), src), "expected a packed compound left exactly as written";
+}
+
+test "an asm statement whose operands are separated by semicolons is kept exactly as written" {
+  str src = `fun outb(u16 port, u8 value) {
+  `  asm volatile arch x86 (in port: "Nd" = port; in value: "a" = value; clobber "memory") {
+  `    outb %[value], %[port]
+  `  };
+  `}
+  `
+;
+  assert equals(format_source(src, "t.fn").unwrap(), src), "expected the asm statement untouched";
+}
