@@ -628,6 +628,9 @@ pub compound Codegen {
   flag emscripten_mode;
   // Every `packed compound`'s own name, generic templates included.
   Vec<str> packed_compound_names;
+  // Native code is linked in (`[build] sources`), which may call any of
+  // the program's own `pub` functions by name, so none is pruned.
+  flag keep_public_roots;
   // A bare-metal build (see `is_freestanding_build`): no C library, no
   // runtime, no `main` wrapper.
   flag freestanding;
@@ -869,6 +872,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.msvc_mode = false;
   g.emscripten_mode = false;
   g.packed_compound_names.init(0);
+  g.keep_public_roots = false;
   g.freestanding = false;
   g.host_arch = "";
   g.prune_unreachable = false;
@@ -950,6 +954,12 @@ fun program_uses_std_c_header(Vec<Node> nodes, str file) flag {
     }
   }
   ret false;
+}
+
+// True for a file from the standard library itself.
+fun _is_stdlib_file(str filename) flag {
+  ret contains(filename, "/std/") || contains(filename, "\\std\\") ||
+    starts_with(filename, "std/");
 }
 
 pub fun uses_fork_in(Vec<Node> nodes, flag test_mode, flag fuzz_mode) flag {
@@ -22254,6 +22264,13 @@ impl Codegen {
           .Function(f) -> {
             if equals(f.name, "main") {
               reachable.add("main");
+              collect_function_reads(f, &reachable);
+            } elif self.keep_public_roots && n.flags.is_public && f.has_body &&
+              !f.has_type_params && n.has_pos && !_is_stdlib_file(n.pos.filename) {
+              // A `pub` function of the program's own may be called by
+              // name from linked native code (a `[build]` source), which
+              // no Fun read can show.
+              reachable.add(f.name);
               collect_function_reads(f, &reachable);
             }
           }

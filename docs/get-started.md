@@ -184,7 +184,10 @@ ldflags = ["-Wl,-rpath,vendor/lib"]
 ```
 
 - `sources` are compiled and linked together with the program, so a
-  file there can call into Fun code or be called from it.
+  file there can call into Fun code or be called from it. Every `pub`
+  function of the program's own is kept in the build when there are
+  `sources`, even one no Fun code calls, since native code can only reach
+  it by name.
 - `links` names libraries the way the linker does (`"SDL2"` links
   `-lSDL2`, or `SDL2.lib` with MSVC). Libraries and `ldflags` come after
   every source on the command line, so a static library's symbols always
