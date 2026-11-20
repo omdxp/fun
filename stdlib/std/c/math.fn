@@ -71,3 +71,66 @@ pub fun hypot(dec x, dec y) dec;
 
 // `x` with the sign of `y`.
 pub fun copysign(dec x, dec y) dec;
+
+// Single-precision (`f32`) versions of the functions above, computed in
+// `float` rather than widened to `double`.
+
+// Sine of `x` (radians), in single precision.
+pub fun sinf(f32 x) f32;
+
+// Cosine of `x` (radians), in single precision.
+pub fun cosf(f32 x) f32;
+
+// Tangent of `x` (radians), in single precision.
+pub fun tanf(f32 x) f32;
+
+// Arcsine of `x`, in radians, in single precision.
+pub fun asinf(f32 x) f32;
+
+// Arccosine of `x`, in radians, in single precision.
+pub fun acosf(f32 x) f32;
+
+// Arctangent of `x`, in radians, in single precision.
+pub fun atanf(f32 x) f32;
+
+// Square root of `x`, in single precision.
+pub fun sqrtf(f32 x) f32;
+
+// `e` raised to `x`, in single precision.
+pub fun expf(f32 x) f32;
+
+// Natural logarithm of `x`, in single precision.
+pub fun logf(f32 x) f32;
+
+// Largest whole number not greater than `x`, in single precision.
+pub fun floorf(f32 x) f32;
+
+// Smallest whole number not less than `x`, in single precision.
+pub fun ceilf(f32 x) f32;
+
+// `x` rounded to the nearest whole number, halfway cases away from zero, in single precision.
+pub fun roundf(f32 x) f32;
+
+// `x` truncated toward zero, in single precision.
+pub fun truncf(f32 x) f32;
+
+// Absolute value of `x`, in single precision.
+pub fun fabsf(f32 x) f32;
+
+// Arctangent of `y / x`, using both signs to pick the quadrant, in single precision.
+pub fun atan2f(f32 y, f32 x) f32;
+
+// `x` raised to the power `y`, in single precision.
+pub fun powf(f32 x, f32 y) f32;
+
+// Floating-point remainder of `x / y`, in single precision.
+pub fun fmodf(f32 x, f32 y) f32;
+
+// Hypotenuse length `sqrt(x*x + y*y)`, in single precision.
+pub fun hypotf(f32 x, f32 y) f32;
+
+// Smaller of `x` and `y`, in single precision.
+pub fun fminf(f32 x, f32 y) f32;
+
+// Larger of `x` and `y`, in single precision.
+pub fun fmaxf(f32 x, f32 y) f32;
