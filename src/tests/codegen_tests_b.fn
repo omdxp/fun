@@ -3610,15 +3610,23 @@ test "fixed-width integers and floats format through their own placeholders and 
   `  println_fmt("{num} {num} {} {dec}", b, c, big, f);
   `  ret 0;
   `}`;
-  str want = "112 -5 9 -70000 4000000000 18446744073709551615 1.5\n112 -5 18446744073709551615 1.5";
+  // Each line on its own: a Windows build ends its lines with `\r\n`.
+  str line1 = "112 -5 9 -70000 4000000000 18446744073709551615 1.5";
+  str line2 = "112 -5 18446744073709551615 1.5";
   str out = run_source(src, "fixed_width_fmt", "fixed-width formatting");
-  assert contains(out, want), "expected every width printed as a number, u64 unsigned";
+  assert contains(out, line1) && contains(out, line2), format(
+    "expected every width printed as a number, u64 unsigned, got: {str}",
+    out
+  );
   str out_msvc = run_source_forcing_msvc(
     src,
     "fixed_width_fmt_msvc",
     "fixed-width formatting (strict MSVC-shaped compile)"
   );
-  assert contains(out_msvc, want), "expected the same output with hoisted varargs";
+  assert contains(out_msvc, line1) && contains(out_msvc, line2), format(
+    "expected the same output with hoisted varargs, got: {str}",
+    out_msvc
+  );
 }
 
 test "as converts numbers, enums, pointers, and addresses with real C casts" {
