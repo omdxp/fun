@@ -515,7 +515,12 @@ pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResu
     built.unwrap().stderr_text
   );
 
+  // `cl` writes `base.exe`; the fixture name's own dotted part means
+  // Windows won't add `.exe` when running a bare `base`.
   str exe_path = base;
+  if equals(cc, "cl") || equals(cc, "cl.exe") {
+    exe_path = format("{str}.exe", base);
+  }
   defer remove_file(exe_path);
 
   Vec<str> invocation;
