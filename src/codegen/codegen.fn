@@ -1209,6 +1209,20 @@ fun _escape_asm_registers(str template) str {
   ret b.build();
 }
 
+// True for an integer literal, parenthesized or not.
+fun _is_int_literal_node(Node* n) flag {
+  fit n.kind {
+    .Number(d) -> {
+      fit d {
+        .Num(_) -> { ret true; }
+        _ -> { ret false; }
+      }
+    }
+    .ExpressionParenthesis(inner) -> { ret _is_int_literal_node(inner); }
+    _ -> { ret false; }
+  }
+}
+
 // A builtin binary operator whose result is always a flag.
 fun _is_flag_result_operator(str op) flag {
   fit op {
@@ -7438,6 +7452,18 @@ impl Codegen {
         self.suppress_next_expr_parens = false;
         if wrote_own_parens {
           self.state.write("(");
+        }
+        // C reads a bare integer literal as a 32-bit `int`, where `num` is
+        // 64-bit: `1 << 40` or `3000000 * 3000000` would overflow before
+        // ever reaching the `num` it is assigned to. A literal shifted, or
+        // combined only with another literal, is widened first.
+        flag widen_left = _is_int_literal_node(e.left) && e.has_right &&
+          (equals(e.op, "<<") || equals(e.op, ">>") ||
+          ((equals(e.op, "*") || equals(e.op, "+") || equals(e.op, "-")) && _is_int_literal_node(
+          e.right
+        )));
+        if widen_left {
+          self.state.write("(int64_t)");
         }
         let lerr = self.emit_expr(*e.left);
         if lerr.is_some() {

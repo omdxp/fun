@@ -3883,3 +3883,25 @@ test "an extended asm template's register names are escaped, its operands and mo
   assert contains(out, "movq %%rbx, %0"), "expected an existing escape and a numbered operand kept";
   assert contains(out, "mov %eax, %ebx"), "expected a block with no operands left exactly as written";
 }
+
+test "an integer literal shifted or combined with another literal computes in 64 bits, like num" {
+  str src = `use std.io;
+  `fun main() num {
+  `  num n = 32;
+  `  num a = 1 << n;
+  `  num b = 1 << 40;
+  `  num c = 3000000 * 3000000;
+  `  num d = 2147483647 + 1;
+  `  println_fmt("{num} {num} {num} {num}", a, b, c, d);
+  `  ret 0;
+  `}`;
+  str want = "4294967296 1099511627776 9000000000000 2147483648";
+  str out = run_source(src, "literal_width", "64-bit literal arithmetic");
+  assert contains(out, want), "expected no 32-bit overflow";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "literal_width_msvc",
+    "64-bit literal arithmetic (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), "expected the same under MSVC";
+}
