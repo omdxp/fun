@@ -4682,3 +4682,29 @@ test "a method called through a pointer must exist on the pointee" {
     "Q has no method 'bogus'"
   ), "expected an unknown method through a pointer rejected";
 }
+
+test "a fixed-width type keeps its own name in messages, and an out-of-range literal is rejected" {
+  assert contains(
+    check(`fun main() {
+    `  u64 a = 1;
+    `  u32* p = a;
+    `}`),
+    "cannot initialize 'p' of type u32* with u64"
+  ), "expected fixed-width names, not num";
+  assert contains(check(`fun main() { f32 f = "x"; }`), "of type f32 with str"), "expected f32, not dec";
+  assert contains(check(`fun main() { u8 b = 300; }`), "300 doesn't fit in u8 (0 to 255)"), "expected an unsigned overflow caught";
+  assert contains(
+    check(`fun main() { i8 c = -129; }`),
+    "-129 doesn't fit in i8 (-128 to 127)"
+  ), "expected a signed underflow caught";
+  accepts(
+    `fun main() {
+    `  i8 c = -128;
+    `  u8 d = 255;
+    `  u16 w = 65535;
+    `  i32 x = -2147483648;
+    `  u8 wrapped = 300 as u8;
+    `}`,
+    "expected every in-range literal, and an explicit wrap, accepted"
+  );
+}

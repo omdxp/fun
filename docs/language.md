@@ -65,6 +65,10 @@ fun main() {
 | `str` | `char*` | Null-terminated string. |
 | `raw` | `void` (`raw*` for `void*`) | Opaque type. |
 
+An integer literal must fit the fixed-width type it initializes:
+`u8 b = 300;` is a compile error. Write `300 as u8` to wrap it on
+purpose (see Conversions below).
+
 ### Formatting values
 
 `format`, `print_fmt`, and `println_fmt` (from `std.io`) fill `{}`
