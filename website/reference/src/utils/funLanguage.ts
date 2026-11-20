@@ -103,7 +103,9 @@ export const funStreamParser = {
       if (word === "nil") return "null";
       if (KEYWORDS.has(word)) return "keyword";
       // `packed` is a modifier only right before `compound`.
-      if (word === "packed" && stream.match(/^\s+compound\b/, false)) return "keyword";
+      if (word === "packed" && stream.match(/^\s+(compound|union)\b/, false)) return "keyword";
+      if (word === "union" && stream.match(/^\s+\w+\s*[{<]/, false)) return "keyword";
+      if (word === "align" && stream.match(/^\(\d+\)/, false)) return "keyword";
       if (BUILTIN_TYPES.has(word) || isWidthType(word)) return "builtinType";
       if (/^[A-Z]/.test(word)) return "typeName";
       // A lowercase identifier directly followed by `(` (ignoring

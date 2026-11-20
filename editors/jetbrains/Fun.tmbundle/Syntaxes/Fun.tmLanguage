@@ -91,7 +91,7 @@
 					<key>name</key>
 					<string>meta.type.declaration.struct.fun</string>
 					<key>match</key>
-					<string>\b(compound)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
+					<string>\b(compound|union)\s+([A-Za-z_][A-Za-z0-9_]*)(\s*&lt;[^&gt;]+&gt;)?</string>
 					<key>captures</key>
 					<dict>
 						<key>1</key>
@@ -329,7 +329,7 @@
 					<key>name</key>
 					<string>meta.function.call.fun</string>
 					<key>match</key>
-					<string>\b(?!use\b|as\b|pub\b|fun\b|closure\b|als\b|compound\b|shape\b|impl\b|enum\b|let\b|const\b|if\b|elif\b|else\b|fit\b|ret\b|for\b|async\b|await\b|fork\b|break\b|continue\b|defer\b|assert\b|panic\b|test\b|sequential\b|fuzz\b|allow\b|expect\b|true\b|false\b|nil\b)([A-Za-z_][A-Za-z0-9_]*)\b(?=\s*\()</string>
+					<string>\b(?!align\(\d+\)|use\b|as\b|pub\b|fun\b|closure\b|als\b|compound\b|shape\b|impl\b|enum\b|let\b|const\b|if\b|elif\b|else\b|fit\b|ret\b|for\b|async\b|await\b|fork\b|break\b|continue\b|defer\b|assert\b|panic\b|test\b|sequential\b|fuzz\b|allow\b|expect\b|true\b|false\b|nil\b)([A-Za-z_][A-Za-z0-9_]*)\b(?=\s*\()</string>
 					<key>captures</key>
 					<dict>
 						<key>1</key>
@@ -383,7 +383,7 @@
 					<key>name</key>
 					<string>keyword.control.fun</string>
 					<key>match</key>
-					<string>\b(packed(?=\s+compound\b)|use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|sequential|fuzz|allow|expect)\b</string>
+					<string>\b(packed(?=\s+(compound|union)\b)|union(?=\s+\w+\s*[{&lt;])|align(?=\(\d+\))|use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|sequential|fuzz|allow|expect)\b</string>
 				</dict>
 			</array>
 		</dict>
