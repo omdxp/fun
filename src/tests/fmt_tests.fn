@@ -777,3 +777,14 @@ test "a packed compound formats like any other compound" {
 ;
   assert equals(format_source(src, "t.fn").unwrap(), src), "expected a packed compound left exactly as written";
 }
+
+test "an asm statement whose operands are separated by semicolons is kept exactly as written" {
+  str src = `fun outb(u16 port, u8 value) {
+  `  asm volatile arch x86 (in port: "Nd" = port; in value: "a" = value; clobber "memory") {
+  `    outb %[value], %[port]
+  `  };
+  `}
+  `
+;
+  assert equals(format_source(src, "t.fn").unwrap(), src), "expected the asm statement untouched";
+}

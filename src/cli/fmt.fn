@@ -1602,7 +1602,13 @@ fun _asm_statement_end(Vec<Token>* tokens, num i) num {
   num j = i;
   for j < tokens.len {
     Token t = tokens.get(j);
-    if t.type == .Symbol {
+    // `(` and `[` lex as operators, unlike their closing symbols, so
+    // they're counted here too: a `;` between asm operands
+    // (`(in p: "r" = p; clobber "memory")`) must not end the statement.
+    if t.type == .Operator &&
+      (equals(token_text(t), "(") || equals(token_text(t), "[")) {
+      depth = depth + 1;
+    } elif t.type == .Symbol {
       let c = _cval_of(t);
       if c == '(' || c == '{' || c == '[' {
         depth = depth + 1;
