@@ -129,6 +129,10 @@ pub compound BuildSettings {
   // The CPU the program is built for (`x86_64`, `aarch64`, ...), when it
   // isn't this machine's own: what `asm arch` blocks are checked against.
   str target_arch;
+  // What `fun build` produces: "" (or "exe") for linked executables, or
+  // "object" for object files under `fun-out/obj` a separate link step
+  // combines.
+  str output;
 }
 
 // No `[build]` settings at all.
@@ -142,6 +146,7 @@ pub fun build_settings_new() BuildSettings {
   b.ldflags.init(0);
   b.freestanding = false;
   b.target_arch = "";
+  b.output = "";
   ret b;
 }
 
@@ -522,11 +527,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     for bk : build_keys {
       fit bk {
         "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "freestanding",
-        "arch" -> {}
+        "arch", "output" -> {}
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, or arch)",
+            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, arch, or output)",
             bk
             )
           );
@@ -548,6 +553,16 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       m.build.freestanding = fs_flag.unwrap();
     }
     m.build.target_arch = build.unwrap().get_str("arch");
+    m.build.output = build.unwrap().get_str("output");
+    if !equals(m.build.output, "") && !equals(m.build.output, "exe") &&
+      !equals(m.build.output, "object") {
+      ret .Err(
+        format(
+        "[build] `output` must be \"exe\" or \"object\", found `{str}`",
+        m.build.output
+      )
+      );
+    }
   }
 
   let lib = doc.table("lib");
@@ -1201,4 +1216,20 @@ test "parses [build] settings, and rejects an unknown key there" {
   let plain = parse_manifest(`[package]
   `name = "plain"`).unwrap();
   assert plain.build.is_empty(), "expected no settings without a [build] table";
+}
+
+test "[build] output takes exe or object" {
+  let m = parse_manifest(`[package]
+  `name = "kernel"
+  `
+  `[build]
+  `output = "object"`)
+    .unwrap();
+  assert equals(m.build.output, "object"), "expected object output read";
+  let bad = parse_manifest(`[package]
+  `name = "kernel"
+  `
+  `[build]
+  `output = "lib"`);
+  assert bad.is_err() && contains(bad.unwrap_err(), "`output` must be"), "expected an unknown output rejected";
 }

@@ -195,6 +195,12 @@ ldflags = ["-Wl,-rpath,vendor/lib"]
 - `cflags` come before the generated source, with `include_dirs`.
 - These apply to every compile in the project: `fun build`, `fun -in`,
   `fun test`, and `fun fuzz`.
+- `output = "object"` makes `fun build` compile every target, and every
+  file in `sources`, to its own object under `fun-out/obj/`, for a
+  project that links them in a separate step (a kernel with its own
+  linker invocation, say). `fun -obj -in file.fn` does the same for one
+  file. Nothing is left out of an object as unused, since whatever links
+  it may call any of its functions.
 - `freestanding = true` builds for bare metal, and `arch = "x86_64"`
   names the CPU being built for when it isn't this machine's own. See
   Bare metal in Platforms & Compilers.
