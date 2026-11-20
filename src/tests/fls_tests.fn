@@ -11180,3 +11180,25 @@ test "inlay hints type a let by its own as conversion, through a following opera
   assert contains(hints, `"label":": dec"`), "expected a converted parenthesized value typed by its target";
   assert contains(hints, `"label":": raw*"`), "expected a pointer target kept whole";
 }
+
+test "packed reads as a keyword before compound, with its own hover, and volatile documents its type use" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///packed_kw.fn";
+  doc.path = "packed_kw.fn";
+  doc.text = `packed compound Entry {
+  `  volatile u16 limit;
+  `}
+  `fun main() {
+  `  num packed = 1;
+  `  _ = packed;
+  `}`;
+  doc.version = 1;
+  str toks = semantic_tokens(&reads, doc);
+  assert contains(toks, `"data":[0,0,6,0,`), "expected packed classified as a keyword before compound";
+  str h = hover(&reads, doc, 0, 2);
+  assert contains(h, "no padding"), "expected packed's own hover";
+  str hv = hover(&reads, doc, 1, 4);
+  assert contains(hv, "memory-mapped device register"), "expected volatile's type-qualifier meaning documented";
+}

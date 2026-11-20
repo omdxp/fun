@@ -502,6 +502,19 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
           ret _hover_result(fork_doc, span_of(t, doc.text));
         }
       }
+      // `packed` is a modifier only right before `compound`.
+      if equals(token_word(t), "packed") {
+        let after_packed = token_after(&tokens, index_of_token(&tokens, t) + 1);
+        if after_packed.is_some() && token_is_keyword(after_packed.unwrap(), "compound") {
+          ret _hover_result(
+            _doc(
+            `packed compound Name { ... }`,
+            `Lays the compound's fields out with no padding between or after them, for a layout fixed by hardware or a file format.`
+            ),
+            span_of(t, doc.text)
+          );
+        }
+      }
       // `sizeof` has a real declaration in `std/builtins.fn`, resolved
       // regardless of whether this file imports it - the same as
       // `nil`/`panic` above - rather than `keyword_doc`'s own generic
@@ -2765,9 +2778,9 @@ pub fun keyword_doc(str word) str {
   }
   if equals(word, "volatile") {
     ret _doc(
+      `volatile u32* reg
       `asm volatile(...) "...";`,
-      `Marks an asm block as having effects the optimizer must not
-      `assume away, forbidding it from being dropped or reordered.`
+      `Before a type, makes every read and write through it reach memory, in order, as a memory-mapped device register needs. Before an asm block, marks it as having effects the optimizer must not assume away.`
     );
   }
   if equals(word, "arch") {
