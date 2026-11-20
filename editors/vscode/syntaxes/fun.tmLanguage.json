@@ -185,7 +185,7 @@
       "patterns": [
         {
           "name": "keyword.control.fun",
-          "match": "\\b(use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|sequential|fuzz|allow|expect)\\b"
+          "match": "\\b(packed(?=\\s+compound\\b)|use|as|pub|fun|closure|als|compound|shape|impl|enum|let|const|asm|volatile|arch|if|elif|else|fit|ret|for|async|await|fork|break|continue|defer|assert|panic|test|sequential|fuzz|allow|expect)\\b"
         }
       ]
     }

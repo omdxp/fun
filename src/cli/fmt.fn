@@ -792,6 +792,18 @@ fun _is_bare_tuple_type_decl_close(Vec<Token>* tokens, num close_idx) flag {
   ret equals(bt, "{") || equals(bt, "}") || equals(bt, ";");
 }
 
+// True when the token at `idx` is `packed` written right before
+// `compound`.
+fun _is_packed_modifier(Vec<Token>* tokens, num idx) flag {
+  Token t = tokens.get(idx);
+  if t.type != .Identifier || !equals(token_text(t), "packed") {
+    ret false;
+  }
+  num next = _next_significant(tokens, idx + 1);
+  ret next >= 0 && tokens.get(next).type == .Keyword &&
+    equals(token_text(tokens.get(next)), "compound");
+}
+
 // True for a word that opens a declaration or a control structure, whose
 // brace is a block rather than a compound literal.
 fun _is_block_keyword(str text) flag {
@@ -2371,9 +2383,10 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.bool_chain_wrap = false;
       s.method_chain_wrap = false;
       s.continuation = false;
-    } elif t.type != .Comment && equals(s.stmt_first, "") && !equals(text, "pub") {
-      // `pub` only marks visibility, so the word after it is what says
-      // what the statement declares.
+    } elif t.type != .Comment && equals(s.stmt_first, "") && !equals(text, "pub") &&
+      !_is_packed_modifier(&tokens, i) {
+      // `pub` only marks visibility, and `packed` only layout, so the word
+      // after them is what says what the statement declares.
       s.stmt_first = text;
     }
     if t.type != .Comment {

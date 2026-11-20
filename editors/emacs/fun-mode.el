@@ -43,6 +43,7 @@
   `((,(regexp-opt fun-keywords 'words) . font-lock-keyword-face)
     ("\\(->\\|::\\|\\+=\\|-=\\|\\*=\\|/=\\|%=\\|==\\|!=\\|<=\\|>=\\|&&\\|[|][|]\\|<<\\|>>\\|\\+\\+\\|--\\|[+\\-*/%=<>!?&|^~.:;,]\\)"
      . fun-operator-face)
+    ("\\_<\\(packed\\)\\s-+compound\\_>" (1 font-lock-keyword-face))
     ("\\_<\\(compound\\|shape\\|enum\\|impl\\)\\_>\\s-+\\([A-Za-z_][A-Za-z0-9_]*\\)"
      (1 font-lock-keyword-face)
      (2 fun-custom-type-face))

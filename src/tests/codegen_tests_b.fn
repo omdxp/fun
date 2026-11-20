@@ -3810,3 +3810,41 @@ test "volatile qualifies pointers, parameters, fields, and conversions" {
   );
   assert contains(out_msvc, "8 1 8"), "expected the same with no GNU-only constructs";
 }
+
+test "a packed compound has no padding, generic or not, and packed stays an ordinary name elsewhere" {
+  str src = `use std.io;
+  `packed compound GdtEntry {
+  `  u16 limit_low;
+  `  u16 base_low;
+  `  u8 base_mid;
+  `  u8 access;
+  `  u8 granularity;
+  `  u8 base_high;
+  `}
+  `packed compound Header<T> {
+  `  u8 tag;
+  `  T value;
+  `}
+  `compound Loose {
+  `  u8 tag;
+  `  u32 value;
+  `}
+  `pub packed compound Wire {
+  `  u8 kind;
+  `  u64 stamp;
+  `}
+  `fun main() num {
+  `  num packed = 1;
+  `  Header<u32> h = Header<u32>{tag = 1, value = 7};
+  `  println_fmt("{num} {num} {num} {num} {u32} {num}", sizeof(GdtEntry), sizeof(Header<u32>), sizeof(Loose), sizeof(Wire), h.value, packed);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "packed_compound", "packed compounds");
+  assert contains(out, "8 5 8 9 7 1"), "expected packed sizes and an unpacked compound left alone";
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "packed_compound_msvc",
+    "packed compounds (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, "8 5 8 9 7 1"), "expected the same layout with no GNU-only constructs";
+}

@@ -637,6 +637,34 @@ fun main() {
 }
 ```
 
+### Packed compounds
+
+`packed compound` lays its fields out with no padding between or after
+them, for a layout fixed by hardware or a file format: a GDT or IDT
+entry, a device descriptor, a network header. `packed` is only special
+right before `compound`, so it stays an ordinary name everywhere else.
+
+```fun
+use std.io;
+
+packed compound GdtEntry {
+  u16 limit_low;
+  u16 base_low;
+  u8 base_mid;
+  u8 access;
+  u8 granularity;
+  u8 base_high;
+}
+
+fun main() {
+  println_fmt("{num} bytes", sizeof(GdtEntry));
+}
+```
+
+A field of a packed compound may sit at an unaligned address, so taking
+its address with `&` gives a pointer some CPUs can't read through
+directly. Copy the field to a local first when that matters.
+
 ### Private fields (leading `_`)
 
 A compound field whose name begins with an underscore is

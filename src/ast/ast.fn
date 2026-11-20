@@ -713,11 +713,15 @@ pub compound CompoundNode {
   // one param has a default, every later one does too. A default may name
   // earlier params (`B = A`), never itself or a later one.
   Vec<DataType*> type_param_defaults;
+  // `packed compound`: no padding between or after fields, for a layout
+  // fixed by hardware or a file format.
+  flag is_packed;
 }
 
 pub fun compound_node_new() CompoundNode {
   CompoundNode c;
   c.name = "";
+  c.is_packed = false;
   c.fields.init(0);
   c.type_params.init(0);
   c.has_type_params = false;

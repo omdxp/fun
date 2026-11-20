@@ -626,6 +626,8 @@ pub compound Codegen {
   // posix_spawnp` link error for spawning) - `transpile` rejects both
   // outright with a real Fun-level message instead.
   flag emscripten_mode;
+  // Every `packed compound`'s own name, generic templates included.
+  Vec<str> packed_compound_names;
   // A bare-metal build (see `is_freestanding_build`): no C library, no
   // runtime, no `main` wrapper.
   flag freestanding;
@@ -866,6 +868,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.test_mode = false;
   g.msvc_mode = false;
   g.emscripten_mode = false;
+  g.packed_compound_names.init(0);
   g.freestanding = false;
   g.host_arch = "";
   g.prune_unreachable = false;
@@ -2280,12 +2283,17 @@ impl Codegen {
     CodegenState typedef_scratch = self.new_scratch_state();
     CodegenState* saved_state = self.state;
     self.state = &typedef_scratch;
+    flag inst_packed = self.packed_compound_names.contains(dt.type_str);
+    self._open_packed(inst_packed);
     self.state.write("typedef struct ");
     self.state.write(mangled_name);
     self.state.write(" {\n");
     num wi = 0;
     for wi < resolved_field_names.len {
       self.state.write("  ");
+      if field_dtypes.get(wi).is_volatile {
+        self.state.write("volatile ");
+      }
       self.write_type_name(resolved_field_type_names.get(wi));
       // Uses the field's star count, not `resolved_field_is_pointer`'s
       // single boolean.
@@ -2330,8 +2338,10 @@ impl Codegen {
       wi = wi + 1;
     }
     self.state.write("} ");
+    self._mark_packed(inst_packed);
     self.state.write(mangled_name);
     self.state.write(";\n\n");
+    self._close_packed(inst_packed);
     self.state = saved_state;
     self.emit_hoisted(typedef_scratch.out.build());
 
@@ -17050,6 +17060,26 @@ impl Codegen {
   // `ensure_plain_type_emitted` and `emit_global_variable` handle first.
   // A sized array field (`T[3]`) gets no special treatment here, unlike
   // an unsized one.
+  // A packed struct: MSVC brackets it with `#pragma pack`, every other
+  // compiler marks it with `__attribute__((packed))` after its body.
+  _open_packed(flag packed) {
+    if packed && self.msvc_mode {
+      self.state.write("#pragma pack(push, 1)\n");
+    }
+  }
+
+  _mark_packed(flag packed) {
+    if packed && !self.msvc_mode {
+      self.state.write("__attribute__((packed)) ");
+    }
+  }
+
+  _close_packed(flag packed) {
+    if packed && self.msvc_mode {
+      self.state.write("#pragma pack(pop)\n");
+    }
+  }
+
   emit_compound(Node node) Option<CodegenErrorKind> {
     if self.is_signature_only_doc_node(node) {
       ret .None;
@@ -17062,6 +17092,9 @@ impl Codegen {
         field_type_names.init(0);
         Vec<flag> field_is_pointer;
         field_is_pointer.init(0);
+        if c.is_packed {
+          self.packed_compound_names.push(c.name);
+        }
 
         if c.has_type_params {
           Vec<DataType*> field_template_dtypes;
@@ -17085,6 +17118,7 @@ impl Codegen {
 
         Vec<DataType> field_dtypes;
         field_dtypes.init(0);
+        self._open_packed(c.is_packed);
         self.state.write("typedef struct ");
         self.state.write(c.name);
         self.state.write(" {\n");
@@ -17157,8 +17191,10 @@ impl Codegen {
           self.state.write("#ifdef _MSC_VER\n  char __msvc_dummy;\n#endif\n");
         }
         self.state.write("} ");
+        self._mark_packed(c.is_packed);
         self.state.write(c.name);
         self.state.write(";\n\n");
+        self._close_packed(c.is_packed);
         self.record_compound_typed(
           c.name,
           field_names,

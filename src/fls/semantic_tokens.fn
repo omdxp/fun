@@ -245,7 +245,16 @@ fun _token_type_of(
     .Operator -> { ret TokenKind.Operator; }
     .Symbol -> { ret TokenKind.Operator; }
     .Keyword -> { ret _keyword_token_type(t); }
-    .Identifier -> { ret _identifier_token_type(tokens, idx, t, const_names, variant_decl); }
+    .Identifier -> {
+      // `packed` is a modifier only right before `compound`.
+      if equals(token_word(t), "packed") {
+        let after = token_after(tokens, idx + 1);
+        if after.is_some() && token_is_keyword(after.unwrap(), "compound") {
+          ret TokenKind.Keyword;
+        }
+      }
+      ret _identifier_token_type(tokens, idx, t, const_names, variant_decl);
+    }
     _ -> { ret -1; }
   }
 }

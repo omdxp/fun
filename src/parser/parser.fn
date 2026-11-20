@@ -1942,6 +1942,9 @@ pub compound Parser {
   // own "apply, then propagate" grouping: `await f()?` is `(await f())?`.
   flag propagation_binds_in_operand;
 
+  // Set right before `parse_compound` runs for `packed compound`.
+  flag pending_packed_compound;
+
   // True while parsing a value expression that must stop at a top-level
   // comma rather than treating it as the comma operator, e.g. a
   // compound-literal field's value (`Point{ x = 1, y = 2 }`); without
@@ -1973,6 +1976,7 @@ pub fun parser_new(ParseState* state) Parser {
   p.in_fit_statement = false;
   p.stop_at_binary_op = false;
   p.propagation_binds_in_operand = false;
+  p.pending_packed_compound = false;
   p.stop_at_comma = false;
   p.pending_call_generic_args.init(0);
   p.has_pending_call_generic_args = false;
@@ -8039,6 +8043,8 @@ impl Parser {
     }
 
     CompoundNode cn = compound_node_new();
+    cn.is_packed = self.pending_packed_compound;
+    self.pending_packed_compound = false;
     cn.name = name;
     cn.fields = fields;
     cn.type_params = type_params;
@@ -9041,6 +9047,29 @@ impl Parser {
   // expression still needs its trailing `;`. An `asm` declaration or a
   // bare `Identifier name;` reports a clean "not yet supported" error
   // rather than misparsing.
+  // `packed compound Name { ... }`: `packed` is only special right before
+  // `compound`, so it stays usable as an ordinary name. Consumes it and
+  // marks the compound about to be parsed.
+  _at_packed_compound() flag {
+    let first = self.state.token_peek_n(0);
+    let second = self.state.token_peek_n(1);
+    if first.is_none() || second.is_none() || first.unwrap().type != .Identifier ||
+      !token_is_keyword(second.unwrap(), "compound") {
+      ret false;
+    }
+    fit first.unwrap().data {
+      .Sval(w) -> {
+        if !equals(w, "packed") {
+          ret false;
+        }
+      }
+      _ -> { ret false; }
+    }
+    self.state.token_next();
+    self.pending_packed_compound = true;
+    ret true;
+  }
+
   pub parse_top_level_declaration() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -9048,6 +9077,10 @@ impl Parser {
       ret .Some(.InvalidStatement);
     }
     let t = tok.unwrap();
+
+    if self._at_packed_compound() {
+      ret self.parse_compound(false);
+    }
 
     if t.type == .Keyword {
       str kw = "";
@@ -9149,6 +9182,9 @@ impl Parser {
           if equals(nkw, "fun") {
             ret self.parse_function(true, false);
           }
+        }
+        if self._at_packed_compound() {
+          ret self.parse_compound(true);
         }
         if nt_is_keyword {
           let msg = format("keyword '{str}' is not yet supported after 'pub'", nkw);
