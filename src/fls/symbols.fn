@@ -1309,7 +1309,6 @@ pub fun type_param_bound_from_tokens(Vec<Token>* tokens, str name, num line) str
 pub fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_name) str {
   num i = 0;
   for i < tokens.len {
-    Token t = tokens.get(i);
     i = i + 1;
     if !opens_compound_decl(tokens, i - 1) {
       continue;

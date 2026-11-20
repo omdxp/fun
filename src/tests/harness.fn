@@ -486,19 +486,32 @@ pub fun run_source_result_forcing_msvc(str src, str name, str label) ProcessResu
     cc = "cc";
   }
   build.push(cc);
-  build.push("-std=c11");
-  build.push("-pedantic-errors");
-  build.push("-O0");
-  build.push("-pthread");
-  build.push("-lm");
-  build.push("-o");
-  build.push(base);
-  build.push(c_path);
+  // MSVC itself spells the same strict C11 build its own way; handed the
+  // GNU flags it would ignore them all and compile as pre-C11 C instead.
+  if equals(cc, "cl") || equals(cc, "cl.exe") {
+    build.push("/nologo");
+    build.push("/std:c11");
+    build.push("/Od");
+    build.push(format("/Fe:{str}.exe", base));
+    build.push(c_path);
+    build.push("/link");
+    build.push("/STACK:134217728");
+  } else {
+    build.push("-std=c11");
+    build.push("-pedantic-errors");
+    build.push("-O0");
+    build.push("-pthread");
+    build.push("-lm");
+    build.push("-o");
+    build.push(base);
+    build.push(c_path);
+  }
   let built = run(argv_from(&build));
   assert built.is_ok(), format("{str}: could not run the C compiler", label);
   assert built.unwrap().exit_code == 0, format(
-    "{str}: the strict, non-GNU C compile rejected the MSVC-shaped program: {str}",
+    "{str}: the strict, non-GNU C compile rejected the MSVC-shaped program: {str}{str}",
     label,
+    built.unwrap().stdout_text,
     built.unwrap().stderr_text
   );
 
