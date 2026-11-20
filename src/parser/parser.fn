@@ -2919,9 +2919,24 @@ impl Parser {
       if err.is_some() {
         ret err;
       }
-      if self.state.nodes.len == before {
+      // A primary that replaces the node it extends (`s[0]`, a call)
+      // leaves the count unchanged, but a following `as` still applies
+      // to it.
+      if self.state.nodes.len == before && !self._conversion_follows() {
         ret .None;
       }
+    }
+  }
+
+  // True when the next token is an `as` that converts the value on top
+  // of the node stack, in a position where `as` applies at all.
+  _conversion_follows() flag {
+    if self.propagation_binds_in_operand || !self.state.next_token_is_keyword("as") {
+      ret false;
+    }
+    fit self.state.node_peek_last() {
+      .Some(last) -> { ret node_is_value_type(last); }
+      .None -> { ret false; }
     }
   }
 
@@ -3899,6 +3914,16 @@ impl Parser {
         defer free(msg);
         self.state.err(msg);
         ret .Some(.InvalidOperand);
+      }
+      // A right side read through one of the paths above (`(...)`,
+      // `[...]`, a prefix operator) still takes a following `as`, which
+      // belongs to it rather than to the whole binary expression.
+      for self._conversion_follows() {
+        let as_tok = self.state.token_peek_next().unwrap();
+        let cerr = self.parse_as_conversion(as_tok);
+        if cerr.is_some() {
+          ret cerr;
+        }
       }
     } else {
       let err = self.parse_expressionable();

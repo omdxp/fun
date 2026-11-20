@@ -3913,3 +3913,39 @@ test "an integer literal shifted or combined with another literal computes in 64
   );
   assert contains(out_msvc, want), "expected the same under MSVC";
 }
+
+test "as applies after an index, a call, a parenthesized right side, and inside a compound literal field" {
+  str src = `use std.io;
+  `compound P {
+  `  u8 a;
+  `  u8 b;
+  `}
+  `fun seven() num {
+  `  ret 7;
+  `}
+  `fun main() num {
+  `  str s = "hi";
+  `  chr[4] d;
+  `  num n = 7;
+  `  u8 x = s[0] as u8;
+  `  P p = P{a = s[1] as u8, b = seven() as u8};
+  `  d[0] = (48 + n % 10) as chr;
+  `  num y = 0;
+  `  y = (n * 2) as num + 1;
+  `  num z = s[1] as num * 2;
+  `  println_fmt("{u8} {u8} {u8} {chr} {num} {num}", x, p.a, p.b, d[0], y, z);
+  `  ret 0;
+  `}`;
+  str want = "104 105 7 7 15 210";
+  str out = run_source(src, "as_positions", "as in every operand position");
+  assert contains(out, want), format(
+    "expected each conversion bound to its own operand, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "as_positions_msvc",
+    "as in every operand position (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format("expected the same under MSVC, got: {str}", out_msvc);
+}
