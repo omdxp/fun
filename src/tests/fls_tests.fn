@@ -11202,3 +11202,26 @@ test "packed reads as a keyword before compound, with its own hover, and volatil
   str hv = hover(&reads, doc, 1, 4);
   assert contains(hv, "memory-mapped device register"), "expected volatile's type-qualifier meaning documented";
 }
+
+test "hover shows a const's fixed-width type and its value as written" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///hexconst.fn";
+  doc.path = "hexconst.fn";
+  doc.text = `const u16 COM1 = 0x3F8;
+  `const u32 FLAGS = 1 << 4;
+  `fun outb(u16 port, u8 value) {}
+  `fun main() {
+  `  outb(COM1, FLAGS as u8);
+  `}`;
+  doc.version = 1;
+  str at_decl = hover(&reads, doc, 0, 11);
+  assert contains(at_decl, "const u16 COM1 = 0x3F8"), "expected u16 and the hex spelling, not num and 1016";
+  str at_use = hover(&reads, doc, 4, 8);
+  assert contains(at_use, "const u16 COM1 = 0x3F8"), "expected the same at a use";
+  str expr = hover(&reads, doc, 1, 11);
+  assert contains(expr, "const u32 FLAGS = 1 << 4"), "expected an initializer expression as written";
+  str fn = hover(&reads, doc, 4, 3);
+  assert contains(fn, "outb(u16 port, u8 value)"), "expected fixed-width parameter types in a signature";
+}

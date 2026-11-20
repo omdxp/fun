@@ -845,7 +845,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     b.append("\n\n");
   }
   b.append("```fun\n");
-  b.append(d.detail);
+  b.append(_detail_with_written_value(d.detail, source_text, d.pos));
   b.append("\n```");
   if read.parsed {
     str footer_text = _see_also_footer(&read.program.nodes, d, doc.path);
@@ -1873,6 +1873,54 @@ fun _call_arg_expected_type(
     ret "";
   }
   ret _param_type_from_piece(params.get(arg_index));
+}
+
+// `detail` with a const's own value shown the way the source writes it
+// (`0x3F8`, `1 << 4`) rather than as the evaluated number, read from
+// `source_text` between the `=` after the name at `pos` and the `;`
+// ending the declaration. `detail` unchanged for anything else.
+fun _detail_with_written_value(str detail, str source_text, Pos pos) str {
+  if !starts_with(detail, "const ") || equals(source_text, "") {
+    ret detail;
+  }
+  // A value that isn't a plain literal (`1 << 4`) has no ` = ` part yet.
+  num eq_in_detail = index_of_str(detail, " = ");
+  if eq_in_detail < 0 {
+    eq_in_detail = len(detail);
+  }
+  num i = line_byte_start(source_text, pos.line - 1) + pos.col - 1;
+  num n = len(source_text);
+  for i < n && source_text[i] != '=' && source_text[i] != ';' && source_text[i] != '\n' {
+    i = i + 1;
+  }
+  if i >= n || source_text[i] != '=' {
+    ret detail;
+  }
+  num start = i + 1;
+  num j = start;
+  flag in_string = false;
+  for j < n {
+    chr c = source_text[j];
+    if c == '"' {
+      in_string = !in_string;
+    } elif c == '\\' && in_string {
+      j = j + 1;
+    } elif c == ';' && !in_string {
+      break;
+    }
+    j = j + 1;
+  }
+  if j >= n {
+    ret detail;
+  }
+  str written = trim(substr(source_text, start, j - start));
+  // A string value already reads the way it was written (a raw string
+  // shown in its ordinary quoted form), so only other values change.
+  if equals(written, "") || index_of_char(written, '\n') >= 0 || written[0] == '"' ||
+    written[0] == '`' {
+    ret detail;
+  }
+  ret format("{str} = {str}", substr(detail, 0, eq_in_detail), written);
 }
 
 fun _hover_result(str markdown, Span s) str {

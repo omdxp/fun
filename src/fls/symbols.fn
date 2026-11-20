@@ -240,6 +240,11 @@ pub fun render_type(DataType* dt) str {
 }
 
 fun _base_type_name(DataType* dt) str {
+  // A fixed-width number (`u16`, `f32`, `i7`) keeps the spelling it was
+  // written with rather than reading as plain `num`/`dec`.
+  if (dt.kind == .Num || dt.kind == .Dec) && !equals(dt.type_str, "") {
+    ret substr(dt.type_str, 0, len(dt.type_str));
+  }
   fit dt.kind {
     .Void -> { ret substr("void", 0, 4); }
     .Raw -> { ret substr("raw", 0, 3); }
