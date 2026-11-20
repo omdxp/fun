@@ -560,7 +560,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         format(
         "[build] `output` must be \"exe\" or \"object\", found `{str}`",
         m.build.output
-      )
+        )
       );
     }
   }
