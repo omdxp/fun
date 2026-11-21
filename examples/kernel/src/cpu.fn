@@ -1,0 +1,36 @@
+// CPU identification. The vendor string comes back in three registers,
+// and a union reads those same 12 bytes back as text.
+
+union VendorId {
+  u32[3] words;
+  chr[12] text;
+}
+
+pub compound CpuInfo {
+  u32 max_leaf;
+  VendorId vendor;
+}
+
+pub fun cpuid(u32 leaf, u32* a, u32* b, u32* c, u32* d) {
+  u32 ra = 0;
+  u32 rb = 0;
+  u32 rc = 0;
+  u32 rd = 0;
+  asm volatile arch x86 (out ra: "=a" = ra; out rb: "=b" = rb; out rc: "=c" = rc; out rd: "=d" = rd; in leaf: "a" = leaf) {
+    cpuid
+  };
+  *a = ra;
+  *b = rb;
+  *c = rc;
+  *d = rd;
+}
+
+pub fun cpu_info() CpuInfo {
+  u32 a = 0;
+  u32 b = 0;
+  u32 c = 0;
+  u32 d = 0;
+  cpuid(0, &a, &b, &c, &d);
+  VendorId v = VendorId{words = [b, d, c]};
+  ret CpuInfo{max_leaf = a, vendor = v};
+}

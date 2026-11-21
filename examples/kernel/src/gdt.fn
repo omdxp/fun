@@ -1,0 +1,56 @@
+// A flat GDT: a null entry, then 4 GiB code and data segments.
+
+packed compound GdtEntry {
+  u16 limit_low;
+  u16 base_low;
+  u8 base_mid;
+  u8 access;
+  u8 granularity;
+  u8 base_high;
+}
+
+packed compound GdtPointer {
+  u16 limit;
+  u32 base;
+}
+
+pub const u16 KERNEL_CODE = 0x08;
+
+align(8) GdtEntry[3] gdt;
+GdtPointer gdt_ptr;
+
+fun gdt_set_gate(num i, u32 base, u32 limit, u8 access, u8 gran) {
+  gdt[i] = GdtEntry{
+    limit_low = (limit & 0xFFFF) as u16,
+    base_low = (base & 0xFFFF) as u16,
+    base_mid = ((base >> 16) & 0xFF) as u8,
+    access = access,
+    granularity = (((limit >> 16) & 0x0F) | (gran & 0xF0)) as u8,
+    base_high = ((base >> 24) & 0xFF) as u8
+  };
+}
+
+pub fun gdt_entry_size() num {
+  ret sizeof(GdtEntry);
+}
+
+pub fun gdt_pointer_size() num {
+  ret sizeof(GdtPointer);
+}
+
+pub fun load_gdt() {
+  gdt_set_gate(0, 0, 0, 0, 0);
+  gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF);
+  gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+  gdt_ptr = GdtPointer{limit = (sizeof(GdtEntry) * 3 - 1) as u16, base = &gdt as u32};
+  GdtPointer* p = &gdt_ptr;
+  asm volatile arch x86 (in p: "r" = p; clobber "memory") {
+    lgdt (%[p])
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    ljmp $0x08, $1f
+    1:
+  };
+}

@@ -1,0 +1,165 @@
+// The interrupt table. Every vector from 0 to 48 enters through its own
+// stub below, which saves the registers and calls `interrupt_dispatch`
+// with a pointer to them; a handler can change that frame, and the
+// stub restores it on the way out.
+
+use console;
+use pic;
+use gdt;
+
+compound InterruptFrame {
+  u32 edi;
+  u32 esi;
+  u32 ebp;
+  u32 esp_at_entry;
+  u32 ebx;
+  u32 edx;
+  u32 ecx;
+  u32 eax;
+  u32 vector;
+  u32 error_code;
+  u32 eip;
+  u32 cs;
+  u32 eflags;
+}
+
+packed compound IdtEntry {
+  u16 offset_low;
+  u16 selector;
+  u8 zero;
+  u8 type_attr;
+  u16 offset_high;
+}
+
+packed compound IdtPointer {
+  u16 limit;
+  u32 base;
+}
+
+// Vectors 0 to 31 are CPU exceptions, 32 to 47 the remapped hardware
+// lines, and 48 the one software interrupt this kernel takes calls on.
+pub const num SYSCALL_VECTOR = 48;
+pub const num STUB_COUNT = 49;
+
+align(8) IdtEntry[256] idt;
+IdtPointer idt_ptr;
+fun(InterruptFrame*) void[49] handlers;
+flag[49] has_handler;
+num[49] counts;
+
+// Vectors 8, 10 to 14, and 17 push their own error code; every other
+// stub pushes a zero in its place so the frame is always the same shape.
+asm arch x86 {
+  .text
+  .macro isr_plain n
+  isr_\n:
+    push $0
+    push $\n
+    jmp isr_common
+  .endm
+  .macro isr_error n
+  isr_\n:
+    push $\n
+    jmp isr_common
+  .endm
+  .irp n, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+  isr_plain \n
+  .endr
+  .irp n, 8,10,11,12,13,14,17
+  isr_error \n
+  .endr
+  .irp n, 32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48
+  isr_plain \n
+  .endr
+  isr_common:
+    pusha
+    cld
+    push %esp
+    call interrupt_dispatch
+    add $4, %esp
+    popa
+    add $8, %esp
+    iret
+  .section .rodata
+  .align 4
+  isr_stub_table:
+  .irp n, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48
+  .long isr_\n
+  .endr
+  .text
+};
+
+fun stub_table() u32* {
+  u32* table = nil;
+  asm volatile arch x86 (out table: "=r" = table) {
+    mov $isr_stub_table, %[table]
+  };
+  ret table;
+}
+
+fun idt_set_gate(num vector, u32 handler) {
+  idt[vector] = IdtEntry{
+    offset_low = (handler & 0xFFFF) as u16,
+    selector = KERNEL_CODE,
+    zero = 0,
+    type_attr = 0x8E,
+    offset_high = ((handler >> 16) & 0xFFFF) as u16
+  };
+}
+
+pub fun idt_entry_size() num {
+  ret sizeof(IdtEntry);
+}
+
+pub fun load_idt() {
+  u32* table = stub_table();
+  num v = 0;
+  for v < STUB_COUNT {
+    idt_set_gate(v, table[v]);
+    v++;
+  }
+  idt_ptr = IdtPointer{limit = (sizeof(IdtEntry) * 256 - 1) as u16, base = &idt as u32};
+  IdtPointer* p = &idt_ptr;
+  asm volatile arch x86 (in p: "r" = p; clobber "memory") {
+    lidt (%[p])
+  };
+}
+
+pub fun set_handler(num vector, fun(InterruptFrame*) void handler) {
+  handlers[vector] = handler;
+  has_handler[vector] = true;
+}
+
+pub fun interrupt_count(num vector) num {
+  ret counts[vector];
+}
+
+pub fun enable_interrupts() {
+  asm volatile arch x86 (clobber "memory") {
+    sti
+  };
+}
+
+pub fun disable_interrupts() {
+  asm volatile arch x86 (clobber "memory") {
+    cli
+  };
+}
+
+pub fun interrupt_dispatch(InterruptFrame* f) {
+  num v = f.vector as num;
+  counts[v]++;
+  if has_handler[v] {
+    handlers[v](f);
+  } elif v < IRQ_BASE {
+    print("unhandled exception ");
+    print_num(v);
+    print(" at ");
+    print_hex(f.eip);
+    print("\n");
+    panic("unhandled CPU exception");
+  }
+  if v >= IRQ_BASE && v < SYSCALL_VECTOR {
+    pic_end_of_interrupt(v - IRQ_BASE);
+  }
+}

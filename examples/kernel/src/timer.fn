@@ -1,0 +1,37 @@
+// The programmable interval timer on IRQ 0, ticking at 100 Hz.
+
+use port;
+use pic;
+use idt;
+
+const u32 PIT_HZ = 1193182;
+pub const u32 TICK_HZ = 100;
+
+volatile num ticks = 0;
+
+fun on_tick(InterruptFrame* f) {
+  ticks++;
+}
+
+pub fun timer_ticks() num {
+  ret ticks;
+}
+
+pub fun timer_start() {
+  u32 divisor = PIT_HZ / TICK_HZ;
+  outb(0x43, 0x36);
+  outb(0x40, (divisor & 0xFF) as u8);
+  outb(0x40, ((divisor >> 8) & 0xFF) as u8);
+  set_handler(IRQ_BASE, on_tick);
+  pic_unmask(0);
+}
+
+// Halts until `n` more ticks have arrived.
+pub fun timer_wait(num n) {
+  num until = ticks + n;
+  for ticks < until {
+    asm volatile arch x86 (clobber "memory") {
+      hlt
+    };
+  }
+}

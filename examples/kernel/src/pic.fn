@@ -1,0 +1,49 @@
+// The two 8259 interrupt controllers, remapped so their 16 lines land
+// on vectors 32 to 47, past the CPU's own exceptions.
+
+use port;
+
+const u16 PIC1_COMMAND = 0x20;
+const u16 PIC1_DATA = 0x21;
+const u16 PIC2_COMMAND = 0xA0;
+const u16 PIC2_DATA = 0xA1;
+
+pub const num IRQ_BASE = 32;
+
+pub fun pic_remap() {
+  outb(PIC1_COMMAND, 0x11);
+  io_wait();
+  outb(PIC2_COMMAND, 0x11);
+  io_wait();
+  outb(PIC1_DATA, IRQ_BASE as u8);
+  io_wait();
+  outb(PIC2_DATA, (IRQ_BASE + 8) as u8);
+  io_wait();
+  outb(PIC1_DATA, 4);
+  io_wait();
+  outb(PIC2_DATA, 2);
+  io_wait();
+  outb(PIC1_DATA, 0x01);
+  io_wait();
+  outb(PIC2_DATA, 0x01);
+  io_wait();
+  // Everything masked until a driver unmasks its own line.
+  outb(PIC1_DATA, 0xFF);
+  outb(PIC2_DATA, 0xFF);
+}
+
+pub fun pic_unmask(num line) {
+  if line < 8 {
+    outb(PIC1_DATA, inb(PIC1_DATA) & ~((1 << line) as u8));
+  } else {
+    outb(PIC2_DATA, inb(PIC2_DATA) & ~((1 << (line - 8)) as u8));
+    outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << 2) as u8);
+  }
+}
+
+pub fun pic_end_of_interrupt(num line) {
+  if line >= 8 {
+    outb(PIC2_COMMAND, 0x20);
+  }
+  outb(PIC1_COMMAND, 0x20);
+}
