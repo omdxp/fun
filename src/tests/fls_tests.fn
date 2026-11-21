@@ -11255,3 +11255,46 @@ test "volatile shows in hovers and hints, a let copy of a volatile value is plai
   str h = hover(&reads, doc, 5, 18);
   assert contains(h, "volatile Cell* vga"), "expected volatile in the declaration's hover";
 }
+
+test "fls shows unions and align(N) in hovers, keywords, and member completion" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///union_fls.fn";
+  doc.path = "union_fls.fn";
+  doc.text = `union Value {
+  `  u32 bits;
+  `  f32 real;
+  `}
+  `align(64) packed compound Line {
+  `  u8 tag;
+  `}
+  `fun main() {
+  `  Value v = Value{bits = 1};
+  `  num align = v.bits as num;
+  `  _ = align;
+  `}`;
+  doc.version = 1;
+  assert contains(hover(&reads, doc, 0, 7), "union Value"), "expected the union's own head";
+  str line_hover = hover(&reads, doc, 4, 27);
+  assert contains(line_hover, "align(64) packed compound Line"), format(
+    "expected alignment and packing in the head, got: {str}",
+    line_hover
+  );
+  assert contains(hover(&reads, doc, 0, 2), "share the same storage"), "expected the union keyword documented";
+  assert contains(hover(&reads, doc, 4, 2), "multiple of N bytes"), "expected align documented";
+  str toks = semantic_tokens(&reads, doc);
+  assert contains(toks, `"data":[0,0,5,0,`), "expected union classified as a keyword";
+
+  doc.text = `union Value {
+  `  u32 bits;
+  `  f32 real;
+  `}
+  `fun main() {
+  `  Value v = Value{bits = 1};
+  `  v.
+  `}`;
+  doc.version = 2;
+  str comp = completion(&reads, doc, 6, 4, true);
+  assert contains(comp, `"label":"bits"`) && contains(comp, `"label":"real"`), "expected the union's members offered mid-edit";
+}

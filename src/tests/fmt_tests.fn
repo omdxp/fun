@@ -788,3 +788,30 @@ test "an asm statement whose operands are separated by semicolons is kept exactl
 ;
   assert equals(format_source(src, "t.fn").unwrap(), src), "expected the asm statement untouched";
 }
+
+test "unions, packed unions, and align(N) declarations format like compounds" {
+  str src = `union Value {
+  `  u32 bits;
+  `  f32 real;
+  `}
+  `
+  `packed union Tiny<T> {
+  `  T a;
+  `}
+  `
+  `align(64) compound Line {
+  `  align(16) u8 tag;
+  `}
+  `
+  `align(4096) u8[4096] page;
+  `
+  `fun main() {
+  `  align(32) u8[8] buf;
+  `  num align = 1;
+  `  _ = align;
+  `  _ = buf;
+  `}
+  `
+;
+  assert equals(format_source(src, "t.fn").unwrap(), src), "expected every declaration kept exactly as written";
+}

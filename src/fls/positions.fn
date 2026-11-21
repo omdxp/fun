@@ -315,3 +315,52 @@ fun _is_trivia(Token t) flag {
   }
   ret false;
 }
+
+// True when the token at `idx` is `union` starting a union declaration
+// (`union Name {` or `union Name<T> {`), not a name spelled `union`.
+pub fun is_union_head_token(Vec<Token>* tokens, num idx) flag {
+  if idx < 0 || idx >= tokens.len {
+    ret false;
+  }
+  Token t = tokens.get(idx);
+  if t.type != .Identifier || !equals(token_word(t), "union") {
+    ret false;
+  }
+  let name = token_after(tokens, idx + 1);
+  if name.is_none() || name.unwrap().type != .Identifier {
+    ret false;
+  }
+  let after = token_after(tokens, index_of_token(tokens, name.unwrap()) + 1);
+  ret after.is_some() &&
+    (token_is_symbol(after.unwrap(), '{') || token_is_operator(after.unwrap(), "<"));
+}
+
+// True when the token at `idx` is the `align` of an `align(N)` prefix.
+pub fun is_align_prefix_token(Vec<Token>* tokens, num idx) flag {
+  if idx < 0 || idx >= tokens.len {
+    ret false;
+  }
+  Token t = tokens.get(idx);
+  if t.type != .Identifier || !equals(token_word(t), "align") {
+    ret false;
+  }
+  let open = token_after(tokens, idx + 1);
+  if open.is_none() || !token_is_operator(open.unwrap(), "(") {
+    ret false;
+  }
+  let size = token_after(tokens, index_of_token(tokens, open.unwrap()) + 1);
+  if size.is_none() || size.unwrap().type != .Number {
+    ret false;
+  }
+  let close = token_after(tokens, index_of_token(tokens, size.unwrap()) + 1);
+  ret close.is_some() && token_is_symbol(close.unwrap(), ')');
+}
+
+// True when the token at `idx` opens a compound or union declaration:
+// the `compound` keyword, or `union` written as `union Name {`.
+pub fun opens_compound_decl(Vec<Token>* tokens, num idx) flag {
+  if idx < 0 || idx >= tokens.len {
+    ret false;
+  }
+  ret token_is_keyword(tokens.get(idx), "compound") || is_union_head_token(tokens, idx);
+}

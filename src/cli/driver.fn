@@ -60,6 +60,9 @@ pub compound Options {
   str fuzz_target;
   // Compile only, leaving the executable unrun.
   flag no_exec;
+  // `-obj`: compile to an object file (`name.o`) and stop, for a program
+  // linked in its own separate step.
+  flag obj;
   // Keep the generated C instead of removing it after the build.
   flag keep_c;
   // Build with debug information.
@@ -155,6 +158,7 @@ fun _options_new() Options {
   o.output = "";
   o.fuzz_target = "";
   o.no_exec = false;
+  o.obj = false;
   o.keep_c = false;
   o.debug_info = false;
   o.show_help = false;
@@ -326,6 +330,7 @@ pub fun parse_args(str[] argv) Options {
   o.show_help = parsed.has("help") || parsed.has("h");
   o.show_version = parsed.has("version");
   o.no_exec = parsed.has("no-exec");
+  o.obj = parsed.has("obj");
   o.keep_c = parsed.has("outf");
   o.debug_info = parsed.has("g");
   o.warn_unused = parsed.has("warn-unused");
@@ -1551,7 +1556,24 @@ pub fun compile_c_to_fuzz_exe(str c_path, str exe_path, flag debug_info) num {
 // Compiles `c_path` to an object at `obj_path` without linking, which is
 // how a library target is checked: it has no entry point to link.
 pub fun compile_c_to_object(str c_path, str obj_path) num {
+  ret compile_c_to_object_mode(c_path, obj_path, false, false);
+}
+
+// `compile_c_to_object`, with the same compiler flags an executable build
+// gets (`FUN_CC_ARGS`, `[build]` cflags and include directories, a
+// freestanding build's own flags), debug info, and optionally the
+// optimizer. `c_path` may be any C or assembly source, so `[build]
+// sources` compile through here too.
+pub fun compile_c_to_object_mode(str c_path, str obj_path, flag debug_info, flag optimize) num {
+  _ensure_msvc_env();
   str cc = c_compiler();
+  if is_freestanding_build() && compiler_is_msvc(cc) {
+    writeln_to(
+      Sink.Stderr,
+      "[Error]\na freestanding build needs gcc or clang; set FUN_CC to one"
+    );
+    ret 1;
+  }
   Vec<str> argv_args;
   argv_args.init(0);
   defer argv_args.free();
@@ -1559,14 +1581,33 @@ pub fun compile_c_to_object(str c_path, str obj_path) num {
 
   if compiler_is_msvc(cc) {
     argv_args.push("/nologo");
+    argv_args.push("/std:c17");
+    if _wants_optimization(optimize, debug_info) {
+      argv_args.push("/O2");
+    }
+    _push_build_compile_flags(&argv_args, true);
     argv_args.push("/c");
     argv_args.push(c_path);
+    if debug_info {
+      argv_args.push("/Zi");
+    }
     argv_args.push(format("/Fo:{str}", obj_path));
   } else {
+    if _wants_optimization(optimize, debug_info) {
+      argv_args.push("-O2");
+    }
+    _push_build_compile_flags(&argv_args, false);
+    if is_freestanding_build() {
+      argv_args.push("-ffreestanding");
+      argv_args.push("-fno-stack-protector");
+    }
     argv_args.push("-c");
     argv_args.push(c_path);
     argv_args.push("-o");
     argv_args.push(obj_path);
+    if debug_info {
+      argv_args.push("-g");
+    }
   }
 
   str[] argv = argv_from(&argv_args);
@@ -1658,6 +1699,7 @@ pub fun help_text() str {
   `  -test             Run -in's own test blocks, in place of a plain compile.
   `  -memcheck         Redirect every allocation through the built-in memory checker, catching leaks, double-frees, and use-after-free.
   `  -arch <name>      The CPU to build for (x86_64, x86, aarch64, arm), checked by asm arch blocks; defaults to the C compiler's own target.
+  `  -obj              Compile -in to an object file (name.o) and stop, for a separate link step.
   `  -freestanding     Build for bare metal (a kernel, bootloader, or firmware): no C library, no runtime, no main wrapper.
   `  -memcheck-leaks   With -memcheck, also fail on an allocation still live when the program exits (for a long-running program; off by default since a short-lived one never frees everything before exiting anyway).
   `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
@@ -2486,6 +2528,40 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
       ret 1;
     }
     println(format("checked {str}", m.lib.name));
+  }
+
+  // `[build] output = "object"`: every target and every `[build]`
+  // source compiled to its own object under `fun-out/obj`, linked by the
+  // project's own separate step (a kernel's linker script, say).
+  if equals(m.build.output, "object") {
+    make_dir_all("fun-out/obj");
+    for e : m.exes {
+      str obj_c = path_join("fun-out/obj", format("{str}.c", e.name));
+      let obj_lowered = compile_to_c(e.path, obj_c, &defines, debug_info, false);
+      if obj_lowered.is_err() {
+        writeln_to(Sink.Stderr, format("[Error]\n{str}", obj_lowered.unwrap_err()));
+        ret 1;
+      }
+      str obj_path = path_join("fun-out/obj", format("{str}.o", e.name));
+      if compile_c_to_object_mode(obj_c, obj_path, debug_info, true) != 0 {
+        ret 1;
+      }
+      println(format("built {str} -> {str}", e.name, obj_path));
+    }
+    for src : m.build.sources {
+      if ends_with(src, ".o") || ends_with(src, ".obj") {
+        continue;
+      }
+      str src_obj = path_join(
+        "fun-out/obj",
+        format("{str}.o", strip_ext(basename(src)))
+      );
+      if compile_c_to_object_mode(src, src_obj, debug_info, true) != 0 {
+        ret 1;
+      }
+      println(format("built {str} -> {str}", src, src_obj));
+    }
+    ret 0;
   }
 
   num i = 0;
@@ -5403,4 +5479,24 @@ test "project file discovery honors .gitignore rules, nested ones included" {
   assert !contains(joined, "x.tmp.fn"), "expected a glob rule to exclude";
   assert !contains(joined, format("{str}/anchored.fn", dir)), "expected the anchored file at the root excluded";
   assert !contains(joined, "nested/local.fn"), "expected a nested .gitignore's own rule applied";
+}
+
+test "a program compiles to an object file with nothing pruned, for a separate link step" {
+  Vec<Define> defines;
+  defines.init(0);
+  defer defines.free();
+  str path = "src/cli/driver_obj_mode.test.fn";
+  assert write_string(path, `pub fun triple(num x) num {
+  `  ret x * 3;
+  `}`), "could not stage the object-mode fixture";
+  defer remove_file(path);
+  str c_path = "src/cli/driver_obj_mode.test.c";
+  let lowered = compile_to_c(path, c_path, &defines, false, false);
+  assert lowered.is_ok(), "expected the fixture to lower to C";
+  defer remove_file(c_path);
+  assert contains(read_to_string(c_path), "x * 3"), "expected the uncalled pub function kept";
+  str obj_path = "src/cli/driver_obj_mode.test.o";
+  assert compile_c_to_object_mode(c_path, obj_path, false, true) == 0, "expected the object to compile";
+  defer remove_file(obj_path);
+  assert exists(obj_path), "expected the object file written";
 }

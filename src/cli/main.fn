@@ -297,7 +297,7 @@ fun main(str[] args) num {
     "",
     mc_debug_info,
     opts.warn_unused_lenient,
-    !opts.memcheck,
+    !opts.memcheck && !opts.obj,
     opts.memcheck,
     opts.memcheck_leaks
   );
@@ -307,6 +307,22 @@ fun main(str[] args) num {
 
   // `-no-exec` stops at the C, which is the artifact it was asked for.
   if opts.no_exec {
+    ret 0;
+  }
+
+  // `-obj` stops at an object file, for a program linked in its own
+  // separate step. Nothing is pruned (above), since whatever links it
+  // may call any of its functions.
+  if opts.obj {
+    str obj_path = default_c_path(opts.input, ".o");
+    let obj_code = compile_c_to_object_mode(c_path, obj_path, opts.debug_info, true);
+    if !opts.keep_c {
+      remove_file(c_path);
+    }
+    if obj_code != 0 {
+      ret _fail("the C compiler rejected the generated program");
+    }
+    println(format("built {str}", obj_path));
     ret 0;
   }
 

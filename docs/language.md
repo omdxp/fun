@@ -672,6 +672,53 @@ A field of a packed compound may sit at an unaligned address, so taking
 its address with `&` gives a pointer some CPUs can't read through
 directly. Copy the field to a local first when that matters.
 
+### Unions
+
+`union` declares a type whose fields all share the same storage, as in
+C: it is as large as its largest field and holds one of them at a time.
+A literal sets exactly one field, and reading another reinterprets the
+same bytes. `union` is only special as `union Name {`, so a method can
+still be named `union` (as `Set.union` is). A union can be generic, and
+`packed union` works like `packed compound`.
+
+```fun
+use std.io;
+
+union Bits {
+  f32 real;
+  u32 bits;
+}
+
+fun main() {
+  Bits b = Bits{real = 1.0};
+  println_fmt("{u32}", b.bits);
+}
+```
+
+### Alignment (`align(N)`)
+
+`align(N)` makes something start at an address that is a multiple of `N`
+bytes, a power of two: a page table, a DMA buffer, a cache-line-sized
+counter. It goes in front of a compound or union (every value of the
+type), a field, or a variable, global or local.
+
+```fun
+use std.io;
+
+align(64) compound Counter {
+  u64 hits;
+}
+
+align(4096) u8[4096] page;
+
+fun main() {
+  align(16) u8[32] buffer;
+  u64 page_addr = &page as u64;
+  println_fmt("{num} {num}", sizeof(Counter), page_addr % 4096);
+  _ = buffer;
+}
+```
+
 ### Private fields (leading `_`)
 
 A compound field whose name begins with an underscore is

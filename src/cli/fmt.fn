@@ -736,6 +736,9 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
   }
   Token before = tokens.get(before_idx);
   str bt = token_text(before);
+  if _is_union_head(tokens, before_idx) {
+    ret true;
+  }
   if before.type == .Keyword {
     ret equals(bt, "impl") || equals(bt, "compound") || equals(bt, "fun") ||
       equals(bt, "pub") || equals(
@@ -800,8 +803,61 @@ fun _is_packed_modifier(Vec<Token>* tokens, num idx) flag {
     ret false;
   }
   num next = _next_significant(tokens, idx + 1);
-  ret next >= 0 && tokens.get(next).type == .Keyword &&
-    equals(token_text(tokens.get(next)), "compound");
+  ret next >= 0 &&
+    (tokens.get(next).type == .Keyword &&
+    equals(token_text(tokens.get(next)), "compound") || _is_union_head(tokens, next));
+}
+
+// True when the token at `idx` is `union` starting a union declaration
+// (`union Name {` or `union Name<T> {`), not a name spelled `union`.
+fun _is_union_head(Vec<Token>* tokens, num idx) flag {
+  Token t = tokens.get(idx);
+  if t.type != .Identifier || !equals(token_text(t), "union") {
+    ret false;
+  }
+  num name = _next_significant(tokens, idx + 1);
+  if name < 0 || tokens.get(name).type != .Identifier {
+    ret false;
+  }
+  num after = _next_significant(tokens, name + 1);
+  ret after >= 0 &&
+    (equals(token_text(tokens.get(after)), "{") || equals(
+    token_text(tokens.get(after)),
+    "<"
+  ));
+}
+
+// True when the token at `idx` is part of an `align(N)` prefix, which
+// only sets a declaration's alignment and says nothing of what it
+// declares.
+fun _is_align_prefix_part(Vec<Token>* tokens, num idx) flag {
+  num start = idx;
+  num back = 0;
+  for back < 3 && start > 0 && !_starts_align_prefix(tokens, start) {
+    start = _prev_significant(tokens, start);
+    back = back + 1;
+  }
+  ret start >= 0 && _starts_align_prefix(tokens, start);
+}
+
+fun _starts_align_prefix(Vec<Token>* tokens, num idx) flag {
+  if idx < 0 {
+    ret false;
+  }
+  Token t = tokens.get(idx);
+  if t.type != .Identifier || !equals(token_text(t), "align") {
+    ret false;
+  }
+  num open = _next_significant(tokens, idx + 1);
+  if open < 0 || !equals(token_text(tokens.get(open)), "(") {
+    ret false;
+  }
+  num size = _next_significant(tokens, open + 1);
+  if size < 0 || tokens.get(size).type != .Number {
+    ret false;
+  }
+  num close = _next_significant(tokens, size + 1);
+  ret close >= 0 && equals(token_text(tokens.get(close)), ")");
 }
 
 // True for a word that opens a declaration or a control structure, whose
@@ -2361,6 +2417,9 @@ pub fun format_source(str src, str filename) Result<str, str> {
         s.angle_depth = 0;
       }
     }
+    if _is_union_head(&tokens, i) {
+      s.pending_decl_block = true;
+    }
     if t.type == .Keyword {
       if equals(text, "fun") {
         s.in_fun_signature = true;
@@ -2390,10 +2449,15 @@ pub fun format_source(str src, str filename) Result<str, str> {
       s.method_chain_wrap = false;
       s.continuation = false;
     } elif t.type != .Comment && equals(s.stmt_first, "") && !equals(text, "pub") &&
-      !_is_packed_modifier(&tokens, i) {
-      // `pub` only marks visibility, and `packed` only layout, so the word
-      // after them is what says what the statement declares.
-      s.stmt_first = text;
+      !_is_packed_modifier(&tokens, i) && !_is_align_prefix_part(&tokens, i) {
+      // `pub` only marks visibility, and `packed` and `align(N)` only
+      // layout, so the word after them is what says what the statement
+      // declares. A union reads as a compound for every purpose here.
+      if _is_union_head(&tokens, i) {
+        s.stmt_first = "compound";
+      } else {
+        s.stmt_first = text;
+      }
     }
     if t.type != .Comment {
       s.at_stmt_start = equals(text, ";") || equals(text, "{") || equals(text, "}");

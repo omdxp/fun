@@ -246,12 +246,19 @@ fun _token_type_of(
     .Symbol -> { ret TokenKind.Operator; }
     .Keyword -> { ret _keyword_token_type(t); }
     .Identifier -> {
-      // `packed` is a modifier only right before `compound`.
+      // `packed` is a modifier only right before `compound` or a union,
+      // `union` a keyword only as `union Name {`, and `align` only as
+      // `align(N)` before a declaration.
       if equals(token_word(t), "packed") {
         let after = token_after(tokens, idx + 1);
-        if after.is_some() && token_is_keyword(after.unwrap(), "compound") {
+        if after.is_some() &&
+          (token_is_keyword(after.unwrap(), "compound") ||
+          is_union_head_token(tokens, index_of_token(tokens, after.unwrap()))) {
           ret TokenKind.Keyword;
         }
+      }
+      if is_union_head_token(tokens, idx) || is_align_prefix_token(tokens, idx) {
+        ret TokenKind.Keyword;
       }
       ret _identifier_token_type(tokens, idx, t, const_names, variant_decl);
     }

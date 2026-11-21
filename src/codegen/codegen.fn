@@ -628,6 +628,11 @@ pub compound Codegen {
   flag emscripten_mode;
   // Every `packed compound`'s own name, generic templates included.
   Vec<str> packed_compound_names;
+  // Every `union`'s own name, generic templates included.
+  Vec<str> union_compound_names;
+  // Every `align(N)` compound's own name, and its N.
+  Vec<str> aligned_compound_names;
+  Vec<num> aligned_compound_values;
   // Native code is linked in (`[build] sources`), which may call any of
   // the program's own `pub` functions by name, so none is pruned.
   flag keep_public_roots;
@@ -872,6 +877,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.msvc_mode = false;
   g.emscripten_mode = false;
   g.packed_compound_names.init(0);
+  g.union_compound_names.init(0);
+  g.aligned_compound_names.init(0);
+  g.aligned_compound_values.init(0);
   g.keep_public_roots = false;
   g.freestanding = false;
   g.host_arch = "";
@@ -2350,13 +2358,27 @@ impl Codegen {
     CodegenState* saved_state = self.state;
     self.state = &typedef_scratch;
     flag inst_packed = self.packed_compound_names.contains(dt.type_str);
+    flag inst_union = self.union_compound_names.contains(dt.type_str);
+    num inst_alignment = 0;
+    num ali = 0;
+    for ali < self.aligned_compound_names.len {
+      if equals(self.aligned_compound_names.get(ali), dt.type_str) {
+        inst_alignment = self.aligned_compound_values.get(ali);
+      }
+      ali = ali + 1;
+    }
     self._open_packed(inst_packed);
-    self.state.write("typedef struct ");
+    self._write_aggregate_head(inst_union);
     self.state.write(mangled_name);
     self.state.write(" {\n");
     num wi = 0;
     for wi < resolved_field_names.len {
       self.state.write("  ");
+      num inst_first_alignment = 0;
+      if wi == 0 {
+        inst_first_alignment = inst_alignment;
+      }
+      self._write_declared_alignment(*field_dtypes.get(wi), inst_first_alignment);
       if field_dtypes.get(wi).is_volatile {
         self.state.write("volatile ");
       }
@@ -12053,6 +12075,7 @@ impl Codegen {
             }
           } else {
             let subst_dt = self.resolve_type_subst(*v.var_type);
+            self._write_declared_alignment(*v.var_type);
             resolved_name = self.write_type(*v.var_type)?!(.UnsupportedNode);
             resolved_ptr = dtype_is_pointer(subst_dt) || arr_as_ptr;
             // The array decay's pointer level is always additional to
@@ -17148,6 +17171,29 @@ impl Codegen {
   // `ensure_plain_type_emitted` and `emit_global_variable` handle first.
   // A sized array field (`T[3]`) gets no special treatment here, unlike
   // an unsized one.
+  // `typedef struct ` or `typedef union `.
+  _write_aggregate_head(flag is_union) {
+    if is_union {
+      self.state.write("typedef union ");
+    } else {
+      self.state.write("typedef struct ");
+    }
+  }
+
+  // `_Alignas(N) ` for a variable or field declared `align(N)`. A type's
+  // own `align(N)` goes on its first field (`type_alignment`, 0 for any
+  // other field), since a struct or union is exactly as aligned as its
+  // most-aligned member - plain C11, so every compiler accepts it.
+  _write_declared_alignment(DataType dt, num type_alignment = 0) {
+    num n = dt.alignment;
+    if type_alignment > n {
+      n = type_alignment;
+    }
+    if n > 0 {
+      self.state.write(format("_Alignas({num}) ", n));
+    }
+  }
+
   // A packed struct: MSVC brackets it with `#pragma pack`, every other
   // compiler marks it with `__attribute__((packed))` after its body.
   _open_packed(flag packed) {
@@ -17183,6 +17229,13 @@ impl Codegen {
         if c.is_packed {
           self.packed_compound_names.push(c.name);
         }
+        if c.is_union {
+          self.union_compound_names.push(c.name);
+        }
+        if c.alignment > 0 {
+          self.aligned_compound_names.push(c.name);
+          self.aligned_compound_values.push(c.alignment);
+        }
 
         if c.has_type_params {
           Vec<DataType*> field_template_dtypes;
@@ -17207,11 +17260,18 @@ impl Codegen {
         Vec<DataType> field_dtypes;
         field_dtypes.init(0);
         self._open_packed(c.is_packed);
-        self.state.write("typedef struct ");
+        self._write_aggregate_head(c.is_union);
         self.state.write(c.name);
         self.state.write(" {\n");
+        num field_index = 0;
         for f : c.fields {
           self.state.write("  ");
+          num first_alignment = 0;
+          if field_index == 0 {
+            first_alignment = c.alignment;
+          }
+          field_index = field_index + 1;
+          self._write_declared_alignment(*f.dtype, first_alignment);
           if f.dtype.has_fn_sig {
             let wnt = self.write_named_type(*f.dtype, f.name);
             if wnt.is_some() {
@@ -17618,6 +17678,7 @@ impl Codegen {
             self.state.write("__auto_type");
           }
         } else {
+          self._write_declared_alignment(*v.var_type);
           let wt = self.write_type(*v.var_type)?!(.UnsupportedNode);
           if arr_as_ptr {
             self.state.write("*");
@@ -22540,7 +22601,11 @@ impl Codegen {
       fit n.kind {
         .Compound(c) -> {
           if !c.has_type_params && !self.is_signature_only_doc_node(n) {
-            self.state.write("typedef struct ");
+            if c.is_union {
+              self.state.write("typedef union ");
+            } else {
+              self.state.write("typedef struct ");
+            }
             self.state.write(c.name);
             self.state.write(" ");
             self.state.write(c.name);
