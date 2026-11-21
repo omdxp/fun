@@ -1365,8 +1365,8 @@ fun _http_test_server_once(raw* arg) raw* {
 }
 
 test "http_get performs a real round trip and reads real headers/body/status" {
-  num port = 58394;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1395,8 +1395,8 @@ test "http_get performs a real round trip and reads real headers/body/status" {
 }
 
 test "__fun_tls_connect fails cleanly, no crash or hang, against a peer that never speaks TLS" {
-  num port = 58403;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1420,8 +1420,8 @@ test "__fun_tls_connect fails cleanly, no crash or hang, against a peer that nev
 }
 
 test "http_post sends a real body and a real Content-Length, and the server actually receives it" {
-  num port = 58395;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1456,8 +1456,8 @@ test "http_post sends a real body and a real Content-Length, and the server actu
 }
 
 test "custom headers set with set_header are actually sent" {
-  num port = 58396;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1483,15 +1483,14 @@ test "custom headers set with set_header are actually sent" {
 }
 
 test "http_get follows a 302 redirect to a real second server and returns its response" {
-  num from_port = 58397;
-  num to_port = 58398;
-
-  let from_fd = tcp_listen(from_port);
+  let from_fd = tcp_listen(0);
   assert from_fd >= 0, "expected the first tcp_listen to succeed";
   defer tcp_close(from_fd);
-  let to_fd = tcp_listen(to_port);
+  num from_port = tcp_local_port(from_fd);
+  let to_fd = tcp_listen(0);
   assert to_fd >= 0, "expected the second tcp_listen to succeed";
   defer tcp_close(to_fd);
+  num to_port = tcp_local_port(to_fd);
 
   _HttpTestServer from_srv;
   from_srv.listen_fd = from_fd;
@@ -1551,8 +1550,8 @@ fun _http_slow_server_main(raw* arg) raw* {
 }
 
 test "set_timeout_ms actually times out a real, genuinely slow server" {
-  num port = 58399;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1665,8 +1664,8 @@ fun _router_test_client_once(raw* arg) raw* {
 }
 
 test "HttpRouter dispatches a real request over a real connection to the matching handler" {
-  num port = 58400;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1690,8 +1689,8 @@ test "HttpRouter dispatches a real request over a real connection to the matchin
 }
 
 test "HttpRouter returns a real 404 for a path with no matching route" {
-  num port = 58401;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1714,8 +1713,8 @@ test "HttpRouter returns a real 404 for a path with no matching route" {
 }
 
 test "HttpRouter POST handler reads the real request body and echoes it back" {
-  num port = 58402;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1739,8 +1738,8 @@ test "HttpRouter POST handler reads the real request body and echoes it back" {
 }
 
 test "HttpRequest.send_async performs a real round trip, off the calling thread" {
-  num port = 58404;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
@@ -1767,8 +1766,8 @@ test "HttpRequest.send_async performs a real round trip, off the calling thread"
 }
 
 test "HttpRouter.handle_client_async dispatches a real request, off the calling thread" {
-  num port = 58405;
-  let server_fd = tcp_listen(port);
+  let server_fd = tcp_listen(0);
+  num port = tcp_local_port(server_fd);
   assert server_fd >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server_fd);
 
