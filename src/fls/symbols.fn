@@ -116,6 +116,7 @@ pub fun render_type(DataType* dt) str {
       b.append("*");
       ts = ts + 1;
     }
+    _append_array_suffix(&b, dt);
     ret b.build();
   }
   if dt.has_fn_sig && dt.fn_sig != nil {
@@ -148,6 +149,7 @@ pub fun render_type(DataType* dt) str {
       b.append("*");
       fs = fs + 1;
     }
+    _append_array_suffix(&b, dt);
     ret b.build();
   }
   if dt.has_closure_sig && dt.closure_sig != nil {
@@ -171,6 +173,7 @@ pub fun render_type(DataType* dt) str {
       b.append("*");
       cs = cs + 1;
     }
+    _append_array_suffix(&b, dt);
     ret b.build();
   }
   if dt.is_volatile {
@@ -205,6 +208,12 @@ pub fun render_type(DataType* dt) str {
     s = s + 1;
   }
 
+  _append_array_suffix(&b, dt);
+  ret b.build();
+}
+
+// Writes an array type's `[N]` sizes after the rest of its spelling.
+fun _append_array_suffix(StringBuilder* b, DataType* dt) {
   if dt.is_array || dt.flags.is_array {
     num depth = dt.array_depth;
     if depth == 0 {
@@ -239,7 +248,6 @@ pub fun render_type(DataType* dt) str {
       a = a + 1;
     }
   }
-  ret b.build();
 }
 
 fun _base_type_name(DataType* dt) str {
@@ -2890,7 +2898,9 @@ fun _declared_type_text(str detail) str {
   ret trim(substr(text, 0, space));
 }
 
-pub fun bare_type_from_detail(str detail) str {
+// The type a declaration's `"Type name"` detail spells, written out in
+// full (`fun(Frame*) void[49]`); "" when the detail has no name part.
+pub fun type_text_from_detail(str detail) str {
   // The *last* top-level space, not the first: a tuple's own rendered
   // form (`"(num, str) t"`) or a function type's (`"fun(A, B) R name"`)
   // carries real spaces of its own inside `(`/`<`, which the first-space
@@ -2914,7 +2924,19 @@ pub fun bare_type_from_detail(str detail) str {
   if space <= 0 {
     ret "";
   }
-  ret bare_type_expr(substr(detail, 0, space));
+  ret substr(detail, 0, space);
+}
+
+// The bare type name a `"Type name"` detail declares (`Vec` for
+// `Vec<num>* v`).
+pub fun bare_type_from_detail(str detail) str {
+  str text = type_text_from_detail(detail);
+  if equals(text, "") {
+    ret text;
+  }
+  str bare = bare_type_expr(text);
+  free(text);
+  ret bare;
 }
 
 // The index just past a rendered "name(args) RetType" signature's own
@@ -3206,6 +3228,51 @@ pub fun local_fn_signature_from_tokens(Vec<Token>* tokens, str text, str callee)
       }
     }
     i = i + 1;
+  }
+  ret "";
+}
+
+// The written type of a function-typed variable named `name`
+// (`fun(Frame*) void[49]` for `fun(Frame*) void[49] handlers;`), read
+// straight from tokens and `text` for when the document doesn't parse.
+// "" when no such declaration is found.
+pub fun fn_value_type_from_tokens(Vec<Token>* tokens, str text, str name) str {
+  num i = 0;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    i = i + 1;
+    if !token_is_keyword(t, "fun") {
+      continue;
+    }
+    let open = token_after(tokens, i);
+    if open.is_none() || !token_is_operator(open.unwrap(), "(") {
+      continue;
+    }
+    num j = index_of_token(tokens, open.unwrap());
+    for j < tokens.len {
+      Token u = tokens.get(j);
+      if token_is_symbol(u, '{') || token_is_symbol(u, ';') {
+        break;
+      }
+      if u.type == .Identifier && equals(token_word(u), name) {
+        let after = token_after(tokens, j + 1);
+        flag ends = after.is_some() &&
+          (token_is_symbol(after.unwrap(), ';') || token_is_operator(after.unwrap(), "=") ||
+          token_is_operator(after.unwrap(), ",") || token_is_symbol(after.unwrap(), ')'));
+        if ends {
+          num start = byte_offset_of_pos(text, t.pos.line, t.pos.start_col);
+          num end = byte_offset_of_pos(text, u.pos.line, u.pos.start_col);
+          if start < 0 || end <= start {
+            ret "";
+          }
+          str raw_text = substr(text, start, end - start);
+          str out = trim(raw_text);
+          free(raw_text);
+          ret out;
+        }
+      }
+      j = j + 1;
+    }
   }
   ret "";
 }

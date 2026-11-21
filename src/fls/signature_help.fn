@@ -9,6 +9,7 @@ use analysis;
 use positions;
 use symbols;
 use completion;
+use navigation;
 use ..lexer.token;
 use std.string;
 use std.vec;
@@ -108,7 +109,13 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
     }
     str sig = local_fn_signature_from_tokens(&tokens, doc.text, c.callee);
     if equals(sig, "") {
-      ret NO_SIGNATURE;
+      str value_type = fn_value_type_from_tokens(&tokens, doc.text, c.callee);
+      str value_label = _fn_value_label(c.callee, value_type, c.indexed);
+      free(value_type);
+      if equals(value_label, "") {
+        ret NO_SIGNATURE;
+      }
+      ret _signature_result(value_label, c.active_param);
     }
     ret _signature_result(sig, c.active_param);
   }
@@ -200,15 +207,53 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
       free(enum_name);
     }
   }
-  if found.is_none() {
-    ret NO_SIGNATURE;
+  // A function value rather than a function: a function-typed local,
+  // parameter, global, or field, or one element of an array of them
+  // (`handlers[v](`).
+  flag is_function = false;
+  if found.is_some() {
+    fit found.unwrap().kind {
+      .Function -> { is_function = true; }
+      _ -> {}
+    }
   }
-  Declaration d = found.unwrap();
-  fit d.kind {
-    .Function -> {}
-    _ -> { ret NO_SIGNATURE; }
+  if !is_function || c.indexed {
+    let value = resolve_at(cache, doc, &tokens, c.callee_token, line);
+    if value.is_none() {
+      ret NO_SIGNATURE;
+    }
+    str value_type = type_text_from_detail(value.unwrap().detail);
+    str value_label = _fn_value_label(c.callee, value_type, c.indexed);
+    free(value_type);
+    if equals(value_label, "") {
+      ret NO_SIGNATURE;
+    }
+    ret _signature_result(value_label, c.active_param);
   }
-  ret _signature_result(d.detail, active_param);
+  ret _signature_result(found.unwrap().detail, active_param);
+}
+
+// The label a call through a function value shows: `type_text`'s own
+// `fun(...) R` with the value's name in place of `fun`, one array level
+// dropped when the call goes through an element. "" when `type_text`
+// isn't a function type.
+fun _fn_value_label(str name, str type_text, flag indexed) str {
+  if !starts_with(type_text, "fun(") {
+    ret "";
+  }
+  num end = len(type_text);
+  if indexed && end > 0 && type_text[end - 1] == ']' {
+    num lb = last_index_of_char(type_text, '[');
+    if lb > 0 {
+      end = lb;
+    }
+  }
+  str rest = substr(type_text, 3, end - 3);
+  str rest_trimmed = trim(rest);
+  free(rest);
+  str out = format("{str}{str}", name, rest_trimmed);
+  free(rest_trimmed);
+  ret out;
 }
 
 // One call the cursor sits inside: the callee's own bare name, the
@@ -223,6 +268,8 @@ pub fun signature_help(AnalysisCache* cache, Document doc, num line, num charact
 compound CallSite {
   str callee;
   Token callee_token;
+  // Called through one of its elements (`handlers[v](`).
+  flag indexed;
   flag has_receiver;
   str receiver_name;
   num active_param;
@@ -255,6 +302,26 @@ fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite
   }
   // `i` now indexes the opening `(` itself.
   Token ct = token_before(tokens, i)?;
+  // `handlers[v](`: the callee is the array before the index.
+  flag indexed = false;
+  if token_is_symbol(ct, ']') {
+    num k = index_of_token(tokens, ct) - 1;
+    num bracket_depth = 1;
+    for k >= 0 && bracket_depth > 0 {
+      Token bk = tokens.get(k);
+      if token_is_symbol(bk, ']') {
+        bracket_depth = bracket_depth + 1;
+      } elif token_is_operator(bk, "[") {
+        bracket_depth = bracket_depth - 1;
+      }
+      k = k - 1;
+    }
+    if bracket_depth != 0 {
+      ret .None;
+    }
+    ct = token_before(tokens, k + 1)?;
+    indexed = true;
+  }
   fit ct.type {
     .Identifier -> {}
     _ -> { ret .None; }
@@ -272,6 +339,7 @@ fun _enclosing_call(Vec<Token>* tokens, num line, num character) Option<CallSite
   CallSite c;
   c.callee = token_word(ct);
   c.callee_token = ct;
+  c.indexed = indexed;
   c.has_receiver = has_receiver;
   c.receiver_name = receiver_name;
   c.active_param = commas;
