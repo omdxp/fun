@@ -3340,17 +3340,20 @@ impl Parser {
     Node exp_node = node_new(.Blank);
     if !self.state.next_token_is_symbol(')') {
       // A parenthesized sub-expression is a fresh context: an inner
-      // binary operator or comma is never bounded by an enclosing
-      // `await <call>` operand or compound-init field value. Clear both
-      // flags so `await (a + b)` and `f(a, b)` parse fully, then restore
-      // whatever the caller had.
+      // binary operator, comma, or `as` is never bounded by an enclosing
+      // `await <call>` operand, compound-init field value, or prefix
+      // operator. Clear those flags so `await (a + b)`, `f(a, b)`, and
+      // `-(x as num)` parse fully, then restore whatever the caller had.
       let prev_stop_binary = self.stop_at_binary_op;
       let prev_stop_comma = self.stop_at_comma;
+      let prev_binds = self.propagation_binds_in_operand;
       self.stop_at_binary_op = false;
       self.stop_at_comma = false;
+      self.propagation_binds_in_operand = false;
       let err = self.parse_expressionable_root();
       self.stop_at_binary_op = prev_stop_binary;
       self.stop_at_comma = prev_stop_comma;
+      self.propagation_binds_in_operand = prev_binds;
       if err.is_some() {
         ret err;
       }
@@ -9109,13 +9112,6 @@ impl Parser {
     ret .None;
   }
 
-  // Parses one top-level item: `use`, `test`, `compound`, `enum`, `shape`,
-  // `impl`, `pub`/`async fun`/`fun`, or a bare-datatype-keyword global
-  // variable (`num x = 5;`). Anything `parse_statement` already
-  // understands is delegated there directly, so a bare top-level
-  // expression still needs its trailing `;`. An `asm` declaration or a
-  // bare `Identifier name;` reports a clean "not yet supported" error
-  // rather than misparsing.
   // The word an identifier token spells, "" for any other token.
   _word_at(num offset) str {
     let t = self.state.token_peek_n(offset);
@@ -9126,6 +9122,14 @@ impl Parser {
       .Sval(w) -> { ret w; }
       _ -> { ret ""; }
     }
+  }
+
+  // True when the `fun` at `offset` starts a function type
+  // (`fun(num) num handler;`) rather than a function, which names
+  // itself right after `fun`.
+  _fn_type_starts_at(num offset) flag {
+    let open = self.state.token_peek_n(offset + 1);
+    ret open.is_some() && token_is_operator(open.unwrap(), "(");
   }
 
   // True when `union Name` starts a union declaration at `offset`:
@@ -9207,6 +9211,13 @@ impl Parser {
     ret self._parse_bare_type_variable_declaration(is_public);
   }
 
+  // Parses one top-level item: `use`, `test`, `compound`, `enum`, `shape`,
+  // `impl`, `pub`/`async fun`/`fun`, or a bare-datatype-keyword global
+  // variable (`num x = 5;`). Anything `parse_statement` already
+  // understands is delegated there directly, so a bare top-level
+  // expression still needs its trailing `;`. An `asm` declaration or a
+  // bare `Identifier name;` reports a clean "not yet supported" error
+  // rather than misparsing.
   pub parse_top_level_declaration() Option<ParseErrorKind> {
     let tok = self.state.token_peek_next();
     if tok.is_none() {
@@ -9322,6 +9333,11 @@ impl Parser {
             ret self.parse_function(true, true);
           }
           if equals(nkw, "fun") {
+            // `pub fun(num) num handler;` declares a function-typed
+            // global rather than a function.
+            if self._fn_type_starts_at(0) {
+              ret self._parse_bare_type_variable_declaration(true);
+            }
             ret self.parse_function(true, false);
           }
         }
@@ -9354,6 +9370,9 @@ impl Parser {
       }
 
       if equals(kw, "fun") {
+        if self._fn_type_starts_at(0) {
+          ret self._parse_bare_type_variable_declaration(false);
+        }
         ret self.parse_function(false, false);
       }
 
