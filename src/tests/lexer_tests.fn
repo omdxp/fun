@@ -286,3 +286,43 @@ test "'imp'/'bin' are no longer reserved words, lexing as ordinary identifiers" 
   assert bin_tokens.get(0).type == .Identifier, "expected 'bin' to lex as a plain identifier, not the removed keyword";
   assert equals(tok_text(bin_tokens.get(0)), "bin"), "expected 'bin' to read back as its own literal text now, no canonicalization left to apply";
 }
+
+test "an asm body is skipped as raw text, whatever characters it holds" {
+  let tokens = lex_ok(
+    `asm {
+  `  .macro isr n
+  `  isr_\n: # it's "quoted" {nested} @note
+  `  .endm
+  `};
+  `num x = 1;`
+  );
+  num braces = 0;
+  flag saw_x = false;
+  for t : tokens {
+    if token_is_symbol(t, '{') || token_is_symbol(t, '}') {
+      braces = braces + 1;
+    }
+    if t.type == .Identifier {
+      fit t.data {
+        .Sval(s) -> {
+          assert !equals(s, "isr"), "expected nothing inside the body tokenized";
+          if equals(s, "x") {
+            saw_x = true;
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+  assert braces == 2, "expected only the body's own braces as tokens";
+  assert saw_x, "expected lexing to carry on after the body";
+}
+
+test "a lex error names the character and where it is" {
+  let r = tokenize(`num x = 1;
+  `num y = 2 \ 3;`, "t.fn");
+  assert r.is_err(), "expected a stray backslash rejected";
+  str message = r.unwrap_err().message;
+  assert contains(message, "unexpected character '\\'"), message;
+  assert contains(message, "Location: t.fn:2:11"), message;
+}
