@@ -4026,3 +4026,89 @@ test "unions share storage, align(N) aligns types, fields, globals, and locals, 
     out_msvc
   );
 }
+
+test "function values work as globals, in arrays, through an alias, and when called through an index or a call" {
+  str src = `use std.io;
+  `als Op = fun(num) num;
+  `als Word = u32;
+  `fun inc(num x) num { ret x + 1; }
+  `fun dbl(num x) num { ret x * 2; }
+  `fun pick(num i) fun(num) num {
+  `  if i == 0 {
+  `    ret inc;
+  `  }
+  `  ret dbl;
+  `}
+  `fun(num) num current;
+  `pub fun(num) num start = inc;
+  `fun(num) num[2] table;
+  `Op[2] aliased;
+  `Word[2] words;
+  `fun main() num {
+  `  current = dbl;
+  `  table[0] = inc;
+  `  table[1] = current;
+  `  aliased[1] = dbl;
+  `  fun(num) num[2] local_table;
+  `  local_table[0] = dbl;
+  `  Word[3] local_words = [1, 2, 3];
+  `  words[1] = local_words[2];
+  `  volatile Word* w = &local_words[0];
+  `  println_fmt("{num} {num} {num} {num} {num}", start(1), table[0](1), table[1](5), aliased[1](4), local_table[0](7));
+  `  println_fmt("{num} {u32} {u32}", pick(1)(6), words[1], *w);
+  `  ret 0;
+  `}`;
+  str want1 = "2 2 10 8 14";
+  str want2 = "12 3 1";
+  str out = run_source(src, "fn_value_tables", "function value tables");
+  assert contains(out, want1) && contains(out, want2), format(
+    "expected every call to land, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "fn_value_tables_msvc",
+    "function value tables (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want1) && contains(out_msvc, want2), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}
+
+test "an asm body keeps any characters it holds" {
+  str src = `asm {
+  `  .macro isr n
+  `  isr_\n:
+  `  .endm
+  `  .section .note, "a", @note # it's {balanced} here
+  `};
+  `fun main() {}`;
+  let out = emit_c(src, "asm body characters");
+  assert contains(out, "isr_\\\\n:"), format(
+    "expected the macro argument kept, got: {str}",
+    out
+  );
+  assert contains(out, "@note # it's {balanced} here"), format(
+    "expected the rest kept verbatim, got: {str}",
+    out
+  );
+}
+
+test "a prefix operator applies to a parenthesized conversion" {
+  str src = `use std.io;
+  `fun main() num {
+  `  num x = 2;
+  `  u8 m = 0xFF;
+  `  num neg = -(x as num);
+  `  u8 cleared = m & ~((1 << x) as u8);
+  `  flag none = !(x as flag);
+  `  println_fmt("{num} {u8} {flag}", neg, cleared, none);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "unary_paren_as", "prefix operators over conversions");
+  assert contains(out, "-2 251 false"), format(
+    "expected the conversions applied inside the parens, got: {str}",
+    out
+  );
+}

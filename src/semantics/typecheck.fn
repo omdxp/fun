@@ -64,6 +64,10 @@ pub compound CheckedType {
   // unresolved just because `name` is empty.
   flag is_tuple;
   Vec<CheckedType> tuple_members;
+  // The top-level function a bare name refers to when it is used as a
+  // value (`handlers[0] = on_tick;`), so it can be checked against the
+  // `fun(...)` slot it is stored in; empty otherwise.
+  str function_name;
 }
 
 pub fun checked_unknown() CheckedType {
@@ -84,6 +88,7 @@ pub fun checked_unknown() CheckedType {
   t.closure_sig = nil;
   t.is_tuple = false;
   t.tuple_members.init(0);
+  t.function_name = "";
   ret t;
 }
 
@@ -254,6 +259,31 @@ pub fun type_name(CheckedType t) str {
       pi = pi + 1;
     }
     ret tb.build();
+  }
+  if !equals(t.function_name, "") {
+    ret format("function '{str}'", t.function_name);
+  }
+  if t.has_fn_sig && t.fn_sig != nil {
+    StringBuilder fb = string_builder_init(16);
+    fb.append("fun(");
+    num fi = 0;
+    for fi < t.fn_sig.params.len {
+      if fi > 0 {
+        fb.append(", ");
+      }
+      fb.append(type_name(checked_from_dtype(t.fn_sig.params.get(fi))));
+      fi = fi + 1;
+    }
+    fb.append(")");
+    CheckedType fr = checked_from_dtype(t.fn_sig.rtype);
+    if fr.base != .Void || fr.pointer_depth > 0 {
+      fb.append(" ");
+      fb.append(type_name(fr));
+    }
+    if t.is_array {
+      fb.append("[]");
+    }
+    ret fb.build();
   }
   str base = "unknown";
   fit t.base {
@@ -1611,6 +1641,26 @@ impl Checker {
   // True when a value of type `from` can stand where `to` is expected,
   // including where `to` is a shape a pointer satisfies.
   assignable(CheckedType to, CheckedType from) flag {
+    // A function stored into a `fun(...)` slot has to take and return
+    // what the slot says, whether it is named directly or read out of
+    // another function value.
+    if to.has_fn_sig && to.fn_sig != nil {
+      if !equals(from.function_name, "") {
+        let known = self.fns.at(from.function_name);
+        if known.is_some() && !known.unwrap().ambiguous {
+          Vec<str> no_params;
+          no_params.init(0);
+          defer no_params.free();
+          Vec<CheckedType> no_args;
+          no_args.init(0);
+          defer no_args.free();
+          ret self._fn_sig_matches(to.fn_sig, known.unwrap(), &no_params, &no_args);
+        }
+      }
+      if from.has_fn_sig && from.fn_sig != nil {
+        ret self._fn_types_match(to.fn_sig, from.fn_sig);
+      }
+    }
     if can_assign(to, from) {
       // Two instantiations of one generic type are the same type only
       // when they were instantiated with the same arguments: a
@@ -2122,6 +2172,15 @@ fun _signature_of(FunctionNode f) FnSig {
   ret sig;
 }
 
+// True when a call's callee is a member access (`a.b(...)`), which
+// method-call checking handles.
+fun _is_member_callee(Node* callee) flag {
+  fit callee.kind {
+    .Expression(ce) -> { ret equals(ce.op, "."); }
+    _ -> { ret false; }
+  }
+}
+
 // The name a call's callee refers to, empty when it is not a plain call
 // to a named function.
 fun _callee_name(Node* callee) str {
@@ -2446,7 +2505,11 @@ impl Checker {
         if found.is_some() {
           ret found.unwrap();
         }
-        ret checked_unknown();
+        CheckedType out = checked_unknown();
+        if self.fns.at(name).is_some() {
+          out.function_name = name;
+        }
+        ret out;
       }
       .ExpressionParenthesis(inner) -> { ret self.infer(inner, env); }
       .Bracket(items) -> { ret self.infer_bracket(node, items, env); }
@@ -2534,12 +2597,39 @@ impl Checker {
     }
     for f : init.fields {
       let field_type = holder.fields.at(f.name);
-      if field_type.is_some() {
-        self.check_shorthand_variant(f.value, field_type.unwrap(), env);
+      if field_type.is_none() {
+        continue;
       }
-    }
-    if self.failed {
-      ret checked_unknown();
+      CheckedType want = field_type.unwrap();
+      self.check_shorthand_variant(f.value, want, env);
+      if self.failed {
+        ret checked_unknown();
+      }
+      // A generic compound's field is checked once its parameters are
+      // known, from the literal's own written arguments.
+      if holder.is_generic {
+        if built.generic_args.len == 0 {
+          continue;
+        }
+        want = substitute(want, &holder.type_params, &built.generic_args);
+      }
+      CheckedType got = self.infer(f.value, env);
+      if self.failed {
+        ret checked_unknown();
+      }
+      if !self.assignable(want, got) {
+        self.fail(
+          format(
+          "field '{str}' of '{str}' expects {str}, found {str}",
+          f.name,
+          built.name,
+          type_name(want),
+          type_name(got)
+          ),
+          f.value
+        );
+        ret checked_unknown();
+      }
     }
     if !holder.is_generic || built.generic_args.len > 0 {
       ret built;
@@ -3782,43 +3872,15 @@ impl Checker {
         if found.is_none() || !found.unwrap().has_fn_sig {
           ret .None;
         }
-        FnTypeSig* fsig = found.unwrap().fn_sig;
-        if args.len != fsig.params.len {
-          self.fail(
-            format(
-            "'{str}' expects {num} arguments, got {num}",
-            field,
-            fsig.params.len,
-            args.len
-            ),
-            node
-          );
-          ret .Some(checked_unknown());
-        }
-        num ci = 0;
-        for ci < fsig.params.len {
-          let want = checked_from_dtype(fsig.params.get(ci));
-          let got = self.infer(args.get(ci), env);
-          self.check_shorthand_variant(args.get(ci), want, env);
-          if self.failed {
-            ret .Some(checked_unknown());
-          }
-          if !self.assignable(want, got) {
-            self.fail(
-              format(
-              "argument {num} of '{str}' expects {str}, found {str}",
-              ci + 1,
-              field,
-              type_name(want),
-              type_name(got)
-              ),
-              args.get(ci)
-            );
-            ret .Some(checked_unknown());
-          }
-          ci = ci + 1;
-        }
-        ret .Some(checked_from_dtype(fsig.rtype));
+        ret .Some(
+          self.check_fn_value_call(
+          node,
+          format("'{str}'", field),
+          found.unwrap().fn_sig,
+          args,
+          env
+          )
+        );
       }
       _ -> {}
     }
@@ -3926,6 +3988,26 @@ impl Checker {
     }
     let want_rtype = substitute(checked_from_dtype(want.rtype), type_params, generic_args);
     ret self.assignable(want_rtype, got.rtype);
+  }
+
+  // Whether a value of function type `from` can be stored where `to` is
+  // expected: the same number of parameters, each one and the return
+  // type matching.
+  _fn_types_match(FnTypeSig* to, FnTypeSig* from) flag {
+    if to.params.len != from.params.len {
+      ret false;
+    }
+    num i = 0;
+    for i < to.params.len {
+      if !self.assignable(
+        checked_from_dtype(to.params.get(i)),
+        checked_from_dtype(from.params.get(i))
+      ) {
+        ret false;
+      }
+      i = i + 1;
+    }
+    ret self.assignable(checked_from_dtype(to.rtype), checked_from_dtype(from.rtype));
   }
 
   // Checks every function-typed parameter's own argument (a bare name,
@@ -4413,6 +4495,55 @@ impl Checker {
     ret true;
   }
 
+  // Checks a call through a function value against its own signature:
+  // `label` names the callee in diagnostics (`'cb'`, or a description
+  // when it is an expression such as `handlers[v]`).
+  check_fn_value_call(
+    Node* node,
+    str label,
+    FnTypeSig* fsig,
+    Vec<Node*>* args,
+    TypeEnv* env
+  ) CheckedType {
+    if args.len != fsig.params.len {
+      self.fail(
+        format(
+        "{str} expects {num} {str}, got {num}",
+        label,
+        fsig.params.len,
+        fsig.params.len == 1 ? "argument" : "arguments",
+        args.len
+        ),
+        node
+      );
+      ret checked_unknown();
+    }
+    num ci = 0;
+    for ci < fsig.params.len {
+      let want = checked_from_dtype(fsig.params.get(ci));
+      let got = self.infer(args.get(ci), env);
+      self.check_shorthand_variant(args.get(ci), want, env);
+      if self.failed {
+        ret checked_unknown();
+      }
+      if !self.assignable(want, got) {
+        self.fail(
+          format(
+          "argument {num} of {str} expects {str}, found {str}",
+          ci + 1,
+          label,
+          type_name(want),
+          type_name(got)
+          ),
+          args.get(ci)
+        );
+        ret checked_unknown();
+      }
+      ci = ci + 1;
+    }
+    ret checked_from_dtype(fsig.rtype);
+  }
+
   check_call(Node* node, ExprNode e, TypeEnv* env, flag awaited) CheckedType {
     Vec<Node*> args;
     args.init(4);
@@ -4432,6 +4563,23 @@ impl Checker {
       name = _callee_name(e.left);
     }
     if equals(name, "") {
+      // A function value read out of an array or returned by a call
+      // (`handlers[v](frame)`, `pick()(x)`).
+      if e.has_left && !_is_member_callee(e.left) {
+        let callee_t = self.infer(e.left, env);
+        if self.failed {
+          ret checked_unknown();
+        }
+        if callee_t.has_fn_sig {
+          ret self.check_fn_value_call(
+            node,
+            "this function value",
+            callee_t.fn_sig,
+            &args,
+            env
+          );
+        }
+      }
       self.check_qualified_variant_call(node, e, &args, env);
       if self.failed {
         ret checked_unknown();
@@ -4484,43 +4632,13 @@ impl Checker {
       if !callee.has_fn_sig {
         ret checked_unknown();
       }
-      let fsig = callee.fn_sig;
-      if args.len != fsig.params.len {
-        self.fail(
-          format(
-          "'{str}' expects {num} arguments, got {num}",
-          name,
-          fsig.params.len,
-          args.len
-          ),
-          node
-        );
-        ret checked_unknown();
-      }
-      num ci = 0;
-      for ci < fsig.params.len {
-        let want = checked_from_dtype(fsig.params.get(ci));
-        let got = self.infer(args.get(ci), env);
-        self.check_shorthand_variant(args.get(ci), want, env);
-        if self.failed {
-          ret checked_unknown();
-        }
-        if !self.assignable(want, got) {
-          self.fail(
-            format(
-            "argument {num} of '{str}' expects {str}, found {str}",
-            ci + 1,
-            name,
-            type_name(want),
-            type_name(got)
-            ),
-            args.get(ci)
-          );
-          ret checked_unknown();
-        }
-        ci = ci + 1;
-      }
-      ret checked_from_dtype(fsig.rtype);
+      ret self.check_fn_value_call(
+        node,
+        format("'{str}'", name),
+        callee.fn_sig,
+        &args,
+        env
+      );
     }
     FnSig sig = known.unwrap();
     if sig.ambiguous {
@@ -5847,6 +5965,29 @@ impl Checker {
   // itself: that helper's own single optional `right` only ever checks
   // one argument (a binary operator's one operand, or none for unary),
   // and a setter always takes two (the index, then the value).
+  // `a[i] = v` on an array: `v` has to fit what the array holds.
+  check_element_store(Node* node, ExprNode e, TypeEnv* env) {
+    CheckedType element = self.infer(e.left, env);
+    if self.failed {
+      ret;
+    }
+    CheckedType value = self.infer(e.right, env);
+    self.check_shorthand_variant(e.right, element, env);
+    if self.failed {
+      ret;
+    }
+    if !self.assignable(element, value) {
+      self.fail(
+        format(
+        "cannot assign {str} to an element of type {str}",
+        type_name(value),
+        type_name(element)
+        ),
+        node
+      );
+    }
+  }
+
   check_index_assignment(Node* node, ExprNode e, ExprNode target, TypeEnv* env) {
     if !equals(e.op, "=") || !e.has_right || !target.has_left {
       ret;
@@ -5860,7 +6001,11 @@ impl Checker {
           _ -> {}
         }
         self.check_array_index_bounds(node, base, write_index_node);
+        if self.failed {
+          ret;
+        }
       }
+      self.check_element_store(node, e, env);
       ret;
     }
     if base.pointer_depth > 0 || equals(base.name, "") ||

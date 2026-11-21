@@ -52,14 +52,14 @@ fun _unresolved_marker() _ResolvedAlias {
   Vec<str> empty_alts;
   empty_alts.init(0);
   ret _ResolvedAlias{
-  is_resolved = false,
-  type_params = empty_params,
-  type_param_is_spread = empty_spread,
-  is_bound_list = false,
-  body = nil,
-  bound_alternatives = empty_alts,
-  is_used = false}
-  ;
+    is_resolved = false,
+    type_params = empty_params,
+    type_param_is_spread = empty_spread,
+    is_bound_list = false,
+    body = nil,
+    bound_alternatives = empty_alts,
+    is_used = false
+  };
 }
 
 // Frees a Vec<DataType*> this module itself built (each entry its own
@@ -273,6 +273,22 @@ fun _expand_dtype(
   // A pointer applied at the reference site stacks onto whatever the
   // alias's own body already carries (`als P = num*; P* x;` -> num**).
   expanded.pointer_depth = expanded.pointer_depth + dt.pointer_depth;
+  // So do the reference site's own array sizes, `volatile`, and
+  // `align(N)` (`als Op = fun(num) num; Op[4] table;`). The sizes move
+  // over rather than being copied, since `_replace_dtype` frees what
+  // `dt` still holds.
+  if dt.is_array && !expanded.is_array {
+    _free_node_ptr_vec(&expanded.array_brackets);
+    expanded.array_brackets = dt.array_brackets;
+    dt.array_brackets.init(0);
+    expanded.is_array = true;
+    expanded.flags.is_array = true;
+    expanded.array_depth = dt.array_depth;
+  }
+  expanded.is_volatile = expanded.is_volatile || dt.is_volatile;
+  if dt.alignment > 0 {
+    expanded.alignment = dt.alignment;
+  }
   _replace_dtype(dt, expanded);
 }
 
@@ -761,8 +777,8 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
         is_bound_list = a.is_bound_list,
         body = a.body,
         bound_alternatives = a.bound_alternatives,
-        is_used = prev_used}
-
+        is_used = prev_used
+        }
       );
       if saw_unresolved {
         any_left = true;
