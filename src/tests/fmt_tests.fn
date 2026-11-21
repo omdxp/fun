@@ -815,3 +815,51 @@ test "unions, packed unions, and align(N) declarations format like compounds" {
 ;
   assert equals(format_source(src, "t.fn").unwrap(), src), "expected every declaration kept exactly as written";
 }
+
+test "a compound literal indents its fields and closes on its own line" {
+  str src = `compound P { num a; num b; }
+  `fun f(num i) {
+  `  a[i] = P{
+  `  a = 1,
+  `  b = 2}
+  `  ;
+  `  g(1
+  `
+  `  );
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "  a[i] = P{\n    a = 1,\n    b = 2\n  };\n"), got;
+  assert contains(got, "  g(1\n  );"), got;
+}
+
+test "an over-long compound literal takes one field per line" {
+  str src = `compound P { num aaaaaaaaaaaa; num bbbbbbbbbbbbbb; num cccccccccccc; num dddddddddddd; }
+  `fun f() {
+  `  x = P{aaaaaaaaaaaa = 1000000, bbbbbbbbbbbbbb = 2000000, cccccccccccc = 3000000, dddddddddddd = 4};
+  `  y = P{aaaaaaaaaaaa = 1};
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(
+    got,
+    "  x = P{\n    aaaaaaaaaaaa = 1000000,\n    bbbbbbbbbbbbbb = 2000000,\n    cccccccccccc = 3000000,\n    dddddddddddd = 4\n  };\n"
+  ), got;
+  assert contains(got, "  y = P{aaaaaaaaaaaa = 1};\n"), got;
+}
+
+test "a wrapped call nested in another call's arguments closes at the same indent on every pass" {
+  str src = `fun f() {
+  `  assert !contains(
+  `    notice(``aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  `    ``bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb``, true),
+  `    "x"
+  `  ), "y";
+  `}`;
+  str once = format_source(src, "t.fn").unwrap();
+  str twice = format_source(once, "t.fn").unwrap();
+  assert equals(once, twice), format(
+    "expected one pass to settle it, got:\n{str}\nthen:\n{str}",
+    once,
+    twice
+  );
+  assert contains(once, "    true\n    ),\n"), once;
+}
