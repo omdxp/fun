@@ -1676,7 +1676,7 @@ pub fun help_text() str {
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
   `  fun lint [<path>] [-summary]  reports every warning under <path> (a file or directory, default '.'), then totals; exits 1 if any
-  `  fun build                reads ./fun.toml, installs binaries under fun-out/bin/
+  `  fun build [-obj]         reads ./fun.toml, installs binaries under fun-out/bin/; -obj builds objects under fun-out/obj/ instead
   `  fun init [lib|exe|mix]   scaffolds fun.toml and src/ (default exe)
   `  fun add <name> -git <url> [-path <p>] [-tag <t> | -branch <b> | -rev <sha>] [-token-env <VAR>]
   `                           adds or updates a [deps] entry in fun.toml
@@ -1699,7 +1699,7 @@ pub fun help_text() str {
   `  -test             Run -in's own test blocks, in place of a plain compile.
   `  -memcheck         Redirect every allocation through the built-in memory checker, catching leaks, double-frees, and use-after-free.
   `  -arch <name>      The CPU to build for (x86_64, x86, aarch64, arm), checked by asm arch blocks; defaults to the C compiler's own target.
-  `  -obj              Compile -in to an object file (name.o) and stop, for a separate link step.
+  `  -obj              Compile -in to an object file (name.o) and stop, for a separate link step (with fun build: every target, as [build] output = "object" does).
   `  -freestanding     Build for bare metal (a kernel, bootloader, or firmware): no C library, no runtime, no main wrapper.
   `  -memcheck-leaks   With -memcheck, also fail on an allocation still live when the program exits (for a long-running program; off by default since a short-lived one never frees everything before exiting anyway).
   `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
@@ -2462,8 +2462,10 @@ fun ensure_deps_resolved() Option<str> {
 
 // Compiles every target the manifest declares, writing executables to
 // `fun-out/bin`. A library has no entry point, so it is compiled to an
-// object under `fun-out/lib` to prove it builds, never linked.
-pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
+// object under `fun-out/lib` to prove it builds, never linked. `objects`
+// (`fun build -obj`) builds objects the way `[build] output = "object"`
+// does, whatever the manifest says.
+pub fun build_project(flag debug_info, Vec<Define>* extra_defines, flag objects = false) num {
   let loaded = load_manifest();
   if loaded.is_err() {
     writeln_to(Sink.Stderr, format("[Error]\n{str}", loaded.unwrap_err()));
@@ -2533,7 +2535,7 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines) num {
   // `[build] output = "object"`: every target and every `[build]`
   // source compiled to its own object under `fun-out/obj`, linked by the
   // project's own separate step (a kernel's linker script, say).
-  if equals(m.build.output, "object") {
+  if objects || equals(m.build.output, "object") {
     make_dir_all("fun-out/obj");
     for e : m.exes {
       str obj_c = path_join("fun-out/obj", format("{str}.c", e.name));
