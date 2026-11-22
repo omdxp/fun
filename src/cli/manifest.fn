@@ -25,6 +25,7 @@ use std.result;
 use std.io;
 use std.fs;
 use std.c.mem;
+use std.atomic;
 
 // A source file compiled to an executable.
 pub compound ExeTarget {
@@ -153,12 +154,11 @@ pub fun build_settings_new() BuildSettings {
 // `./fun.toml`'s `[build]` settings, read once per process; empty when
 // there is no manifest here or it doesn't parse (the command that needs
 // the manifest reports that itself).
-flag _project_build_loaded = false;
+Once _project_build_loaded;
 BuildSettings _project_build;
 
 pub fun project_build_settings() BuildSettings {
-  if !_project_build_loaded {
-    _project_build_loaded = true;
+  if _project_build_loaded.begin() {
     _project_build = build_settings_new();
     if exists("fun.toml") {
       let parsed = parse_manifest(read_to_string("fun.toml"));
@@ -166,6 +166,7 @@ pub fun project_build_settings() BuildSettings {
         _project_build = parsed.unwrap().build;
       }
     }
+    _project_build_loaded.finish();
   }
   ret _project_build;
 }

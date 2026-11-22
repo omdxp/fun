@@ -1106,9 +1106,10 @@ fun _ensure_msvc_env() {
   if !equals(env_or("INCLUDE", ""), "") {
     ret;
   }
-  if !_msvc_env_claimed.compare_exchange(false, true) {
+  if !_msvc_env_once.begin() {
     ret;
   }
+  defer _msvc_env_once.finish();
   str vcvarsall = _find_vcvarsall();
   if equals(vcvarsall, "") {
     ret;
@@ -1278,22 +1279,14 @@ pub fun resolve_c_compiler() str {
   ret c_compiler();
 }
 
-// Guards `_resolve_c_compiler_cached`'s one-time resolution: the thread
-// whose `compare_exchange` wins runs the real probe and publishes its
-// result; every other caller (any number of parallel `fun test`/`fun
-// build` workers, all racing here at once) spins on `_cc_ready` until
-// that publish lands, rather than each repeating the same subprocess
-// probes `resolve_c_compiler` itself does. Zero-initialized at load
-// time like any other global, so both start correctly false with no
-// explicit constructor needed.
-Atomic<flag> _cc_claimed;
-Atomic<flag> _cc_ready;
+// Guards `_resolve_c_compiler_cached`'s one-time resolution, so parallel
+// `fun test` and `fun build` workers share one probe.
+Once _cc_once;
 
-// Guards `_ensure_msvc_env`'s own one-time environment probe the same way:
-// `run_test_suite` (its only caller) can itself run concurrently on more
-// than one thread, and the probe's own `set_env` calls race on the
-// process's environment block if two of them ever overlap.
-Atomic<flag> _msvc_env_claimed;
+// Guards `_ensure_msvc_env`'s one-time environment probe. Its `set_env`
+// calls would race if two ran at once, and every caller needs the
+// environment set before it compiles.
+Once _msvc_env_once;
 
 // `resolve_c_compiler`, memoized for this process's lifetime, but only
 // for the expensive PATH search its own fallback runs when `FUN_CC` is
@@ -1311,14 +1304,9 @@ fun _resolve_c_compiler_cached() str {
   if !equals(override_cc, "") {
     ret override_cc;
   }
-  if _cc_claimed.compare_exchange(false, true) {
-    str v = resolve_c_compiler();
-    _cc_cached_value = v;
-    _cc_ready.store(true);
-    ret v;
-  }
-  for !_cc_ready.load() {
-    sleep_ms(1);
+  if _cc_once.begin() {
+    _cc_cached_value = resolve_c_compiler();
+    _cc_once.finish();
   }
   ret _cc_cached_value;
 }
