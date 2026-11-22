@@ -28,6 +28,11 @@ pub compound FmtState {
   // Width already written on the current line, which is what a
   // decision about breaking a construct is measured against.
   num col;
+  // Lines written so far, and the line each still-open compound literal
+  // opened on, so a literal whose fields went onto lines of their own
+  // closes on a line of its own too.
+  num line_count;
+  Vec<num> literal_open_lines;
   // How many newlines have been seen since the last emitted token, so a
   // blank line in the source survives as a blank line.
   num pending_newlines;
@@ -120,6 +125,8 @@ pub fun fmt_state_new() FmtState {
   s.indent = 0;
   s.at_line_start = true;
   s.col = 0;
+  s.line_count = 0;
+  s.literal_open_lines.init(0);
   s.open_delims = 0;
   s.force_break = false;
   s.continuation = false;
@@ -298,6 +305,7 @@ impl FmtState {
 
   pub newline() {
     self.pending_space = false;
+    self.line_count = self.line_count + 1;
     self.out.append_char('\n');
     self.at_line_start = true;
     self.col = 0;
@@ -1293,6 +1301,37 @@ fun _matching_rparen_forward(Vec<Token>* tokens, num lparen_idx) num {
   ret -1;
 }
 
+// The index of the `}` closing the `{` at `lbrace_idx`, or -1.
+fun _matching_rbrace_forward(Vec<Token>* tokens, num lbrace_idx) num {
+  num depth = 0;
+  num i = lbrace_idx;
+  for i < tokens.len {
+    Token t = tokens.get(i);
+    if token_is_symbol(t, '{') {
+      depth = depth + 1;
+    } elif token_is_symbol(t, '}') {
+      depth = depth - 1;
+      if depth == 0 {
+        ret i;
+      }
+    }
+    i = i + 1;
+  }
+  ret -1;
+}
+
+// Whether the compound literal opened by the `{` at `lbrace_idx` is too
+// long to stay on the line it starts on, measured from `start_col`, the
+// column right after that brace.
+fun _literal_wrap_decision(Vec<Token>* tokens, num lbrace_idx, num start_col) flag {
+  num rbrace_idx = _matching_rbrace_forward(tokens, lbrace_idx);
+  if rbrace_idx <= lbrace_idx + 1 {
+    ret false;
+  }
+  num width = _inline_width(tokens, lbrace_idx + 1, rbrace_idx - 1);
+  ret start_col + width + 1 > MAX_LINE_WIDTH;
+}
+
 // Whether the `(` at `lparen_idx` opens a call's own argument list
 // (immediately preceded by the name being called, rather than a
 // grouping paren or an index's own `[`) that doesn't fit on the
@@ -1883,7 +1922,7 @@ fun _split_als_generic_closer_equals(Vec<Token>* tokens) {
 pub fun format_source(str src, str filename) Result<str, str> {
   let lexed = tokenize(src, filename);
   if lexed.is_err() {
-    ret .Err("lex error");
+    ret .Err(lexed.unwrap_err().message);
   }
   let raw_tokens = lexed.unwrap();
   // Deep: no AST is built here. `tokens` below only rearranges copies
@@ -1898,6 +1937,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
   defer starts.free();
 
   FmtState s = fmt_state_new();
+  defer s.literal_open_lines.free();
+  defer s.brace_kinds.free();
+  defer s.fit_body_depth_at_start.free();
+  defer s.call_arg_wrap.free();
+  defer s.open_delims_at_block.free();
   num i = 0;
   for i < tokens.len {
     Token t = tokens.get(i);
@@ -1917,6 +1961,15 @@ pub fun format_source(str src, str filename) Result<str, str> {
     str text = _written_text(src, &starts, t);
     if t.type == .Comment {
       text = _comment_line(_sval_of(t), s.in_doc_fence);
+    }
+    // A closer ends the list it closes: no blank line comes right
+    // before it.
+    if s.pending_newlines > 1 && _is_closing(text) {
+      s.pending_newlines = 1;
+    }
+    // A separator ends the line it follows; it never starts one.
+    if equals(text, ";") || equals(text, ",") {
+      s.pending_newlines = 0;
     }
 
     // Every top-level declaration stands apart from the one before it.
@@ -2118,10 +2171,22 @@ pub fun format_source(str src, str filename) Result<str, str> {
       }
     }
 
+    // A compound literal's fields are bracketed like a call's own
+    // arguments: they indent as a continuation when written on their
+    // own lines, and an over-long literal takes one field per line,
+    // its closing brace back under the line that opened it.
     if is_literal_brace {
       s.flush_newlines();
       s.write(text);
       s.brace_kinds.push(1);
+      s.literal_open_lines.push(s.line_count);
+      s.open_delims = s.open_delims + 1;
+      flag wraps = _literal_wrap_decision(&tokens, i, s.col);
+      s.call_arg_wrap.push(wraps);
+      if wraps {
+        s.force_break = true;
+        s.pending_newlines = 0;
+      }
       s.stmt_first = "";
       s.at_stmt_start = true;
       s.has_prev = true;
@@ -2132,6 +2197,33 @@ pub fun format_source(str src, str filename) Result<str, str> {
     if equals(text, "}") && s.brace_kinds.len > 0 &&
       s.brace_kinds.get(s.brace_kinds.len - 1) == 1 {
       s.brace_kinds.pop();
+      if s.open_delims > 0 {
+        s.open_delims = s.open_delims - 1;
+      }
+      flag wrapped = false;
+      if s.call_arg_wrap.len > 0 {
+        wrapped = s.call_arg_wrap.pop();
+      }
+      if s.literal_open_lines.len > 0 && s.literal_open_lines.pop() < s.line_count {
+        wrapped = true;
+      }
+      if wrapped || s.pending_newlines > 0 || s.at_line_start {
+        s.pending_newlines = 0;
+        s.force_break = false;
+        if !s.at_line_start {
+          s.newline();
+        }
+        num block_baseline = 0;
+        if s.open_delims_at_block.len > 0 {
+          block_baseline = s.open_delims_at_block.get(s.open_delims_at_block.len - 1);
+        }
+        s.continuation = s.open_delims - block_baseline > 0;
+        s.write(text);
+        s.has_prev = true;
+        s.prev = t;
+        i = i + 1;
+        continue;
+      }
       if !s.at_line_start && s.has_prev &&
         _needs_space_at(
         &tokens,
@@ -2228,7 +2320,14 @@ pub fun format_source(str src, str filename) Result<str, str> {
       if s.call_arg_wrap.len > 0 {
         flag closing_call_wrap = s.call_arg_wrap.pop();
         if closing_call_wrap && equals(text, ")") && !s.at_line_start {
-          s.continuation = false;
+          // Still inside an outer call's own parens, the closer stays
+          // at that call's continuation indent, as it does when the
+          // source already put it on its own line.
+          num close_baseline = 0;
+          if s.open_delims_at_block.len > 0 {
+            close_baseline = s.open_delims_at_block.get(s.open_delims_at_block.len - 1);
+          }
+          s.continuation = s.open_delims - close_baseline > 0;
           s.newline();
         }
       }

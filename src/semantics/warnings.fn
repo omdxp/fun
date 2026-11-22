@@ -312,6 +312,33 @@ fun _constant_truth(Node* node) Option<flag> {
   ret .None;
 }
 
+// Every type name `dt` spells: its own, and every one nested in its
+// generic arguments, tuple members, and function or closure signature
+// (`fun(Frame*) void` reads `Frame`).
+pub fun collect_dtype_reads(DataType* dt, Set<str>* out) {
+  if dt == nil {
+    ret;
+  }
+  if !equals(dt.type_str, "") {
+    out.add(dt.type_str);
+  }
+  for g : dt.generic_args {
+    collect_dtype_reads(g, out);
+  }
+  for m : dt.tuple_members {
+    collect_dtype_reads(m, out);
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    for prm : dt.fn_sig.params {
+      collect_dtype_reads(prm, out);
+    }
+    collect_dtype_reads(dt.fn_sig.rtype, out);
+  }
+  if dt.has_closure_sig && dt.closure_sig != nil {
+    collect_dtype_reads(dt.closure_sig.rtype, out);
+  }
+}
+
 // What a function reads: its body, the types of its arguments, and its
 // return type. Shared so a method inside an `impl` is read exactly as a
 // top-level function is, rather than being skipped for want of a case.
@@ -323,7 +350,7 @@ pub fun collect_function_reads(FunctionNode f, Set<str>* out) {
     collect_reads(a, out);
   }
   if f.has_rtype && f.rtype != nil {
-    out.add(f.rtype.type_str);
+    collect_dtype_reads(f.rtype, out);
   }
 }
 
@@ -341,9 +368,7 @@ fun _collect_reads_excluding_declarations(Node* stmt, Set<str>* out) {
       }
     }
     .Variable(v) -> {
-      if v.var_type != nil {
-        out.add(v.var_type.type_str);
-      }
+      collect_dtype_reads(v.var_type, out);
       if v.has_val {
         collect_reads(v.val, out);
       }
@@ -2068,12 +2093,7 @@ impl Analysis {
         }
         .Compound(c) -> {
           for field : c.fields {
-            if field.dtype != nil {
-              read.add(field.dtype.type_str);
-              for g : field.dtype.generic_args {
-                read.add(g.type_str);
-              }
-            }
+            collect_dtype_reads(field.dtype, &read);
           }
         }
         .Variable(v) -> { collect_reads(node, &read); }
@@ -2720,7 +2740,7 @@ pub fun collect_reads(Node* node, Set<str>* out) {
     .Panic(message) -> { collect_reads(message, out); }
     .CompoundInit(init) -> {
       if init.has_dtype {
-        out.add(init.init_dtype.type_str);
+        collect_dtype_reads(init.init_dtype, out);
       }
       for f : init.fields {
         collect_reads(f.value, out);
@@ -2733,12 +2753,7 @@ pub fun collect_reads(Node* node, Set<str>* out) {
     }
     .Variable(v) -> {
       // The type a declaration names is read by naming it.
-      if v.var_type != nil {
-        out.add(v.var_type.type_str);
-        for g : v.var_type.generic_args {
-          out.add(g.type_str);
-        }
-      }
+      collect_dtype_reads(v.var_type, out);
       if v.has_val {
         collect_reads(v.val, out);
       }

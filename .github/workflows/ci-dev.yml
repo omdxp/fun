@@ -280,6 +280,16 @@ jobs:
           set -e
           grep -q "all checks passed" /tmp/kernel.out
           test "$code" = "1"
+          # The same kernel built as objects and linked by hand, as a
+          # project with its own link step would.
+          FUN_CC=clang ../../fun-out/bin/fun build -obj
+          ld.lld -m elf_i386 -T boot/linker.ld --build-id=none -o fun-out/kernel.elf fun-out/obj/start.o fun-out/obj/kernel.o fun-out/obj/mem.o
+          set +e
+          timeout 60 qemu-system-i386 -kernel fun-out/kernel.elf -serial stdio -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 | tee /tmp/kernel_obj.out
+          code=${PIPESTATUS[0]}
+          set -e
+          grep -q "all checks passed" /tmp/kernel_obj.out
+          test "$code" = "1"
   lint:
     runs-on: ubuntu-24.04
     env:

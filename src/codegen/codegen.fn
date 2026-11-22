@@ -7913,6 +7913,34 @@ impl Codegen {
         );
         ret self.emit_closure_call(tmp_name, callee_dt.unwrap().closure_sig, e.right);
       }
+      // A function value read out of an array or returned by a call
+      // (`handlers[v](frame)`, `pick()(x)`) is an ordinary C function
+      // pointer, called in place.
+      if callee_dt.is_some() && callee_dt.unwrap().has_fn_sig {
+        self.state.write("(");
+        let cerr = self.emit_expr(*e.left);
+        if cerr.is_some() {
+          ret cerr;
+        }
+        self.state.write(")(");
+        Vec<Node*> args;
+        args.init(0);
+        defer args.free();
+        self.flatten_call_args(e.right, &args);
+        num i = 0;
+        for arg : args {
+          if i > 0 {
+            self.state.write(", ");
+          }
+          i = i + 1;
+          let aerr = self.emit_expr(*arg);
+          if aerr.is_some() {
+            ret aerr;
+          }
+        }
+        self.state.write(")");
+        ret .None;
+      }
     }
     fit e.left.kind {
       .Identifier(name) -> { callee_name = name; }
@@ -12120,23 +12148,9 @@ impl Codegen {
             }
           } elif !is_let && !arr_as_ptr && v.var_type.is_array {
             if v.var_type.array_brackets.len > 0 {
-              for bnode : v.var_type.array_brackets {
-                self.state.write("[");
-                fit bnode.kind {
-                  .Bracket(inner) -> {
-                    let berr = self.emit_expr(*inner);
-                    if berr.is_some() {
-                      ret berr;
-                    }
-                  }
-                  _ -> {
-                    let berr = self.emit_expr(*bnode);
-                    if berr.is_some() {
-                      ret berr;
-                    }
-                  }
-                }
-                self.state.write("]");
+              let berr = self._write_array_brackets(*v.var_type);
+              if berr.is_some() {
+                ret berr;
               }
             } elif v.var_type.array_depth > 1 {
               // A multi-dimensional array with no explicit bracket sizes
@@ -12303,7 +12317,9 @@ impl Codegen {
         // apparently already registers (confirmed directly: without
         // this, a later `c.fn`/`c()` on a plain `closure() void c =
         // ...;` local failed with "unknown identifier 'c'").
-        if !is_let && v.var_type.has_closure_sig {
+        // A function-typed one too, so a call through one of its
+        // elements (`handlers[v](frame)`) can find the signature.
+        if !is_let && (v.var_type.has_closure_sig || v.var_type.has_fn_sig) {
           self.record_local_typed(v.name, "", false, *v.var_type);
         }
         if is_let && v.has_val {
@@ -12411,15 +12427,17 @@ impl Codegen {
         self.state.write(";\n");
         ret .None;
       }
-      .Panic(_) -> {
-        // A bare `panic("msg");` statement, with no statement wrapper of
-        // its own, as with `.Expression`/`.Unary` above.
+      .Panic(msg) -> {
+        // A bare `panic("msg");` statement has no value to produce, so it
+        // is a plain block rather than the expression form, whose
+        // placeholder value would only be discarded.
         self.state.write_indent();
-        let perr = self.emit_expr(node);
+        self.state.write("{ fprintf(stderr_stream(), \"panic: %s\\n\", ");
+        let perr = self.emit_expr(*msg);
         if perr.is_some() {
           ret perr;
         }
-        self.state.write(";\n");
+        self.state.write("); abort(); }\n");
         ret .None;
       }
       .Ternary(t) -> {
@@ -15889,6 +15907,30 @@ impl Codegen {
   // Writes `dtype name`, in whatever order C wants the name written. A
   // function type puts it inside the declarator, `flag (*name)(num)`, so
   // a type and a name cannot simply be written one after the other.
+  // Writes an array type's own `[N]` sizes, which C puts after the
+  // declared name.
+  _write_array_brackets(DataType dt) Option<CodegenErrorKind> {
+    for bnode : dt.array_brackets {
+      self.state.write("[");
+      fit bnode.kind {
+        .Bracket(inner) -> {
+          let err = self.emit_expr(*inner);
+          if err.is_some() {
+            ret err;
+          }
+        }
+        _ -> {
+          let err = self.emit_expr(*bnode);
+          if err.is_some() {
+            ret err;
+          }
+        }
+      }
+      self.state.write("]");
+    }
+    ret .None;
+  }
+
   write_named_type(DataType dtype, str name) Option<CodegenErrorKind> {
     // A closure-typed value is the ordinary two-word `__fun_closure_t`
     // struct, never a function-pointer declarator (unlike `fun(...)R`
@@ -15918,6 +15960,14 @@ impl Codegen {
     }
     self.state.write(" (*");
     self.state.write(name);
+    // An array of function values, `R (*name[N])(T)`: the sizes sit
+    // inside the declarator, next to the name.
+    if dtype.is_array {
+      let aerr = self._write_array_brackets(dtype);
+      if aerr.is_some() {
+        ret aerr;
+      }
+    }
     self.state.write(")(");
     if sig.params.len == 0 {
       self.state.write("void");
@@ -17308,23 +17358,9 @@ impl Codegen {
           // exactly when there are bracket sizes to write, and without
           // this the field silently became a bare scalar.
           if f.dtype.is_array && !fld_arr_ptr && f.dtype.array_brackets.len > 0 {
-            for bnode : f.dtype.array_brackets {
-              self.state.write("[");
-              fit bnode.kind {
-                .Bracket(inner) -> {
-                  let ferr = self.emit_expr(*inner);
-                  if ferr.is_some() {
-                    ret ferr;
-                  }
-                }
-                _ -> {
-                  let ferr = self.emit_expr(*bnode);
-                  if ferr.is_some() {
-                    ret ferr;
-                  }
-                }
-              }
-              self.state.write("]");
+            let ferr = self._write_array_brackets(*f.dtype);
+            if ferr.is_some() {
+              ret ferr;
             }
           }
           self.state.write(";\n");
@@ -17711,23 +17747,9 @@ impl Codegen {
           }
         } elif !is_let && !arr_as_ptr && v.var_type.is_array {
           if v.var_type.array_brackets.len > 0 {
-            for bnode : v.var_type.array_brackets {
-              self.state.write("[");
-              fit bnode.kind {
-                .Bracket(inner) -> {
-                  let berr = self.emit_expr(*inner);
-                  if berr.is_some() {
-                    ret berr;
-                  }
-                }
-                _ -> {
-                  let berr = self.emit_expr(*bnode);
-                  if berr.is_some() {
-                    ret berr;
-                  }
-                }
-              }
-              self.state.write("]");
+            let berr = self._write_array_brackets(*v.var_type);
+            if berr.is_some() {
+              ret berr;
             }
           } elif v.var_type.array_depth > 1 {
             self.state.write("[]");
@@ -23694,8 +23716,8 @@ test "emit_statement emits a bare panic(...) as a statement" {
   assert g.emit_statement(n).is_none(), "expected the bare panic statement to emit";
   assert equals(
     st.out.build(),
-    "({ fprintf(stderr_stream(), \"panic: %s\\n\", \"internal error\"); abort(); 0; });\n"
-  ), "expected the panic expression followed by a trailing ';\\n', same as any other bare-expression statement";
+    "{ fprintf(stderr_stream(), \"panic: %s\\n\", \"internal error\"); abort(); }\n"
+  ), "expected a plain block, with no placeholder value left unused";
 }
 
 test "emit_statement emits 'assert cond, msg;' as an if/abort with the message printed" {

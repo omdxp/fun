@@ -4723,3 +4723,62 @@ test "a union literal sets one field, and align(N) needs a power of two" {
   assert equals(check(`align(24) compound C { u8 x; }
   `fun main() {}`), "parse error"), "expected a non-power-of-two alignment rejected";
 }
+
+test "array element stores, literal fields, and function values are checked against what they fill" {
+  assert contains(
+    check(`fun main() { num[2] a; a[0] = "x"; }`),
+    "cannot assign str to an element of type num"
+  ), "expected an element store checked";
+  assert contains(
+    check(`compound P { num x; }
+    `fun main() { P p = P{x = "a"}; }`),
+    "field 'x' of 'P' expects num, found str"
+  ), "expected a literal field checked";
+  assert contains(
+    check(`fun neg(str x) str { ret x; }
+    `fun main() { fun(num) num f = neg; }`),
+    "cannot initialize 'f' of type fun(num) num with function 'neg'"
+  ), "expected a function checked against the slot it initializes";
+  assert contains(
+    check(`fun neg(str x) str { ret x; }
+    `fun main() { fun(num) num[2] fs; fs[0] = neg; }`),
+    "cannot assign function 'neg' to an element of type fun(num) num"
+  ), "expected a function checked against the array it is stored in";
+  assert contains(
+    check(
+    `fun a(num x) num { ret x; }
+    `fun b(str x) str { ret x; }
+    `fun main() { fun(num) num f = a; fun(str) str g = b; f = g; }`
+    ),
+    "cannot assign fun(str) str to 'f' of type fun(num) num"
+  ), "expected one function value checked against another";
+  assert contains(
+    check(
+    `fun neg(str x) str { ret x; }
+    `compound Ops { fun(num) num op; }
+    `fun main() { Ops o = Ops{op = neg}; }`
+    ),
+    "field 'op' of 'Ops' expects fun(num) num, found function 'neg'"
+  ), "expected a function checked against the field it fills";
+  assert contains(
+    check(
+    `fun inc(num x) num { ret x + 1; }
+    `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0](1, 2); }`
+    ),
+    "this function value expects 1 argument, got 2"
+  ), "expected a call through an element checked for arity";
+  assert contains(
+    check(
+    `fun inc(num x) num { ret x + 1; }
+    `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0]("a"); }`
+    ),
+    "argument 1 of this function value expects num, found str"
+  ), "expected a call through an element checked for argument types";
+  accepts(
+    `fun inc(num x) num { ret x + 1; }
+  `als Op = fun(num) num;
+  `Op[2] table;
+  `fun main() { table[0] = inc; fun(num) num f = table[0]; num r = f(1) + table[0](2); }`,
+    "expected matching function values accepted"
+  );
+}

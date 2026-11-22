@@ -1,116 +1,43 @@
-// A bare-metal x86 kernel QEMU boots directly: it loads its own GDT
-// (packed compounds), writes to VGA text memory (volatile), talks to the
-// first serial port (port I/O through asm), and reports success or a
-// failed assert through QEMU's debug-exit device. See README.md.
+// A bare-metal x86 kernel QEMU boots directly. It loads its own GDT and
+// interrupt table, remaps the interrupt controllers, counts timer ticks,
+// turns on paging with a page mapped twice and a page fault handler that
+// maps pages on first touch, and reports every check over the serial
+// port before exiting through QEMU's debug-exit device. See README.md.
 
-packed compound GdtEntry {
-  u16 limit_low;
-  u16 base_low;
-  u8 base_mid;
-  u8 access;
-  u8 granularity;
-  u8 base_high;
+use console;
+use port;
+use gdt;
+use idt;
+use pic;
+use timer;
+use paging;
+use cpu;
+
+// The system call vector doubles `eax`, the way a system call hands
+// back its result.
+fun on_double(InterruptFrame* f) {
+  f.eax = f.eax * 2;
 }
 
-packed compound GdtPointer {
-  u16 limit;
-  u32 base;
-}
-
-compound VgaCell {
-  u8 ch;
-  u8 color;
-}
-
-const u32 VGA = 0xB8000;
-const u16 COM1 = 0x3F8;
-
-GdtEntry[3] gdt;
-GdtPointer gdt_ptr;
-num cursor = 0;
-
-fun outb(u16 port, u8 value) {
-  asm volatile arch x86 (in port: "Nd" = port; in value: "a" = value) {
-    outb %[value], %[port]
+fun call_double(u32 x) u32 {
+  u32 r = x;
+  asm volatile arch x86 (out r: "+a" = r; clobber "memory") {
+    int $0x30
   };
+  ret r;
 }
 
-fun inb(u16 port) u8 {
-  u8 value = 0;
-  asm volatile arch x86 (out value: "=a" = value; in port: "Nd" = port) {
-    inb %[port], %[value]
-  };
-  ret value;
+// A breakpoint only needs to be seen: the stub counts it, and the CPU
+// resumes after the `int3`.
+fun on_breakpoint(InterruptFrame* f) {
+  print("breakpoint at ");
+  print_hex(f.eip);
+  print("\n");
 }
 
-fun serial_put(chr c) {
-  for (inb(COM1 + 5) & 0x20) == 0 {
-  }
-  outb(COM1, c as u8);
-}
-
-fun print(str s) {
-  volatile VgaCell* vga = VGA as volatile VgaCell*;
-  num i = 0;
-  for s[i] != '\0' {
-    serial_put(s[i]);
-    if s[i] != '\n' {
-      vga[cursor] = VgaCell{ch = s[i] as u8, color = 0x0F};
-      cursor++;
-    }
-    i++;
-  }
-}
-
-fun print_num(num n) {
-  chr[20] digits;
-  num count = 0;
-  if n == 0 {
-    serial_put('0');
-    ret;
-  }
-  for n > 0 {
-    digits[count] = ('0' as num + n % 10) as chr;
-    n = n / 10;
-    count++;
-  }
-  for count > 0 {
-    count--;
-    serial_put(digits[count]);
-  }
-}
-
-fun set_gate(num i, u32 base, u32 limit, u8 access, u8 gran) {
-  gdt[i] = GdtEntry{
-  limit_low = (limit & 0xFFFF) as u16,
-  base_low = (base & 0xFFFF) as u16,
-  base_mid = ((base >> 16) & 0xFF) as u8,
-  access = access,
-  granularity = (((limit >> 16) & 0x0F) | (gran & 0xF0)) as u8,
-  base_high = ((base >> 24) & 0xFF) as u8}
-  ;
-}
-
-fun load_gdt() {
-  set_gate(0, 0, 0, 0, 0);
-  set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF);
-  set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
-  gdt_ptr = GdtPointer{limit = (sizeof(GdtEntry) * 3 - 1) as u16, base = &gdt as u32};
-  GdtPointer* p = &gdt_ptr;
-  asm volatile arch x86 (in p: "r" = p; clobber "memory") {
-    lgdt (%[p])
-    mov $0x10, %ax
-    mov %ax, %ds
-    mov %ax, %es
-    mov %ax, %ss
-    ljmp $0x08, $1f
-    1:
-  };
-}
-
-fun qemu_exit(u32 code) {
-  asm volatile arch x86 (in code: "a" = code) {
-    outl %[code], $0xf4
+fun breakpoint() {
+  asm volatile arch x86 (clobber "memory") {
+    int3
   };
 }
 
@@ -121,21 +48,72 @@ pub fun fun_panic_handler(str message) {
   qemu_exit(3);
 }
 
+fun check_cpu() {
+  CpuInfo info = cpu_info();
+  print("cpu vendor: ");
+  num i = 0;
+  for i < 12 {
+    serial_put(info.vendor.text[i]);
+    i++;
+  }
+  print("\n");
+  assert info.max_leaf >= 1, "cpuid has leaf 1";
+}
+
+fun check_interrupts() {
+  load_idt();
+  report("idt entry size", idt_entry_size());
+  set_handler(3, on_breakpoint);
+  set_handler(SYSCALL_VECTOR, on_double);
+  breakpoint();
+  assert interrupt_count(3) == 1, "breakpoint reached its stub";
+  u32 doubled = call_double(21);
+  report("system call doubled 21", doubled as num);
+  assert doubled == 42, "a handler's frame change reaches the caller";
+}
+
+fun check_timer() {
+  pic_remap();
+  timer_start();
+  enable_interrupts();
+  timer_wait(5);
+  disable_interrupts();
+  report("timer ticks", timer_ticks());
+  assert timer_ticks() >= 5, "timer ticked";
+}
+
+fun check_paging() {
+  report_hex("page directory", table_address());
+  assert (table_address() & 0xFFF) == 0, "page directory is page aligned";
+  assert (shared_page_address() & 0xFFF) == 0, "shared page is page aligned";
+  enable_paging();
+  print("paging enabled\n");
+  volatile u32* alias = ALIAS as volatile u32*;
+  volatile u32* direct = shared_page_address() as volatile u32*;
+  *alias = 0xCAFEF00D;
+  report_hex("read through identity map", *direct);
+  assert *direct == 0xCAFEF00D, "alias and identity map share a page";
+  volatile u32* demand = (DEMAND + 0x1000) as volatile u32*;
+  u32 seen = *demand;
+  report_hex("page fault at", last_fault_address());
+  assert interrupt_count(14) == 1, "first touch faulted once";
+  assert seen == 0xCAFEF00D, "fault handler mapped the shared page";
+}
+
 pub fun kmain() {
   print("fun kernel booted\n");
-  print("gdt entry size: ");
-  print_num(sizeof(GdtEntry));
-  print("\n");
-  print("gdt pointer size: ");
-  print_num(sizeof(GdtPointer));
-  print("\n");
+  report("gdt entry size", gdt_entry_size());
+  report("gdt pointer size", gdt_pointer_size());
   load_gdt();
   print("gdt loaded\n");
-  volatile VgaCell* vga = VGA as volatile VgaCell*;
   print("vga first char: ");
-  serial_put(vga[0].ch as chr);
+  serial_put(vga_char_at(0));
   print("\n");
-  assert cursor > 10, "cursor advanced";
+  assert console_cursor() > 10, "cursor advanced";
+  check_cpu();
+  check_interrupts();
+  check_timer();
+  check_paging();
   print("all checks passed\n");
   qemu_exit(0);
 }

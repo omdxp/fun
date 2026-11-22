@@ -167,6 +167,22 @@ pub fun tcp_listen(num port) num {
   ret fd;
 }
 
+// The port a socket is bound to, such as the free one the system picked
+// for `tcp_listen(0)`; -1 on failure.
+pub fun tcp_local_port(num fd) num {
+  SockAddrInPacked addr;
+  addr.word0 = 0;
+  addr.word1 = 0;
+  u32 addr_len = 16;
+  raw* addr_ptr = &addr;
+  raw* len_ptr = &addr_len;
+  if getsockname(fd, addr_ptr, len_ptr) != 0 {
+    ret -1;
+  }
+  // The port sits in bytes 2 and 3 in both the Linux and BSD layouts.
+  ret ntohs((addr.word0 >> 16) & 0xFFFF);
+}
+
 // Creates a TCP listening socket on `port`, with Result.
 pub fun try_tcp_listen(num port) Result<num, Error> {
   let fd = tcp_listen(port);
@@ -515,8 +531,8 @@ pub fun try_http_serve_forever(num port, str body) Result<num, Error> {
 // against the listen backlog before `accept` is ever called, so this needs
 // no second thread.
 test "tcp_listen/tcp_connect/tcp_accept round-trip real bytes over loopback" {
-  num port = 58391;
-  let server = tcp_listen(port);
+  let server = tcp_listen(0);
+  num port = tcp_local_port(server);
   assert server >= 0, "expected tcp_listen to succeed";
   defer tcp_close(server);
 

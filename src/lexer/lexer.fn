@@ -1,11 +1,12 @@
 // Turns source text into a `Vec<Token>`.
 //
 // Reads the whole source into a `str` up front (via `std.fs`) and lexes
-// with an index cursor. `asm { ... }` bodies lex as ordinary
-// keywords/statements; the raw-body-capture special case for inline
-// assembly is not implemented.
+// with an index cursor. An `asm` block's `{ ... }` body is assembly, not
+// Fun, so it is skipped as raw text: only its braces become tokens, and
+// the parser slices the body back out of the source between them.
 
 use std.string;
+use std.io;
 use std.vec;
 use std.ctype;
 use std.result;
@@ -28,6 +29,12 @@ pub compound Lexer {
   // handed back up to a driver loop) because the hex/binary special-number
   // check below needs to inspect, and pop, the preceding emitted token.
   Vec<Token> tokens;
+  // Where an `asm` statement is: 0 outside one, 1 in its header (the
+  // part before the body), 2 right after its body's opening brace.
+  num asm_state;
+  // Parenthesis depth inside an `asm` header, so the `;` between its
+  // operands isn't taken for the end of the statement.
+  num asm_depth;
 }
 
 // Creates a Lexer positioned at the start of `src` (a whole file's
@@ -46,7 +53,17 @@ pub fun lexer_new(str src, str filename, num start_line = 1) Lexer {
   l.col = 1;
   l.filename = filename;
   l.tokens.init(64);
+  l.asm_state = 0;
+  l.asm_depth = 0;
   ret l;
+}
+
+// True if `t` is an `Operator` token whose text equals `val`.
+fun _is_operator(Token t, str val) flag {
+  fit t.data {
+    .Sval(s) -> { ret t.type == .Operator && equals(s, val); }
+    _ -> { ret false; }
+  }
 }
 
 // True if `c` can start an identifier (a letter or underscore).
@@ -864,12 +881,93 @@ impl Lexer {
   // Reads the next token, or `None` at end of input, and records it onto
   // `self.tokens` (see the field doc comment for why).
   next() Result<Option<Token>, Error> {
+    if self.asm_state == 2 {
+      self.asm_state = 0;
+      if !self._skip_asm_body() {
+        ret err_kind(.Parse, "unterminated asm block", .None);
+      }
+    }
     let opt = self._next_inner()!;
     fit opt {
-      .Some(t) -> { self.tokens.push(t); }
+      .Some(t) -> {
+        self.tokens.push(t);
+        self._track_asm(t);
+      }
       .None -> {}
     }
     ret .Ok(opt);
+  }
+
+  // Follows an `asm` statement's header so its body can be skipped once
+  // the body's opening brace has been read.
+  _track_asm(Token t) {
+    if token_is_keyword(t, "asm") {
+      self.asm_state = 1;
+      self.asm_depth = 0;
+      ret;
+    }
+    if self.asm_state != 1 {
+      ret;
+    }
+    if _is_operator(t, "(") {
+      self.asm_depth = self.asm_depth + 1;
+    } elif token_is_symbol(t, ')') {
+      self.asm_depth = self.asm_depth - 1;
+    } elif self.asm_depth <= 0 {
+      if token_is_symbol(t, '{') {
+        self.asm_state = 2;
+      } elif token_is_symbol(t, ';') || t.type == .String {
+        self.asm_state = 0;
+      }
+    }
+  }
+
+  // Moves past an `asm` body up to (not including) its closing brace,
+  // whatever characters it holds: `\` in an assembler macro, `@` in a
+  // section flag, an apostrophe in a `#` comment. Nested braces are
+  // counted, and braces inside a `"..."` string or a `//` or `/* */`
+  // comment are not. False when the body never closes.
+  _skip_asm_body() flag {
+    num depth = 0;
+    for self.pos < self.len {
+      let c = self._peek();
+      if c == '"' {
+        self._advance();
+        for self.pos < self.len && self._peek() != '"' && self._peek() != '\n' {
+          if self._peek() == '\\' {
+            self._advance();
+          }
+          self._advance();
+        }
+        if self._peek() == '"' {
+          self._advance();
+        }
+      } elif c == '/' && self._peek2() == '/' {
+        for self.pos < self.len && self._peek() != '\n' {
+          self._advance();
+        }
+      } elif c == '/' && self._peek2() == '*' {
+        self._advance();
+        self._advance();
+        for self.pos < self.len && !(self._peek() == '*' && self._peek2() == '/') {
+          self._advance();
+        }
+        self._advance();
+        self._advance();
+      } elif c == '{' {
+        depth = depth + 1;
+        self._advance();
+      } elif c == '}' {
+        if depth == 0 {
+          ret true;
+        }
+        depth = depth - 1;
+        self._advance();
+      } else {
+        self._advance();
+      }
+    }
+    ret false;
   }
 
   // Does the actual dispatch work for `next()`: inspects the current
@@ -1004,7 +1102,7 @@ impl Lexer {
         }
         ret .Ok(.Some(r.unwrap()));
       }
-      _ -> { ret err_kind(.Parse, "unexpected character", .None); }
+      _ -> { ret err_kind(.Parse, format("unexpected character '{chr}'", c), .None); }
     }
   }
 }
@@ -1016,7 +1114,14 @@ pub fun tokenize(str src, str filename, num start_line = 1) Result<Vec<Token>, E
   for {
     let r = lex.next();
     if r.is_err() {
-      ret err_kind(.Parse, "lex error", lex.tokens);
+      str message = format(
+        "{str}\nLocation: {str}:{num}:{num}",
+        r.unwrap_err().message,
+        filename,
+        lex.line,
+        lex.col
+      );
+      ret err_kind(.Parse, message, lex.tokens);
     }
     let opt = r.unwrap();
     fit opt {

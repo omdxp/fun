@@ -1,0 +1,85 @@
+// Output to the first serial port and VGA text memory at once.
+
+use port;
+
+compound VgaCell {
+  u8 ch;
+  u8 color;
+}
+
+const u32 VGA = 0xB8000;
+const u16 COM1 = 0x3F8;
+
+num cursor = 0;
+
+pub fun console_cursor() num {
+  ret cursor;
+}
+
+pub fun vga_char_at(num i) chr {
+  volatile VgaCell* vga = VGA as volatile VgaCell*;
+  ret vga[i].ch as chr;
+}
+
+pub fun serial_put(chr c) {
+  for (inb(COM1 + 5) & 0x20) == 0 {
+  }
+  outb(COM1, c as u8);
+}
+
+pub fun print(str s) {
+  volatile VgaCell* vga = VGA as volatile VgaCell*;
+  num i = 0;
+  for s[i] != '\0' {
+    serial_put(s[i]);
+    if s[i] != '\n' {
+      vga[cursor] = VgaCell{ch = s[i] as u8, color = 0x0F};
+      cursor++;
+    }
+    i++;
+  }
+}
+
+pub fun print_num(num n) {
+  chr[20] digits;
+  num count = 0;
+  if n == 0 {
+    serial_put('0');
+    ret;
+  }
+  for n > 0 {
+    digits[count] = ('0' as num + n % 10) as chr;
+    n = n / 10;
+    count++;
+  }
+  for count > 0 {
+    count--;
+    serial_put(digits[count]);
+  }
+}
+
+pub fun print_hex(u32 n) {
+  str hex = "0123456789abcdef";
+  serial_put('0');
+  serial_put('x');
+  num shift = 28;
+  for shift >= 0 {
+    serial_put(hex[((n >> shift) & 0xF) as num]);
+    shift = shift - 4;
+  }
+}
+
+// One labeled line, `label: value`.
+pub fun report(str label, num value) {
+  print(label);
+  print(": ");
+  print_num(value);
+  print("\n");
+}
+
+pub fun report_hex(str label, u32 value) {
+  print(label);
+  print(": ");
+  print_hex(value);
+  print("\n");
+}

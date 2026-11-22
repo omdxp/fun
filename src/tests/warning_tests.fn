@@ -1352,3 +1352,16 @@ test "a local used only as an asm operand is not unused" {
   assert !contains(found, "unused variable 'p'"), "expected an input operand counted as a read";
   assert !contains(found, "unused variable 'out'"), "expected an output operand counted as a use";
 }
+
+test "a compound named only inside a function type is used" {
+  assert !contains(
+    notice(
+    `compound Frame { num eax; }
+    `fun(Frame*) void[2] handlers;
+    `fun run(fun(Frame*) void cb) { _ = cb; }
+    `fun main() { handlers[0] = nil; run(nil); }`,
+    true
+    ),
+    "unused compound 'Frame'"
+  ), "expected Frame counted as used through the function types that name it";
+}

@@ -1,0 +1,33 @@
+// Port I/O and QEMU's debug-exit device.
+
+pub fun outb(u16 port, u8 value) {
+  asm volatile arch x86 (in port: "Nd" = port; in value: "a" = value) {
+    outb %[value], %[port]
+  };
+}
+
+pub fun inb(u16 port) u8 {
+  u8 value = 0;
+  asm volatile arch x86 (out value: "=a" = value; in port: "Nd" = port) {
+    inb %[port], %[value]
+  };
+  ret value;
+}
+
+// A write to an unused port, long enough for an old device to settle
+// between two commands.
+pub fun io_wait() {
+  outb(0x80, 0);
+}
+
+// Exits QEMU with `code`, then halts for good if no debug-exit device
+// is there to end the run.
+pub fun qemu_exit(u32 code) {
+  asm volatile arch x86 (in code: "a" = code) {
+    outl %[code], $0xf4
+    cli
+    1:
+    hlt
+    jmp 1b
+  };
+}

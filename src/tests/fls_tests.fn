@@ -11298,3 +11298,45 @@ test "fls shows unions and align(N) in hovers, keywords, and member completion" 
   str comp = completion(&reads, doc, 6, 4, true);
   assert contains(comp, `"label":"bits"`) && contains(comp, `"label":"real"`), "expected the union's members offered mid-edit";
 }
+
+test "fls shows an array of function values and gives signature help through one of its elements" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///fn_values_fls.fn";
+  doc.path = "fn_values_fls.fn";
+  doc.text = `compound Frame {
+  `  u32 eax;
+  `}
+  `compound Ops {
+  `  fun(num, str) num op;
+  `}
+  `fun(Frame*) void[49] handlers;
+  `fun(num) num scale;
+  `fun main() {
+  `  Frame fr = Frame{eax = 1};
+  `  handlers[0](&fr);
+  `  num a = scale(2);
+  `  Ops o;
+  `  num b = o.op(1, "x");
+  `  _ = a + b;
+  `}`;
+  doc.version = 1;
+  assert contains(hover(&reads, doc, 6, 22), "fun(Frame*) void[49] handlers"), "expected the array size in the hover";
+  assert contains(signature_help(&reads, doc, 10, 14), `"label":"handlers(Frame*) void"`), "expected an element's own signature";
+  assert contains(signature_help(&reads, doc, 11, 16), `"label":"scale(num) num"`), "expected a function-typed global's signature";
+  str field_sig = signature_help(&reads, doc, 13, 18);
+  assert contains(field_sig, `"label":"op(num, str) num"`) &&
+    contains(field_sig, `"activeParameter":1`), field_sig;
+
+  doc.text = `compound Frame {
+  `  u32 eax;
+  `}
+  `fun(Frame*) void[49] handlers;
+  `fun main() {
+  `  Frame fr = Frame{eax = 1};
+  `  handlers[0](
+  `}`;
+  doc.version = 2;
+  assert contains(signature_help(&reads, doc, 6, 14), `"label":"handlers(Frame*) void"`), "expected the same mid-edit";
+}

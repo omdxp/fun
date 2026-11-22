@@ -33,6 +33,11 @@ pub fun listen(num sockfd, num backlog) num;
 // null). Returns the client fd or -1 (C semantics).
 pub fun accept(num sockfd, raw* addr, raw* addrlen) num;
 
+// Writes the local address a socket is bound to into `addr`, `addrlen`
+// holding its size in and the written size out. Returns 0 on success,
+// -1 on error (C semantics).
+pub fun getsockname(num sockfd, raw* addr, raw* addrlen) num;
+
 // Connects a socket to a remote address. Returns 0 on success, -1 on error
 // (C semantics).
 pub fun connect(num sockfd, raw* addr, num addrlen) num;

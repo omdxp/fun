@@ -198,7 +198,8 @@ ldflags = ["-Wl,-rpath,vendor/lib"]
 - `output = "object"` makes `fun build` compile every target, and every
   file in `sources`, to its own object under `fun-out/obj/`, for a
   project that links them in a separate step (a kernel with its own
-  linker invocation, say). `fun -obj -in file.fn` does the same for one
+  linker invocation, say). `fun build -obj` does the same for one build
+  without changing `fun.toml`, and `fun -obj -in file.fn` does it for one
   file. Nothing is left out of an object as unused, since whatever links
   it may call any of its functions.
 - `freestanding = true` builds for bare metal, and `arch = "x86_64"`

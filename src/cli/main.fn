@@ -61,7 +61,7 @@ fun main(str[] args) num {
     print_ast_for(opts.input);
   }
   if equals(opts.subcommand, "build") {
-    ret build_project(opts.debug_info, &opts.defines);
+    ret build_project(opts.debug_info, &opts.defines, opts.obj);
   }
   if equals(opts.subcommand, "init") {
     ret init_project(opts.input);

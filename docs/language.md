@@ -1251,13 +1251,46 @@ fun main() {
 }
 ```
 
+A function type also declares a global, and an array of function values
+is written with the size after the type, the way any array is. A call
+through one of its elements, or through a call that returns a function,
+works in place:
+
+```fun
+use std.io;
+
+als Handler = fun(num) num;
+
+fun inc(num x) num { ret x + 1; }
+fun dbl(num x) num { ret x * 2; }
+
+fun(num) num fallback = inc;
+Handler[2] table;
+
+fun pick(num i) fun(num) num {
+  if i == 0 {
+    ret inc;
+  }
+  ret dbl;
+}
+
+fun main() {
+  table[0] = fallback;
+  table[1] = dbl;
+  println_fmt("{num} {num} {num}", table[0](1), table[1](5), pick(1)(6)); // 2 10 12
+}
+```
+
 Every call site is checked against the declared signature: arity, every
 parameter type, and the return type must match. This holds whether the
 function value is passed by name as an argument, called through a
-parameter inside the function that received it, or called through a
-compound field, and a generic method's own type parameter (`Vec<T>`'s `T`
-in `sort_by(cmp)`) is substituted with the receiver's real type first. A
-mismatch is a compile error, caught before it can reach the C compiler.
+parameter inside the function that received it, called through a
+compound field or an array element, or returned by a call, and a generic
+method's own type parameter (`Vec<T>`'s `T` in `sort_by(cmp)`) is
+substituted with the receiver's real type first. Storing a function into a
+`fun(...)` slot (a variable, an array element, a field, or a literal's
+field) is checked the same way. A mismatch is a compile error, caught
+before it can reach the C compiler.
 `Vec<T>.sort_by(cmp)` is the standard library's own use of this, for
 custom comparators. Its parameter is typed `Comparator<T>`, an alias `std.vec`
 exports for `fun(T, T) num` (negative when `a` sorts before `b`, positive
@@ -1704,7 +1737,10 @@ fun read_cr0() u64 {
 }
 ```
 - Asm block contents are preserved as raw text (including whitespace and
-  comments). Fun does not validate assembly syntax inside asm blocks;
+  comments), and may hold any characters the assembler takes: a `\` in a
+  macro argument, `@` in a section flag, an apostrophe in a `#` comment.
+  Braces inside the body must balance. Fun does not validate assembly
+  syntax inside asm blocks;
   correctness is decided by the downstream assembler/dialect (clang/GAS
   vs NASM, for example).
 

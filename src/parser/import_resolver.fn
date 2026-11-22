@@ -941,7 +941,7 @@ fun _preload_one_file(PreloadShared* shared, str path, str source) Option<str> {
 
   let tok_result = tokenize(src, path);
   if tok_result.is_err() {
-    ret .Some(format("lex error in {str}", path));
+    ret .Some(tok_result.unwrap_err().message);
   }
 
   ParseState state = parse_state_new(path, src);
@@ -1356,7 +1356,7 @@ fun _parse_and_merge_source(
   } else {
     let tok_result = tokenize(src, path);
     if tok_result.is_err() {
-      ret .Some(format("lex error in {str}", path));
+      ret .Some(tok_result.unwrap_err().message);
     }
 
     ParseState state = parse_state_new(path, src);
