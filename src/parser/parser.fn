@@ -5220,8 +5220,6 @@ impl Parser {
       .Sval(s) -> { item_name = s; }
       _ -> {}
     }
-    flag used_double_colon = false;
-
     if self.state.next_token_is_operator(",") {
       index_name = item_name;
       has_index_name = true;
@@ -5239,7 +5237,6 @@ impl Parser {
       if dcerr.is_some() {
         ret dcerr;
       }
-      used_double_colon = true;
     } else {
       let cerr = self.state.expect_op(":");
       if cerr.is_some() {
@@ -5270,16 +5267,9 @@ impl Parser {
 
     self.state.new_scope();
 
-    if is_range && used_double_colon {
-      self.state.err("range for loop does not support 'i, item ::' form");
-      ret .Some(.InvalidStatement);
-    }
-    // A range-for's own single name is `item_name` (`fi.item_name`, not
-    // `fi.index_name`): it's bound to each value the range yields, exactly
-    // what `item_name` already means for an ordinary `.Iter` loop - a
-    // range desugars into one below, not a distinct shape, so it shares
-    // this same scope-entity logic (`has_index_name` is always false for
-    // a range, so only `item_entity` ever pushes).
+    // A range desugars into an ordinary `.Iter` loop below, so its names
+    // bind the same way: `item_name` to each value, and `index_name`, in
+    // the `i, x ::` form, to a running count.
     if has_index_name {
       ScopeEntity index_entity = scope_entity_new(index_name);
       index_entity.on_stack = true;
@@ -7773,7 +7763,8 @@ impl Parser {
   // declaration (`(num, str) t;`) or a bare declared-type destructuring
   // declaration (`(num, str) (a, b) = expr;`), not an ordinary
   // parenthesized/tuple-literal expression statement: scans past the
-  // balanced `(...)` group (and any trailing pointer-depth stars) and
+  // balanced `(...)` group (and any trailing pointer-depth stars and
+  // array brackets) and
   // checks whether an identifier - the declared name - or another `(` -
   // the destructuring pattern - follows, rather than an operator
   // continuing an expression. Nothing valid today looks like "a
@@ -7810,6 +7801,29 @@ impl Parser {
         break;
       }
       off = off + 1;
+    }
+    // An array of tuples: `(num, str)[2] pairs`.
+    for true {
+      let t = self.state.token_peek_n(off);
+      if t.is_none() || !token_is_operator(t.unwrap(), "[") {
+        break;
+      }
+      num bracket_depth = 0;
+      for true {
+        let bt = self.state.token_peek_n(off);
+        if bt.is_none() {
+          ret false;
+        }
+        if token_is_operator(bt.unwrap(), "[") {
+          bracket_depth = bracket_depth + 1;
+        } elif token_is_symbol(bt.unwrap(), ']') {
+          bracket_depth = bracket_depth - 1;
+        }
+        off = off + 1;
+        if bracket_depth == 0 {
+          break;
+        }
+      }
     }
     let after = self.state.token_peek_n(off);
     if after.is_none() {
@@ -12838,7 +12852,7 @@ test "parse_for_statement still parses an ordinary parenthesized condition, not 
   }
 }
 
-test "parse_for_statement rejects a range loop written with the 'i, item ::' form" {
+test "parse_for_statement accepts a range loop written with the 'i, item ::' form" {
   Vec<str> names;
   names.init(0);
   names.push("n");
@@ -12850,7 +12864,7 @@ test "parse_for_statement rejects a range loop written with the 'i, item ::' for
   p.has_current_function = true;
 
   let err = p.parse_for_statement();
-  assert err.is_some(), "expected an error for a range loop using the iterator ',' '::' syntax";
+  assert err.is_none(), "expected a counted range loop to parse";
 }
 
 test "parse_for_statement rejects use outside of a function" {
