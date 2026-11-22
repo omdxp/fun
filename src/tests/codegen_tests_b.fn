@@ -4411,3 +4411,63 @@ test "closures go through type aliases, generic functions, and generic methods" 
     out_msvc
   );
 }
+
+test "a generic method's loop over a generic iterable still sees its own type parameter" {
+  str src = `use std.io;
+  `use std.map;
+  `
+  `enum Maybe<T> {
+  `  Yes(T),
+  `  No,
+  `}
+  `
+  `impl Maybe<T> {
+  `  mapit<U>(closure(T) U f) Maybe<U> {
+  `    fit *self {
+  `      .Yes(v) -> { ret .Yes(f(v)); }
+  `      .No -> { ret .No; }
+  `    }
+  `    ret .No;
+  `  }
+  `  or_zero() num {
+  `    ret 0;
+  `  }
+  `}
+  `
+  `compound Bag<T> {
+  `  Map<T, flag> m;
+  `}
+  `
+  `impl Bag<T> {
+  `  count() num {
+  `    num n = 0;
+  `    for k, _p :: self.m {
+  `      T copy = k;
+  `      _ = copy;
+  `      n = n + 1;
+  `    }
+  `    ret n;
+  `  }
+  `}
+  `
+  `fun main() num {
+  `  Bag<num> b;
+  `  b.m.init(4);
+  `  b.m.put(3, true);
+  `  b.m.put(4, true);
+  `  Maybe<num> a = .Yes(3);
+  `  let lab = fun(num x) str {
+  `    ret x > 1 ? "big" : "small";
+  `  };
+  `  flag same = a.mapit(lab).or_zero() == 0;
+  `  println(format("{num} {flag}", b.count(), same));
+  `  lab.free();
+  `  b.m.free();
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "generic_loop_subst", "generic loop body substitution");
+  assert contains(out, "2 true"), format(
+    "expected the loop and the comparison to compile and run, got: {str}",
+    out
+  );
+}

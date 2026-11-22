@@ -1272,7 +1272,7 @@ impl Analysis {
           if f.has_body {
             Set<str> free_names = closure_free_identifier_names(f);
             defer free_names.free();
-            for name : free_names.keys() {
+            for name : free_names {
               let aliased = last_address_of.at(name);
               if aliased.is_some() {
                 self.report(
