@@ -1313,11 +1313,11 @@ substituted with the receiver's real type first. Storing a function into a
 `fun(...)` slot (a variable, an array element, a field, or a literal's
 field) is checked the same way. A mismatch is a compile error, caught
 before it can reach the C compiler.
-`Vec<T>.sort_by(cmp)` is the standard library's own use of this, for
-custom comparators. Its parameter is typed `Comparator<T>`, an alias `std.vec`
-exports for `fun(T, T) num` (negative when `a` sorts before `b`, positive
-when after, 0 when equal), so a function of your own can take a comparator
-the same way: `fun sort_with(Vec<num>* v, Comparator<num> order)`.
+`Vec<T>.sort_by(cmp)` takes a comparator typed `Comparator<T>`, an alias
+`std.vec` exports for `closure(T, T) num` (negative when `a` sorts before
+`b`, positive when after, 0 when equal). Since a plain function fits a
+closure slot, `v.sort_by(by_name)` works as well as a closure capturing
+what it compares against; see [Closures](#closures).
 
 ### Closures
 
@@ -1366,6 +1366,12 @@ fun main() {
   add.free();
 }
 ```
+
+The standard library takes closures where it takes a callback:
+`Vec<T>` has `sort_by(closure(T, T) num cmp)`, `each(closure(T) void f)`,
+`filter(closure(T) flag keep) Vec<T>`, and `map<U>(closure(T) U f)
+Vec<U>`, and an `HttpRouter` route handler is a `closure(HttpServerRequest*)
+HttpServerResponse`, which the router frees in its own `free()`.
 
 A plain function, or a `fun(...) R` value, fits wherever a closure of
 the same signature is expected; it runs with nothing captured. The
