@@ -1839,7 +1839,7 @@ impl Codegen {
   // positive is only the same placeholder text this call site always
   // used to return anyway, not a new failure mode.
   _dtype_is_bare_generic_param(DataType dt) flag {
-    if dt.has_fn_sig || dt.is_tuple || dt.generic_args.len > 0 {
+    if dt.has_fn_sig || dt.has_closure_sig || dt.is_tuple || dt.generic_args.len > 0 {
       ret false;
     }
     ret len(dt.type_str) == 1 && is_upper(dt.type_str[0]);
@@ -2210,14 +2210,14 @@ impl Codegen {
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
-      if arg.generic_args.len > 0 || arg.is_tuple || arg.has_fn_sig {
+      if arg.generic_args.len > 0 || arg.is_tuple || dtype_signature(arg) != nil {
         // Resolved (and, on first use, emitted) first, so it's already
         // hoisted before the outer type's mangled name is built. A
         // tuple argument (`Vec<(num, str)>`) has no `generic_args` of
         // its own (its members live in `tuple_members` instead), so
         // `arg.type_str` alone (empty for a tuple) would otherwise
-        // silently mangle to nothing here. A bare function-type argument
-        // (`Option<HttpHandler>`) is the same shape of gap - its
+        // silently mangle to nothing here. A bare function or closure type
+        // argument (`Option<HttpHandler>`) is the same shape of gap - its
         // `type_str` is only ever the parser's `"fun(...)"` placeholder
         // text, never a real name; `resolve_type_name` synthesizes a
         // real one for a concrete function type, or falls back to that
@@ -2528,7 +2528,7 @@ impl Codegen {
     for ai < dt.generic_args.len {
       let arg = dt.generic_args.get(ai);
       str arg_name = arg.type_str;
-      if arg.generic_args.len > 0 || arg.is_tuple || arg.has_fn_sig {
+      if arg.generic_args.len > 0 || arg.is_tuple || dtype_signature(arg) != nil {
         // A nested generic argument resolves first, recursing to
         // arbitrary depth. A tuple argument's own members live in
         // `tuple_members`, not `generic_args`, so it needs the same
@@ -4301,6 +4301,23 @@ impl Codegen {
     ret self.drain_pending_generic_impl_methods();
   }
 
+  // Writes the prototype of every queued method whose prototype is still
+  // owed, so code about to be hoisted can call it before its body exists.
+  _write_pending_generic_impl_prototypes() {
+    num qi = self.pending_generic_impl_method_cursor;
+    for qi < self.pending_generic_impl_method_owner.len {
+      if !self.pending_generic_impl_method_proto_written.get(qi) {
+        self.emit_generic_impl_method_prototype_now(
+          self.pending_generic_impl_method_owner.get(qi),
+          self.pending_generic_impl_method_bare.get(qi),
+          self.pending_generic_impl_method_shape.get(qi)
+        );
+        self.pending_generic_impl_method_proto_written.set(qi, true);
+      }
+      qi = qi + 1;
+    }
+  }
+
   // Processes every queued (owner, bare name, shape name) triple. Writes
   // straight to `self.state`/`self.hoist_insert_pos`, so the caller must
   // have restored the real ones first.
@@ -4917,6 +4934,9 @@ impl Codegen {
                 self.current_fn_rtype_dt = saved_fn_rtype_dt;
                 self.defer_stack = saved_defer_stack;
                 self.defer_scope_starts = saved_defer_scope_starts;
+                // Methods this body called were only queued, so their
+                // prototypes go out ahead of it.
+                self._write_pending_generic_impl_prototypes();
                 self.emit_hoisted(method_scratch.out.build());
 
                 self.type_subst_param_names = prev_params;

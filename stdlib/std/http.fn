@@ -781,10 +781,9 @@ impl HttpServerResponse {
 }
 
 // A route handler: given the parsed request, produces the response to
-// send back. A real, ordinary function value (`fun(HttpServerRequest*)
-// HttpServerResponse`), storable and passable the same way
-// `Vec.sort_by`'s own `Comparator<T>` is.
-pub als HttpHandler = fun(HttpServerRequest*) HttpServerResponse;
+// send back. A closure, so it can carry state of its own; a plain
+// function fits too.
+pub als HttpHandler = closure(HttpServerRequest*) HttpServerResponse;
 
 compound _HttpRoute {
   HttpMethod method;
@@ -826,7 +825,20 @@ fun _http_handle_client_worker(raw* arg) raw* {
 }
 
 impl HttpRouter {
-  // Registers `handler` for `method` requests to `path`.
+  // Frees the route table and every handler registered on it, which the
+  // router owns once registered.
+  pub free() {
+    num i = 0;
+    for i < self.routes.len {
+      let rt = self.routes.get(i);
+      rt.handler.free();
+      i = i + 1;
+    }
+    self.routes.free();
+  }
+
+  // Registers `handler` for `method` requests to `path`. The router owns
+  // it from here on, and `free()` frees it.
   pub route(HttpMethod method, str path, HttpHandler handler) {
     _HttpRoute rt;
     rt.method = method;

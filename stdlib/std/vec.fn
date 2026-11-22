@@ -5,10 +5,10 @@ use std.c.string;
 use std.shapes;
 use std.option;
 
-// A comparison function for two values of one type, following the `strcmp`
+// A comparison for two values of one type, following the `strcmp`
 // convention: negative when `a` sorts before `b`, positive when after, 0
-// when equal.
-pub als Comparator<T> = fun(T, T) num;
+// when equal. A closure, so a plain function fits too.
+pub als Comparator<T> = closure(T, T) num;
 
 // Dynamic vector.
 pub compound Vec<T> {
@@ -318,6 +318,42 @@ impl Vec<T> {
     num i = start;
     for i < end {
       out.push(self.data[i]);
+      i = i + 1;
+    }
+    ret out;
+  }
+
+  // Calls `f` with each element, in order.
+  pub each(closure(T) void f) {
+    num i = 0;
+    for i < self.len {
+      f(self.data[i]);
+      i = i + 1;
+    }
+  }
+
+  // Returns a new vector holding the elements `keep` returns true for, in
+  // order.
+  pub filter(closure(T) flag keep) Vec<T> {
+    Vec<T> out;
+    out.init(0);
+    num i = 0;
+    for i < self.len {
+      if keep(self.data[i]) {
+        out.push(self.data[i]);
+      }
+      i = i + 1;
+    }
+    ret out;
+  }
+
+  // Returns a new vector holding `f` applied to each element, in order.
+  pub map<U>(closure(T) U f) Vec<U> {
+    Vec<U> out;
+    out.init(self.len);
+    num i = 0;
+    for i < self.len {
+      out.push(f(self.data[i]));
       i = i + 1;
     }
     ret out;
@@ -902,6 +938,43 @@ test "slice clamps its bounds, and sort_by uses the comparator" {
   v.free();
   mid.free();
   all.free();
+}
+
+test "sort_by, each, filter and map take closures that capture" {
+  Vec<num> v = _nums(3, 1, 2);
+  num pivot = 2;
+  let near_pivot = fun(num a, num b) num {
+    num da = a > pivot ? a - pivot : pivot - a;
+    num db = b > pivot ? b - pivot : pivot - b;
+    ret da - db;
+  };
+  v.sort_by(near_pivot);
+  assert v.get(0) == 2, "expected the element nearest the captured pivot first";
+  near_pivot.free();
+  num* total = malloc(sizeof(num));
+  *total = 0;
+  let add = fun(num x) {
+    *total = *total + x;
+  };
+  v.each(add);
+  assert *total == 6, "expected each to visit every element";
+  add.free();
+  free(total);
+  let big = fun(num x) flag {
+    ret x >= pivot;
+  };
+  Vec<num> kept = v.filter(big);
+  assert kept.len() == 2, "expected filter to keep the elements at or above the pivot";
+  big.free();
+  let label = fun(num x) str {
+    ret x == pivot ? "p" : "o";
+  };
+  Vec<str> labels = v.map(label);
+  assert labels.len() == 3 && strcmp(labels.get(0), "p") == 0, "expected map to transform each element";
+  label.free();
+  v.free();
+  kept.free();
+  labels.free();
 }
 
 test "a vector iterates, clones independently and clears through its shapes" {
