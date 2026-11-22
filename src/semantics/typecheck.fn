@@ -240,6 +240,23 @@ pub fun is_unknown(CheckedType t) flag {
 // The placeholder the parser writes for a `let` declaration's type.
 pub const str LET_INFER_TYPE = "__let_infer__";
 
+// True for a single number, character, string, or flag: not an array, a
+// pointer, a tuple, or a function value.
+fun _is_scalar_value(CheckedType t) flag {
+  if t.is_array || t.pointer_depth > 0 || t.is_tuple || t.has_fn_sig ||
+  t.has_closure_sig {
+    ret false;
+  }
+  fit t.base {
+    .Chr -> { ret true; }
+    .Str -> { ret true; }
+    .Dec -> { ret true; }
+    .Num -> { ret true; }
+    .Bin -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
 pub fun type_name(CheckedType t) str {
   if t.is_tuple {
     StringBuilder tb = string_builder_init(16);
@@ -1789,6 +1806,33 @@ impl Checker {
     ret self.enum_names.has(t.name) && !self.plain_enums.has(t.name);
   }
 
+  // Describes `t` when it's a value no comparison operator applies to: an
+  // array, a tuple, or a compound without an operator method of its own.
+  // Empty for anything comparable.
+  _uncomparable_value(CheckedType t, str op) str {
+    if t.pointer_depth > 0 {
+      ret "";
+    }
+    if t.is_array {
+      ret format(
+        "arrays ('{str}'); it would compare their addresses, so compare the elements",
+        type_name(t)
+      );
+    }
+    if t.is_tuple {
+      ret format("tuples ('{str}'); compare their elements", type_name(t));
+    }
+    if !equals(t.name, "") && self.compounds.at(t.name).is_some() {
+      ret format(
+        "'{str}' values; give '{str}' an `{str}` method, or compare their fields",
+        t.name,
+        t.name,
+        operator_method_name(op)
+      );
+    }
+    ret "";
+  }
+
   check_comparison(Node* node, ExprNode e, TypeEnv* env) {
     if !e.has_left || !e.has_right {
       ret;
@@ -1822,6 +1866,20 @@ impl Checker {
           ),
           node
         );
+        ret;
+      }
+    }
+    // A compound or tuple value is a struct in the generated C, and an array
+    // compares as its address, so none of them has a built-in comparison.
+    if !left.is_null_literal && !right.is_null_literal {
+      let what = self._uncomparable_value(left, e.op);
+      let what_right = self._uncomparable_value(right, e.op);
+      str found = what;
+      if equals(found, "") {
+        found = what_right;
+      }
+      if !equals(found, "") {
+        self.fail(format("'{str}' cannot compare {str}", e.op, found), node);
         ret;
       }
     }
@@ -5750,6 +5808,16 @@ impl Checker {
         } elif elem_opt.is_some() {
           env.define(it.item_name, elem_opt.unwrap());
         } else {
+          // A scalar value has nothing to walk.
+          if _is_scalar_value(iterable_type) {
+            self.fail(
+              format(
+              "'for' can't walk a value of type '{str}'; it needs an array, a Vec, or a type that implements Iterator",
+              type_name(iterable_type)
+              ),
+              it.iterable
+            );
+          }
           // What the loop walks holds values of a type the checker
           // does not model yet (Vec/Set/array today).
           env.define(it.item_name, checked_unknown());

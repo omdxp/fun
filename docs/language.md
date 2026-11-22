@@ -151,6 +151,29 @@ fun main() {
 }
 ```
 
+### Comparisons
+
+`==`, `!=`, `<`, `<=`, `>`, and `>=` compare numbers, characters, and
+flags by value, and two `str` values by their contents, ordered byte by
+byte. A `nil` string equals only another `nil` and orders before every
+other string. Comparing a `str` with `nil` or `0` checks for null.
+
+```fun
+use std.io;
+
+fun main() {
+  str a = "apple";
+  str b = "banana";
+  println_fmt("{flag} {flag} {flag}", a < b, a == "apple", b >= "c");
+}
+```
+
+Arrays, tuples, and compounds have no built-in comparison, and comparing
+two is a compile error. A compound can define its own through operator
+methods (`op_eq`, `op_lt`, ...; see
+[Operator Overloading](#operator-overloading)). Pointers of any type
+compare by address.
+
 ### Arrays
 
 Array literals require uniform element types: `num[] arr = [1, 2, 3];`.

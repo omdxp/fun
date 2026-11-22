@@ -13,6 +13,8 @@
 
 use std.c.atomic;
 use std.c.string;
+use std.time;
+use std.thread;
 
 // A lock-free atomic value holding a `num` or `flag`.
 pub compound Atomic<T: num | flag> {
@@ -82,6 +84,47 @@ impl Atomic<num> {
   }
 }
 
+// Runs a one-time initialization safely when several threads may ask for
+// it at once. A zero-initialized `Once` (a global, say) is ready to use.
+//
+// Once _loaded;
+// Settings _settings;
+//
+// fun settings() Settings {
+// if _loaded.begin() {
+// _settings = load_settings();
+// _loaded.finish();
+// }
+// ret _settings;
+// }
+pub compound Once {
+  Atomic<flag> claimed;
+  Atomic<flag> done;
+}
+
+impl Once {
+  // True for exactly one caller, which must initialize and then call
+  // `finish`. Every other caller waits until `finish` has run and gets
+  // false, so whatever was initialized is complete when it returns.
+  pub begin() flag {
+    if self.done.load() {
+      ret false;
+    }
+    if self.claimed.compare_exchange(false, true) {
+      ret true;
+    }
+    for !self.done.load() {
+      sleep_ms(1);
+    }
+    ret false;
+  }
+
+  // Marks the initialization complete, releasing every waiting caller.
+  pub finish() {
+    self.done.store(true);
+  }
+}
+
 test "Atomic<num> load/store/swap/compare_exchange/fetch_add/fetch_sub" {
   Atomic<num> a = atomic_new(10);
   assert a.load() == 10, "expected the constructor's initial value";
@@ -122,4 +165,37 @@ test "Atomic<flag> load/store/swap/compare_exchange" {
   assert a.load(), "expected the successful compare_exchange to take effect";
   assert !a.compare_exchange(false, false), "expected a non-matching compare_exchange to fail";
   assert a.load(), "expected the failed compare_exchange to leave the value unchanged";
+}
+
+Once _test_once;
+Atomic<num> _test_once_runs;
+
+fun _test_once_worker(raw* arg) raw* {
+  if _test_once.begin() {
+    sleep_ms(20);
+    _ = _test_once_runs.fetch_add(1);
+    _test_once.finish();
+  }
+  // Every caller sees the initialization complete.
+  num* seen = arg;
+  *seen = _test_once_runs.load();
+  ret nil;
+}
+
+test "Once initializes exactly once, and every caller waits for it" {
+  num[4] seen = [0, 0, 0, 0];
+  Thread[4] threads;
+  num i = 0;
+  for i < 4 {
+    threads[i] = thread_new();
+    assert thread_start(&threads[i], _test_once_worker, &seen[i]) == 0, "expected the thread to start";
+    i = i + 1;
+  }
+  i = 0;
+  for i < 4 {
+    assert thread_join(&threads[i], nil) == 0, "expected the thread to join";
+    i = i + 1;
+  }
+  assert _test_once_runs.load() == 1, "expected one initialization";
+  assert seen[0] == 1 && seen[1] == 1 && seen[2] == 1 && seen[3] == 1, "expected every caller to see it finished";
 }

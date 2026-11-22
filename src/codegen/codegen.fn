@@ -1280,6 +1280,33 @@ fun _split_double_underscore_exact(str s, num n) Option<Vec<str>> {
   ret .Some(parts);
 }
 
+// True when `operand` is `nil` or a number literal, which a `str`
+// comparison treats as a null check rather than a string.
+fun _is_null_operand(Node* operand) flag {
+  fit operand.kind {
+    .Nil -> { ret true; }
+    .Number(_) -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// True for a name, or fields and indexes read off one (`a`, `a.b[0].c`).
+fun _is_name_chain(Node* n) flag {
+  fit n.kind {
+    .Identifier(_) -> { ret true; }
+    .Expression(e) -> {
+      ret (equals(e.op, ".") || equals(e.op, "[]")) && e.has_left &&
+      _is_name_chain(e.left);
+    }
+    _ -> { ret false; }
+  }
+}
+
+// True for a `str` value, not a pointer to one or an array of them.
+fun _dtype_is_str_value(DataType dt) flag {
+  ret equals(dt.type_str, "str") && !dtype_is_pointer(dt) && !dt.is_array;
+}
+
 fun dtype_is_pointer(DataType dt) flag {
   if dt.pointer_depth > 0 {
     ret true;
@@ -7380,55 +7407,47 @@ impl Codegen {
             _ -> {}
           }
         }
-        // `str == str` and `str != str` compare contents through
-        // `__fun_str_eq`, which treats a null `str` as unequal to any
-        // string. A comparison with `nil` or `0` stays a pointer check.
-        if equals(e.op, "==") || equals(e.op, "!=") {
-          flag lhs_is_null = false;
-          flag rhs_is_null = false;
-          flag lhs_is_str_lit = false;
-          flag rhs_is_str_lit = false;
-          fit e.left.kind {
-            .Nil -> { lhs_is_null = true; }
-            .Number(_) -> { lhs_is_null = true; }
-            .String(_) -> { lhs_is_str_lit = true; }
-            _ -> {}
+        // A comparison between `str` values compares contents: `==` and
+        // `!=` through `__fun_str_eq`, ordering through `__fun_str_cmp`. A
+        // null `str` equals only another null and orders before any string.
+        // A comparison with `nil` or `0` stays a pointer check.
+        flag is_equality = equals(e.op, "==") || equals(e.op, "!=");
+        flag is_ordering = equals(e.op, "<") || equals(e.op, ">") ||
+        equals(e.op, "<=") || equals(e.op, ">=");
+        if (is_equality || is_ordering) && !_is_null_operand(e.left) &&
+          !_is_null_operand(e.right) &&
+          (self._operand_is_str(e.left) || self._operand_is_str(e.right)) {
+          flag sp = !self.suppress_next_expr_parens;
+          self.suppress_next_expr_parens = false;
+          if sp {
+            self.state.write("(");
           }
-          fit e.right.kind {
-            .Nil -> { rhs_is_null = true; }
-            .Number(_) -> { rhs_is_null = true; }
-            .String(_) -> { rhs_is_str_lit = true; }
-            _ -> {}
+          if equals(e.op, "==") {
+            self.state.write("__fun_str_eq(");
+          } elif equals(e.op, "!=") {
+            self.state.write("!__fun_str_eq(");
+          } else {
+            self.state.write("__fun_str_cmp(");
           }
-          flag use_str_eq = !lhs_is_null && !rhs_is_null &&
-            (lhs_is_str_lit || rhs_is_str_lit || self._operand_is_str(e.left) ||
-            self._operand_is_str(e.right));
-          if use_str_eq {
-            flag sp = !self.suppress_next_expr_parens;
-            self.suppress_next_expr_parens = false;
-            if sp {
-              self.state.write("(");
-            }
-            if equals(e.op, "==") {
-              self.state.write("__fun_str_eq(");
-            } else {
-              self.state.write("!__fun_str_eq(");
-            }
-            let lerr2 = self.emit_expr(*e.left);
-            if lerr2.is_some() {
-              ret lerr2;
-            }
-            self.state.write(", ");
-            let rerr2 = self.emit_expr(*e.right);
-            if rerr2.is_some() {
-              ret rerr2;
-            }
+          let lerr2 = self.emit_expr(*e.left);
+          if lerr2.is_some() {
+            ret lerr2;
+          }
+          self.state.write(", ");
+          let rerr2 = self.emit_expr(*e.right);
+          if rerr2.is_some() {
+            ret rerr2;
+          }
+          self.state.write(")");
+          if is_ordering {
+            self.state.write(" ");
+            self.state.write(e.op);
+            self.state.write(" 0");
+          }
+          if sp {
             self.state.write(")");
-            if sp {
-              self.state.write(")");
-            }
-            ret .None;
           }
+          ret .None;
         }
         // Operator overloading: `left op right` on a type with a
         // matching `impl` method (`op_add`, `op_eq`, ...) emits as a
@@ -7657,67 +7676,79 @@ impl Codegen {
   // of them). Only operands whose type can be read without rendering any
   // C are typed, so asking never hoists a temporary.
   _operand_is_str(Node* operand) flag {
-    if !self._types_without_rendering(operand) {
-      ret false;
-    }
-    let dt = self.infer_let_expr_type(operand);
+    let dt = self._dtype_without_rendering(operand);
     if dt.is_none() {
       ret false;
     }
-    let resolved = self.resolve_type_subst(dt.unwrap());
-    ret equals(resolved.type_str, "str") && !dtype_is_pointer(resolved) &&
-      !resolved.flags.is_array;
+    ret _dtype_is_str_value(dt.unwrap());
   }
 
-  // True when typing `n` needs no rendered C: a name, a literal, a field
-  // or index off one, or a call whose callee is one. A call or operator
-  // as a field receiver is rendered to find its type, so it doesn't count.
+  // `n`'s type, resolved through the active generic substitution, read
+  // from declarations alone. A field or index off a call's result takes
+  // the call's declared return type rather than rendering the call.
+  _dtype_without_rendering(Node* n) Option<DataType> {
+    if self._types_without_rendering(n) {
+      let dt = self.infer_let_expr_type(n)?;
+      ret .Some(self.resolve_type_subst(dt));
+    }
+    fit n.kind {
+      .Expression(e) -> {
+        if !e.has_left || !e.has_right {
+          ret .None;
+        }
+        if equals(e.op, ".") {
+          str field = "";
+          fit e.right.kind {
+            .Identifier(name) -> { field = name; }
+            _ -> { ret .None; }
+          }
+          let owner = self._dtype_without_rendering(e.left)?;
+          let owner_name = self.resolve_type_name(owner)?;
+          let info = self.lookup_compound_field(owner_name, field)?;
+          let fdt = info.dtype?;
+          ret .Some(self.resolve_type_subst(fdt));
+        }
+        if equals(e.op, "[]") {
+          let base = self._dtype_without_rendering(e.left)?;
+          if _dtype_is_str_value(base) {
+            DataType c = dtype_new();
+            c.type_str = "chr";
+            ret .Some(c);
+          }
+          if base.is_array && base.array_depth > 0 {
+            DataType elem = base;
+            elem.array_depth = base.array_depth - 1;
+            elem.is_array = elem.array_depth > 0;
+            elem.flags.is_array = elem.is_array;
+            ret .Some(elem);
+          }
+        }
+        ret .None;
+      }
+      _ -> { ret .None; }
+    }
+  }
+
+  // True when typing `n` needs no rendered C: a literal, a chain of names,
+  // fields, and indexes, or a call whose callee is one. A call's own result
+  // is rendered when a field or index is read off it, so that doesn't count.
   _types_without_rendering(Node* n) flag {
     fit n.kind {
-      .Identifier(_) -> { ret true; }
       .String(_) -> { ret true; }
       .Expression(e) -> {
-        if !e.has_left {
-          ret false;
-        }
-        if equals(e.op, "()") {
+        if equals(e.op, "()") && e.has_left {
           fit e.left.kind {
             .Identifier(_) -> { ret true; }
             .Expression(callee) -> {
               ret equals(callee.op, ".") && callee.has_left &&
-                self._types_without_rendering(callee.left);
+              _is_name_chain(callee.left);
             }
             _ -> { ret false; }
           }
         }
-        if equals(e.op, ".") || equals(e.op, "[]") {
-          ret self._types_without_rendering(e.left);
-        }
-        ret false;
+        ret _is_name_chain(n);
       }
-      _ -> { ret false; }
-    }
-  }
-
-  // True when `arg`'s declared type, resolved through the active generic
-  // substitution, is the builtin string type, which the `__fun_key_eq`
-  // and `__fun_key_hash` intrinsics use to pick string-contents over
-  // raw-byte semantics. Only a bare `.Identifier` argument is resolvable;
-  // anything else conservatively answers false.
-  _key_arg_is_str(Node* arg) flag {
-    fit arg.kind {
-      .Identifier(name) -> {
-        let dt_opt = self.lookup_local_dtype(name);
-        if dt_opt.is_none() {
-          ret false;
-        }
-        let resolved = self.resolve_type_subst(dt_opt.unwrap());
-        if resolved.pointer_depth != 0 {
-          ret false;
-        }
-        ret equals(resolved.type_str, "str");
-      }
-      _ -> { ret false; }
+      _ -> { ret _is_name_chain(n); }
     }
   }
 
@@ -8701,11 +8732,11 @@ impl Codegen {
     // real functions, used by `Map<K, V>`/`Set<T>` to compare and hash a
     // key by contents when it's a string and by raw bytes otherwise;
     // without this a `Map<str>` key would hash the pointer itself.
-    // `_key_arg_is_str` resolves through the active generic substitution,
+    // `_operand_is_str` resolves through the active generic substitution,
     // since a bare type param like `K` may concretely be `str` here.
     if equals(callee_name, "__fun_key_eq") && args.len == 2 {
       self.state.write("(");
-      if self._key_arg_is_str(args.get(0)) {
+      if self._operand_is_str(args.get(0)) {
         self.state.write("strcmp((");
         let keq_a_err = self.emit_expr(*args.get(0));
         if keq_a_err.is_some() {
@@ -8750,7 +8781,7 @@ impl Codegen {
       ret .None;
     }
     if equals(callee_name, "__fun_key_hash") && args.len == 1 {
-      if self._key_arg_is_str(args.get(0)) {
+      if self._operand_is_str(args.get(0)) {
         self.state.write("__fun_str_key_hash((");
         let kh_err = self.emit_expr(*args.get(0));
         if kh_err.is_some() {
@@ -18349,7 +18380,11 @@ impl Codegen {
           // when the receiver dispatches to one (the only shape that can
           // diverge from the receiver's own type name); a plain array
           // keeps today's fallback below, since its element type already
-          // *is* `e.left`'s own resolved type name.
+          // *is* `e.left`'s own resolved type name. Indexing a `str`
+          // yields one `chr`.
+          if self._operand_is_str(e.left) {
+            ret .Some("chr");
+          }
           fit e.left.kind {
             .Identifier(_) -> {
               let dispatched = self.resolve_operator_dispatch("[]", e.left);
@@ -20186,6 +20221,7 @@ impl Codegen {
     `#define fprintf(stream, format, message) __fun_fs_report(message)
     `#define abort() __fun_fs_halt()
     `__attribute__((unused)) static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; while (*a && *a == *b) { a++; b++; } return *a == *b; }
+    `__attribute__((unused)) static inline int __fun_str_cmp(const char* a, const char* b) { if (a == b) return 0; if (!a) return -1; if (!b) return 1; while (*a && *a == *b) { a++; b++; } return (int)(unsigned char)*a - (int)(unsigned char)*b; }
     `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
     `
     `
@@ -20220,6 +20256,9 @@ impl Codegen {
     );
     self.state.write(
       "static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }\n"
+    );
+    self.state.write(
+      "static inline int __fun_str_cmp(const char* a, const char* b) { if (a == b) return 0; if (!a) return -1; if (!b) return 1; return strcmp(a, b); }\n"
     );
     // A closure value's fixed runtime shape: `fn`'s own real C signature
     // is `void* (*)(void* env)` at every use site, deliberately
@@ -27508,6 +27547,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <ctype.h>
     `#include <limits.h>
     `static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }
+    `static inline int __fun_str_cmp(const char* a, const char* b) { if (a == b) return 0; if (!a) return -1; if (!b) return 1; return strcmp(a, b); }
     `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
