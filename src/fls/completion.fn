@@ -1526,12 +1526,10 @@ fun _members_from_tokens(Vec<Token>* tokens, str type_name, Vec<Item>* items) {
       j = j + 1;
     }
   }
-  // `.fn`/`.env` on a closure value - same reasoning as `_members_of`'s
-  // own identical check: never a real declared `compound`/`enum` this
-  // token-only scan above could ever find by name.
+  // `.free()` on a closure value - same reasoning as `_members_of`'s
+  // own identical check: nothing declared names it.
   if starts_with(base_type, "closure(") {
-    items.push(_item("fn", .Field, "raw*"));
-    items.push(_item("env", .Field, "raw*"));
+    items.push(_item("free", .Method, "free()"));
   }
 }
 
@@ -3711,16 +3709,10 @@ fun _members_of(
       _ -> {}
     }
   }
-  // `.fn`/`.env` on a closure value - the only two fields it ever has,
-  // but never through a real declared `.Compound` the loop above could
-  // ever match: a closure's `{fn, env}` representation is compiler-
-  // synthesized, with no Fun-level declaration behind it at all. Added
-  // here unconditionally rather than inside the loop, same as `.tag_
-  // value()` is added once per matching enum above, not found by
-  // walking anything.
+  // `.free()` on a closure value, its only member: built in, with no
+  // declaration the loop above could match, same as `.tag_value()`.
   if starts_with(type_name, "closure(") {
-    items.push(_item("fn", .Field, "raw*"));
-    items.push(_item("env", .Field, "raw*"));
+    items.push(_item("free", .Method, "free()"));
   }
   if mangled_owned {
     free(mangled_type_name);

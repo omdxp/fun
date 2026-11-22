@@ -1,13 +1,18 @@
-// Closures: `fun() R { ... }` is an anonymous value, written wherever an
-// expression is expected, that captures every outer local it reads by
-// value at the moment it's created. Its own declared type is `closure()
-// R`, distinct from a plain `fun(...) R` function pointer - a closure's
-// runtime shape is a function pointer plus its own captured environment,
-// wider than a bare function pointer, so the two are never
-// interchangeable.
+// Closures: `fun(num a) R { ... }` is an anonymous value, written wherever
+// an expression is expected, that captures every outer local it reads by
+// value at the moment it's created. Its type is `closure(num) R`. A plain
+// function or `fun(...) R` value fits a closure of the same signature,
+// but a closure never fits a plain `fun(...) R` slot.
 
 use std.io;
-use std.c.mem;
+
+fun twice(num x) num {
+  ret x * 2;
+}
+
+fun apply(closure(num) num f, num x) num {
+  ret f(x);
+}
 
 fun main() {
   num x = 1;
@@ -15,33 +20,18 @@ fun main() {
     println_fmt("snapshot sees x={num}", x);
   };
   x = 99;
-  snapshot(); // prints "x=1" - captured a snapshot, not a live alias
+  snapshot(); // prints "x=1": captured a snapshot, not a live alias
+  snapshot(); // a closure runs as many times as it's called
+  snapshot.free();
 
-  // `let` infers `closure() R` the same way it infers anything else -
-  // writing `closure() R` explicitly is never required. A closure
-  // literal always takes zero call-time parameters; everything it
-  // needs comes from what it captures.
+  // `let` infers `closure(num) num` the same way it infers anything else.
   num base = 10;
-  let add_base = fun() num {
-    ret base + 1;
+  let add_base = fun(num n) num {
+    ret n + base;
   };
-  println_fmt("add_base={num}", add_base());
+  println_fmt("add_base={num}", apply(add_base, 1));
+  add_base.free();
 
-  // A closure can return a value too.
-  closure() num doubled = fun() num {
-    ret x * 2;
-  };
-  println_fmt("doubled={num}", doubled());
-
-  // Calling a closure runs it at most once: its captured environment is
-  // freed the moment it finishes. A closure that's created but never
-  // called or spawned needs its own explicit free - there's nothing
-  // else that would free it.
-  num* counter = malloc(sizeof(num));
-  *counter = 5;
-  closure() void unused = fun() {
-    println_fmt("never runs, counter={num}", *counter);
-  };
-  free(unused.env);
-  free(counter);
+  // A plain function goes where a closure is expected, capturing nothing.
+  println_fmt("twice={num}", apply(twice, 21));
 }

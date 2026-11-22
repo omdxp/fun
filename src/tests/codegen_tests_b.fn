@@ -4266,3 +4266,148 @@ test "for loops walk arrays of tuples and generic compounds, and count over rang
     out_msvc
   );
 }
+
+test "closures take arguments, run any number of times, and stand in for plain functions" {
+  str src = `use std.io;
+  `use std.vec;
+  `
+  `fun twice(num x) num {
+  `  ret x * 2;
+  `}
+  `
+  `fun apply(closure(num) num f, num x) num {
+  `  ret f(x);
+  `}
+  `
+  `fun make_adder(num n) closure(num) num {
+  `  ret fun(num x) num {
+  `    ret x + n;
+  `  };
+  `}
+  `
+  `compound Handler {
+  `  closure(str) num on;
+  `}
+  `
+  `fun main() num {
+  `  num base = 10;
+  `  closure(num, num) num add = fun(num a, num b) num {
+  `    ret a + b + base;
+  `  };
+  `  print(format("{num} {num} ", add(1, 2), add(3, 4)));
+  `  add.free();
+  `  print(format("{num} ", apply(twice, 5)));
+  `  fun(num) num fp = twice;
+  `  print(format("{num} ", apply(fp, 6)));
+  `  let inc = make_adder(100);
+  `  print(format("{num} ", apply(inc, 1)));
+  `  inc.free();
+  `  Handler h = Handler{on = fun(str s) num {
+  `    ret len(s) + base;
+  `  }};
+  `  print(format("{num} ", h.on("abc")));
+  `  h.on.free();
+  `  closure(num) num g = twice;
+  `  print(format("{num} ", g(21)));
+  `  g = fun(num x) num {
+  `    ret x - base;
+  `  };
+  `  print(format("{num} ", g(21)));
+  `  g.free();
+  `  Vec<(num, str)> v;
+  `  v.init(2);
+  `  v.push((7, "x"));
+  `  v.push((8, "y"));
+  `  for i, (n, s) :: v {
+  `    print(format("{num}:{num}{str} ", i, n, s));
+  `  }
+  `  v.free();
+  `  println("");
+  `  ret 0;
+  `}`;
+  str want = "13 17 10 12 101 13 42 11 0:7x 1:8y";
+  str out = run_source(src, "closures_with_args", "closures with arguments");
+  assert contains(out, want), format("expected every closure call to run, got: {str}", out);
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "closures_with_args_msvc",
+    "closures with arguments (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}
+
+test "closures go through type aliases, generic functions, and generic methods" {
+  str src = `use std.io;
+  `
+  `als Step = closure(num) num;
+  `als Cmp<T> = closure(T, T) num;
+  `
+  `compound Box<T> {
+  `  T v;
+  `}
+  `
+  `impl Box<T> {
+  `  map(closure(T) T f) Box<T> {
+  `    ret Box<T>{v = f(self.v)};
+  `  }
+  `  map_to<U>(closure(T) U f) Box<U> {
+  `    ret Box<U>{v = f(self.v)};
+  `  }
+  `}
+  `
+  `fun convert<T, U>(closure(T) U f, T x) U {
+  `  ret f(x);
+  `}
+  `
+  `fun pick(Cmp<num> c, num a, num b) num {
+  `  ret c(a, b) < 0 ? a : b;
+  `}
+  `
+  `fun twice(num x) num {
+  `  ret x * 2;
+  `}
+  `
+  `fun label(num x) str {
+  `  ret x > 0 ? "pos" : "neg";
+  `}
+  `
+  `fun main() num {
+  `  num k = 3;
+  `  Step add = fun(num x) num {
+  `    ret x + k;
+  `  };
+  `  Cmp<num> c = fun(num a, num b) num {
+  `    ret a - b;
+  `  };
+  `  Box<num> b = Box<num>{v = 5};
+  `  let s = b.map_to(fun(num x) str {
+  `    ret x > 2 ? "big" : "small";
+  `  });
+  `  str t = convert(fun(num x) str {
+  `    ret x > 5 ? "a" : "b";
+  `  }, 9);
+  `  print(format("{num} {num} {num} {str} ", pick(c, 9, 2), b.map(add).v, b.map(twice).v, s.v));
+  `  println(format("{str} {str}", convert(label, 3), t));
+  `  add.free();
+  `  c.free();
+  `  ret 0;
+  `}`;
+  str want = "2 8 10 big pos a";
+  str out = run_source(src, "closures_generic", "closures through aliases and generics");
+  assert contains(out, want), format(
+    "expected every generic closure use to run, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "closures_generic_msvc",
+    "closures through aliases and generics (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}

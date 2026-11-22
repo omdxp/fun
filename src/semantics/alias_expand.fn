@@ -95,13 +95,12 @@ fun _replace_dtype(DataType* dt, DataType replacement) {
   Vec<DataType*> old_generic_args = dt.generic_args;
   Vec<DataType*> old_tuple_members = dt.tuple_members;
   Vec<Node*> old_array_brackets = dt.array_brackets;
-  flag old_has_fn_sig = dt.has_fn_sig;
-  FnTypeSig* old_fn_sig = dt.fn_sig;
+  FnTypeSig* old_fn_sig = dtype_signature(dt);
   *dt = replacement;
   _free_dtype_ptr_vec(&old_generic_args);
   _free_dtype_ptr_vec(&old_tuple_members);
   _free_node_ptr_vec(&old_array_brackets);
-  if old_has_fn_sig && old_fn_sig != nil {
+  if old_fn_sig != nil {
     _free_dtype_ptr_vec(&old_fn_sig.params);
     dtype_free(old_fn_sig.rtype);
     free(old_fn_sig);
@@ -145,7 +144,8 @@ fun _substitute_params(
     _substitute_params(dt.tuple_members.get(ti), params, args, spread_flags);
     ti = ti + 1;
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
+  FnTypeSig* sig = dtype_signature(dt);
+  if sig != nil {
     // A `fun((Args)) Ret`-shaped alias body whose single parameter
     // position is bound BARE (no generic wrapping, no pointer) to a
     // param DECLARED as a spread param (`(Args)` in the alias's own
@@ -160,8 +160,8 @@ fun _substitute_params(
     Vec<DataType*> new_fn_params;
     new_fn_params.init(0);
     num p = 0;
-    for p < dt.fn_sig.params.len {
-      let prm = dt.fn_sig.params.get(p);
+    for p < sig.params.len {
+      let prm = sig.params.get(p);
       flag spread = false;
       if prm.generic_args.len == 0 && !prm.is_tuple && prm.pointer_depth == 0 {
         num j2 = 0;
@@ -187,9 +187,9 @@ fun _substitute_params(
       }
       p = p + 1;
     }
-    dt.fn_sig.params.free();
-    dt.fn_sig.params = new_fn_params;
-    _substitute_params(dt.fn_sig.rtype, params, args, spread_flags);
+    sig.params.free();
+    sig.params = new_fn_params;
+    _substitute_params(sig.rtype, params, args, spread_flags);
   }
   num j = 0;
   for j < params.len && j < args.len {
@@ -231,13 +231,14 @@ fun _expand_dtype(
     _expand_dtype(dt.tuple_members.get(ti), resolved, saw_unresolved);
     ti = ti + 1;
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
+  FnTypeSig* sig = dtype_signature(dt);
+  if sig != nil {
     num p = 0;
-    for p < dt.fn_sig.params.len {
-      _expand_dtype(dt.fn_sig.params.get(p), resolved, saw_unresolved);
+    for p < sig.params.len {
+      _expand_dtype(sig.params.get(p), resolved, saw_unresolved);
       p = p + 1;
     }
-    _expand_dtype(dt.fn_sig.rtype, resolved, saw_unresolved);
+    _expand_dtype(sig.rtype, resolved, saw_unresolved);
   }
 
   let found = resolved.at(dt.type_str);

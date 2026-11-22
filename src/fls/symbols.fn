@@ -119,25 +119,25 @@ pub fun render_type(DataType* dt) str {
     _append_array_suffix(&b, dt);
     ret b.build();
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
-    // A function-typed value (`fun(A, B) R`): `_base_type_name` would
-    // otherwise just show the parser's own fixed placeholder text
-    // (`"fun(...)"`, never rewritten to reflect the real params/return -
-    // codegen reads `fn_sig` directly instead of ever needing to), so
-    // this renders the real signature the same way a reader wrote it.
-    b.append("fun(");
+  flag is_closure = dt.has_closure_sig && dt.closure_sig != nil;
+  if is_closure || (dt.has_fn_sig && dt.fn_sig != nil) {
+    // A function or closure type (`fun(A, B) R`, `closure(A) R`):
+    // `_base_type_name` would only show the parser's placeholder text
+    // (`"fun(...)"`), so this renders the signature as a reader wrote it.
+    FnTypeSig* sig = is_closure ? dt.closure_sig : dt.fn_sig;
+    b.append(is_closure ? "closure(" : "fun(");
     num p = 0;
-    for p < dt.fn_sig.params.len {
+    for p < sig.params.len {
       if p > 0 {
         b.append(", ");
       }
-      str param_text = render_type(dt.fn_sig.params.get(p));
+      str param_text = render_type(sig.params.get(p));
       b.append(param_text);
       free(param_text);
       p = p + 1;
     }
     b.append(") ");
-    str rtype_text = render_type(dt.fn_sig.rtype);
+    str rtype_text = render_type(sig.rtype);
     b.append(rtype_text);
     free(rtype_text);
     num fstars = dt.pointer_depth;
@@ -148,30 +148,6 @@ pub fun render_type(DataType* dt) str {
     for fs < fstars {
       b.append("*");
       fs = fs + 1;
-    }
-    _append_array_suffix(&b, dt);
-    ret b.build();
-  }
-  if dt.has_closure_sig && dt.closure_sig != nil {
-    // A capturing closure's own declared type (`closure() R`) - same
-    // reasoning as the `has_fn_sig` case just above: the parser's own
-    // fixed placeholder text (`"closure(...)"`) never reflects the
-    // real return type, since codegen reads `closure_sig` directly
-    // instead. Always zero parameters (see `parse_closure_type_
-    // datatype`'s own comment), so there is no parameter list to
-    // render.
-    b.append("closure() ");
-    str crtype_text = render_type(dt.closure_sig.rtype);
-    b.append(crtype_text);
-    free(crtype_text);
-    num cstars = dt.pointer_depth;
-    if dt.flags.is_pointer && cstars == 0 {
-      cstars = 1;
-    }
-    num cs = 0;
-    for cs < cstars {
-      b.append("*");
-      cs = cs + 1;
     }
     _append_array_suffix(&b, dt);
     ret b.build();
@@ -1117,15 +1093,10 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
       ret "";
     }
   }
-  // `closure() R name`: `j` has already walked back past `R` itself
-  // (whichever shape just below would otherwise return it bare) - a
-  // closure's own declared type is `closure() R` as a whole, not just
-  // its return type, so this is checked first, before either ordinary
-  // branch returns just `R` alone and silently drops the fact that
-  // `name` is a closure at all. Matches `render_type`'s own identical
-  // `"closure(...)"` + real-rtype rendering, so every fls codepath
-  // that resolves a closure-typed local's own declared type agrees on
-  // the same `starts_with(..., "closure(")` convention.
+  // `closure(T) R name`: `j` has already walked back past `R` itself,
+  // and a closure's declared type is the whole `closure(T) R`, not just
+  // its return type, so it is checked before `R` alone is returned.
+  // Matches `render_type`'s rendering of the same type.
   str maybe_rtype = "";
   if tokens.get(j).type == .Identifier {
     maybe_rtype = token_word(tokens.get(j));
@@ -1136,11 +1107,12 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
   if !equals(maybe_rtype, "") {
     num cj = _prev_real_index(tokens, j);
     if cj >= 0 && token_is_symbol(tokens.get(cj), ')') {
-      num oj = _prev_real_index(tokens, cj);
-      if oj >= 0 && token_is_operator(tokens.get(oj), "(") {
+      num oj = -1;
+      str params = _paren_group_text(tokens, cj, &oj);
+      if oj >= 0 {
         num kj = _prev_real_index(tokens, oj);
         if kj >= 0 && token_is_keyword(tokens.get(kj), "closure") {
-          ret format("closure() {str}", maybe_rtype);
+          ret format("closure({str}) {str}", params, maybe_rtype);
         }
       }
     }
@@ -1150,6 +1122,52 @@ pub fun _base_type_before(Vec<Token>* tokens, num i) str {
     ret maybe_rtype;
   }
   ret "";
+}
+
+// The text inside the `(...)` group whose `)` is at `close`, as a
+// reader would write it (`num, Vec<str>`), with `*open_out` set to the
+// index of its `(`, or -1 when the group is unbalanced.
+pub fun _paren_group_text(Vec<Token>* tokens, num close, num* open_out) str {
+  *open_out = -1;
+  num depth = 1;
+  num j = _prev_real_index(tokens, close);
+  for j >= 0 {
+    if token_is_symbol(tokens.get(j), ')') {
+      depth = depth + 1;
+    } elif token_is_operator(tokens.get(j), "(") {
+      depth = depth - 1;
+      if depth == 0 {
+        break;
+      }
+    }
+    j = _prev_real_index(tokens, j);
+  }
+  if j < 0 {
+    ret "";
+  }
+  *open_out = j;
+  StringBuilder b = string_builder_init(16);
+  num k = _next_real_index(tokens, j);
+  str prev = "";
+  for k >= 0 && k < close {
+    Token t = tokens.get(k);
+    str w = token_word(t);
+    if token_is_symbol(t, ')') {
+      w = ")";
+    }
+    if equals(w, ",") {
+      b.append(", ");
+    } else {
+      // A word after a closing `)` is a return type: `fun(num) num`.
+      if equals(prev, ")") && (t.type == .Identifier || t.type == .Keyword) {
+        b.append(" ");
+      }
+      b.append(w);
+    }
+    prev = w;
+    k = _next_real_index(tokens, k);
+  }
+  ret b.build();
 }
 
 // Whether `w` names one of this language's own builtin scalar types
@@ -6036,13 +6054,10 @@ fun _infer_type_primary(
           out_end_idx
         );
       }
-      // A closure literal (`fun() R { ... }`), the same shape `let c
-      // = fun() num {...};` writes - rendered as `"closure() R"`,
-      // matching `render_type`'s own closure-type rendering exactly,
-      // so a let-inferred closure's own hover/completion/goto reads
-      // identically to an explicitly `closure() R`-typed one. Always
-      // zero parameters (see `parse_closure_literal`'s own comment),
-      // so there is no parameter list to read past `()` here either.
+      // A closure literal (`fun(num a) R { ... }`), as `let c = fun(num
+      // a) num {...};` writes it - rendered as `"closure(num) num"`,
+      // matching `render_type`'s closure rendering, so a let-inferred
+      // closure reads the same as an explicitly typed one.
       if equals(token_word(val_tok), "fun") {
         num fun_idx = index_of_token(tokens, val_tok);
         let lparen_opt = token_after(tokens, fun_idx + 1);
@@ -6050,11 +6065,49 @@ fun _infer_type_primary(
           ret "";
         }
         num lparen_idx = index_of_token(tokens, lparen_opt.unwrap());
-        let rparen_opt = token_after(tokens, lparen_idx + 1);
-        if rparen_opt.is_none() || !token_is_symbol(rparen_opt.unwrap(), ')') {
+        // Each parameter's type is every word of it but the last, its name.
+        StringBuilder ptb = string_builder_init(16);
+        Vec<str> seg;
+        seg.init(4);
+        defer seg.free();
+        num pdepth = 0;
+        num pk = _next_real_index(tokens, lparen_idx);
+        flag first_param = true;
+        for pk >= 0 && pk < tokens.len {
+          Token pt = tokens.get(pk);
+          flag closes = token_is_symbol(pt, ')');
+          if (closes && pdepth == 0) || (pdepth == 0 && token_is_operator(pt, ",")) {
+            if seg.len > 1 {
+              if !first_param {
+                ptb.append(", ");
+              }
+              first_param = false;
+              num si = 0;
+              for si < seg.len - 1 {
+                ptb.append(seg.get(si));
+                si = si + 1;
+              }
+            }
+            seg.clear();
+            if closes {
+              break;
+            }
+          } else {
+            if token_is_operator(pt, "(") || token_is_operator(pt, "<") {
+              pdepth = pdepth + 1;
+            } elif closes || token_is_operator(pt, ">") {
+              pdepth = pdepth - 1;
+            }
+            seg.push(closes ? ")" : token_word(pt));
+          }
+          pk = _next_real_index(tokens, pk);
+        }
+        str params_text = ptb.build();
+        defer free(params_text);
+        if pk < 0 || pk >= tokens.len {
           ret "";
         }
-        num rparen_idx = index_of_token(tokens, rparen_opt.unwrap());
+        num rparen_idx = pk;
         num k = rparen_idx + 1;
         StringBuilder rtb = string_builder_init(16);
         flag any_rt = false;
@@ -6077,7 +6130,7 @@ fun _infer_type_primary(
           free(rtype_text);
           rtype_text = substr("void", 0, 4);
         }
-        str closure_type_text = format("closure() {str}", rtype_text);
+        str closure_type_text = format("closure({str}) {str}", params_text, rtype_text);
         free(rtype_text);
         ret closure_type_text;
       }
@@ -7621,6 +7674,9 @@ fun _lookup_in_body(
         }
         ret .Some(_declaration(name, .Local, b.build(), body.pos));
       }
+      if v.has_val {
+        ret _lookup_in_closures(tokens, v.val, name, program, file, line);
+      }
     }
     .Body(block) -> {
       num i = 0;
@@ -7695,7 +7751,72 @@ fun _lookup_in_body(
       if nested.is_some() {
         ret _lookup_in_body(tokens, nested.unwrap(), name, program, file, line);
       }
+      ret _lookup_in_closures(tokens, body, name, program, file, line);
     }
+  }
+  ret .None;
+}
+
+// `name` as a parameter of, or a local inside, a closure literal within
+// the expression `expr` whose body spans `line`.
+fun _lookup_in_closures(
+  Vec<Token>* tokens,
+  Node* expr,
+  str name,
+  Vec<Node>* program,
+  str file,
+  num line
+) Option<Declaration> {
+  if expr == nil {
+    ret .None;
+  }
+  fit expr.kind {
+    .ClosureLiteral(f) -> {
+      if !f.has_body || !expr.has_pos || line < expr.pos.line || line > _last_line(f.body) {
+        ret .None;
+      }
+      for a : f.args {
+        fit a.kind {
+          .Variable(av) -> {
+            if equals(av.name, name) {
+              str ptype = render_type(av.var_type);
+              str detail = format("{str} {str}", ptype, name);
+              free(ptype);
+              ret .Some(_declaration(name, .Local, detail, a.pos));
+            }
+          }
+          _ -> {}
+        }
+      }
+      ret _lookup_in_body(tokens, f.body, name, program, file, line);
+    }
+    .Expression(e) -> {
+      if e.has_left {
+        let found = _lookup_in_closures(tokens, e.left, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+      }
+      if e.has_right {
+        ret _lookup_in_closures(tokens, e.right, name, program, file, line);
+      }
+    }
+    .ExpressionParenthesis(inner) -> {
+      ret _lookup_in_closures(tokens, inner, name, program, file, line);
+    }
+    .Unary(u) -> { ret _lookup_in_closures(tokens, u.operand, name, program, file, line); }
+    .StatementReturn(value) -> {
+      ret _lookup_in_closures(tokens, value, name, program, file, line);
+    }
+    .CompoundInit(ci) -> {
+      for fld : ci.fields {
+        let found = _lookup_in_closures(tokens, fld.value, name, program, file, line);
+        if found.is_some() {
+          ret found;
+        }
+      }
+    }
+    _ -> {}
   }
   ret .None;
 }
@@ -7953,6 +8074,9 @@ pub fun for_iter_bindings(
   }
   defer members.free();
   if fi.item_is_destructure {
+    if fi.has_index_name {
+      out.push(ForBinding{name = fi.index_name, type_text = "num"});
+    }
     num fdi = 0;
     for fdi < fi.item_destructure_names.len {
       str member_type = "";

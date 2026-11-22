@@ -139,13 +139,10 @@ expected `done()` has actually landed.
 
 ## `std.thread_spawn`: a closure on a real OS thread
 
-`spawn(closure() void c)` runs a closure on a new, real OS thread,
-fire-and-forget - unlike `fork`, which runs an `async fun` on this
-project's own M:N virtual-thread scheduler, `spawn` is a thin
-pass-through straight to `std.thread`'s own `Thread.start`: a
-[closure](language.md#closures)'s `{fn, env}` runtime shape already
-matches what a thread's own entry point and argument expect, with no
-translation at all.
+`spawn(closure() void c)` runs a [closure](language.md#closures) on a
+new, real OS thread, fire-and-forget - unlike `fork`, which runs an
+`async fun` on this project's own M:N virtual-thread scheduler, `spawn`
+starts a `std.thread` `Thread` of its own.
 
 ```fun
 use std.io;
@@ -169,6 +166,7 @@ that needs its own real OS thread; reach for `fork` for many cheap,
 short-lived concurrent tasks, which the scheduler multiplexes far more
 cheaply than one real thread each.
 
-A closure runs at most once: `spawn` (or a direct call) frees its own
-captured environment the moment it finishes. `RuntimeAsyncTask.join`/
-`detach` manage the underlying `Thread` the usual way; see `std.thread`.
+The thread owns the closure from then on: it frees what the closure
+captured once it has run, so don't call or `free()` it again after
+spawning it. `RuntimeAsyncTask.join`/`detach` manage the underlying
+`Thread` the usual way; see `std.thread`.

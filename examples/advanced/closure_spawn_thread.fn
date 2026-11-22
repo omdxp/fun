@@ -1,9 +1,8 @@
 // `spawn(closure() void c)` (std.thread_spawn) runs a closure on a new,
-// real OS thread, fire-and-forget - a thin pass-through to std.thread's
-// own Thread.start, since a closure's `{fn, env}` runtime shape already
-// matches what a thread's entry point and argument expect. Reach for
-// `spawn` for genuinely parallel, CPU-bound work; reach for `fork` for
-// many cheap, short-lived concurrent tasks instead.
+// real OS thread, fire-and-forget. The thread owns the closure and frees
+// what it captured once it has run. Reach for `spawn` for genuinely
+// parallel, CPU-bound work; reach for `fork` for many cheap, short-lived
+// concurrent tasks instead.
 
 use std.io;
 use std.thread_spawn;
