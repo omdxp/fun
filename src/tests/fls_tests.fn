@@ -5815,7 +5815,8 @@ test "the two-variable for loop's own bindings are key/value for a Map, not inde
   Document doc;
   doc.uri = "file:///formapkv.fn";
   doc.path = "formapkv.fn";
-  doc.text = `fun use_it(Map<str, num> scores) {
+  doc.text = `use std.map;
+  `fun use_it(Map<str, num> scores) {
   `  for name, score :: scores {
   `    _ = name;
   `    _ = score;
@@ -5823,9 +5824,9 @@ test "the two-variable for loop's own bindings are key/value for a Map, not inde
   `}`;
   doc.version = 1;
 
-  assert contains(hover(&reads, doc, 1, 6), "str name"), "expected the Map's own key type, not a bare num index";
-  assert contains(hover(&reads, doc, 1, 13), "num score"), "expected the Map's own value type, not its key type again";
-  str offered = completion(&reads, doc, 2, 8, false);
+  assert contains(hover(&reads, doc, 2, 6), "str name"), "expected the Map's own key type, not a bare num index";
+  assert contains(hover(&reads, doc, 2, 13), "num score"), "expected the Map's own value type, not its key type again";
+  str offered = completion(&reads, doc, 3, 8, false);
   assert contains(offered, `"label":"name"`), "expected the key binding offered in scope completion";
   assert contains(offered, `"label":"score"`), "expected the value binding offered in scope completion";
 }
@@ -11339,4 +11340,84 @@ test "fls shows an array of function values and gives signature help through one
   `}`;
   doc.version = 2;
   assert contains(signature_help(&reads, doc, 6, 14), `"label":"handlers(Frame*) void"`), "expected the same mid-edit";
+}
+
+test "hover and completion type every for loop's bound names" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///forall.fn";
+  doc.path = "forall.fn";
+  doc.text = `use std.step_range;
+  `use std.range;
+  `use std.map;
+  `compound Pt { num x; }
+  `compound Day { num n; }
+  `impl Day as Steppable<Day> {
+  `  succ() Day { ret Day{n = self.n + 1}; }
+  `  reached(Day end) flag { ret self.n >= end.n; }
+  `}
+  `compound Countdown { num n; }
+  `impl Countdown as Iterator<num> {
+  `  next() Option<num> { ret .None; }
+  `}
+  `fun use_it(Vec<Pt> pts, Map<str, Pt> named) {
+  `  Pt[3] arr = [Pt{x = 1}, Pt{x = 2}, Pt{x = 3}];
+  `  num[2][3] grid;
+  `  (num, str)[2] pairs = [(1, "a"), (2, "b")];
+  `  Countdown cd = Countdown{n = 3};
+  `  Day a = Day{n = 1};
+  `  for p : arr { _ = p; }
+  `  for i, q :: arr { _ = i + q.x; }
+  `  for row : grid { _ = row; }
+  `  for r : 0..3 { _ = r; }
+  `  for c, s :: 0..3 { _ = c + s; }
+  `  for d : StepRange<Day>{start = a, end = a} { _ = d; }
+  `  for n : cd { _ = n; }
+  `  for (k, v) : named { _ = v.x; }
+  `  for (num_part, str_part) : pairs { _ = num_part; }
+  `  for e : pts { _ = e; }
+  `}`;
+  doc.version = 1;
+
+  assert contains(hover(&reads, doc, 19, 6), "Pt p"), "expected an array's item typed by its element";
+  assert contains(hover(&reads, doc, 20, 9), "Pt q"), "expected an indexed array's item typed by its element";
+  assert contains(hover(&reads, doc, 20, 6), "num i"), "expected an indexed array's index to be a count";
+  assert contains(hover(&reads, doc, 21, 6), "num[3] row"), "expected a 2D array's item to be one row";
+  assert contains(hover(&reads, doc, 22, 6), "num r"), "expected a range's item typed";
+  assert contains(hover(&reads, doc, 23, 9), "num s"), "expected a counted range's item typed";
+  assert contains(hover(&reads, doc, 24, 6), "Day d"), "expected a StepRange literal's item typed";
+  assert contains(hover(&reads, doc, 25, 6), "num n"), "expected a user Iterator's item typed by its next()";
+  assert contains(hover(&reads, doc, 26, 10), "Pt v"), "expected a Map destructure's value typed";
+  assert contains(hover(&reads, doc, 27, 18), "str str_part"), "expected a tuple array destructure typed";
+  assert contains(hover(&reads, doc, 28, 6), "Pt e"), "expected a Vec's item typed";
+
+  str members = completion(&reads, doc, 20, 30, false);
+  assert contains(members, `"label":"x"`), "expected member completion through an array item";
+  str scope = completion(&reads, doc, 24, 50, false);
+  assert contains(scope, `"label":"d"`), "expected the StepRange item offered in scope";
+
+  str hints = inlay_hints(&reads, doc, 0, 40);
+  assert contains(hints, `"label":": Pt"`), "expected an array item's type as an inlay hint";
+  assert contains(hints, `"label":": Day"`), "expected a StepRange item's type as an inlay hint";
+  assert contains(hints, `"label":": num[3]"`), "expected a 2D array row's type as an inlay hint";
+}
+
+test "a condition loop gets no inlay hint, and a typed for loop's names each get one" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///forhint.fn";
+  doc.path = "forhint.fn";
+  doc.text = `use std.map;
+  `fun use_it(Map<str, num> m) {
+  `  num n = 0;
+  `  for n < 3 { n = n + 1; }
+  `  for k, v :: m { _ = k; _ = v; }
+  `}`;
+  doc.version = 1;
+  str hints = inlay_hints(&reads, doc, 0, 10);
+  assert contains(hints, `{"line":4,"character":7},"label":": str"`), "expected the key's type after it";
+  assert contains(hints, `{"line":4,"character":10},"label":": num"`), "expected the value's type after it";
+  assert !contains(hints, `"line":3`), "expected nothing on the condition loop";
 }

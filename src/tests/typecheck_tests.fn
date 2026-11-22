@@ -773,15 +773,13 @@ test "a generic function's type param that appears nowhere at all is rejected, n
   // every source, never one this file's own narrower inference
   // merely fails to resolve a concrete value for.
   accepts(
-    `use std.vec;
-    `fun first<T>(Vec<T> items) T {
-    `  ret items.get(0);
+    `compound Box<T> { T v; }
+    `fun first<T>(Box<T> b) T {
+    `  ret b.v;
     `}
     `fun main() {
-    `  Vec<num> nums;
-    `  nums.init(1);
-    `  nums.push(5);
-    `  num n = first(nums);
+    `  Box<num> b = Box<num>{v = 5};
+    `  num n = first(b);
     `}`,
     "expected a type param nested inside an argument's own type to still be accepted, not flagged as unreachable"
   );
@@ -4820,4 +4818,50 @@ test "comparisons need comparable values, and a for loop needs something to walk
   `fun main() { P a = P{x = 1}; P b = P{x = 1}; P* pa = &a; flag r = a == b && pa == &a && pa != nil; }`,
     "expected an op_eq compound and pointer comparisons accepted"
   );
+}
+
+test "a name that is no type is reported wherever a type is written" {
+  assert contains(
+    check(`fun main() { Nope q; }`),
+    "no type called 'Nope' is declared in this program (missing an import?)"
+  ), "expected a local's unknown type reported";
+  assert contains(
+    check(`compound Box<T> { T v; }
+  `fun main() { Box<Nope> b; }`),
+    "no type called 'Nope'"
+  ), "expected an unknown generic argument reported";
+  assert contains(check(`fun main() { (num, Nope) t; }`), "no type called 'Nope'"), "expected an unknown tuple member reported";
+  assert contains(check(`fun take(Nope n) {}`), "no type called 'Nope'"), "expected an unknown parameter type reported";
+  assert contains(check(`fun give() Nope {}`), "no type called 'Nope'"), "expected an unknown return type reported";
+  assert contains(
+    check(`compound Holder { Nope n; }`),
+    "the type 'Nope' of field 'n' in 'Holder' is not declared"
+  ), "expected an unknown field type reported by field";
+  accepts(
+    `compound Box<T> { T v; }
+  `fun first<T>(Box<T> b) T { T copy = b.v; ret copy; }
+  `fun main() { Box<num> b = Box<num>{v = 1}; let n = first(b); }`,
+    "expected type parameters and declared generics accepted"
+  );
+}
+
+test "a for loop over an array types its item by the element" {
+  assert contains(
+    check(`fun main() { num[3] a = [1, 2, 3]; for x : a { flag f = x; } }`),
+    "cannot initialize 'f' of type flag with num"
+  ), "expected the item typed by the element";
+  assert contains(
+    check(`fun main() { num[2][2] g = [[1, 2], [3, 4]]; for row : g { flag f = row; } }`),
+    "with num[]"
+  ), "expected a 2D array's item to be a row";
+  assert contains(
+    check(`fun main() { (num, str)[2] t = [(1, "a"), (2, "b")]; for i, p :: t { flag f = i; } }`),
+    "with num"
+  ), "expected an array's index to count even over pairs";
+  assert contains(
+    check(
+    `fun main() { (num, str)[2] t = [(1, "a"), (2, "b")]; for (n, s) : t { flag f = s; } }`
+    ),
+    "with str"
+  ), "expected an array of tuples destructured";
 }

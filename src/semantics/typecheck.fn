@@ -1776,21 +1776,75 @@ impl Checker {
     if equals(bare, "") || keyword_is_datatype(bare) {
       ret;
     }
-    if self.compounds.at(bare).is_some() || self.shapes.has(bare) ||
-      self.plain_enums.has(bare) {
+    if self._names_a_type(bare) {
       ret;
-    }
-    if self.enum_names.has(bare) {
-      ret;
-    }
-    // A parameter of the declaration being walked stands for a type an
-    // instantiation supplies, which is a type all the same.
-    for tp : self.active_type_params {
-      if equals(tp, bare) {
-        ret;
-      }
     }
     self.fail(format("sizeof names no type called '{str}'", bare), node);
+  }
+
+  // True when `name` is a builtin type, a declared compound, union, enum,
+  // or shape, or a type parameter of the declaration being walked, which
+  // stands for a type an instantiation supplies.
+  _names_a_type(str name) flag {
+    if keyword_is_datatype(name) {
+      ret true;
+    }
+    str canonical = self.canonical_type_name(name);
+    if self.compounds.at(canonical).is_some() || self.shapes.has(canonical) ||
+      self.plain_enums.has(canonical) || self.enum_names.has(canonical) {
+      ret true;
+    }
+    for tp : self.active_type_params {
+      if equals(tp, name) {
+        ret true;
+      }
+    }
+    // A specialized instantiation is named in its mangled form
+    // (`Vec__str`), which is a type when its base is.
+    num mangled_at = index_of_str(name, "__");
+    if mangled_at > 0 {
+      ret self._names_a_type(substr(name, 0, mangled_at));
+    }
+    ret false;
+  }
+
+  // The first name in `t`, its generic arguments and tuple members
+  // included, that names no type at all. Empty when every name does.
+  _missing_type_name(CheckedType t) str {
+    if t.has_fn_sig || t.has_closure_sig {
+      ret "";
+    }
+    if !equals(t.name, "") && !self._names_a_type(t.name) {
+      ret t.name;
+    }
+    for arg : t.generic_args {
+      str missing = self._missing_type_name(arg);
+      if !equals(missing, "") {
+        ret missing;
+      }
+    }
+    for member : t.tuple_members {
+      str missing = self._missing_type_name(member);
+      if !equals(missing, "") {
+        ret missing;
+      }
+    }
+    ret "";
+  }
+
+  // Reports a name in `t` that names no type, rather than leave the C
+  // compiler to reject it.
+  check_type_exists(CheckedType t, Node* at) {
+    str missing = self._missing_type_name(t);
+    if !equals(missing, "") {
+      self.fail(
+        format(
+        "no type called '{str}' is declared in this program (missing an import?)",
+        missing
+        ),
+        at
+      );
+    }
   }
 
   // Rejects a comparison between two different enums. A plain enum reads
@@ -3062,11 +3116,7 @@ impl Checker {
         }
         self.check_array_index_bounds(node, base, read_index_node);
       }
-      CheckedType held = base;
-      held.array_depth = base.array_depth - 1;
-      held.is_array = held.array_depth > 0;
-      held.array_sizes = _array_sizes_shifted(base.array_sizes);
-      ret held;
+      ret _array_element(base);
     }
     if equals(e.op, ",") {
       ret checked_unknown();
@@ -4931,6 +4981,15 @@ fun _has_mixed_array_dimensions(DataType* dt) flag {
   ret dt.is_array && dt.array_brackets.len > 0 && dt.array_brackets.len != dt.array_depth;
 }
 
+// The type of one element of the array type `base`.
+fun _array_element(CheckedType base) CheckedType {
+  CheckedType held = base;
+  held.array_depth = base.array_depth - 1;
+  held.is_array = held.array_depth > 0;
+  held.array_sizes = _array_sizes_shifted(base.array_sizes);
+  ret held;
+}
+
 // `sizes` with its own outermost dimension dropped, as a fresh,
 // independently-owned `Vec` - never `sizes`'s own backing buffer,
 // which an ordinary struct copy (`CheckedType held = base;`) still
@@ -5739,7 +5798,13 @@ impl Checker {
         // directly implement `Iterator<Elem>`? Covers `Range`, `Vec`,
         // `Map` (yielding `(K, V)` pairs), `Set`, and any user-defined
         // type with its own `impl X as Iterator<T>`.
-        let elem_opt = self.shape_arg_of(iterable_type, "Iterator");
+        Option<CheckedType> elem_opt = self.shape_arg_of(iterable_type, "Iterator");
+        // A raw array has no shape impls; it walks its own elements.
+        flag walks_array = elem_opt.is_none() && iterable_type.is_array &&
+          iterable_type.pointer_depth == 0;
+        if walks_array {
+          elem_opt = .Some(_array_element(iterable_type));
+        }
         if it.item_is_destructure {
           // `for (a, b) : pairs`: the loop item is a tuple, destructured
           // into its own names the same way a declared-type `let`
@@ -5791,7 +5856,7 @@ impl Checker {
           }
         } elif it.has_index_name && elem_opt.is_some() {
           let elem = elem_opt.unwrap();
-          if elem.is_tuple && elem.tuple_members.len == 2 {
+          if elem.is_tuple && elem.tuple_members.len == 2 && !walks_array {
             // A two-name form over anything else yielding a pair (a
             // future Map migrated onto Iterator<(K, V)>, or a user type
             // doing the same) destructures it the same way, rather than
@@ -6161,6 +6226,12 @@ impl Checker {
         if self.failed {
           ret;
         }
+      }
+    }
+    if !equals(v.var_type.type_str, LET_INFER_TYPE) {
+      self.check_type_exists(declared, stmt);
+      if self.failed {
+        ret;
       }
     }
     self.check_instantiation(declared, stmt);
@@ -6857,6 +6928,73 @@ impl Checker {
     self.check_function_with_self(f, nodes, "");
   }
 
+  // Reports a compound field whose type names no type, once every type in
+  // the program is known.
+  check_field_types(Vec<Node>* nodes) {
+    num i = 0;
+    for i < nodes.len {
+      Node* n = &nodes.data[i];
+      i = i + 1;
+      fit n.kind {
+        .Compound(c) -> {
+          Vec<str> previous_params = self.active_type_params;
+          Vec<str> params;
+          params.init(c.type_params.len);
+          for tp : c.type_params {
+            params.push(tp);
+          }
+          self.active_type_params = params;
+          for field : c.fields {
+            CheckedType ft = checked_from_dtype(field.dtype);
+            str missing = self._missing_type_name(ft);
+            _free_checked_type_contents(&ft);
+            if !equals(missing, "") {
+              self.fail(
+                format(
+                "the type '{str}' of field '{str}' in '{str}' is not declared in this program (missing an import?)",
+                missing,
+                field.name,
+                c.name
+                ),
+                n
+              );
+              break;
+            }
+          }
+          self.active_type_params.free();
+          self.active_type_params = previous_params;
+          if self.failed {
+            ret;
+          }
+        }
+        _ -> {}
+      }
+    }
+  }
+
+  // Reports a parameter or return type that names no type. Run while the
+  // declaration's own type parameters are active.
+  check_signature_types(FunctionNode f) {
+    for a : f.args {
+      fit a.kind {
+        .Variable(v) -> {
+          CheckedType at = checked_from_dtype(v.var_type);
+          self.check_type_exists(at, a);
+          _free_checked_type_contents(&at);
+          if self.failed {
+            ret;
+          }
+        }
+        _ -> {}
+      }
+    }
+    if f.has_rtype {
+      CheckedType rt = checked_from_dtype(f.rtype);
+      self.check_type_exists(rt, f.body);
+      _free_checked_type_contents(&rt);
+    }
+  }
+
   check_function_with_self(FunctionNode f, Vec<Node>* nodes, str self_type) {
     if !f.has_body {
       ret;
@@ -6988,7 +7126,10 @@ impl Checker {
         &self.impl_type_params
       );
     }
-    self.check_statement(f.body, &env);
+    self.check_signature_types(f);
+    if !self.failed {
+      self.check_statement(f.body, &env);
+    }
     // The rtype just built above (owned outright, not an alias of
     // `previous`) is done being checked against now - freed before
     // it's overwritten, or every typed function body leaks its own
@@ -7301,6 +7442,10 @@ pub fun typecheck_program_with_aliases(
   }
 
   _check_c_names(&checker, nodes);
+  if checker.failed {
+    ret .Err(checker.error);
+  }
+  checker.check_field_types(nodes);
   if checker.failed {
     ret .Err(checker.error);
   }

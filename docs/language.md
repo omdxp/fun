@@ -1440,6 +1440,16 @@ direct index, since it's a primitive language construct with no shape
 impls of its own. Every other iterable dispatches structurally through
 `Iterator<T>`.
 
+Every name a loop binds has a type: an array's item is its element
+type (a 2D array's item is one row), and an iterable's item is what its
+`next()` yields. In the two-name form over an array, the first name is
+always the index, even when the elements are pairs, and
+`for (a, b) : pairs` destructures an array of tuples the same way it
+does any tuple-yielding iterable. A range counts too:
+`for i, x :: 5..8` binds `i` to 0, 1, 2 and `x` to 5, 6, 7. Walking a
+single value (`for c : name` over a `str`, or over a number) is a
+compile error.
+
 #### Iterator\<T\>
 
 ```fun

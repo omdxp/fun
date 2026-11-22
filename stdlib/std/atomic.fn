@@ -87,16 +87,18 @@ impl Atomic<num> {
 // Runs a one-time initialization safely when several threads may ask for
 // it at once. A zero-initialized `Once` (a global, say) is ready to use.
 //
+// ```
 // Once _loaded;
 // Settings _settings;
 //
 // fun settings() Settings {
-// if _loaded.begin() {
-// _settings = load_settings();
-// _loaded.finish();
+//   if _loaded.begin() {
+//     _settings = load_settings();
+//     _loaded.finish();
+//   }
+//   ret _settings;
 // }
-// ret _settings;
-// }
+// ```
 pub compound Once {
   Atomic<flag> claimed;
   Atomic<flag> done;

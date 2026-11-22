@@ -13041,6 +13041,43 @@ impl Codegen {
     }
   }
 
+  // Binds each name in `names` to the matching field of the `for` loop's
+  // hidden `__fun_for_item` tuple, recording each one's type.
+  emit_for_item_destructure(Vec<str> names, DataType elem_dt) {
+    num fdi = 0;
+    for name : names {
+      self.state.write_indent();
+      flag wrote_fd_type = false;
+      if fdi < elem_dt.tuple_members.len {
+        if self.msvc_mode {
+          let fdwt = self.write_type(*elem_dt.tuple_members.get(fdi));
+          wrote_fd_type = fdwt.is_some();
+        }
+      }
+      if !wrote_fd_type {
+        self.state.write("__auto_type");
+      }
+      self.state.write(" ");
+      self.state.write(name);
+      self.state.write(" = __fun_for_item");
+      self.state.write(format("._{num};\n", fdi));
+      if fdi < elem_dt.tuple_members.len {
+        let fd_elem = *elem_dt.tuple_members.get(fdi);
+        let fd_resolved = self.resolve_type_name(fd_elem);
+        if fd_resolved.is_some() {
+          let fd_subst = self.resolve_type_subst(fd_elem);
+          self.record_local_typed(
+            name,
+            fd_resolved.unwrap(),
+            dtype_is_pointer(fd_subst),
+            fd_subst
+          );
+        }
+      }
+      fdi = fdi + 1;
+    }
+  }
+
   // Binds a yielded `next()` payload to the `for` loop's own item/index
   // names, per whichever of the three forms `fi` declares: an explicit
   // destructure (`for (a, b) : x`) splits a hidden temp's tuple fields
@@ -13100,38 +13137,7 @@ impl Codegen {
         names.push(fi.index_name);
         names.push(fi.item_name);
       }
-      num fdi = 0;
-      for name : names {
-        self.state.write_indent();
-        flag wrote_fd_type = false;
-        if fdi < elem_dt.tuple_members.len {
-          if self.msvc_mode {
-            let fdwt = self.write_type(*elem_dt.tuple_members.get(fdi));
-            wrote_fd_type = fdwt.is_some();
-          }
-        }
-        if !wrote_fd_type {
-          self.state.write("__auto_type");
-        }
-        self.state.write(" ");
-        self.state.write(name);
-        self.state.write(" = __fun_for_item");
-        self.state.write(format("._{num};\n", fdi));
-        if fdi < elem_dt.tuple_members.len {
-          let fd_elem = *elem_dt.tuple_members.get(fdi);
-          let fd_resolved = self.resolve_type_name(fd_elem);
-          if fd_resolved.is_some() {
-            let fd_subst = self.resolve_type_subst(fd_elem);
-            self.record_local_typed(
-              name,
-              fd_resolved.unwrap(),
-              dtype_is_pointer(fd_subst),
-              fd_subst
-            );
-          }
-        }
-        fdi = fdi + 1;
-      }
+      self.emit_for_item_destructure(names, elem_dt);
       ret .None;
     }
     if fi.has_index_name {
@@ -13223,38 +13229,7 @@ impl Codegen {
         names.push(fi.index_name);
         names.push(fi.item_name);
       }
-      num fdi = 0;
-      for name : names {
-        self.state.write_indent();
-        flag wrote_fd_type = false;
-        if fdi < elem_dt.tuple_members.len {
-          if self.msvc_mode {
-            let fdwt = self.write_type(*elem_dt.tuple_members.get(fdi));
-            wrote_fd_type = fdwt.is_some();
-          }
-        }
-        if !wrote_fd_type {
-          self.state.write("__auto_type");
-        }
-        self.state.write(" ");
-        self.state.write(name);
-        self.state.write(" = __fun_for_item");
-        self.state.write(format("._{num};\n", fdi));
-        if fdi < elem_dt.tuple_members.len {
-          let fd_elem = *elem_dt.tuple_members.get(fdi);
-          let fd_resolved = self.resolve_type_name(fd_elem);
-          if fd_resolved.is_some() {
-            let fd_subst = self.resolve_type_subst(fd_elem);
-            self.record_local_typed(
-              name,
-              fd_resolved.unwrap(),
-              dtype_is_pointer(fd_subst),
-              fd_subst
-            );
-          }
-        }
-        fdi = fdi + 1;
-      }
+      self.emit_for_item_destructure(names, elem_dt);
       ret .None;
     }
     if fi.has_index_name {
@@ -14044,7 +14019,16 @@ impl Codegen {
       let arr_dt = arr_dtype.unwrap();
       if arr_dt.is_array && arr_dt.pointer_depth == 0 {
         is_raw_array = true;
-        elem_c_type = map_type_to_c(arr_dt.type_str);
+        // The element's own spelling, so a tuple or generic instantiation
+        // element gets its real C type rather than a bare name.
+        DataType one_elem = arr_dt;
+        one_elem.is_array = false;
+        one_elem.flags.is_array = false;
+        one_elem.array_depth = 0;
+        elem_c_type = self.write_type_text(one_elem);
+        if equals(elem_c_type, "") {
+          elem_c_type = map_type_to_c(arr_dt.type_str);
+        }
         raw_arr_dt = .Some(arr_dt);
         if arr_dt.array_depth > 0 {
           raw_array_depth = arr_dt.array_depth;
@@ -14296,10 +14280,18 @@ impl Codegen {
       self.state.write("];\n");
     }
     if fi.item_is_destructure {
-      // A raw array's element type isn't resolved to a real tuple shape
-      // here, so a destructuring for-loop over one is unsupported;
-      // typecheck's own resolution is independent and unaffected.
-      ret .Some(.UnsupportedNode);
+      // Each name takes its field of the element tuple.
+      if raw_arr_dt.is_none() {
+        ret .Some(.UnsupportedNode);
+      }
+      DataType tuple_elem = raw_arr_dt.unwrap();
+      tuple_elem.array_depth = element_depth;
+      tuple_elem.is_array = element_depth > 0;
+      tuple_elem.flags.is_array = tuple_elem.is_array;
+      if !tuple_elem.is_tuple || element_depth > 0 {
+        ret .Some(.UnsupportedNode);
+      }
+      self.emit_for_item_destructure(fi.item_destructure_names, tuple_elem);
     }
     // A raw array's item is recorded at the decremented depth, so a
     // nested `for x : item` can resolve `is_raw_array` structurally for

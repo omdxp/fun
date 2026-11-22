@@ -1,8 +1,9 @@
 // Inlay hints.
 //
-// Two kinds, both inline "ghost" text a reader never typed: a
-// `let`-inferred local's own resolved type right after its name, and
-// a call argument's own parameter name right before it.
+// Two kinds, both inline "ghost" text a reader never typed: an
+// inferred name's own resolved type right after it (a `let` or `const`
+// local, or a `for` loop's names), and a call argument's own parameter
+// name right before it.
 //
 // `let`'s declared type never actually resolves in the parsed tree:
 // the parser leaves it as a permanent __let_infer__ sentinel, and
@@ -23,6 +24,51 @@ use std.vec;
 use std.option;
 use std.ctype;
 use std.c.mem;
+
+// Appends one type hint, `: type`, right after the name ending at byte
+// column `end_col` (0-indexed) of 0-indexed `line0`.
+fun _append_type_hint(
+  StringBuilder* b,
+  flag* any,
+  Document doc,
+  num line0,
+  num end_col,
+  str type_text
+) {
+  if *any {
+    b.append(",");
+  }
+  *any = true;
+  b.append(`{"position":{"line":`);
+  b.append_num(line0);
+  b.append(`,"character":`);
+  b.append_num(byte_col_to_utf16_char(doc.text, line0, end_col));
+  b.append(`},"label":`);
+  str label = format(": {str}", type_text);
+  json_quote_into(b, label);
+  free(label);
+  b.append(`,"kind":1,"paddingLeft":true}`);
+}
+
+// The type a hover on `name` at `src_line` shows, or "" when it has none.
+fun _declared_type_of(
+  Vec<Token>* tokens,
+  Vec<Node>* nodes,
+  str name,
+  str path,
+  num src_line
+) str {
+  let decl = lookup(tokens, nodes, name, path, src_line);
+  if decl.is_none() {
+    ret "";
+  }
+  str detail = decl.unwrap().detail;
+  num name_len = len(name);
+  if len(detail) <= name_len || !ends_with(detail, name) {
+    ret "";
+  }
+  ret substr(detail, 0, len(detail) - name_len - 1);
+}
 
 // Every `let name = value;`/`const name = value;` local with no
 // explicit type within lines `start_line` through `end_line` (both
@@ -47,13 +93,57 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
   for i < tokens.len {
     Token t = tokens.get(i);
     i = i + 1;
-    if t.type != .Keyword ||
+    if t.type != .Keyword {
+      continue;
+    }
+    flag is_for = equals(token_word(t), "for");
+    if !is_for &&
       !(equals(token_word(t), "let") || equals(token_word(t), "const")) {
       continue;
     }
     num src_line = t.pos.line;
     num line0 = src_line - 1;
     if line0 < start_line || line0 > end_line {
+      continue;
+    }
+    // A `for` loop's names (`for x :`, `for i, x ::`, `for (a, b) :`)
+    // are inferred from what it walks. A condition loop has no `:`
+    // before its body, so it binds nothing.
+    if is_for {
+      Vec<Token> names;
+      names.init(2);
+      defer names.free();
+      flag binds = false;
+      num k = i;
+      for k < tokens.len {
+        Token ft = tokens.get(k);
+        k = k + 1;
+        if token_is_operator(ft, ":") || token_is_operator(ft, "::") {
+          binds = true;
+          break;
+        }
+        if token_is_symbol(ft, '{') || token_is_symbol(ft, ';') {
+          break;
+        }
+        if ft.type == .Identifier {
+          names.push(ft);
+        }
+      }
+      if !binds {
+        continue;
+      }
+      for nt : names {
+        str ftype = _declared_type_of(
+          &tokens,
+          &program.nodes,
+          token_word(nt),
+          doc.path,
+          src_line
+        );
+        if !equals(ftype, "") {
+          _append_type_hint(&b, &any, doc, line0, nt.pos.end_col - 1, ftype);
+        }
+      }
       continue;
     }
     let name_tok_opt = token_after(&tokens, i);
@@ -80,30 +170,16 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
           .Identifier -> {}
           _ -> { continue; }
         }
-        str dname = token_word(nt);
-        let decl = lookup(&tokens, &program.nodes, dname, doc.path, src_line);
-        if decl.is_none() {
-          continue;
+        str dtype = _declared_type_of(
+          &tokens,
+          &program.nodes,
+          token_word(nt),
+          doc.path,
+          src_line
+        );
+        if !equals(dtype, "") {
+          _append_type_hint(&b, &any, doc, line0, nt.pos.end_col - 1, dtype);
         }
-        str detail = decl.unwrap().detail;
-        num dname_len = len(dname);
-        if len(detail) <= dname_len || !ends_with(detail, dname) {
-          continue;
-        }
-        str dtype = substr(detail, 0, len(detail) - dname_len - 1);
-        if any {
-          b.append(",");
-        }
-        any = true;
-        b.append(`{"position":{"line":`);
-        b.append_num(line0);
-        b.append(`,"character":`);
-        b.append_num(byte_col_to_utf16_char(doc.text, line0, nt.pos.end_col - 1));
-        b.append(`},"label":`);
-        str dlabel = format(": {str}", dtype);
-        json_quote_into(&b, dlabel);
-        free(dlabel);
-        b.append(`,"kind":1,"paddingLeft":true}`);
       }
       continue;
     }
@@ -122,19 +198,7 @@ pub fun inlay_hints(AnalysisCache* cache, Document doc, num start_line, num end_
     if equals(type_part, "") {
       continue;
     }
-    if any {
-      b.append(",");
-    }
-    any = true;
-    b.append(`{"position":{"line":`);
-    b.append_num(line0);
-    b.append(`,"character":`);
-    b.append_num(byte_col_to_utf16_char(doc.text, line0, name_tok.pos.end_col - 1));
-    b.append(`},"label":`);
-    str let_label = format(": {str}", type_part);
-    json_quote_into(&b, let_label);
-    free(let_label);
-    b.append(`,"kind":1,"paddingLeft":true}`);
+    _append_type_hint(&b, &any, doc, line0, name_tok.pos.end_col - 1, type_part);
   }
 
   // Parameter-name hints at call sites: `f(name: value)`. Every

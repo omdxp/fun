@@ -4209,3 +4209,60 @@ test "str ordering compares contents, and an indexed str is a chr" {
     out_msvc
   );
 }
+
+test "for loops walk arrays of tuples and generic compounds, and count over ranges" {
+  str src = `use std.io;
+  `use std.range;
+  `use std.step_range;
+  `
+  `compound Box<T> {
+  `  T v;
+  `}
+  `
+  `compound Day {
+  `  num n;
+  `}
+  `
+  `impl Day as Steppable<Day> {
+  `  succ() Day {
+  `    ret Day{n = self.n + 1};
+  `  }
+  `  reached(Day end) flag {
+  `    ret self.n >= end.n;
+  `  }
+  `}
+  `
+  `fun main() num {
+  `  Box<num>[2] boxes = [Box<num>{v = 4}, Box<num>{v = 5}];
+  `  for b : boxes {
+  `    print(format("{num} ", b.v));
+  `  }
+  `  (num, str)[2] pairs = [(1, "a"), (2, "b")];
+  `  for i, p :: pairs {
+  `    print(format("{num}{num}{str} ", i, p.0, p.1));
+  `  }
+  `  for (n, s) : pairs {
+  `    print(format("{num}{str} ", n, s));
+  `  }
+  `  for c, x :: 5..7 {
+  `    print(format("{num}:{num} ", c, x));
+  `  }
+  `  for k, d :: StepRange<Day>{start = Day{n = 1}, end = Day{n = 3}} {
+  `    print(format("{num}/{num} ", k, d.n));
+  `  }
+  `  println("");
+  `  ret 0;
+  `}`;
+  str want = "4 5 01a 12b 1a 2b 0:5 1:6 0/1 1/2";
+  str out = run_source(src, "for_loop_forms", "for loop forms");
+  assert contains(out, want), format("expected every loop form to run, got: {str}", out);
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "for_loop_forms_msvc",
+    "for loop forms (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}
