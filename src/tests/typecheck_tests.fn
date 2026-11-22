@@ -4782,3 +4782,42 @@ test "array element stores, literal fields, and function values are checked agai
     "expected matching function values accepted"
   );
 }
+
+test "comparisons need comparable values, and a for loop needs something to walk" {
+  assert contains(
+    check(
+    `compound P { num x; }
+    `fun main() { P a = P{x = 1}; P b = P{x = 1}; flag r = a == b; }`
+    ),
+    "'==' cannot compare 'P' values; give 'P' an `op_eq` method, or compare their fields"
+  ), "expected a compound comparison rejected";
+  assert contains(
+    check(
+    `compound P { num x; }
+    `fun main() { P a = P{x = 1}; flag r = a < a; }`
+    ),
+    "give 'P' an `op_lt` method"
+  ), "expected the method named for the operator used";
+  assert contains(
+    check(`fun main() { (num, num) a = (1, 2); flag r = a != (1, 2); }`),
+    "'!=' cannot compare tuples"
+  ), "expected a tuple comparison rejected";
+  assert contains(
+    check(`fun main() { num[2] a = [1, 2]; num[2] b = [1, 2]; flag r = a == b; }`),
+    "'==' cannot compare arrays"
+  ), "expected an array comparison rejected";
+  assert contains(
+    check(`fun main() { str s = "ab"; for c : s {} }`),
+    "'for' can't walk a value of type 'str'"
+  ), "expected a for loop over a str rejected";
+  assert contains(
+    check(`fun main() { for c : 5 {} }`),
+    "'for' can't walk a value of type 'num'"
+  ), "expected a for loop over a number rejected";
+  accepts(
+    `compound P { num x; }
+  `impl P { op_eq(P o) flag { ret self.x == o.x; } }
+  `fun main() { P a = P{x = 1}; P b = P{x = 1}; P* pa = &a; flag r = a == b && pa == &a && pa != nil; }`,
+    "expected an op_eq compound and pointer comparisons accepted"
+  );
+}
