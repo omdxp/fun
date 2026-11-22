@@ -1368,10 +1368,20 @@ fun main() {
 ```
 
 The standard library takes closures where it takes a callback:
-`Vec<T>` has `sort_by(closure(T, T) num cmp)`, `each(closure(T) void f)`,
-`filter(closure(T) flag keep) Vec<T>`, and `map<U>(closure(T) U f)
-Vec<U>`, and an `HttpRouter` route handler is a `closure(HttpServerRequest*)
-HttpServerResponse`, which the router frees in its own `free()`.
+
+- `Vec<T>`: `sort_by(closure(T, T) num cmp)` (a stable merge sort),
+  `each(closure(T) void f)`, `filter(closure(T) flag keep) Vec<T>`,
+  `map<U>(closure(T) U f) Vec<U>`, `any`/`all(closure(T) flag pred)
+  flag`, `find(closure(T) flag pred) Option<T>`, and `reduce<A>(A init,
+  closure(A, T) A f) A`.
+- `Map<K, V>`: `each(closure(K, V) void f)` and `filter(closure(K, V)
+  flag keep) Map<K, V>`; `Set<T>` has the same two over its members.
+- `Option<T>`: `filter(closure(T) flag keep) Option<T>` and
+  `map<U>(closure(T) U f) Option<U>`.
+- An `HttpRouter` route handler is a `closure(HttpServerRequest*)
+  HttpServerResponse`, which the router frees in its own `free()`.
+
+None of these free the closure they're given.
 
 A plain function, or a `fun(...) R` value, fits wherever a closure of
 the same signature is expected; it runs with nothing captured. The

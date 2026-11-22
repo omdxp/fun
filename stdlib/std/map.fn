@@ -397,6 +397,34 @@ impl Map<K, V> {
     ret out;
   }
 
+  // Calls `f` with each live key and value, in iteration order.
+  pub each(closure(K, V) void f) {
+    num i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        f(self.key_slots[i], self.load_value_idx(i));
+      }
+      i = i + 1;
+    }
+  }
+
+  // Returns a new map holding the entries `keep` returns true for.
+  pub filter(closure(K, V) flag keep) Map<K, V> {
+    Map<K, V> out;
+    out.init(self.len + 1);
+    num i = 0;
+    for i < self.cap {
+      if self.used[i] != false && self.tomb[i] == false {
+        V value = self.load_value_idx(i);
+        if keep(self.key_slots[i], value) {
+          out.put(self.key_slots[i], value);
+        }
+      }
+      i = i + 1;
+    }
+    ret out;
+  }
+
   // Returns every live value as a vector, in iteration order.
   pub values() Vec<V> {
     Vec<V> out;
@@ -711,4 +739,28 @@ test "string maps render as text" {
   free(both);
   n.free();
   s.free();
+}
+
+test "each and filter take closures over keys and values" {
+  Map<str, num> m = _sample_map();
+  num* total = malloc(sizeof(num));
+  *total = 0;
+  let add = fun(str k, num v) {
+    _ = k;
+    *total = *total + v;
+  };
+  m.each(add);
+  assert *total == 6, "expected each to visit every entry";
+  add.free();
+  free(total);
+  num floor = 2;
+  let keep = fun(str k, num v) flag {
+    _ = k;
+    ret v >= floor;
+  };
+  Map<str, num> kept = m.filter(keep);
+  assert kept.len() == 2 && kept.has("b") && !kept.has("a"), "expected only the entries at or above the captured floor";
+  keep.free();
+  kept.free();
+  m.free();
 }

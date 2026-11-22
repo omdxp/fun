@@ -25,10 +25,25 @@ fun main() num {
   Option<str> s2 = Option.None;
   printf("s2=%s\n", s2.unwrap_or("fallback"));
 
-  // `filter` keeps the value only when the predicate holds.
+  // `filter` keeps the value only when the predicate holds for it, and
+  // `map` transforms a value that's there.
   Option<num> ten = some(10);
-  Option<num> kept = ten.filter(true);
-  Option<num> dropped = ten.filter(false);
+  let even = fun(num v) flag {
+    ret v % 2 == 0;
+  };
+  let big = fun(num v) flag {
+    ret v > 100;
+  };
+  Option<num> kept = ten.filter(even);
+  Option<num> dropped = ten.filter(big);
   printf("kept=%lld dropped=%lld\n", kept.unwrap_or(-1), dropped.unwrap_or(-1));
+  let half = fun(num v) num {
+    ret v / 2;
+  };
+  Option<num> halved = ten.map(half);
+  printf("halved=%lld\n", halved.unwrap_or(-1));
+  even.free();
+  big.free();
+  half.free();
   ret 0;
 }

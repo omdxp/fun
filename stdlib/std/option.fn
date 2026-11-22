@@ -93,17 +93,24 @@ impl Option<T> {
     ret .None;
   }
 
-  // Keep the value when `keep` is true; otherwise None. `keep` is a plain
-  // boolean you compute at the call site (Fun has no first-class predicate
-  // functions), e.g. `opt.filter(n > 0)`.
-  pub filter(flag keep) Option<T> {
+  // Keeps the value when `keep` returns true for it; otherwise `None`.
+  pub filter(closure(T) flag keep) Option<T> {
     fit *self {
       .Some(v) -> {
-        if keep {
+        if keep(v) {
           ret .Some(v);
         }
         ret .None;
       }
+      .None -> { ret .None; }
+    }
+    ret .None;
+  }
+
+  // `Some(f(v))` for a `Some(v)`, `None` for `None`.
+  pub map<U>(closure(T) U f) Option<U> {
+    fit *self {
+      .Some(v) -> { ret .Some(f(v)); }
       .None -> { ret .None; }
     }
     ret .None;
@@ -128,4 +135,22 @@ pub fun ok_or<T>(Option<T> o, ErrorKind kind, str message) Result<T, Error> {
   }
   T zero;
   ret err_kind(kind, message, zero);
+}
+
+test "filter and map take closures" {
+  Option<num> ten = some(10);
+  num limit = 5;
+  let over = fun(num v) flag {
+    ret v > limit;
+  };
+  assert ten.filter(over).is_some(), "expected 10 to pass the captured limit";
+  Option<num> none = .None;
+  assert none.filter(over).is_none(), "expected None to stay None";
+  over.free();
+  let twice = fun(num v) num {
+    ret v * 2;
+  };
+  assert ten.map(twice).unwrap_or(0) == 20, "expected map to apply to Some";
+  assert none.map(twice).is_none(), "expected map to leave None alone";
+  twice.free();
 }

@@ -359,22 +359,97 @@ impl Vec<T> {
     ret out;
   }
 
-  // Sorts elements in place with a stable insertion sort, for any element type.
-  pub sort_by(Comparator<T> cmp) {
-    num i = 1;
+  // True when `pred` holds for at least one element.
+  pub any(closure(T) flag pred) flag {
+    num i = 0;
     for i < self.len {
-      T key = self.data[i];
-      num j = i - 1;
-      for j >= 0 {
-        if cmp(self.data[j], key) <= 0 {
-          break;
-        }
-        self.data[j + 1] = self.data[j];
-        j = j - 1;
+      if pred(self.data[i]) {
+        ret true;
       }
-      self.data[j + 1] = key;
       i = i + 1;
     }
+    ret false;
+  }
+
+  // True when `pred` holds for every element, and for an empty vector.
+  pub all(closure(T) flag pred) flag {
+    num i = 0;
+    for i < self.len {
+      if !pred(self.data[i]) {
+        ret false;
+      }
+      i = i + 1;
+    }
+    ret true;
+  }
+
+  // The first element `pred` holds for, or `None`.
+  pub find(closure(T) flag pred) Option<T> {
+    num i = 0;
+    for i < self.len {
+      if pred(self.data[i]) {
+        ret .Some(self.data[i]);
+      }
+      i = i + 1;
+    }
+    ret .None;
+  }
+
+  // Folds the elements into one value, starting from `init` and combining
+  // each element in order with `f(acc, element)`.
+  pub reduce<A>(A init, closure(A, T) A f) A {
+    A acc = init;
+    num i = 0;
+    for i < self.len {
+      acc = f(acc, self.data[i]);
+      i = i + 1;
+    }
+    ret acc;
+  }
+
+  // Sorts elements in place with a stable merge sort: equal elements keep
+  // their order. Takes O(n log n) comparisons and a scratch buffer of `len`
+  // elements.
+  pub sort_by(Comparator<T> cmp) {
+    if self.len < 2 {
+      ret;
+    }
+    T* scratch = malloc(self.len * sizeof(T));
+    if scratch == nil {
+      ret;
+    }
+    T* src = self.data;
+    T* dst = scratch;
+    num width = 1;
+    for width < self.len {
+      num lo = 0;
+      for lo < self.len {
+        num mid = lo + width < self.len ? lo + width : self.len;
+        num hi = lo + 2 * width < self.len ? lo + 2 * width : self.len;
+        num l = lo;
+        num r = mid;
+        num k = lo;
+        for k < hi {
+          if l < mid && (r >= hi || cmp(src[l], src[r]) <= 0) {
+            dst[k] = src[l];
+            l = l + 1;
+          } else {
+            dst[k] = src[r];
+            r = r + 1;
+          }
+          k = k + 1;
+        }
+        lo = hi;
+      }
+      T* swap = src;
+      src = dst;
+      dst = swap;
+      width = width * 2;
+    }
+    if src != self.data {
+      memcpy(self.data, src, self.len * sizeof(T));
+    }
+    free(scratch);
   }
 }
 
@@ -975,6 +1050,59 @@ test "sort_by, each, filter and map take closures that capture" {
   v.free();
   kept.free();
   labels.free();
+}
+
+test "any, all, find and reduce take closures" {
+  Vec<num> v = _nums(4, 1, 6);
+  num limit = 5;
+  let over = fun(num x) flag {
+    ret x > limit;
+  };
+  let positive = fun(num x) flag {
+    ret x > 0;
+  };
+  assert v.any(over) && !v.all(over) && v.all(positive), "expected any/all to agree with the elements";
+  assert v.find(over).unwrap_or(0) == 6, "expected find to return the first match";
+  over.free();
+  positive.free();
+  let none = fun(num x) flag {
+    ret x > 99;
+  };
+  assert v.find(none).is_none() && !v.any(none), "expected no match to give None";
+  none.free();
+  let sum = fun(num acc, num x) num {
+    ret acc + x;
+  };
+  assert v.reduce(0, sum) == 11, "expected reduce to fold every element";
+  sum.free();
+  v.free();
+}
+
+test "sort_by is stable and sorts more than a handful" {
+  Vec<(num, num)> pairs;
+  pairs.init(4);
+  num i = 0;
+  for i < 40 {
+    pairs.push(((i * 7) % 5, i));
+    i = i + 1;
+  }
+  let by_key = fun((num, num) a, (num, num) b) num {
+    ret a.0 - b.0;
+  };
+  pairs.sort_by(by_key);
+  by_key.free();
+  num j = 1;
+  flag ordered = true;
+  for j < pairs.len() {
+    let prev = pairs.get(j - 1);
+    let cur = pairs.get(j);
+    if prev.0 > cur.0 || (prev.0 == cur.0 && prev.1 > cur.1) {
+      ordered = false;
+    }
+    j = j + 1;
+  }
+  assert ordered, "expected keys in order and equal keys in their original order";
+  pairs.free();
 }
 
 test "a vector iterates, clones independently and clears through its shapes" {

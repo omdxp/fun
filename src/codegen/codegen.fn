@@ -490,6 +490,14 @@ pub compound Codegen {
   // with its own generic arguments intact rather than collapsing to an
   // opaque mangled name.
   Vec<DataType*> type_subst_arg_dtypes;
+  // The substitution in effect around a `for` loop whose iterator is
+  // being inlined under the iterable's own substitution, so the loop's
+  // body is emitted under the enclosing code's instead.
+  flag loop_body_has_outer_subst;
+  Vec<str> loop_outer_param_names;
+  Vec<str> loop_outer_arg_type_strs;
+  Vec<flag> loop_outer_arg_is_pointer;
+  Vec<DataType*> loop_outer_arg_dtypes;
   // Non-empty while `emit_shape_vtable_machinery` is building the
   // machinery for one concrete instantiation of a generic compound's
   // shape impl, naming that instantiation's mangled struct name (e.g.
@@ -808,6 +816,11 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.type_subst_arg_type_strs.init(0);
   g.type_subst_arg_is_pointer.init(0);
   g.type_subst_arg_dtypes.init(0);
+  g.loop_body_has_outer_subst = false;
+  g.loop_outer_param_names.init(0);
+  g.loop_outer_arg_type_strs.init(0);
+  g.loop_outer_arg_is_pointer.init(0);
+  g.loop_outer_arg_dtypes.init(0);
   g.shape_inst_override_name = "";
   g.shape_inst_override_shape_concrete = "";
   g.loop_defer_marks.init(0);
@@ -5833,6 +5846,12 @@ impl Codegen {
                 _ -> { ret .None; }
               }
               let mrecv = self.resolve_operator_operand(call_dot.left)?;
+              // A method with type parameters of its own (`map<U>`) has a
+              // declared return type naming them; resolving it here would
+              // instantiate the template with `U` itself.
+              if self.impl_method_has_own_type_params(mrecv.type_name, call_method) {
+                ret .None;
+              }
               let m_rt = self.lookup_impl_method_rtype(mrecv.type_name, call_method)?;
               let m_type_name = self.resolve_type_name(*m_rt)?;
               if !self.compound_names.contains(m_type_name) {
@@ -9786,7 +9805,7 @@ impl Codegen {
         Vec<DataType> cap_dtypes;
         cap_dtypes.init(4);
         defer cap_dtypes.free();
-        for name : free_names.keys() {
+        for name : free_names {
           // Locals only: a global is shared program-wide state, read and
           // written in place - capturing a snapshot of one made the
           // closure's own writes to it vanish.
@@ -13557,6 +13576,31 @@ impl Codegen {
     ret .None;
   }
 
+  // Emits a `for` loop's body under the substitution of the code around
+  // the loop, not the iterable's, which is active while its iterator is
+  // inlined.
+  _emit_loop_body(Node* body) Option<CodegenErrorKind> {
+    if !self.loop_body_has_outer_subst {
+      ret self.emit_body(*body);
+    }
+    let inner_params = self.type_subst_param_names;
+    let inner_arg_names = self.type_subst_arg_type_strs;
+    let inner_arg_ptrs = self.type_subst_arg_is_pointer;
+    let inner_arg_dtypes = self.type_subst_arg_dtypes;
+    self.type_subst_param_names = self.loop_outer_param_names;
+    self.type_subst_arg_type_strs = self.loop_outer_arg_type_strs;
+    self.type_subst_arg_is_pointer = self.loop_outer_arg_is_pointer;
+    self.type_subst_arg_dtypes = self.loop_outer_arg_dtypes;
+    self.loop_body_has_outer_subst = false;
+    let err = self.emit_body(*body);
+    self.loop_body_has_outer_subst = true;
+    self.type_subst_param_names = inner_params;
+    self.type_subst_arg_type_strs = inner_arg_names;
+    self.type_subst_arg_is_pointer = inner_arg_ptrs;
+    self.type_subst_arg_dtypes = inner_arg_dtypes;
+    ret err;
+  }
+
   // Emits one statement from an already-cloned-and-renamed `next()` body
   // inline, recursing through the handful of control-flow shapes
   // `_next_body_inlinable` confirmed are present, and delegating every
@@ -13604,7 +13648,7 @@ impl Codegen {
           ret bind_err;
         }
         self.loop_defer_marks.push(self.defer_stack.len);
-        let berr = self.emit_body(*fi.body);
+        let berr = self._emit_loop_body(fi.body);
         self.loop_defer_marks.pop();
         if berr.is_some() {
           ret berr;
@@ -13934,6 +13978,16 @@ impl Codegen {
     let prev_arg_names = self.type_subst_arg_type_strs;
     let prev_arg_ptrs = self.type_subst_arg_is_pointer;
     let prev_arg_dtypes = self.type_subst_arg_dtypes;
+    flag prev_has_outer = self.loop_body_has_outer_subst;
+    let prev_outer_params = self.loop_outer_param_names;
+    let prev_outer_arg_names = self.loop_outer_arg_type_strs;
+    let prev_outer_arg_ptrs = self.loop_outer_arg_is_pointer;
+    let prev_outer_arg_dtypes = self.loop_outer_arg_dtypes;
+    self.loop_body_has_outer_subst = true;
+    self.loop_outer_param_names = prev_params;
+    self.loop_outer_arg_type_strs = prev_arg_names;
+    self.loop_outer_arg_is_pointer = prev_arg_ptrs;
+    self.loop_outer_arg_dtypes = prev_arg_dtypes;
     self.type_subst_param_names = tmpl_type_params;
     self.type_subst_arg_type_strs = arg_type_names;
     self.type_subst_arg_dtypes = arg_dtypes;
@@ -13960,6 +14014,11 @@ impl Codegen {
     self.type_subst_arg_type_strs = prev_arg_names;
     self.type_subst_arg_is_pointer = prev_arg_ptrs;
     self.type_subst_arg_dtypes = prev_arg_dtypes;
+    self.loop_body_has_outer_subst = prev_has_outer;
+    self.loop_outer_param_names = prev_outer_params;
+    self.loop_outer_arg_type_strs = prev_outer_arg_names;
+    self.loop_outer_arg_is_pointer = prev_outer_arg_ptrs;
+    self.loop_outer_arg_dtypes = prev_outer_arg_dtypes;
 
     self.state.indent_level = self.state.indent_level - 1;
     if ierr.is_some() {
@@ -14059,7 +14118,7 @@ impl Codegen {
     }
 
     self.loop_defer_marks.push(self.defer_stack.len);
-    let berr = self.emit_body(*fi.body);
+    let berr = self._emit_loop_body(fi.body);
     self.loop_defer_marks.pop();
     if berr.is_some() {
       ret berr;

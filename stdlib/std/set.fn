@@ -69,10 +69,10 @@ impl Set<T> {
   pub union(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + other.map.len + 1);
-    for k : self.map.keys() {
+    for k, _present :: self.map {
       out.add(k);
     }
-    for k : other.map.keys() {
+    for k, _present :: other.map {
       out.add(k);
     }
     ret out;
@@ -82,7 +82,7 @@ impl Set<T> {
   pub intersection(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + 1);
-    for k : self.map.keys() {
+    for k, _present :: self.map {
       if other.has(k) {
         out.add(k);
       }
@@ -94,8 +94,27 @@ impl Set<T> {
   pub difference(Set<T>* other) Set<T> {
     Set<T> out;
     out.map.init(self.map.len + 1);
-    for k : self.map.keys() {
+    for k, _present :: self.map {
       if other.has(k) == false {
+        out.add(k);
+      }
+    }
+    ret out;
+  }
+
+  // Calls `f` with each element, in iteration order.
+  pub each(closure(T) void f) {
+    for k, _present :: self.map {
+      f(k);
+    }
+  }
+
+  // Returns a new set holding the elements `keep` returns true for.
+  pub filter(closure(T) flag keep) Set<T> {
+    Set<T> out;
+    out.map.init(self.map.len + 1);
+    for k, _present :: self.map {
+      if keep(k) {
         out.add(k);
       }
     }
@@ -104,7 +123,7 @@ impl Set<T> {
 
   // True when every element of this set is also in `other`.
   pub is_subset(Set<T>* other) flag {
-    for k : self.map.keys() {
+    for k, _present :: self.map {
       if other.has(k) == false {
         ret false;
       }
@@ -153,7 +172,7 @@ impl Set<num> as Display {
     out[pos] = '{';
     pos = pos + 1;
     num written = 0;
-    for x : self.map.keys() {
+    for x, _present :: self.map {
       if written > 0 {
         out[pos] = ',';
         out[pos + 1] = ' ';
@@ -180,7 +199,7 @@ impl Set<str> as Display {
   // Render as `{"a", "b"}` (elements are unordered).
   pub to_string() str {
     num budget = 3;
-    for x : self.map.keys() {
+    for x, _present :: self.map {
       num m = 0;
       for x[m] != 0 {
         m = m + 1;
@@ -195,7 +214,7 @@ impl Set<str> as Display {
     out[pos] = '{';
     pos = pos + 1;
     num written = 0;
-    for x : self.map.keys() {
+    for x, _present :: self.map {
       if written > 0 {
         out[pos] = ',';
         out[pos + 1] = ' ';
@@ -304,5 +323,29 @@ test "a set of numbers and a set of strings render as text" {
   assert contains(both, "\"a\"") && contains(both, "\"b\"") && contains(both, ", "), "expected both strings quoted and separated";
   free(both);
   n.free();
+  s.free();
+}
+
+test "each and filter take closures over the members" {
+  Set<num> s = set_init(0, 4);
+  s.add(1);
+  s.add(2);
+  s.add(3);
+  num* total = malloc(sizeof(num));
+  *total = 0;
+  let add = fun(num x) {
+    *total = *total + x;
+  };
+  s.each(add);
+  assert *total == 6, "expected each to visit every member";
+  add.free();
+  free(total);
+  let odd = fun(num x) flag {
+    ret x % 2 == 1;
+  };
+  Set<num> odds = s.filter(odd);
+  assert odds.len() == 2 && odds.has(1) && odds.has(3), "expected only the odd members";
+  odd.free();
+  odds.free();
   s.free();
 }
