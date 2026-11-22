@@ -7380,40 +7380,29 @@ impl Codegen {
             _ -> {}
           }
         }
-        // `str == str`/`str != str` when either operand is a string
-        // literal must use value comparison, not C pointer comparison. On
-        // MSVC string literals are not deduplicated across translation
-        // units, so a function returning `""` yields a different address
-        // than a `""` literal in the same condition even though both are
-        // semantically empty strings.
-        //
-        // We use `__fun_str_eq` (emitted in the prelude) rather than raw
-        // `strcmp` so that a null str on either side is treated as
-        // "not equal to any string literal" — matching the old pointer
-        // comparison semantics exactly and avoiding a segfault.
-        //
-        // Trigger only when at least one side is a string literal; that
-        // covers `func() != ""` and `ident == "val"` without firing on
-        // `ident != 0` or `ident != nil` (null-pointer checks where the
-        // right operand is not a string literal at all, so calling
-        // resolve_field_chain is not needed and has no side effects here).
+        // `str == str` and `str != str` compare contents through
+        // `__fun_str_eq`, which treats a null `str` as unequal to any
+        // string. A comparison with `nil` or `0` stays a pointer check.
         if equals(e.op, "==") || equals(e.op, "!=") {
-          flag lhs_is_nil = false;
-          flag rhs_is_nil = false;
+          flag lhs_is_null = false;
+          flag rhs_is_null = false;
           flag lhs_is_str_lit = false;
           flag rhs_is_str_lit = false;
           fit e.left.kind {
-            .Nil -> { lhs_is_nil = true; }
+            .Nil -> { lhs_is_null = true; }
+            .Number(_) -> { lhs_is_null = true; }
             .String(_) -> { lhs_is_str_lit = true; }
             _ -> {}
           }
           fit e.right.kind {
-            .Nil -> { rhs_is_nil = true; }
+            .Nil -> { rhs_is_null = true; }
+            .Number(_) -> { rhs_is_null = true; }
             .String(_) -> { rhs_is_str_lit = true; }
             _ -> {}
           }
-          flag use_str_eq = !lhs_is_nil && !rhs_is_nil &&
-          (lhs_is_str_lit || rhs_is_str_lit);
+          flag use_str_eq = !lhs_is_null && !rhs_is_null &&
+            (lhs_is_str_lit || rhs_is_str_lit || self._operand_is_str(e.left) ||
+            self._operand_is_str(e.right));
           if use_str_eq {
             flag sp = !self.suppress_next_expr_parens;
             self.suppress_next_expr_parens = false;
@@ -7661,6 +7650,52 @@ impl Codegen {
         }
       }
       _ -> { ret 1; }
+    }
+  }
+
+  // True when `operand` is a `str` value (not a pointer to one or an array
+  // of them). Only operands whose type can be read without rendering any
+  // C are typed, so asking never hoists a temporary.
+  _operand_is_str(Node* operand) flag {
+    if !self._types_without_rendering(operand) {
+      ret false;
+    }
+    let dt = self.infer_let_expr_type(operand);
+    if dt.is_none() {
+      ret false;
+    }
+    let resolved = self.resolve_type_subst(dt.unwrap());
+    ret equals(resolved.type_str, "str") && !dtype_is_pointer(resolved) &&
+      !resolved.flags.is_array;
+  }
+
+  // True when typing `n` needs no rendered C: a name, a literal, a field
+  // or index off one, or a call whose callee is one. A call or operator
+  // as a field receiver is rendered to find its type, so it doesn't count.
+  _types_without_rendering(Node* n) flag {
+    fit n.kind {
+      .Identifier(_) -> { ret true; }
+      .String(_) -> { ret true; }
+      .Expression(e) -> {
+        if !e.has_left {
+          ret false;
+        }
+        if equals(e.op, "()") {
+          fit e.left.kind {
+            .Identifier(_) -> { ret true; }
+            .Expression(callee) -> {
+              ret equals(callee.op, ".") && callee.has_left &&
+                self._types_without_rendering(callee.left);
+            }
+            _ -> { ret false; }
+          }
+        }
+        if equals(e.op, ".") || equals(e.op, "[]") {
+          ret self._types_without_rendering(e.left);
+        }
+        ret false;
+      }
+      _ -> { ret false; }
     }
   }
 

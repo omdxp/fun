@@ -4112,3 +4112,50 @@ test "a prefix operator applies to a parenthesized conversion" {
     out
   );
 }
+
+test "str equality compares contents for calls, fields, elements, and generics" {
+  str src = `use std.io;
+  `use std.string;
+  `use std.vec;
+  `compound P {
+  `  str name;
+  `  str[2] tags;
+  `}
+  `fun mk() str {
+  `  StringBuilder sb = string_builder_init(8);
+  `  sb.append("a");
+  `  sb.append("b");
+  `  ret sb.build();
+  `}
+  `fun same<T>(T a, T b) flag {
+  `  ret a == b;
+  `}
+  `fun main() num {
+  `  str s = mk();
+  `  P p = P{name = mk(), tags = [mk(), "z"]};
+  `  P q = P{name = "ab", tags = ["y", "z"]};
+  `  Vec<str> v;
+  `  v.init(0);
+  `  v.push(mk());
+  `  str n = nil;
+  `  println_fmt("{flag} {flag} {flag} {flag}", mk() == s, p.name == q.name, p.tags[0] == s, v.get(0) == s);
+  `  println_fmt("{flag} {flag} {flag} {flag}", same(s, mk()), same(1, 2), s != p.name, n == s);
+  `  ret 0;
+  `}`;
+  str want1 = "true true true true";
+  str want2 = "true false false false";
+  str out = run_source(src, "str_eq_contents", "str equality by contents");
+  assert contains(out, want1) && contains(out, want2), format(
+    "expected every comparison by contents, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "str_eq_contents_msvc",
+    "str equality by contents (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want1) && contains(out_msvc, want2), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}
