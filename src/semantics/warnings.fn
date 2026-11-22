@@ -328,14 +328,12 @@ pub fun collect_dtype_reads(DataType* dt, Set<str>* out) {
   for m : dt.tuple_members {
     collect_dtype_reads(m, out);
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
-    for prm : dt.fn_sig.params {
+  FnTypeSig* sig = dtype_signature(dt);
+  if sig != nil {
+    for prm : sig.params {
       collect_dtype_reads(prm, out);
     }
-    collect_dtype_reads(dt.fn_sig.rtype, out);
-  }
-  if dt.has_closure_sig && dt.closure_sig != nil {
-    collect_dtype_reads(dt.closure_sig.rtype, out);
+    collect_dtype_reads(sig.rtype, out);
   }
 }
 
@@ -1272,9 +1270,7 @@ impl Analysis {
       fit c.kind {
         .ClosureLiteral(f) -> {
           if f.has_body {
-            Set<str> empty_bound = set_init("", 1);
-            defer empty_bound.free();
-            Set<str> free_names = closure_free_identifier_names(f.body, empty_bound);
+            Set<str> free_names = closure_free_identifier_names(f);
             defer free_names.free();
             for name : free_names.keys() {
               let aliased = last_address_of.at(name);

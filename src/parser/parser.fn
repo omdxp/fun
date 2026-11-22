@@ -949,16 +949,14 @@ impl ParseState {
     ret .None;
   }
 
-  // Parses a function-type parameter's datatype: `fun(T1, T2, ...) R`.
-  // Called from `parse_datatype` on a leading `fun` keyword. Fills
-  // `dt.fn_sig` with the recursively-parsed params and return type, and
-  // sets `type_str` to the fixed placeholder `"fun(...)"` since codegen
-  // reads `fn_sig` directly. Gotcha: a bare identifier right after the
-  // closing `)` is always consumed as the return type, so `fun(chr)
-  // pred` with no return type misparses `pred` as one instead of
-  // defaulting to `void`.
-  pub parse_fn_type_datatype(DataType* dt) Option<ParseErrorKind> {
-    self.token_next(); // consume 'fun'
+  // Parses a function type, `fun(T1, T2) R`, or with `is_closure` a
+  // closure type, `closure(T1, T2) R`. Both keep the parameter types and
+  // return type in a `FnTypeSig`; a closure's goes in `closure_sig`, since
+  // a closure also carries what it captured and is never a plain function
+  // pointer. A bare identifier right after the closing `)` is always read
+  // as the return type, so `fun(chr) pred` misparses `pred` as one.
+  pub parse_fn_type_datatype(DataType* dt, flag is_closure) Option<ParseErrorKind> {
+    self.token_next(); // consume 'fun' or 'closure'
     let operr = self.expect_op("(");
     if operr.is_some() {
       ret operr;
@@ -1023,74 +1021,15 @@ impl ParseState {
     *sig_ptr = sig;
 
     dt.kind = .Unknown;
-    dt.fn_sig = sig_ptr;
-    dt.has_fn_sig = true;
-    dt.type_str = "fun(...)";
-    ret .None;
-  }
-
-  // Parses a capturing-closure parameter's datatype: `closure() R`.
-  // Called from `parse_datatype` on a leading `closure` keyword, sibling
-  // to `parse_fn_type_datatype` directly above - same shape, same
-  // return-type sniff, but with no parameter loop at all (a closure
-  // literal never takes call-time parameters, see `parse_closure_literal`'s
-  // own doc comment), and filling the entirely separate `closure_sig`/
-  // `has_closure_sig` pair rather than `fn_sig`/`has_fn_sig`: a capturing
-  // closure's runtime shape (a function pointer plus a heap environment
-  // pointer) is not binary-compatible with a plain bare function
-  // pointer, so the two type tracks must never be interchangeable.
-  pub parse_closure_type_datatype(DataType* dt) Option<ParseErrorKind> {
-    self.token_next(); // consume 'closure'
-    let operr = self.expect_op("(");
-    if operr.is_some() {
-      ret operr;
-    }
-    let cperr = self.expect_sym(')');
-    if cperr.is_some() {
-      ret cperr;
-    }
-
-    DataType* rtype = malloc(sizeof(DataType));
-    *rtype = dtype_new();
-    flag has_rtype_tok = false;
-    fit self.token_peek_next() {
-      .Some(t) -> {
-        if t.type == .Identifier {
-          has_rtype_tok = true;
-        } else {
-          if t.type == .Keyword {
-            fit t.data {
-              .Sval(s) -> {
-                if keyword_is_datatype(s) {
-                  has_rtype_tok = true;
-                }
-              }
-              _ -> {}
-            }
-          }
-        }
-      }
-      .None -> {}
-    }
-    if has_rtype_tok {
-      let rerr = self.parse_datatype(rtype);
-      if rerr.is_some() {
-        ret rerr;
-      }
+    if is_closure {
+      dt.closure_sig = sig_ptr;
+      dt.has_closure_sig = true;
+      dt.type_str = "closure(...)";
     } else {
-      rtype.kind = .Void;
-      rtype.type_str = "void";
+      dt.fn_sig = sig_ptr;
+      dt.has_fn_sig = true;
+      dt.type_str = "fun(...)";
     }
-
-    FnTypeSig sig = fn_type_sig_new();
-    sig.rtype = rtype;
-    FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
-    *sig_ptr = sig;
-
-    dt.kind = .Unknown;
-    dt.closure_sig = sig_ptr;
-    dt.has_closure_sig = true;
-    dt.type_str = "closure(...)";
     ret .None;
   }
 
@@ -1180,10 +1119,10 @@ impl ParseState {
       ret verr;
     }
     if self.next_token_is_keyword("fun") {
-      ret self.parse_fn_type_datatype(dt);
+      ret self.parse_fn_type_datatype(dt, false);
     }
     if self.next_token_is_keyword("closure") {
-      ret self.parse_closure_type_datatype(dt);
+      ret self.parse_fn_type_datatype(dt, true);
     }
     if self.next_token_is_operator("(") {
       ret self.parse_tuple_type_datatype(dt);
@@ -5224,6 +5163,9 @@ impl Parser {
       index_name = item_name;
       has_index_name = true;
       self.state.token_next(); // skip ','
+      if self.state.next_token_is_operator("(") {
+        ret self._parse_for_iter_destructure(for_tok, index_name);
+      }
       let second = self.state.token_next();
       if second.is_none() || second.unwrap().type != .Identifier {
         self.state.err("expected identifier after ',' in for loop");
@@ -5409,13 +5351,12 @@ impl Parser {
     ret after.is_some() && token_is_operator(after.unwrap(), ":");
   }
 
-  // Parses `for (a, b) : pairs { ... }`: a destructuring loop variable,
-  // one name per element of the iterable's own tuple-typed element.
-  // Mirrors `_parse_for_range_or_iter`'s own `.Iter` shape closely, just
-  // with a name list instead of a single identifier - no index-tracking
-  // combined form (`for (a, b) :: pairs` is not supported; the plain
-  // `for i, item :: xs` two-name form already covers index tracking).
-  _parse_for_iter_destructure(Option<Token> for_tok) Option<ParseErrorKind> {
+  // Parses `for (a, b) : pairs { ... }`, or with `index_name` (already
+  // consumed with its comma) `for i, (a, b) :: pairs { ... }`: one name
+  // per element of the iterable's tuple-typed items, plus a running count
+  // in the second form.
+  _parse_for_iter_destructure(Option<Token> for_tok, str index_name) Option<ParseErrorKind> {
+    flag has_index = !equals(index_name, "");
     let lperr = self.state.expect_op("(");
     if lperr.is_some() {
       ret lperr;
@@ -5451,7 +5392,7 @@ impl Parser {
       self.state.err("a 'for' destructuring pattern must bind at least two names");
       ret .Some(.InvalidStatement);
     }
-    let cerr = self.state.expect_op(":");
+    let cerr = self.state.expect_op(has_index ? "::" : ":");
     if cerr.is_some() {
       ret cerr;
     }
@@ -5469,6 +5410,13 @@ impl Parser {
     *iterable_ptr = maybe_iterable.unwrap();
 
     self.state.new_scope();
+    if has_index {
+      ScopeEntity index_entity = scope_entity_new(index_name);
+      index_entity.on_stack = true;
+      ScopeEntity* index_entity_ptr = malloc(sizeof(ScopeEntity));
+      *index_entity_ptr = index_entity;
+      self.state.push_scope_entity(index_entity_ptr);
+    }
     for name : names {
       ScopeEntity name_entity = scope_entity_new(name);
       name_entity.on_stack = true;
@@ -5491,8 +5439,8 @@ impl Parser {
     *body = maybe_body.unwrap();
 
     ForIterNode fi;
-    fi.index_name = "";
-    fi.has_index_name = false;
+    fi.index_name = index_name;
+    fi.has_index_name = has_index;
     fi.item_name = "";
     fi.item_is_destructure = true;
     fi.item_destructure_names = names;
@@ -5560,7 +5508,7 @@ impl Parser {
     }
 
     if self.state.next_token_is_operator("(") && self._looks_like_for_destructure_iter() {
-      ret self._parse_for_iter_destructure(for_tok);
+      ret self._parse_for_iter_destructure(for_tok, "");
     }
 
     flag is_legacy = false;
@@ -6489,6 +6437,19 @@ impl Parser {
       self.state.finish_scope();
       ret operr;
     }
+    Vec<Node*> cl_args;
+    cl_args.init(0);
+    flag cl_variadic = false;
+    let aerr = self._parse_function_args(&cl_args, &cl_variadic);
+    if aerr.is_some() {
+      self.state.finish_scope();
+      ret aerr;
+    }
+    if cl_variadic {
+      self.state.err("a closure can't take '...' arguments");
+      self.state.finish_scope();
+      ret .Some(.InvalidStatement);
+    }
     let cperr = self.state.expect_sym(')');
     if cperr.is_some() {
       self.state.finish_scope();
@@ -6497,8 +6458,8 @@ impl Parser {
 
     FunctionNode fnv = function_node_new();
     fnv.has_name = false;
-    fnv.args.init(0);
-    fnv.has_args = false;
+    fnv.args = cl_args;
+    fnv.has_args = cl_args.len > 0;
 
     Node cl_node = node_new(.ClosureLiteral(fnv));
     fit fun_tok {
@@ -6578,6 +6539,12 @@ impl Parser {
         // pre-built rather than allocating a fresh one on every call.
         FnTypeSig csig = fn_type_sig_new();
         csig.rtype = rtype;
+        for ca : cur.args {
+          fit ca.kind {
+            .Variable(cv) -> { csig.params.push(cv.var_type); }
+            _ -> {}
+          }
+        }
         FnTypeSig* csig_ptr = malloc(sizeof(FnTypeSig));
         *csig_ptr = csig;
         cur.closure_sig = csig_ptr;

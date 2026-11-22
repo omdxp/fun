@@ -4278,13 +4278,97 @@ test "a closure's own return type is checked against its own body, not its enclo
   );
 }
 
-test "has_closure_sig is never assignable to a plain fun(...) slot, or the reverse" {
+test "a plain function fits a closure slot with its signature, never the reverse" {
+  accepts(
+    `fun add(num a, num b) num { ret a + b; }
+    `fun main() {
+    `  closure(num, num) num c = add;
+    `  fun(num, num) num f = add;
+    `  closure(num, num) num d = f;
+    `  _ = c(1, 2) + d(3, 4);
+    `}`,
+    "expected a named function and a function value to fit a closure slot with the same signature"
+  );
   rejects(
     `fun add(num a, num b) num { ret a + b; }
     `fun main() {
     `  closure() num c = add;
     `}`,
-    "expected a bare named function (plain fun(...) value) to be rejected where a closure is declared - different runtime shapes"
+    "expected a function taking two numbers to be rejected where closure() num is declared"
+  );
+  rejects(
+    `fun main() {
+    `  fun(num) num f = fun(num a) num { ret a; };
+    `}`,
+    "expected a closure to be rejected where a plain fun(...) is declared"
+  );
+}
+
+test "a closure's parameters are typed in its body and checked at each call" {
+  accepts(
+    `fun main() {
+    `  num base = 1;
+    `  let add = fun(num a, flag s) num { ret s ? a + base : a; };
+    `  _ = add(2, true);
+    `  add.free();
+    `}`,
+    "expected a closure with parameters to typecheck"
+  );
+  rejects(
+    `fun main() {
+    `  let add = fun(num a) num { ret a; };
+    `  _ = add("no");
+    `}`,
+    "expected a str argument to be rejected where the closure takes num"
+  );
+  rejects(
+    `fun main() {
+    `  let add = fun(num a) num { ret a; };
+    `  _ = add();
+    `}`,
+    "expected a missing argument to be rejected"
+  );
+  rejects(
+    `fun main() {
+    `  let f = fun(num a) str { ret a; };
+    `}`,
+    "expected a closure body returning num to be rejected against its declared str"
+  );
+}
+
+test "a closure field is called with its own signature" {
+  accepts(
+    `compound H {
+    `  closure(num) num on;
+    `}
+    `fun main() {
+    `  H h = H{ on = fun(num s) num { ret s + 1; } };
+    `  _ = h.on(3);
+    `  h.on.free();
+    `}`,
+    "expected a closure field to be callable"
+  );
+  rejects(
+    `compound H {
+    `  closure(num) num on;
+    `}
+    `fun main() {
+    `  H h = H{ on = fun(num s) num { ret s + 1; } };
+    `  _ = h.on("no");
+    `}`,
+    "expected a str argument to be rejected where the closure field takes num"
+  );
+}
+
+test "sizeof takes any declared type, whatever its name looks like" {
+  accepts(
+    `compound box_t {
+    `  num x;
+    `}
+    `fun main() {
+    `  _ = sizeof(box_t);
+    `}`,
+    "expected sizeof of a lowercase compound name to be accepted"
   );
 }
 
@@ -4864,4 +4948,14 @@ test "a for loop over an array types its item by the element" {
     ),
     "with str"
   ), "expected an array of tuples destructured";
+}
+
+test "a discarded value is still checked" {
+  rejects(
+    `fun twice(num a) num { ret a * 2; }
+    `fun main() {
+    `  _ = twice("no");
+    `}`,
+    "expected a str argument to be rejected even when the result is discarded"
+  );
 }

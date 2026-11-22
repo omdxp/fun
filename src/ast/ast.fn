@@ -47,6 +47,18 @@ pub compound FnTypeSig {
   DataType* rtype;
 }
 
+// The signature of a function or closure type, or `nil` for any
+// other type.
+pub fun dtype_signature(DataType* dt) FnTypeSig* {
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    ret dt.fn_sig;
+  }
+  if dt.has_closure_sig && dt.closure_sig != nil {
+    ret dt.closure_sig;
+  }
+  ret nil;
+}
+
 pub fun fn_type_sig_new() FnTypeSig {
   FnTypeSig s;
   s.params.init(0);
@@ -70,13 +82,9 @@ pub compound DataType {
   Vec<DataType*> generic_args;
   FnTypeSig* fn_sig;
   flag has_fn_sig;
-  // A capturing closure's own signature (`closure() R`), kept entirely
-  // separate from `fn_sig`/`has_fn_sig` above rather than unioned with
-  // it: a closure's runtime shape (a function pointer plus a heap
-  // environment pointer) is not binary-compatible with a plain bare
-  // function pointer, so the two type tracks must never be
-  // interchangeable. `closure_sig.params` is always empty (a closure
-  // literal takes no call-time parameters); only `rtype` is ever real.
+  // A closure type's signature (`closure(T1, T2) R`), kept apart from
+  // `fn_sig`: a closure value is a function pointer plus what it
+  // captured, never a bare function pointer.
   FnTypeSig* closure_sig;
   flag has_closure_sig;
   // A real, permanently-persisting tuple type (`(num, str)`), kept
@@ -521,10 +529,9 @@ pub compound FunctionNode {
   // instead of being treated as eternal, shared token text.
   flag owns_name;
   // Only ever set for a `.ClosureLiteral`'s own `FunctionNode` (always
-  // `nil` for a real `.Function` declaration): a `closure() R`-shaped
-  // signature built once, here, by the parser, wrapping this SAME
-  // node's own `rtype` pointer (never a second, independently-owned
-  // DataType) - so `infer()`'s own `.ClosureLiteral` arm can hand back
+  // `nil` for a real `.Function` declaration): its `closure(...) R`
+  // signature, built once by the parser around this same node's own
+  // `rtype` and parameter types (borrowed, never separately owned) - so `infer()`'s own `.ClosureLiteral` arm can hand back
   // a `CheckedType` whose `closure_sig` is borrowed from the AST,
   // freed exactly once with it, the same way a real function-typed
   // value's own `CheckedType.fn_sig` already borrows straight from its
@@ -1061,10 +1068,9 @@ pub enum NodeKind {
   Panic(Node*),
   Variable(VariableNode),
   Function(FunctionNode),
-  // An anonymous `fun() R { ... }` closure literal, an expression, never
-  // a declaration. Reuses `FunctionNode` as-is (`name=""`, `has_name =
-  // false`, `args` always empty since a closure takes no call-time
-  // parameters), but kept as its own variant rather than an
+  // An anonymous `fun(T a) R { ... }` closure literal, an expression,
+  // never a declaration. Reuses `FunctionNode` as-is (`name=""`,
+  // `has_name = false`), but kept as its own variant rather than an
   // oddly-flagged `.Function`, since `.Function` is matched in roughly
   // 185 places across this codebase (many via a wildcard default arm) -
   // a dedicated variant falls through those harmlessly, while reusing
@@ -1229,6 +1235,8 @@ pub fun node_is_expressionable(Node n) flag {
     // ',' to continue chaining the outer literal's remaining elements.
     .Bracket(inner) -> { ret true; }
     .TupleLiteral(tl) -> { ret true; }
+    // A closure literal followed by another argument (`f(fun() {}, 1)`).
+    .ClosureLiteral(_) -> { ret true; }
     _ -> { ret false; }
   }
 }
@@ -1477,11 +1485,15 @@ fun _free_node_contents(Node* n) {
       if f.has_rtype {
         dtype_free(f.rtype);
       }
-      // `closure_sig.rtype` is the exact same pointer as `f.rtype` just
-      // freed above (see `FunctionNode.closure_sig`'s own comment) -
-      // only the small wrapper struct itself is this node's to free.
+      // `closure_sig` borrows `f.rtype` and each parameter's type (see
+      // `FunctionNode.closure_sig`), so only its wrapper and vector are
+      // this node's to free.
       if f.closure_sig != nil {
+        f.closure_sig.params.free();
         free(f.closure_sig);
+      }
+      if f.has_args {
+        _free_node_vec(&f.args);
       }
       if f.has_body {
         node_free(f.body);
@@ -1817,15 +1829,16 @@ pub fun dtype_substitute_params(DataType* dt, Vec<str>* params, Vec<DataType*>* 
     dtype_substitute_params(dt.tuple_members.get(ti), params, args);
     ti = ti + 1;
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
+  FnTypeSig* sig = dtype_signature(dt);
+  if sig != nil {
     num pi = 0;
-    for pi < dt.fn_sig.params.len {
-      dtype_substitute_params(dt.fn_sig.params.get(pi), params, args);
+    for pi < sig.params.len {
+      dtype_substitute_params(sig.params.get(pi), params, args);
       pi = pi + 1;
     }
-    dtype_substitute_params(dt.fn_sig.rtype, params, args);
+    dtype_substitute_params(sig.rtype, params, args);
   }
-  if dt.generic_args.len > 0 || dt.is_tuple || dt.has_fn_sig {
+  if dt.generic_args.len > 0 || dt.is_tuple || sig != nil {
     ret;
   }
   num j = 0;
@@ -2031,9 +2044,18 @@ pub fun node_clone(Node n) Node {
       // original's own `f.closure_sig.rtype` - each clone owns its own
       // independent DataType tree, so its own `closure_sig` must point
       // into that same tree, not back at the source node's.
+      if f.has_args {
+        cf.args = _clone_node_vec(&f.args);
+      }
       if f.closure_sig != nil {
         FnTypeSig sig = fn_type_sig_new();
         sig.rtype = cf.rtype;
+        for ca : cf.args {
+          fit ca.kind {
+            .Variable(cv) -> { sig.params.push(cv.var_type); }
+            _ -> {}
+          }
+        }
         FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
         *sig_ptr = sig;
         cf.closure_sig = sig_ptr;
@@ -2212,10 +2234,10 @@ pub fun clone_node_tree(Vec<Node>* nodes) Vec<Node> {
   ret out;
 }
 
-// Every identifier `body` reads that isn't bound somewhere inside
-// `body` itself (a `let`/`const`, a for-loop variable, a `fit` pattern
-// binding) or already present in the caller's own `bound` set - the
-// free variables a closure literal wrapping this body must capture.
+// Every identifier a closure literal's body reads that isn't one of its
+// own parameters or bound somewhere inside the body itself (a `let`/
+// `const`, a for-loop variable, a `fit` pattern binding) - the free
+// variables the closure must capture.
 // Pure name-set algebra with no type information at all, deliberately:
 // typecheck's own inferred types never get written back onto the AST,
 // and codegen re-derives everything itself from its own local-scope
@@ -2230,11 +2252,19 @@ pub fun clone_node_tree(Vec<Node>* nodes) Vec<Node> {
 // outer closure's body wherever it runs. Over-capturing into the
 // outer closure's environment is harmless; under-capturing would be a
 // real correctness bug.
-pub fun closure_free_identifier_names(Node* body, Set<str> bound) Set<str> {
-  Set<str> bound_copy = bound.clone();
-  defer bound_copy.free();
+pub fun closure_free_identifier_names(FunctionNode f) Set<str> {
+  Set<str> bound = set_init("", 4);
+  defer bound.free();
+  for a : f.args {
+    fit a.kind {
+      .Variable(av) -> { bound.add(av.name); }
+      _ -> {}
+    }
+  }
   Set<str> free_names = set_init("", 8);
-  _collect_closure_free_names(body, &bound_copy, &free_names);
+  if f.has_body {
+    _collect_closure_free_names(f.body, &bound, &free_names);
+  }
   ret free_names;
 }
 
@@ -2343,17 +2373,26 @@ fun _collect_closure_free_names(Node* node, Set<str>* bound, Set<str>* free_name
             }
           } else {
             bound.add(it.item_name);
-            if it.has_index_name {
-              bound.add(it.index_name);
-            }
+          }
+          if it.has_index_name {
+            bound.add(it.index_name);
           }
           _collect_closure_free_names(it.body, bound, free_names);
         }
       }
     }
     .ClosureLiteral(f) -> {
+      // Its own parameters are bound only inside its own body.
+      Set<str> inner_bound = bound.clone();
+      defer inner_bound.free();
+      for a : f.args {
+        fit a.kind {
+          .Variable(av) -> { inner_bound.add(av.name); }
+          _ -> {}
+        }
+      }
       if f.has_body {
-        _collect_closure_free_names(f.body, bound, free_names);
+        _collect_closure_free_names(f.body, &inner_bound, free_names);
       }
     }
     _ -> {}

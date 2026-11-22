@@ -50,13 +50,14 @@ fun _mentions(DataType* dt, str name) flag {
       ret true;
     }
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
-    for prm : dt.fn_sig.params {
+  FnTypeSig* sig = dtype_signature(dt);
+  if sig != nil {
+    for prm : sig.params {
       if _mentions(prm, name) {
         ret true;
       }
     }
-    if _mentions(dt.fn_sig.rtype, name) {
+    if _mentions(sig.rtype, name) {
       ret true;
     }
   }
@@ -146,11 +147,12 @@ fun _fill_dtype(DataType* dt, Map<str, _DefaultsEntry>* table, num depth, str* e
   for member : dt.tuple_members {
     _fill_dtype(member, table, depth + 1, err);
   }
-  if dt.has_fn_sig && dt.fn_sig != nil {
-    for prm : dt.fn_sig.params {
+  FnTypeSig* sig = dtype_signature(dt);
+  if sig != nil {
+    for prm : sig.params {
       _fill_dtype(prm, table, depth + 1, err);
     }
-    _fill_dtype(dt.fn_sig.rtype, table, depth + 1, err);
+    _fill_dtype(sig.rtype, table, depth + 1, err);
   }
 
   let found = table.at(dt.type_str);

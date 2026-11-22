@@ -296,10 +296,9 @@ fun main() {
   (numeric widening included), not just whatever it happens to infer to.
 - **`for (a, b) : pairs { ... }`** destructures each element of a
   tuple-elemented iterable (`Vec<(K, V)>`) into its own names per
-  iteration, the same way `let` destructures a plain tuple value - no
-  combined index-tracking form (`for (a, b) :: xs` is not supported;
-  the existing `for i, item :: xs` two-name form already covers index
-  tracking).
+  iteration, the same way `let` destructures a plain tuple value;
+  `for i, (a, b) :: pairs { ... }` also counts, binding `i` to each
+  item's position.
 - A tuple works as an ordinary generic argument (`Box<(num, str)>`) and
   as an ordinary type alias's own body - see [Type Aliases](#language?anchor=language-type-aliases)
   for the `als Args = (num, str);` pattern this enables with generic
@@ -1322,48 +1321,68 @@ the same way: `fun sort_with(Vec<num>* v, Comparator<num> order)`.
 
 ### Closures
 
-Fun has no nested function declarations, but `fun() R { ... }` is also a
-closure literal: an anonymous value, written wherever an expression is
-expected, that captures every outer local it reads by value at the
-moment it's created:
+Fun has no nested function declarations, but `fun(num a) R { ... }` is
+also a closure literal: an anonymous value, written wherever an
+expression is expected, that captures every outer local it reads by
+value at the moment it's created:
 
 ```fun
 use std.io;
 
 fun main() {
   num x = 1;
-  closure() void c = fun() {
+  closure() void show = fun() {
     println_fmt("x={num}", x);
   };
   x = 99;
-  c(); // prints "x=1" - the closure captured a snapshot, not a live alias
+  show(); // prints "x=1" - the closure captured a snapshot, not a live alias
+  show.free();
 }
 ```
 
-A closure's own declared type is `closure() R`, deliberately distinct
-from a plain `fun(...) R` function pointer: a closure's runtime shape
-(a function pointer plus its own captured environment) is wider than a
-bare function pointer, so the two are never interchangeable, in either
-direction. A bare named function can't be assigned where a closure is
-expected, and a closure can't stand in for a plain `fun(...) R`
-parameter. `let c = fun() R { ... };` infers `closure() R` the same
-way any other `let` infers its own declared type - writing `closure()
-R` explicitly is never required, just occasionally clearer to read.
-`R` itself can be a generic function's own type parameter
-(`fun make_getter<T>(T value) closure() T { ... }`), substituted the
-same way any other generic return type already is.
+A closure's type is `closure(T1, T2) R`, written like a function type
+with `closure` in place of `fun`. A closure literal takes parameters
+the same way a function does, and a closure can be called any number
+of times:
 
-A closure literal always takes zero call-time parameters, `fun()`,
-never `fun(x Type)` - everything it needs comes from what it captures,
-not from arguments. Capturing a pointer opts into aliasing explicitly,
-the same as it would anywhere else in the language; capturing an
-ordinary value never does.
+```fun
+use std.io;
 
-Calling or spawning a closure runs it at most once: its own captured
-environment is freed the moment it finishes. Calling or spawning the
-same closure value again afterward is undefined. A closure that's
-created but never spawned or called needs its own explicit
-`free(c.env)` - there is nothing else to call that would free it.
+fun apply(closure(num) num f, num x) num {
+  ret f(x);
+}
+
+fun twice(num x) num {
+  ret x * 2;
+}
+
+fun main() {
+  num base = 10;
+  let add = fun(num n) num {
+    ret n + base;
+  };
+  println_fmt("{num} {num}", apply(add, 1), apply(add, 2)); // 11 12
+  println_fmt("{num}", apply(twice, 21)); // 42
+  add.free();
+}
+```
+
+A plain function, or a `fun(...) R` value, fits wherever a closure of
+the same signature is expected; it runs with nothing captured. The
+reverse never holds: a closure carries what it captured alongside its
+function, so it can't stand in for a plain `fun(...) R` parameter.
+`let c = fun(num a) R { ... };` infers `closure(num) R`, so writing the
+type is never required. A closure type works in a type alias
+(`als Cmp<T> = closure(T, T) num;`), as a compound field, and with a
+generic function's or method's type parameters, including one inferred
+from what the closure returns (`fun convert<T, U>(closure(T) U f, T x)
+U`).
+
+Capturing a pointer opts into aliasing explicitly, the same as it would
+anywhere else in the language; capturing an ordinary value never does.
+What a closure captured lives on the heap until `c.free()` releases it,
+once the closure is no longer called. Passing a closure to `spawn`
+hands it to the new thread, which frees it after it runs.
 
 #### `closure_captures_escaping_pointer`
 
@@ -1506,6 +1525,8 @@ fun main() {
   fields by position, same arity/type rules as an ordinary `let`
   destructure. Works over any `Iterator` whose `Elem` is a tuple, not
   just `Map`.
+- Counted destructuring (`for i, (a, b) :: it { ... }`): the same, with
+  `i` a running 0-based count.
 
 **Reentrancy**: a `for` loop always iterates a fresh copy of the value
 it started from, never the caller's own variable - a type implementing

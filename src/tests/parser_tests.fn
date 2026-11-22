@@ -608,19 +608,24 @@ test "a closure literal parses as an expression, with or without an explicit ret
   str src = `fun main() {
   `  closure() void c = fun() { _ = 1; };
   `  closure() num d = fun() num { ret 2; };
-  `  c.fn;
-  `  d.fn;
+  `  c.free();
+  `  d.free();
   `}`;
   ParseState st = parse_ok(src);
   free_node_tree(&st.nodes);
 }
 
-test "a closure literal rejects a non-empty parameter list at parse time" {
+test "a closure literal takes parameters, but never '...'" {
+  assert !parse_fails(
+    `fun main() {
+    `  closure(num, str) num c = fun(num a, str s) num { ret a + len(s); };
+    `}`
+  ), "expected a closure literal with parameters to parse";
   assert parse_fails(
     `fun main() {
-    `  closure() void c = fun(num a) { _ = a; };
+    `  let c = fun(num a, ...) { _ = a; };
     `}`
-  ), "expected 'fun(num a) {...}' to be rejected - a closure literal takes no call-time parameters";
+  ), "expected a variadic closure literal to be rejected";
 }
 
 test "a closure literal requires a real body, never a bodyless prototype form" {

@@ -674,6 +674,9 @@ pub compound Codegen {
   // Incremented for each closure literal, so each one's own hoisted env
   // struct/body function/entry trampoline gets a unique C name.
   num closure_counter;
+  // Each `__fun_fn_as_closure_N` trampoline already emitted, keyed by
+  // the C signature it calls through.
+  Map<str, str> fn_closure_trampolines;
   // Emit exactly one `fuzz` block as a harness in place of the program's
   // own `main`.
   flag fuzz_mode;
@@ -820,6 +823,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.va_call_counter = 0;
   g.try_call_counter = 0;
   g.closure_counter = 0;
+  g.fn_closure_trampolines.init(8);
   g.hoist_scratch_depth = 0;
   // Matches `g.state`, so `self.state == self.root_state` is already
   // true for the very first function, not just after the first nested
@@ -1797,6 +1801,9 @@ impl Codegen {
     // declaration) - falling through to the placeholder text below is
     // harmless there, since nothing real reads it before an actual
     // instantiation resolves it properly.
+    if rdt.has_closure_sig {
+      ret .Some("__fun_closure_t");
+    }
     if rdt.has_fn_sig && rdt.fn_sig != nil {
       let fn_type_name = self.mangled_fn_type_name(rdt);
       if fn_type_name.is_some() {
@@ -4586,6 +4593,26 @@ impl Codegen {
     ret false;
   }
 
+  // The resolved return type name of a callable argument: a named
+  // function, a closure literal, or a closure or function value.
+  _callable_return_type_name(Node* arg) Option<str> {
+    fit arg.kind {
+      .Identifier(fname) -> {
+        if self.lookup_local_dtype(fname).is_none() {
+          ret self._toplevel_function_rtype_name(fname);
+        }
+      }
+      _ -> {}
+    }
+    let dt = self.infer_let_expr_type(arg)?;
+    DataType* dtp = &dt;
+    FnTypeSig* sig = dtype_signature(dtp);
+    if sig == nil || sig.rtype == nil {
+      ret .None;
+    }
+    ret self.resolve_type_name(*sig.rtype);
+  }
+
   // The declared return type of a plain (non-generic) top-level
   // function named `fname`, resolved to its own C type name - used to
   // infer a method's own type param from a function-typed argument's
@@ -4708,21 +4735,12 @@ impl Codegen {
                               found_name = inferred.unwrap();
                               found = true;
                             }
-                          } elif !found && v.var_type.has_fn_sig &&
-                          v.var_type.fn_sig != nil &&
-                          v.var_type.fn_sig.rtype != nil &&
-                            equals(v.var_type.fn_sig.rtype.type_str, tp) &&
-                            v.var_type.fn_sig.rtype.generic_args.len == 0 &&
-                            arg_i < args.len {
-                            fit args.get(arg_i).kind {
-                              .Identifier(fname) -> {
-                                let fn_rtype = self._toplevel_function_rtype_name(fname);
-                                if fn_rtype.is_some() {
-                                  found_name = fn_rtype.unwrap();
-                                  found = true;
-                                }
-                              }
-                              _ -> {}
+                          } elif !found && arg_i < args.len &&
+                            _sig_returns_bare(dtype_signature(v.var_type), tp) {
+                            let arg_rtype = self._callable_return_type_name(args.get(arg_i));
+                            if arg_rtype.is_some() {
+                              found_name = arg_rtype.unwrap();
+                              found = true;
                             }
                           }
                         }
@@ -7024,6 +7042,14 @@ impl Codegen {
             // `{...}` body, every nested sub-object slot is always
             // bare-eligible in C, regardless of whether the outer
             // literal itself needed a leading cast.
+            flag field_closure_coerce = false;
+            if field_info.is_some() && field_info.unwrap().dtype.is_some() &&
+              !field_did_shape_coerce && !field_shape_coerce_inline {
+              field_closure_coerce = self._open_closure_coerce(
+                field_info.unwrap().dtype.unwrap(),
+                f.value
+              );
+            }
             let prev_arr_init = self.in_array_initializer;
             let prev_bare_init = self.in_bare_initializer_context;
             self.in_array_initializer = true;
@@ -7038,6 +7064,9 @@ impl Codegen {
             }
             if field_did_shape_coerce {
               self.state.write(")");
+            }
+            if field_closure_coerce {
+              self.state.write("))");
             }
             if field_shape_coerce_inline {
               self.state.write("), .vtable = &__fun_impl_");
@@ -7537,6 +7566,16 @@ impl Codegen {
             }
           }
         }
+        flag did_assign_closure_coerce = false;
+        if equals(e.op, "=") && !did_assign_coerce {
+          let lhs_closure_dt = self._dtype_without_rendering(e.left);
+          if lhs_closure_dt.is_some() {
+            did_assign_closure_coerce = self._open_closure_coerce(
+              lhs_closure_dt.unwrap(),
+              e.right
+            );
+          }
+        }
         flag prev_has_expected_tuple = self.has_expected_tuple_type;
         DataType prev_expected_tuple = self.expected_tuple_type;
         if resolves_rhs_shorthand {
@@ -7576,6 +7615,9 @@ impl Codegen {
         }
         if did_assign_coerce {
           self.state.write(")");
+        }
+        if did_assign_closure_coerce {
+          self.state.write("))");
         }
         if wrote_own_parens {
           self.state.write(")");
@@ -8951,6 +8993,10 @@ impl Codegen {
           arg_did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
         }
       }
+      flag arg_did_closure_coerce = false;
+      if ptype.is_some() && !arg_did_shape_coerce {
+        arg_did_closure_coerce = self._open_closure_coerce(ptype.unwrap(), arg);
+      }
       let aerr = self.emit_expr(*arg);
       self.expected_enum_type = prev_expected;
       self.expected_compound_type = prev_expected_compound2;
@@ -8962,6 +9008,9 @@ impl Codegen {
       }
       if arg_did_shape_coerce {
         self.state.write(")");
+      }
+      if arg_did_closure_coerce {
+        self.state.write("))");
       }
       arg_idx = arg_idx + 1;
     }
@@ -9691,14 +9740,11 @@ impl Codegen {
 
   // Emits a closure literal's own value: a hoisted env struct (one
   // field per captured name, copied by value), a hoisted body function
-  // (an ordinary C function, each capture a real parameter - so the
-  // closure's own body needs no rewriting at all, it already reads
-  // these names as plain locals), a hoisted entry trampoline (unpacks
-  // the env, calls the body function once, frees the env, returns),
-  // and finally the closure value itself at this expression's own
-  // point of use: a GNU statement expression heap-allocating and
-  // populating the env, the same accepted idiom this codegen already
-  // uses for `?`/`!` propagation and `panic(...)`.
+  // (an ordinary C function taking each capture, then the closure's own
+  // parameters, so its body reads them all as plain locals), a hoisted
+  // entry trampoline (unpacks the env and calls the body function), and
+  // finally the closure value itself at this expression's own point of
+  // use. The env lives until `free()` is called on the closure.
   emit_closure_literal(Node node) Option<CodegenErrorKind> {
     fit node.kind {
       .ClosureLiteral(f) -> {
@@ -9707,10 +9753,7 @@ impl Codegen {
         str env_name = format("__fun_closure_env_{num}", n);
         str body_name = format("__fun_closure_body_{num}", n);
         str entry_name = format("__fun_closure_entry_{num}", n);
-
-        Set<str> empty_bound = set_init("", 1);
-        defer empty_bound.free();
-        Set<str> free_names = closure_free_identifier_names(f.body, empty_bound);
+        Set<str> free_names = closure_free_identifier_names(f);
         defer free_names.free();
 
         // A free name that isn't a real local (a global/const/function/
@@ -9787,6 +9830,9 @@ impl Codegen {
           body_args.push(arg_ptr);
           ai = ai + 1;
         }
+        for own_arg : f.args {
+          body_args.push(own_arg);
+        }
         FunctionNode synth = function_node_new();
         synth.name = body_name;
         synth.has_name = true;
@@ -9850,40 +9896,50 @@ impl Codegen {
         }
         self.emit_hoisted(body_scratch.out.build());
 
-        // 3. Entry trampoline. Always `void*` for a `void`-returning
-        // closure, matching `pthread_create`'s own expected entry
-        // shape exactly (the only kind `std.thread_spawn.spawn`
-        // accepts) - a non-void closure's own real return type is used
-        // instead, since that shape is never handed to a thread
-        // primitive at all, only ever called back synchronously
-        // through `emit_closure_call`'s own cast.
+        // 3. Entry trampoline: what a call through the closure value
+        // reaches, `R entry(void* env, params...)`, unpacking the
+        // captures and passing them ahead of the call's own arguments.
         flag is_void_closure = !f.has_rtype || equals(f.rtype.type_str, "void");
         CodegenState entry_scratch = self.new_scratch_state();
         CodegenState* saved_state_entry = self.state;
         self.state = &entry_scratch;
+        self.state.write("static ");
         if is_void_closure {
-          self.state.write("static void* ");
+          self.state.write("void");
         } else {
           let ert = self.write_type(*f.rtype);
           if ert.is_none() {
             self.state = saved_state_entry;
             ret .Some(.UnsupportedNode);
           }
-          self.state.write(" ");
         }
+        self.state.write(" ");
         self.state.write(entry_name);
-        self.state.write("(void* __env) {\n  ");
+        self.state.write("(const __fun_closure_t* __c");
+        Vec<str> own_names;
+        own_names.init(f.args.len);
+        defer own_names.free();
+        for own : f.args {
+          fit own.kind {
+            .Variable(ov) -> {
+              self.state.write(", ");
+              let owt = self.write_named_type(*ov.var_type, ov.name);
+              if owt.is_some() {
+                self.state = saved_state_entry;
+                ret owt;
+              }
+              own_names.push(ov.name);
+            }
+            _ -> {}
+          }
+        }
+        self.state.write(") {\n  ");
         self.state.write(env_name);
         self.state.write("* __e = (");
         self.state.write(env_name);
-        self.state.write("*)__env;\n  ");
+        self.state.write("*)__c->env;\n  (void)__e;\n  ");
         if !is_void_closure {
-          let ert2 = self.write_type(*f.rtype);
-          if ert2.is_none() {
-            self.state = saved_state_entry;
-            ret .Some(.UnsupportedNode);
-          }
-          self.state.write(" __r = ");
+          self.state.write("return ");
         }
         self.state.write(body_name);
         self.state.write("(");
@@ -9896,12 +9952,14 @@ impl Codegen {
           self.state.write(cap_names.get(ci));
           ci = ci + 1;
         }
-        self.state.write(");\n  free(__env);\n  ");
-        if is_void_closure {
-          self.state.write("return NULL;\n}\n");
-        } else {
-          self.state.write("return __r;\n}\n");
+        for on : own_names {
+          if ci > 0 {
+            self.state.write(", ");
+          }
+          self.state.write(on);
+          ci = ci + 1;
         }
+        self.state.write(");\n}\n");
         self.state = saved_state_entry;
         self.emit_hoisted(entry_scratch.out.build());
 
@@ -9943,13 +10001,15 @@ impl Codegen {
         cl_sb.append(format_num(n));
         cl_sb.append(";\n__fun_closure_val_");
         cl_sb.append(format_num(n));
-        cl_sb.append(".fn = (void* (*)(void*))");
+        cl_sb.append(".fn = (void (*)(void))");
         cl_sb.append(entry_name);
         cl_sb.append(";\n__fun_closure_val_");
         cl_sb.append(format_num(n));
         cl_sb.append(".env = (void*)__fun_closure_envp_");
         cl_sb.append(format_num(n));
-        cl_sb.append(";\n");
+        cl_sb.append(";\n__fun_closure_val_");
+        cl_sb.append(format_num(n));
+        cl_sb.append(".target = NULL;\n");
         str cl_text = cl_sb.build();
 
         self._splice_before_statement(cl_text);
@@ -9961,18 +10021,16 @@ impl Codegen {
     }
   }
 
-  // Calls a closure-typed local (`c();`) - not an ordinary bare C
-  // function-pointer call, which a `__fun_closure_t` 2-word struct
-  // value isn't: casts its own `fn` field back to the statically-known
-  // `R(*)(void*)` shape (`closure_sig.rtype`, never erased - typecheck
-  // already guarantees every call site agrees with it) and calls it
-  // with `env`.
-  emit_closure_call(str callee_name, FnTypeSig* closure_sig, Node* args_node) Option<CodegenErrorKind> {
+  // Calls a closure value, `callee_text` naming it (read twice, so it
+  // must be a plain name or field chain): its `fn` cast back to
+  // `R (*)(const __fun_closure_t*, params...)` and called with the
+  // closure itself ahead of the call's own arguments.
+  emit_closure_call(str callee_text, FnTypeSig* closure_sig, Node* args_node) Option<CodegenErrorKind> {
     Vec<Node*> args;
     args.init(0);
     defer args.free();
     self.flatten_call_args(args_node, &args);
-    if args.len != 0 {
+    if args.len != closure_sig.params.len {
       ret .Some(.UnsupportedNode);
     }
     self.state.write("((");
@@ -9980,12 +10038,184 @@ impl Codegen {
     if rt.is_none() {
       ret .Some(.UnsupportedNode);
     }
-    self.state.write("(*)(void*))");
-    self.state.write(callee_name);
-    self.state.write(".fn)(");
-    self.state.write(callee_name);
-    self.state.write(".env)");
+    self.state.write(" (*)(const __fun_closure_t*");
+    for p : closure_sig.params {
+      self.state.write(", ");
+      let pt = self._c_type_text(*p);
+      if pt.is_none() {
+        ret .Some(.UnsupportedNode);
+      }
+      self.state.write(pt.unwrap());
+    }
+    self.state.write("))");
+    self.state.write(callee_text);
+    self.state.write(".fn)(&");
+    self.state.write(callee_text);
+    num ai = 0;
+    for arg : args {
+      self.state.write(", ");
+      let aerr = self.emit_expr_as(arg, *closure_sig.params.get(ai));
+      if aerr.is_some() {
+        ret aerr;
+      }
+      ai = ai + 1;
+    }
+    self.state.write(")");
     ret .None;
+  }
+
+  // The C spelling of `dt` as an abstract declarator, the way a cast or
+  // a parameter list without names writes it (`int64_t`, `R (*)(T)`).
+  _c_type_text(DataType dt) Option<str> {
+    CodegenState scratch = self.new_scratch_state();
+    CodegenState* saved = self.state;
+    self.state = &scratch;
+    let err = self.write_named_type(dt, "");
+    self.state = saved;
+    if err.is_some() {
+      ret .None;
+    }
+    ret .Some(trim(scratch.out.build()));
+  }
+
+  // Emits `arg` where a value of type `target` is expected, wrapping a
+  // plain function or function value passed where a closure is expected
+  // into a closure that captures nothing.
+  emit_expr_as(Node* arg, DataType target) Option<CodegenErrorKind> {
+    flag wrapped = self._open_closure_coerce(target, arg);
+    let err = self.emit_expr(*arg);
+    if err.is_some() {
+      ret err;
+    }
+    if wrapped {
+      self.state.write("))");
+    }
+    ret .None;
+  }
+
+  // When `target` is a closure type and `arg` is a plain function or a
+  // function value, writes the opening of the wrap that turns it into a
+  // closure value and returns true; the caller closes it with `))` after
+  // `arg`. The function pointer itself rides in the closure's `target`,
+  // and a trampoline per signature calls through it. The signature comes
+  // from `arg`, which is always concrete here, unlike a generic
+  // callee's declared parameter type.
+  _open_closure_coerce(DataType target, Node* arg) flag {
+    if !target.has_closure_sig {
+      ret false;
+    }
+    let sig = self._plain_function_signature(arg);
+    if sig.is_none() {
+      ret false;
+    }
+    FnTypeSig found = sig.unwrap();
+    let tramp = self._fn_as_closure_trampoline(&found);
+    if tramp.is_none() {
+      ret false;
+    }
+    self.state.write("__fun_closure_of((void (*)(void))");
+    self.state.write(tramp.unwrap());
+    self.state.write(", (void (*)(void))(");
+    ret true;
+  }
+
+  // The signature of `arg` when it is a plain function value: a named
+  // function that no local shadows, or an expression of a `fun(...)`
+  // type. `.None` for anything else, a closure included.
+  _plain_function_signature(Node* arg) Option<FnTypeSig> {
+    fit arg.kind {
+      .Identifier(name) -> {
+        let local = self.lookup_local_dtype(name);
+        if local.is_some() {
+          if local.unwrap().has_fn_sig && local.unwrap().fn_sig != nil {
+            ret .Some(*local.unwrap().fn_sig);
+          }
+          ret .None;
+        }
+        // Borrows the function's registered types; nothing here owns them.
+        FnTypeSig sig;
+        sig.rtype = self.lookup_function_rtype(name)?;
+        sig.params = self.lookup_function_param_types(name)?;
+        ret .Some(sig);
+      }
+      .ClosureLiteral(_) -> { ret .None; }
+      _ -> {}
+    }
+    let dt = self.infer_let_expr_type(arg)?;
+    if dt.has_fn_sig && dt.fn_sig != nil {
+      ret .Some(*dt.fn_sig);
+    }
+    ret .None;
+  }
+
+  // The name of the hoisted trampoline that calls a function pointer
+  // held in a closure's `target` with `sig`'s parameters, emitted once per
+  // distinct C signature.
+  _fn_as_closure_trampoline(FnTypeSig* sig) Option<str> {
+    let rt_text = self._c_type_text(*sig.rtype)?;
+    StringBuilder key_sb = string_builder_init(32);
+    key_sb.append(rt_text);
+    key_sb.append("(");
+    Vec<str> ptexts;
+    ptexts.init(sig.params.len);
+    defer ptexts.free();
+    for p : sig.params {
+      let pt = self._c_type_text(*p)?;
+      key_sb.append(pt);
+      key_sb.append(",");
+      ptexts.push(pt);
+    }
+    key_sb.append(")");
+    str key = key_sb.build();
+    let known = self.fn_closure_trampolines.at(key);
+    if known.is_some() {
+      ret known;
+    }
+    self.closure_counter = self.closure_counter + 1;
+    str tname = format("__fun_fn_as_closure_{num}", self.closure_counter);
+    flag is_void = equals(rt_text, "void");
+    StringBuilder tb = string_builder_init(128);
+    tb.append("static ");
+    tb.append(rt_text);
+    tb.append(" ");
+    tb.append(tname);
+    tb.append("(const __fun_closure_t* __c");
+    num i = 0;
+    for i < ptexts.len {
+      tb.append(format(", {str} __a{num}", ptexts.get(i), i));
+      i = i + 1;
+    }
+    tb.append(") {\n  ");
+    if !is_void {
+      tb.append("return ");
+    }
+    tb.append("((");
+    tb.append(rt_text);
+    tb.append(" (*)(");
+    if ptexts.len == 0 {
+      tb.append("void");
+    }
+    i = 0;
+    for i < ptexts.len {
+      if i > 0 {
+        tb.append(", ");
+      }
+      tb.append(ptexts.get(i));
+      i = i + 1;
+    }
+    tb.append("))__c->target)(");
+    i = 0;
+    for i < ptexts.len {
+      if i > 0 {
+        tb.append(", ");
+      }
+      tb.append(format("__a{num}", i));
+      i = i + 1;
+    }
+    tb.append(");\n}\n");
+    self.emit_hoisted(tb.build());
+    self.fn_closure_trampolines.put(key, tname);
+    ret .Some(tname);
   }
 
   // Emits `.tag_value()`'s builtin body: any enum's own underlying C
@@ -10010,6 +10240,24 @@ impl Codegen {
   emit_method_call(ExprNode recv_e, Node* args_node) Option<CodegenErrorKind> {
     if !recv_e.has_left || !recv_e.has_right {
       ret .Some(.InvalidNode);
+    }
+    // `c.free()` on a closure releases what it captured.
+    fit recv_e.right.kind {
+      .Identifier(mname) -> {
+        if equals(mname, "free") {
+          let cl_dt = self.infer_let_expr_type(recv_e.left);
+          if cl_dt.is_some() && cl_dt.unwrap().has_closure_sig {
+            self.state.write("free((");
+            let ferr = self.emit_expr(*recv_e.left);
+            if ferr.is_some() {
+              ret ferr;
+            }
+            self.state.write(").env)");
+            ret .None;
+          }
+        }
+      }
+      _ -> {}
     }
     let recv_r = self.resolve_field_chain(recv_e.left)?!(.UnsupportedNode);
     str method_name = "";
@@ -10043,6 +10291,14 @@ impl Codegen {
       let finfo = field_info.unwrap();
       if finfo.dtype.is_some() && finfo.dtype.unwrap().has_fn_sig {
         ret self.emit_fn_sig_field_call(recv_r, method_name, args_node);
+      }
+      if finfo.dtype.is_some() && finfo.dtype.unwrap().has_closure_sig {
+        str sep = recv_r.is_pointer ? "->" : ".";
+        ret self.emit_closure_call(
+          format("{str}{str}{str}", recv_r.text, sep, method_name),
+          finfo.dtype.unwrap().closure_sig,
+          args_node
+        );
       }
     }
 
@@ -10136,9 +10392,16 @@ impl Codegen {
           }
         }
       }
+      flag marg_did_closure_coerce = false;
+      if ptype.is_some() && !marg_did_shape_coerce {
+        marg_did_closure_coerce = self._open_closure_coerce(*ptype.unwrap(), arg);
+      }
       let aerr = self.emit_expr(*arg);
       if marg_did_shape_coerce {
         self.state.write(")");
+      }
+      if marg_did_closure_coerce {
+        self.state.write("))");
       }
       self.expected_enum_type = prev_expected;
       self.expected_compound_type = prev_expected_compound;
@@ -10595,21 +10858,6 @@ impl Codegen {
       .Identifier(name) -> { field_name = name; }
       _ -> { ret .Some(.UnsupportedNode); }
     }
-    // A closure's own `.fn`, read from Fun code as a `raw*`, is the
-    // union's object-pointer view: ISO C has no conversion between a
-    // function pointer and `void*`.
-    if equals(field_name, "fn") {
-      let fn_recv_dt = self.infer_let_expr_type(e.left);
-      if fn_recv_dt.is_some() && fn_recv_dt.unwrap().has_closure_sig {
-        let fn_recv_err = self.emit_expr(*e.left);
-        if fn_recv_err.is_some() {
-          ret fn_recv_err;
-        }
-        self.state.write(".fn_raw");
-        ret .None;
-      }
-    }
-
     str enum_recv_name = "";
     flag is_bare_shorthand = false;
     flag left_is_single_level = false;
@@ -11865,6 +12113,9 @@ impl Codegen {
               self.has_expected_tuple_type = true;
               self.expected_tuple_type = self.current_fn_rtype_dt.unwrap();
             }
+            flag ret_closure_coerce = !ret_did_shape_coerce &&
+              self.current_fn_rtype_dt.is_some() &&
+              self._open_closure_coerce(self.current_fn_rtype_dt.unwrap(), exp);
             let eerr = self.emit_expr(*exp);
             self.expected_enum_type = prev_expected;
             self.expected_compound_type = prev_expected_compound;
@@ -11875,6 +12126,9 @@ impl Codegen {
             }
             if ret_did_shape_coerce {
               self.state.write(")");
+            }
+            if ret_closure_coerce {
+              self.state.write("))");
             }
           }
           self.state.write(";\n");
@@ -11915,6 +12169,9 @@ impl Codegen {
             self.has_expected_tuple_type = true;
             self.expected_tuple_type = self.current_fn_rtype_dt.unwrap();
           }
+          flag ret_closure_coerce = !ret_did_shape_coerce &&
+            self.current_fn_rtype_dt.is_some() &&
+            self._open_closure_coerce(self.current_fn_rtype_dt.unwrap(), exp);
           let eerr = self.emit_expr(*exp);
           self.expected_enum_type = prev_expected;
           self.expected_compound_type = prev_expected_compound;
@@ -11925,6 +12182,9 @@ impl Codegen {
           }
           if ret_did_shape_coerce {
             self.state.write(")");
+          }
+          if ret_closure_coerce {
+            self.state.write("))");
           }
           self.state.write(";\n");
         }
@@ -12359,10 +12619,15 @@ impl Codegen {
           } else {
             self.expected_let_dt = .None;
           }
+          flag var_closure_coerce = !is_let && !did_shape_coerce &&
+            self._open_closure_coerce(*v.var_type, v.val);
           let verr = self.emit_expr(*v.val);
           self.expected_let_dt = prev_expected_let_dt;
           if did_shape_coerce {
             self.state.write(")");
+          }
+          if var_closure_coerce {
+            self.state.write("))");
           }
           self.expected_array_elem_shape_type = prev_local_arr_elem_shape;
           self.expected_array_elem_shape_coerce_as_constant = prev_local_arr_elem_const;
@@ -12394,7 +12659,7 @@ impl Codegen {
             let idt = inferred.unwrap();
             // Same reason the explicitly-typed branch above never
             // routes a closure dtype through `resolve_type_name`
-            // either: `closure() R`'s own fixed placeholder `type_str`
+            // either: a closure type's own fixed placeholder `type_str`
             // ("closure(...)") was never meant to resolve through
             // ordinary name resolution at all, only ever recognized by
             // checking `has_closure_sig` first.
@@ -13078,6 +13343,19 @@ impl Codegen {
     }
   }
 
+  // Declares a counted loop's running count, `name`, from `counter`.
+  _emit_for_count_bind(str name, str counter) {
+    self.state.write_indent();
+    self.state.write("int64_t ");
+    self.state.write(name);
+    self.state.write(" = ");
+    self.state.write(counter);
+    self.state.write("++;\n");
+    DataType idx_dt = dtype_new();
+    idx_dt.type_str = "num";
+    self.record_local_typed(name, "num", false, idx_dt);
+  }
+
   // Binds a yielded `next()` payload to the `for` loop's own item/index
   // names, per whichever of the three forms `fi` declares: an explicit
   // destructure (`for (a, b) : x`) splits a hidden temp's tuple fields
@@ -13132,6 +13410,9 @@ impl Codegen {
       Vec<str> names;
       if fi.item_is_destructure {
         names = fi.item_destructure_names;
+        if fi.has_index_name {
+          self._emit_for_count_bind(fi.index_name, idx_counter_name);
+        }
       } else {
         names.init(2);
         names.push(fi.index_name);
@@ -13141,15 +13422,7 @@ impl Codegen {
       ret .None;
     }
     if fi.has_index_name {
-      self.state.write_indent();
-      self.state.write("int64_t ");
-      self.state.write(fi.index_name);
-      self.state.write(" = ");
-      self.state.write(idx_counter_name);
-      self.state.write("++;\n");
-      DataType idx_dt = dtype_new();
-      idx_dt.type_str = "num";
-      self.record_local_typed(fi.index_name, "num", false, idx_dt);
+      self._emit_for_count_bind(fi.index_name, idx_counter_name);
     }
     self.state.write_indent();
     if self.msvc_mode {
@@ -13224,6 +13497,9 @@ impl Codegen {
       Vec<str> names;
       if fi.item_is_destructure {
         names = fi.item_destructure_names;
+        if fi.has_index_name {
+          self._emit_for_count_bind(fi.index_name, idx_counter_name);
+        }
       } else {
         names.init(2);
         names.push(fi.index_name);
@@ -13233,15 +13509,7 @@ impl Codegen {
       ret .None;
     }
     if fi.has_index_name {
-      self.state.write_indent();
-      self.state.write("int64_t ");
-      self.state.write(fi.index_name);
-      self.state.write(" = ");
-      self.state.write(idx_counter_name);
-      self.state.write("++;\n");
-      DataType idx_dt = dtype_new();
-      idx_dt.type_str = "num";
-      self.record_local_typed(fi.index_name, "num", false, idx_dt);
+      self._emit_for_count_bind(fi.index_name, idx_counter_name);
     }
     self.state.write_indent();
     if self.msvc_mode {
@@ -13446,7 +13714,7 @@ impl Codegen {
     flag pair_two_name = fi.has_index_name && !fi.item_is_destructure &&
     elem_dt.is_tuple && elem_dt.tuple_members.len == 2;
     str idx_counter_name = "";
-    if fi.has_index_name && !fi.item_is_destructure && !pair_two_name {
+    if fi.has_index_name && !pair_two_name {
       self.iter_inline_local_counter = self.iter_inline_local_counter + 1;
       StringBuilder idxc_sb = string_builder_init(24);
       idxc_sb.append("__fun_iter_idx");
@@ -13726,7 +13994,7 @@ impl Codegen {
     flag pair_two_name = fi.has_index_name && !fi.item_is_destructure &&
     elem_dt.is_tuple && elem_dt.tuple_members.len == 2;
     str idx_counter_name = "";
-    if fi.has_index_name && !fi.item_is_destructure && !pair_two_name {
+    if fi.has_index_name && !pair_two_name {
       self.iter_inline_local_counter = self.iter_inline_local_counter + 1;
       StringBuilder idxc_sb = string_builder_init(24);
       idxc_sb.append("__fun_iter_idx");
@@ -15994,7 +16262,7 @@ impl Codegen {
     // struct, never a function-pointer declarator (unlike `fun(...)R`
     // just below) - a plain `<type> <name>` is already the right shape,
     // just with a fixed type name standing in for `write_type`'s own
-    // generic name resolution, which `closure() R`'s fixed placeholder
+    // generic name resolution, which a closure type's fixed placeholder
     // `type_str` ("closure(...)") was never meant to resolve through.
     if dtype.has_closure_sig {
       self.state.write("__fun_closure_t ");
@@ -16597,7 +16865,7 @@ impl Codegen {
         }
         // A closure-typed return is the ordinary two-word
         // `__fun_closure_t` struct, never a name `write_type`'s own
-        // generic resolution could ever map - `closure() R`'s fixed
+        // generic resolution could ever map - a closure type's fixed
         // placeholder `type_str` ("closure(...)") was never meant to
         // resolve through it, the same reason `write_named_type`
         // special-cases this first for a closure-typed parameter.
@@ -16907,6 +17175,14 @@ impl Codegen {
         self.in_main = saved_in_main;
         if berr.is_some() {
           ret berr;
+        }
+        // The synthetic `vargs` cleanup sits outside the body's own defer
+        // scope, so a `void` body that falls off its end runs it here.
+        if f.is_variadic && (!f.has_rtype || equals(f.rtype.type_str, "void")) {
+          let vderr = self.emit_function_scope_defers();
+          if vderr.is_some() {
+            ret vderr;
+          }
         }
         // Typecheck already rejects a non-void function whose body
         // doesn't return on every path; C's own, weaker flow analysis
@@ -18731,34 +19007,17 @@ impl Codegen {
           _ -> { ret .None; }
         }
       }
-      // A closure literal's own type: `has_closure_sig`/`closure_sig`,
-      // built the same way `parse_closure_type_datatype` builds one
-      // for the explicit `closure() R` syntax - `let c = fun() R
-      // {...};` needs the exact same shape recorded for `c` as an
-      // explicitly-typed `closure() R c = ...;` already gets, or
-      // nothing downstream (most directly, `emit_call`'s own
-      // closure-dispatch check) ever recognizes `c` as callable
-      // through its own `{fn, env}` pair - it reads as an ordinary,
-      // uncallable struct value instead, confirmed directly as a real
-      // C compile error (calling a `__fun_closure_t` as if it were a
-      // function).
       .ExpressionParenthesis(inner) -> { ret self.infer_let_expr_type(inner); }
+      // A closure literal's type is the signature the parser built for it,
+      // so `let c = fun(num a) R {...};` records `c` the same way an
+      // explicitly typed `closure(num) R c` does.
       .ClosureLiteral(f) -> {
-        FnTypeSig sig = fn_type_sig_new();
-        if f.has_rtype {
-          sig.rtype = f.rtype;
-        } else {
-          DataType* void_dt = malloc(sizeof(DataType));
-          *void_dt = dtype_new();
-          void_dt.kind = .Void;
-          void_dt.type_str = "void";
-          sig.rtype = void_dt;
+        if f.closure_sig == nil {
+          ret .None;
         }
-        FnTypeSig* sig_ptr = malloc(sizeof(FnTypeSig));
-        *sig_ptr = sig;
         DataType dt = dtype_new();
         dt.kind = .Unknown;
-        dt.closure_sig = sig_ptr;
+        dt.closure_sig = f.closure_sig;
         dt.has_closure_sig = true;
         dt.type_str = "closure(...)";
         ret .Some(dt);
@@ -19381,6 +19640,27 @@ impl Codegen {
                     _ -> {}
                   }
                   ai3 = ai3 + 1;
+                }
+              }
+              // A callable parameter returning `tp` bare (`closure(T) U f`)
+              // takes it from the argument's own return type.
+              if !found {
+                num ai4 = 0;
+                for parg4 : f.args {
+                  fit parg4.kind {
+                    .Variable(v4) -> {
+                      if !found && ai4 < args.len &&
+                        _sig_returns_bare(dtype_signature(v4.var_type), tp) {
+                        let ret_name = self._callable_return_type_name(args.get(ai4));
+                        if ret_name.is_some() {
+                          found_name = ret_name.unwrap();
+                          found = true;
+                        }
+                      }
+                    }
+                    _ -> {}
+                  }
+                  ai4 = ai4 + 1;
                 }
               }
               if !found {
@@ -20214,7 +20494,7 @@ impl Codegen {
     `#define abort() __fun_fs_halt()
     `__attribute__((unused)) static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; while (*a && *a == *b) { a++; b++; } return *a == *b; }
     `__attribute__((unused)) static inline int __fun_str_cmp(const char* a, const char* b) { if (a == b) return 0; if (!a) return -1; if (!b) return 1; while (*a && *a == *b) { a++; b++; } return (int)(unsigned char)*a - (int)(unsigned char)*b; }
-    `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
+    `typedef struct { void (*fn)(void); void* env; void (*target)(void); } __fun_closure_t; __attribute__((unused)) static inline __fun_closure_t __fun_closure_of(void (*fn)(void), void (*target)(void)) { __fun_closure_t c; c.fn = fn; c.env = NULL; c.target = target; return c; }
     `
     `
 
@@ -20252,18 +20532,15 @@ impl Codegen {
     self.state.write(
       "static inline int __fun_str_cmp(const char* a, const char* b) { if (a == b) return 0; if (!a) return -1; if (!b) return 1; return strcmp(a, b); }\n"
     );
-    // A closure value's fixed runtime shape: `fn`'s own real C signature
-    // is `void* (*)(void* env)` at every use site, deliberately
-    // identical to a thread entry point's own expected shape
-    // (`__fun_thread_start`'s own `entry`/`arg` below), so a closure's
-    // `{fn, env}` pair plugs directly into `Thread.start`/`thread_start`
-    // with no translation at all. `fn_raw` is the same pointer seen as a
-    // `void*`, which is how Fun code reads `c.fn`, since ISO C has no
-    // conversion between the two. Unconditional, like every other
-    // header/helper above - a program with no closures in it just never
-    // references the name.
+    // A closure value's fixed runtime shape: `fn` is its entry, really
+    // `R (*)(const __fun_closure_t*, params...)`, `env` what a closure
+    // literal captured, and `target` the plain function a wrapped one
+    // calls. Function pointers stay in function-pointer fields, since ISO
+    // C has no conversion between them and `void*`. Unconditional, like
+    // every other header/helper above - a program with no closures in it
+    // just never references the name.
     self.state.write(
-      "typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;\n"
+      "typedef struct { void (*fn)(void); void* env; void (*target)(void); } __fun_closure_t; static inline __fun_closure_t __fun_closure_of(void (*fn)(void), void (*target)(void)) { __fun_closure_t c; c.fn = fn; c.env = NULL; c.target = target; return c; }\n"
     );
     // `<math.h>` declares names a program may define itself (`log`), so
     // it is emitted only when the math bindings are actually imported.
@@ -27540,7 +27817,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#include <limits.h>
     `static inline int __fun_str_eq(const char* a, const char* b) { if (a == b) return 1; if (!a || !b) return 0; return strcmp(a, b) == 0; }
     `static inline int __fun_str_cmp(const char* a, const char* b) { if (a == b) return 0; if (!a) return -1; if (!b) return 1; return strcmp(a, b); }
-    `typedef struct { union { void* (*fn)(void*); void* fn_raw; }; void* env; } __fun_closure_t;
+    `typedef struct { void (*fn)(void); void* env; void (*target)(void); } __fun_closure_t; static inline __fun_closure_t __fun_closure_of(void (*fn)(void), void (*target)(void)) { __fun_closure_t c; c.fn = fn; c.env = NULL; c.target = target; return c; }
     `static FILE* stdout_stream(void){ return stdout; }
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
@@ -29572,4 +29849,10 @@ test "typedef_declared_before remembers a hit and stays correct when a later spl
   g.hoist_insert_pos = splice_in_decl;
   g.emit_hoisted("XX");
   assert !g.typedef_declared_before("typedef struct Foo", 36), "expected a splice through the declaration to make a remembered hit stale, not still true";
+}
+
+// True when `sig` returns exactly the bare type parameter `tp`.
+fun _sig_returns_bare(FnTypeSig* sig, str tp) flag {
+  ret sig != nil && sig.rtype != nil && equals(sig.rtype.type_str, tp) &&
+    sig.rtype.generic_args.len == 0;
 }

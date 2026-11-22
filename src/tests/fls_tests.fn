@@ -10750,7 +10750,7 @@ test "a let local inferred from an array-indexed field access gets the field's o
   );
 }
 
-test "hover on a closure value's own .fn/.env fields describes what they are, not a bogus unrelated field" {
+test "hover on a closure value's own .free() describes it, not a bogus unrelated member" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -10761,22 +10761,15 @@ test "hover on a closure value's own .fn/.env fields describes what they are, no
   `  closure() void c = fun() {
   `    _ = x;
   `  };
-  `  c.fn;
-  `  c.env;
+  `  c.free();
   `}`;
   doc.version = 1;
 
-  // Hover on 'fn' (line 5 "  c.fn;", col 4).
-  str fn_hover = hover(&reads, doc, 5, 4);
-  assert contains(fn_hover, "closure's own underlying function pointer"), format(
-    "expected a real doc describing the closure's own .fn field, got: {str}",
-    fn_hover
-  );
-  // Hover on 'env' (line 6 "  c.env;", col 4).
-  str env_hover = hover(&reads, doc, 6, 4);
-  assert contains(env_hover, "closure's own captured environment"), format(
-    "expected a real doc describing the closure's own .env field, got: {str}",
-    env_hover
+  // Hover on 'free' (line 5 "  c.free();", col 4).
+  str free_hover = hover(&reads, doc, 5, 4);
+  assert contains(free_hover, "Releases what the closure captured"), format(
+    "expected a real doc describing the closure's own free(), got: {str}",
+    free_hover
   );
 }
 
@@ -10788,19 +10781,19 @@ test "hover on the 'closure' keyword itself shows real doc text" {
   doc.path = "closurekw.fn";
   doc.text = `fun main() {
   `  closure() void c = fun() {};
-  `  c.fn;
+  `  c.free();
   `}`;
   doc.version = 1;
 
   // Hover on 'closure' (line 1 "  closure() void c = ...;", col 2).
   str kw_hover = hover(&reads, doc, 1, 2);
-  assert contains(kw_hover, "capturing closure"), format(
+  assert contains(kw_hover, "Names the type of a closure"), format(
     "expected real doc text for the 'closure' keyword, got: {str}",
     kw_hover
   );
 }
 
-test "goto-definition on a closure value's own .fn/.env is a clean no-op, never a crash" {
+test "goto-definition on a closure value's own .free() is a clean no-op, never a crash" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -10808,21 +10801,18 @@ test "goto-definition on a closure value's own .fn/.env is a clean no-op, never 
   doc.path = "closuregoto.fn";
   doc.text = `fun main() {
   `  closure() void c = fun() {};
-  `  c.fn;
-  `  c.env;
+  `  c.free();
   `}`;
   doc.version = 1;
 
-  str fn_def = definition(&reads, doc, 2, 4);
-  assert equals(fn_def, "[]"), format("expected no real location for .fn, got: {str}", fn_def);
-  str env_def = definition(&reads, doc, 3, 4);
-  assert equals(env_def, "[]"), format(
-    "expected no real location for .env, got: {str}",
-    env_def
+  str free_def = definition(&reads, doc, 2, 4);
+  assert equals(free_def, "[]"), format(
+    "expected no real location for .free(), got: {str}",
+    free_def
   );
 }
 
-test "dot-completion on a closure value offers only fn/env, never anything else" {
+test "dot-completion on a closure value offers only free(), never anything else" {
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
   Document doc;
@@ -10836,8 +10826,10 @@ test "dot-completion on a closure value offers only fn/env, never anything else"
 
   // Right after the dot on line 2, "  c.".
   str out = completion(&reads, doc, 2, 4, true);
-  assert contains(out, `"label":"fn"`), format("expected 'fn' to be offered, got: {str}", out);
-  assert contains(out, `"label":"env"`), format("expected 'env' to be offered, got: {str}", out);
+  assert contains(out, `"label":"free"`), format(
+    "expected 'free' to be offered, got: {str}",
+    out
+  );
   assert !contains(out, `"label":"tag_value"`), format(
     "expected no unrelated builtin (tag_value is enum-only) to leak into a closure's own completions, got: {str}",
     out
@@ -10861,7 +10853,7 @@ test "hover, goto-definition, and completion resolve a method declared only in a
   `  closure() void c = fun() {
   `    hp.fetch_add(1);
   `  };
-  `  c.fn;
+  `  c.free();
   `}`;
   AnalysisCache reads = analysis_cache_new();
   defer reads.free();
@@ -10917,15 +10909,10 @@ test "inlay hints show a generic call's own inferred type argument(s), right bef
   // callee name, which an explicit `<...>` call doesn't have.
 }
 
-test "a let-inferred closure resolves every fls feature a declared closure() R one already does" {
-  // fls's own token-only type inference (`_infer_type_primary`) had
-  // no case for a closure literal at all - `let c = fun() num {
-  // ...};` left `c` unresolved, so hover/completion on `c.fn`/`c.env`
-  // fell through to nothing (completion) or the wrong thing (a bare
-  // `main`/`fn` keyword dump, not the real closure-only members).
+test "a let-inferred closure resolves every fls feature a declared closure one already does" {
   str src = `fun main() num {
-  `  let c = fun() num { ret 42; };
-  `  c.fn;
+  `  let c = fun(num a, str s) num { ret a; };
+  `  c.free();
   `  ret 0;
   `}`;
   AnalysisCache reads = analysis_cache_new();
@@ -10937,20 +10924,18 @@ test "a let-inferred closure resolves every fls feature a declared closure() R o
   doc.version = 1;
 
   str hov_c = hover(&reads, doc, 1, 6);
-  assert contains(hov_c, "closure() num c"), "expected c's own let-inferred type to render as closure() num, same as an explicitly-typed one";
+  assert contains(hov_c, "closure(num, str) num c"), format(
+    "expected c's own let-inferred type to render as closure(num, str) num, same as an explicitly-typed one, got: {str}",
+    hov_c
+  );
 
-  str hov_field = hover(&reads, doc, 2, 4);
-  assert contains(hov_field, "fn: raw*"), "expected the real .fn field doc, not nothing";
+  str hov_free = hover(&reads, doc, 2, 4);
+  assert contains(hov_free, "free()"), "expected the real .free() doc, not nothing";
 
   str comp = completion(&reads, doc, 2, 4, false);
-  assert contains(comp, `"label":"fn"`), "expected fn offered";
-  assert contains(comp, `"label":"env"`), "expected env offered";
-  assert !contains(comp, `"label":"main"`), "expected only fn/env, not every name in scope";
+  assert contains(comp, `"label":"free"`), "expected free offered";
+  assert !contains(comp, `"label":"main"`), "expected only free, not every name in scope";
 
-  // Goto-definition is a clean no-op here too, same as the
-  // explicitly-typed case already covers: `.fn`/`.env` are compiler-
-  // synthesized, never a real declared field with a location of its
-  // own.
   str def = definition(&reads, doc, 2, 4);
   assert equals(def, "[]"), "expected a clean no-op, never a crash";
 }
@@ -11420,4 +11405,35 @@ test "a condition loop gets no inlay hint, and a typed for loop's names each get
   assert contains(hints, `{"line":4,"character":7},"label":": str"`), "expected the key's type after it";
   assert contains(hints, `{"line":4,"character":10},"label":": num"`), "expected the value's type after it";
   assert !contains(hints, `"line":3`), "expected nothing on the condition loop";
+}
+
+test "hover types a closure's parameters, and a closure value shows its whole signature" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///closureparams.fn";
+  doc.path = "closureparams.fn";
+  doc.text = `fun main() {
+  `  closure(num, flag) num add = fun(num a, flag up) num {
+  `    ret up ? a : 0;
+  `  };
+  `  _ = add(1, true);
+  `}`;
+  doc.version = 1;
+
+  str hovered_param = hover(&reads, doc, 2, 13);
+  assert contains(hovered_param, "num"), format(
+    "expected a closure parameter's use to show its type 'num', got: {str}",
+    hovered_param
+  );
+  str hovered_value = hover(&reads, doc, 4, 7);
+  assert contains(hovered_value, "closure(num, flag) num"), format(
+    "expected the closure value to show its signature, got: {str}",
+    hovered_value
+  );
+  str hovered_flag = hover(&reads, doc, 2, 8);
+  assert contains(hovered_flag, "flag"), format(
+    "expected a closure parameter's use to show its type 'flag', got: {str}",
+    hovered_flag
+  );
 }
