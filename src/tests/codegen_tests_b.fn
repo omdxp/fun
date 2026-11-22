@@ -4159,3 +4159,53 @@ test "str equality compares contents for calls, fields, elements, and generics" 
     out_msvc
   );
 }
+
+test "str ordering compares contents, and an indexed str is a chr" {
+  str src = `use std.io;
+  `use std.string;
+  `compound P {
+  `  str name;
+  `  str[2] tags;
+  `}
+  `fun mk(str x) str {
+  `  StringBuilder sb = string_builder_init(8);
+  `  sb.append(x);
+  `  ret sb.build();
+  `}
+  `fun get(str x) P {
+  `  ret P{name = mk(x), tags = [mk(x), mk("z")]};
+  `}
+  `fun most<T>(T a, T b) T {
+  `  if a > b {
+  `    ret a;
+  `  }
+  `  ret b;
+  `}
+  `fun main() num {
+  `  str a = mk("b");
+  `  str b = mk("a");
+  `  str n = nil;
+  `  println_fmt("{flag} {flag} {flag} {flag} {flag}", a < b, a > b, mk("a") <= b, a >= "c", n < b);
+  `  println_fmt("{flag} {flag} {str} {num}", get("ab").name == get("ab").name, get("ab").tags[1] < get("ab").tags[0], most(b, a), most(2, 7));
+  `  println_fmt("{chr} {chr} {chr} {}", a[0], get("xy").name[1], get("pq").tags[1][0], mk("uv")[1]);
+  `  ret 0;
+  `}`;
+  str want1 = "false true true false true";
+  str want2 = "true false b 7";
+  str want3 = "b y z v";
+  str out = run_source(src, "str_ordering", "str ordering by contents");
+  assert contains(out, want1) && contains(out, want2) && contains(out, want3), format(
+    "expected every comparison by contents and every index a chr, got: {str}",
+    out
+  );
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "str_ordering_msvc",
+    "str ordering by contents (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want1) && contains(out_msvc, want2) &&
+  contains(out_msvc, want3), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}
