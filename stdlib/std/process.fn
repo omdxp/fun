@@ -291,7 +291,8 @@ pub fun kill_pid(num pid) {
 }
 
 // Where `program` resolves to on `PATH` right now, or "" if it isn't
-// found there at all - the same shell-out `command -v`/`where` convention
+// found there at all; the caller owns the result either way and frees it.
+// The same shell-out `command -v`/`where` convention
 // `fun upgrade` already uses to find its own installed binary, not a
 // new primitive. Deliberately not "the exact file this process itself
 // is running from" (which would need a real, platform-specific OS
@@ -319,18 +320,18 @@ pub fun find_on_path(str program) str {
   free_argv(argv);
   args.free();
   if r.is_err() {
-    ret "";
+    ret substr("", 0, 0);
   }
   let res = r.unwrap();
   if res.exit_code != 0 {
-    ret "";
+    ret substr("", 0, 0);
   }
   // `where` can print more than one match; PATH resolves to whichever
   // comes first.
   Vec<str> lines = split(trim(res.stdout_text), '\n');
   defer lines.free();
   if lines.len == 0 {
-    ret "";
+    ret substr("", 0, 0);
   }
   ret trim(lines.get(0));
 }

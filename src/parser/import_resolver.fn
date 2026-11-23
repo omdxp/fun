@@ -485,6 +485,27 @@ pub fun import_cache_new() ImportCache {
   ret c;
 }
 
+// Frees what `cache` holds: each parsed file's nodes, tokens, and source,
+// and each preload scan's own results. A program merged through it borrows
+// strings from those tokens, so it has to be freed first. The paths it's
+// keyed by stay, since diagnostics carry them, and so does the symbols
+// key every entry from one parse shares.
+pub fun import_cache_free(ImportCache* cache) {
+  for _path, pf :: cache.files {
+    Vec<Node> nodes = pf.nodes;
+    free_node_tree(&nodes);
+    Vec<Token> tokens = pf.tokens;
+    free_token_vec(&tokens);
+    free(pf.source);
+  }
+  cache.files.free();
+  for _key, pre :: cache.preload_cache {
+    PreloadedFileSymbols stale = pre;
+    _free_stale_preloaded(&stale);
+  }
+  cache.preload_cache.free();
+}
+
 // The declared names, in a fixed order, so two sets can be compared as
 // one string.
 fun _symbols_key(Map<str, GlobalSymbolInfo>* symbols) str {

@@ -4378,12 +4378,24 @@ fun _lint_outcome_new() LintOutcome {
 // building it: parse with its imports, expand aliases, then read the
 // warnings off the file's own declarations.
 fun _lint_file(str file, LintOutcome* out) {
-  let parsed = parse_program_with_imports(file);
+  // A cache of its own, freed with everything parsed through it once the
+  // file is checked: a tree's worth of files would otherwise keep every
+  // one of their whole programs alive at once.
+  ImportCache cache = import_cache_new();
+  defer import_cache_free(&cache);
+  let parsed = parse_program_cached(file, nil, &cache);
   if parsed.is_err() {
     out.failures.push(format("{str}: error: {str}", file, parsed.unwrap_err()));
     ret;
   }
   let merged = parsed.unwrap();
+  // Freed before the cache it borrows strings from (defers run last
+  // first).
+  defer free_node_tree(&merged.entry_nodes);
+  defer free_node_tree(&merged.nodes);
+  defer merged.aliases.free();
+  defer merged.alias_rename_keys.free();
+  defer merged.alias_rename_targets.free();
   let alias_err = expand_type_aliases(&merged.nodes);
   if alias_err.is_some() {
     out.failures.push(format("{str}: error: {str}", file, alias_err.unwrap()));

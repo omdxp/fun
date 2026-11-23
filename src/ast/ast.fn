@@ -150,16 +150,6 @@ pub fun node_flags_new() NodeFlags {
   ret f;
 }
 
-// Links a node back to its owning declaration/enclosing function, used by
-// semantic checks that need to walk from a reference back to context (e.g.
-// visibility checks, "which function is this return statement inside").
-pub compound BindedNode {
-  Node* owner;
-  flag has_owner;
-  Node* function;
-  flag has_function;
-}
-
 // ===== Warning diagnostics =====
 
 // Stable identifier for a compiler warning category, used by diagnostics and
@@ -1138,8 +1128,6 @@ pub compound Node {
   Pos pos;
   flag has_pos;
   NodeFlags flags;
-  BindedNode* binded;
-  flag has_binded;
 }
 
 // Names `kind` for a diagnostic, so a rejected node can say what it was.
@@ -1178,8 +1166,6 @@ pub fun node_new(NodeKind kind) Node {
   n.kind = kind;
   n.has_pos = false;
   n.flags = node_flags_new();
-  n.binded = nil;
-  n.has_binded = false;
   ret n;
 }
 
@@ -1305,13 +1291,7 @@ fun is_array_operator(str op) flag {
 // pointer directly rather than copying it (`token_word`'s own
 // contract), so a node's string fields and its source token's string
 // data are frequently the same allocation - freeing both would double-
-// free. `BindedNode.owner`/`.function` (see `Parser.create_node`) are
-// each a separately `malloc`'d shallow copy of whatever enclosing
-// body/function node was active at construction time - the copy's own
-// `kind` shares every nested `Node*`/`Vec<T>` pointer the real node
-// still owns (a shallow struct copy copies the pointer values, not
-// what they point to), so only the copy's own outer struct is ever
-// freed here, never anything reachable through it.
+// free.
 
 fun _free_node_vec(Vec<Node*>* v) {
   num i = 0;
@@ -1611,37 +1591,6 @@ fun _free_node_contents(Node* n) {
       node_free(fz.body);
     }
     _ -> {}
-  }
-  if n.has_binded && n.binded != nil {
-    if n.binded.has_owner && n.binded.owner != nil {
-      free(n.binded.owner);
-    }
-    if n.binded.has_function && n.binded.function != nil {
-      free(n.binded.function);
-    }
-    free(n.binded);
-  }
-}
-
-// Frees only a node's own `binded` context (its `owner`/`function`
-// back-reference copies - see `BindedNode`), never its `kind` payload.
-// For a wrapper a parser-side rotation discards after absorbing its
-// contents elsewhere by value (its former children now live on
-// somewhere else, so freeing them here would double-free): the wrapper
-// itself still carries its own, independent binding context from when
-// it was first built, which nothing else points at or will ever free.
-pub fun free_node_binded_only(Node* n) {
-  if n == nil {
-    ret;
-  }
-  if n.has_binded && n.binded != nil {
-    if n.binded.has_owner && n.binded.owner != nil {
-      free(n.binded.owner);
-    }
-    if n.binded.has_function && n.binded.function != nil {
-      free(n.binded.function);
-    }
-    free(n.binded);
   }
 }
 
@@ -1986,16 +1935,9 @@ fun _clone_enum_variants(Vec<EnumVariant>* variants) Vec<EnumVariant> {
 
 // A deep, independently-owned copy of `n`'s own contents - every
 // `Vec<T>`/`Node*`/`DataType*` field freshly built, string fields
-// shared with the original (see the file-level note above). `binded`
-// is dropped rather than cloned: it's a later pass's own bookkeeping
-// (`Parser.create_node`'s own shallow snapshot of enclosing context),
-// meaningless once detached into an independently-merged program, and
-// its own `owner`/`function` are themselves non-owning references
-// `node_free` already treats specially for the same reason.
+// shared with the original (see the file-level note above).
 pub fun node_clone(Node n) Node {
   Node c = n;
-  c.has_binded = false;
-  c.binded = nil;
   fit n.kind {
     .Import(i) -> {
       ImportNode ci = i;
