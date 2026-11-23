@@ -37,7 +37,7 @@ fun runtime_thread_new_posix() Thread {
   ret thread_backend_posix_new();
 }
 
-fun runtime_thread_start_posix(Thread* thread, raw* entry, raw* arg) num {
+fun runtime_thread_start_posix(Thread* thread, ThreadEntry entry, raw* arg) num {
   ret thread_backend_posix_start(thread, entry, arg);
 }
 
@@ -54,7 +54,7 @@ fun runtime_thread_new_windows() Thread {
   ret thread_backend_windows_new();
 }
 
-fun runtime_thread_start_windows(Thread* thread, raw* entry, raw* arg) num {
+fun runtime_thread_start_windows(Thread* thread, ThreadEntry entry, raw* arg) num {
   ret thread_backend_windows_start(thread, entry, arg);
 }
 
@@ -75,7 +75,7 @@ pub fun runtime_thread_new() Thread {
 }
 
 // Start a runtime thread handle.
-pub fun runtime_thread_start(Thread* thread, raw* entry, raw* arg) num {
+pub fun runtime_thread_start(Thread* thread, ThreadEntry entry, raw* arg) num {
   if thread_runtime_backend_is_windows() == true {
     ret runtime_thread_start_windows(thread, entry, arg);
   }
@@ -120,7 +120,7 @@ pub fun runtime_async_task_new() RuntimeAsyncTask {
 // Spawns a runtime thread running `entry(arg)` (pthread-style entry
 // pointer, `raw* (*)(raw*)`), returning a RuntimeAsyncTask join handle with
 // start_rc set to the thread start result.
-pub fun runtime_async_spawn(raw* entry, raw* arg) RuntimeAsyncTask {
+pub fun runtime_async_spawn(ThreadEntry entry, raw* arg) RuntimeAsyncTask {
   let task = runtime_async_task_new();
   task.start_rc = runtime_thread_start(&task.thread, entry, arg);
   task.active = task.start_rc == 0;

@@ -24,13 +24,17 @@ pub fun thread_new() Thread {
   ret t;
 }
 
+// A thread's entry function: called with the argument it was started
+// with, its return value is what `join` reads back.
+pub als ThreadEntry = fun(raw*) raw*;
+
 impl Thread {
   // Starts this thread running `entry(arg)`. Its stack is sized
   // explicitly (8 MiB) rather than left at the OS default: a secondary
   // thread's default stack is far smaller than the main thread's on some
   // platforms (512 KiB on macOS, for example), easily overflowed by a
   // deeply recursive `entry`.
-  pub start(raw* entry, raw* arg) num {
+  pub start(ThreadEntry entry, raw* arg) num {
     if self.started == true {
       ret 0;
     }
@@ -71,7 +75,7 @@ impl Thread {
 }
 
 // Starts a thread via pointer receiver helper. Returns -1 when `thread` is null.
-pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
+pub fun thread_start(Thread* thread, ThreadEntry entry, raw* arg) num {
   if thread == nil {
     ret -1;
   }
@@ -84,7 +88,7 @@ pub fun thread_start(Thread* thread, raw* entry, raw* arg) num {
 
 // Start a thread with Result. `Ok(true)` on success, `Err` with the backend code
 // otherwise (where `thread_start` returns a raw nonzero/-1 code that's easy to ignore).
-pub fun try_thread_start(Thread* thread, raw* entry, raw* arg) Result<flag, Error> {
+pub fun try_thread_start(Thread* thread, ThreadEntry entry, raw* arg) Result<flag, Error> {
   let rc = thread_start(thread, entry, arg);
   if rc != 0 {
     ret err_kind_code(.System, rc, "thread_start failed", false);

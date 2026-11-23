@@ -1,7 +1,9 @@
-// A closure-based `spawn` for `std.thread`.
+// A closure-based `spawn` for `std.thread`, and `spawn_value` for a
+// closure whose result is read back by joining.
 
 use std.thread_runtime;
 use std.atomic;
+use std.result;
 use std.c.mem;
 
 // What a spawned thread is handed: the closure to run, boxed so it
@@ -23,11 +25,94 @@ fun run_spawned(raw* arg) raw* {
 
 // Runs `task` on a new OS thread, fire-and-forget. The thread owns
 // `task` from here on and frees what it captured once it has run, so
-// the caller must not call or free it again.
+// the caller must not call or free it again. When no thread can be
+// started, `task` is freed here and the returned task reports why.
 pub fun spawn(closure() void task) RuntimeAsyncTask {
   SpawnBox* box = malloc(sizeof(SpawnBox));
   box.task = task;
-  ret runtime_async_spawn(run_spawned, box);
+  RuntimeAsyncTask started = runtime_async_spawn(run_spawned, box);
+  if started.last_start_rc() != 0 {
+    free(box);
+    task.free();
+  }
+  ret started;
+}
+
+// Where a `spawn_value` thread leaves its result. Shared by the thread
+// and the handle; whichever lets go of it last frees it.
+compound SpawnSlot<T> {
+  T result;
+  Atomic<num> refs;
+}
+
+// Drops one reference to `slot`, freeing it when none remain.
+fun release_slot<T>(SpawnSlot<T>* slot) {
+  if slot.refs.fetch_sub(1) == 1 {
+    free(slot);
+  }
+}
+
+// A running `spawn_value` thread, whose result `join()` reads back. Call
+// `join()` or `detach()` exactly once; a handle that does neither leaks
+// the thread and its result slot.
+pub compound Spawned<T> {
+  RuntimeAsyncTask task;
+  SpawnSlot<T>* slot;
+}
+
+// Runs `task` on a new OS thread and returns a handle to join for its
+// result. The thread owns `task` and frees what it captured once it has
+// run.
+pub fun spawn_value<T>(closure() T task) Spawned<T> {
+  SpawnSlot<T>* slot = malloc(sizeof(SpawnSlot<T>));
+  slot.refs = atomic_new(2);
+  Spawned<T> h;
+  h.slot = slot;
+  h.task = spawn(fun() {
+    slot.result = task();
+    task.free();
+    release_slot(slot);
+  });
+  // No thread ever ran the wrapper, so nothing else will free these.
+  if h.task.last_start_rc() != 0 {
+    task.free();
+    free(slot);
+    h.slot = nil;
+  }
+  ret h;
+}
+
+impl Spawned<T> {
+  // Waits for the thread and returns what its closure returned, or `Err`
+  // with the error code: why the thread couldn't start, or why joining
+  // it failed. The caller owns the result, including any memory it
+  // holds. A second `join()`, or one after `detach()`, is `Err(-1)`.
+  pub join() Result<T, num> {
+    if self.slot == nil {
+      num start_rc = self.task.last_start_rc();
+      ret .Err(start_rc != 0 ? start_rc : -1);
+    }
+    num rc = self.task.join(nil);
+    if rc != 0 {
+      ret .Err(rc);
+    }
+    T value = self.slot.result;
+    release_slot(self.slot);
+    self.slot = nil;
+    ret .Ok(value);
+  }
+
+  // Lets the thread run on without waiting for it. Its result is thrown
+  // away once it finishes; a result that holds memory of its own leaks.
+  pub detach() num {
+    if self.slot == nil {
+      ret 0;
+    }
+    num rc = self.task.detach();
+    release_slot(self.slot);
+    self.slot = nil;
+    ret rc;
+  }
 }
 
 test "spawn runs a closure on a real thread, capturing a heap counter it mutates" {
@@ -43,4 +128,41 @@ test "spawn runs a closure on a real thread, capturing a heap counter it mutates
   assert task.join(nil) == 0, "expected the spawned thread to join cleanly";
   assert hp.load() == 1, "expected the closure to have run exactly once on the spawned thread";
   free(hp);
+}
+
+test "spawn_value returns its closure's result through join" {
+  num base = 10;
+  Spawned<num> h = spawn_value(fun() num {
+    ret base * 4;
+  });
+  let got = h.join();
+  assert got.is_ok() && got.unwrap_or(0) == 40, "expected the closure's result back";
+  assert h.join().is_err(), "expected a second join to fail";
+}
+
+test "spawn_value threads run side by side and each result comes back" {
+  Spawned<num>[4] handles;
+  num i = 0;
+  for i < 4 {
+    num n = i;
+    handles[i] = spawn_value(fun() num {
+      ret n * n;
+    });
+    i = i + 1;
+  }
+  num total = 0;
+  i = 0;
+  for i < 4 {
+    total = total + handles[i].join().unwrap_or(-100);
+    i = i + 1;
+  }
+  assert total == 14, "expected 0 + 1 + 4 + 9";
+}
+
+test "a detached spawn_value thread frees its own slot" {
+  Spawned<str> h = spawn_value(fun() str {
+    ret "done";
+  });
+  assert h.detach() == 0, "expected detach to succeed";
+  assert h.join().is_err(), "expected join after detach to fail";
 }

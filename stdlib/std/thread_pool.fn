@@ -81,7 +81,7 @@ impl ThreadPool {
   // Starts all workers running `entry`, with an optional per-worker
   // argument array (`args[i]` for worker i). Returns 0 on success, -2 when
   // pool allocation failed, or the first nonzero thread start error code.
-  pub start_all(raw* entry, raw** args) num {
+  pub start_all(ThreadEntry entry, raw** args) num {
     if self.has_storage == false {
       ret -2;
     }
@@ -109,7 +109,7 @@ impl ThreadPool {
   // Start all workers with Result. `Ok(count)` (workers started) on success, `Err`
   // when storage failed or a worker couldn't start — clearer than the -2/raw-code
   // sentinels of `start_all`.
-  pub try_start_all(raw* entry, raw** args) Result<num, Error> {
+  pub try_start_all(ThreadEntry entry, raw** args) Result<num, Error> {
     let rc = self.start_all(entry, args);
     if rc != 0 {
       ret err_kind_code(.System, rc, "thread pool start_all failed", rc);

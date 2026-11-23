@@ -20039,9 +20039,20 @@ impl Codegen {
                 // body splice still uses `self.hoist_insert_pos`, landing
                 // after `scratch` where a definition belongs.
                 let saved_stmt_start_pos_for_drain = self.current_stmt_start_pos;
+                num len_before_drain = self.state.out.len();
                 self.current_stmt_start_pos = saved_hoist_pos;
                 self.drain_pending_generic_impl_methods();
+                // The drain inserted its text ahead of the statement being
+                // emitted, so that statement's start moved by as much.
+                num drained = self.state.out.len() - len_before_drain;
                 self.current_stmt_start_pos = saved_stmt_start_pos_for_drain;
+                if drained > 0 && saved_hoist_pos.is_some() {
+                  self.current_stmt_start_pos = adjust_pos_after_splice(
+                    self.current_stmt_start_pos,
+                    saved_hoist_pos.unwrap(),
+                    drained
+                  );
+                }
               }
             }
 
@@ -22376,7 +22387,7 @@ impl Codegen {
     `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
     `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
     `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
-    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
+    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* (*start_routine)(void*), void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
     `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
     `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
     `static pthread_t pthread_self(void) { return GetCurrentThread(); }
@@ -28148,7 +28159,7 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static void __fun_win_clock_gettime(__fun_win_timespec* out) { FILETIME ft; GetSystemTimeAsFileTime(&ft); unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime; t -= 116444736000000000ULL; out->tv_sec = (time_t)(t / 10000000ULL); out->tv_nsec = (long)((t % 10000000ULL) * 100); }
     `typedef struct { void* (*fn)(void*); void* arg; } __fun_pth_ctx;
     `static DWORD WINAPI __fun_pth_tramp(LPVOID p) { __fun_pth_ctx* ctx = (__fun_pth_ctx*)p; if (ctx) { ctx->fn(ctx->arg); free(ctx); } return 0; }
-    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* start_routine, void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = (void* (*)(void*))start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
+    `static long long pthread_create(pthread_t* thread, pthread_attr_t* attr, void* (*start_routine)(void*), void* arg) { (void)attr; if (!thread || !start_routine) return 22; __fun_pth_ctx* ctx = (__fun_pth_ctx*)malloc(sizeof(__fun_pth_ctx)); if (!ctx) return 12; ctx->fn = start_routine; ctx->arg = arg; HANDLE h = CreateThread(NULL, 8 * 1024 * 1024, __fun_pth_tramp, ctx, 0, NULL); if (!h) { free(ctx); return 11; } *thread = h; return 0; }
     `static long long pthread_join(pthread_t thread, void* retval) { if (!thread) return 22; DWORD w = WaitForSingleObject(thread, INFINITE); if (retval) *((void**)retval) = NULL; CloseHandle(thread); return w == WAIT_OBJECT_0 ? 0 : (long long)GetLastError(); }
     `static long long pthread_detach(pthread_t thread) { if (!thread) return 22; return CloseHandle(thread) ? 0 : (long long)GetLastError(); }
     `static pthread_t pthread_self(void) { return GetCurrentThread(); }
