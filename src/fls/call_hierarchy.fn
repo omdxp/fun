@@ -71,7 +71,7 @@ pub fun incoming_calls(AnalysisCache* cache, Documents* docs, str name) str {
   Vec<Occurrence> found;
   found.init();
   defer found.free();
-  _collect_occurrences(cache, docs, name, &found);
+  _collect_occurrences(cache, docs, name, .None, &found);
 
   Vec<_CallerGroup> groups;
   groups.init(4);

@@ -111,7 +111,7 @@ fun _references_lens(
   Vec<Occurrence> found;
   found.init(4);
   defer found.free();
-  _collect_occurrences(cache, docs, name, &found);
+  _collect_occurrences(cache, docs, name, .None, &found);
   ret _lens(found, "reference", decl_pos, len(name), document_uri, decl_text);
 }
 

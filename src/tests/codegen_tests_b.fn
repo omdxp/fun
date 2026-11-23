@@ -4471,3 +4471,83 @@ test "a generic method's loop over a generic iterable still sees its own type pa
     out
   );
 }
+
+test "an awaited value is a receiver like a call result, and propagates" {
+  str src = `use std.io;
+  `use std.result;
+  `
+  `compound Pt {
+  `  num x;
+  `}
+  `
+  `impl Pt {
+  `  twice() num {
+  `    ret self.x * 2;
+  `  }
+  `}
+  `
+  `async fun pt() Pt {
+  `  ret Pt{x = 3};
+  `}
+  `
+  `async fun parse(num n) Result<num, str> {
+  `  if n < 0 {
+  `    ret .Err("negative");
+  `  }
+  `  ret .Ok(n * 10);
+  `}
+  `
+  `async fun chained(num n) Result<num, str> {
+  `  num v = await parse(n)!;
+  `  num w = (await parse(n))!;
+  `  ret .Ok(v + w);
+  `}
+  `
+  `async fun main() {
+  `  num a = (await pt()).x;
+  `  num b = (await pt()).twice();
+  `  let ok = await chained(2);
+  `  let bad = await chained(-1);
+  `  println(format("{num} {num} {num} {flag}", a, b, ok.unwrap_or(0), bad.is_err()));
+  `}`;
+  str out = run_source(src, "await_receiver", "awaited receivers and propagation");
+  assert contains(out, "3 6 40 true"), format(
+    "expected every awaited form to run, got: {str}",
+    out
+  );
+}
+
+test "a for loop walks an array literal, tuples included" {
+  str src = `use std.io;
+  `
+  `fun main() num {
+  `  num t = 0;
+  `  for x : [1, 2, 3] {
+  `    t = t + x;
+  `  }
+  `  for i, x :: [4, 5] {
+  `    t = t + i + x;
+  `  }
+  `  for i, (a, b) :: [(1, 2), (3, 4)] {
+  `    t = t + i + a + b;
+  `  }
+  `  let pairs = [(5, 6), (7, 8)];
+  `  for (m, n) : pairs {
+  `    t = t + m + n;
+  `  }
+  `  println(format("{num} {num}", t, pairs[1].0));
+  `  ret 0;
+  `}`;
+  str want = "53 7";
+  str out = run_source(src, "for_over_literal", "for over array literals");
+  assert contains(out, want), format("expected every literal loop to run, got: {str}", out);
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "for_over_literal_msvc",
+    "for over array literals (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}

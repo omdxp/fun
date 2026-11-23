@@ -3804,11 +3804,13 @@ test "document highlight finds every occurrence in the current document, but nev
   Document doc = held.unwrap();
 
   // `total` in `a.fn` is written twice: the declaration and its own
-  // recursive call. `references` also finds `b.fn`'s own unrelated
-  // `total`, since it scans every open document; document_highlights
-  // must not.
+  // recursive call. `b.fn` declares an unrelated `total` of its own, which
+  // neither `references` nor `document_highlights` may pick up.
   str refs = references(&reads, &docs, doc, 0, 5);
-  assert count(refs, `"uri"`) == 3, "expected references to find all three, across both files";
+  assert count(refs, `"uri"`) == 2, format(
+    "expected references to find a.fn's two, not b.fn's unrelated declaration, got: {str}",
+    refs
+  );
 
   str highlights = document_highlights(&reads, doc, 0, 5);
   assert count(highlights, `"range"`) == 2, "expected only a.fn's own two occurrences";
@@ -11435,5 +11437,47 @@ test "hover types a closure's parameters, and a closure value shows its whole si
   assert contains(hovered_flag, "flag"), format(
     "expected a closure parameter's use to show its type 'flag', got: {str}",
     hovered_flag
+  );
+}
+
+test "rename and references on a local stay inside its own function, and skip fields of the same name" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Documents docs = documents_new();
+  defer docs.free();
+  docs.opened(
+    "file:///scoped.fn",
+    `compound P {
+  `  num count;
+  `}
+  `fun first() num {
+  `  num count = 1;
+  `  P p = P{count = 2};
+  `  ret count + p.count;
+  `}
+  `fun second() num {
+  `  num count = 3;
+  `  ret count;
+  `}`,
+    1
+  );
+  let doc = docs.at("file:///scoped.fn").unwrap();
+
+  // The local `count` declared in `first` (line 4, "  num count = 1;").
+  str edit = rename_symbol(&reads, &docs, doc, 4, 7, "total");
+  assert count(edit, `"newText":"total"`) == 2, format(
+    "expected only first's own two uses of its local renamed, got: {str}",
+    edit
+  );
+  str refs = references(&reads, &docs, doc, 9, 7);
+  assert count(refs, `"uri"`) == 2, format(
+    "expected second's local to have exactly its own two occurrences, got: {str}",
+    refs
+  );
+  // The field, reached through `p.count` (line 6, col 19).
+  str field_refs = references(&reads, &docs, doc, 6, 19);
+  assert count(field_refs, `"uri"`) == 3, format(
+    "expected the field's declaration, literal label, and access, got: {str}",
+    field_refs
   );
 }

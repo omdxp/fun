@@ -2950,6 +2950,21 @@ impl Checker {
       want_name = "Result";
     }
     if !equals(operand.name, want_name) {
+      str other_name = is_option ? "Result" : "Option";
+      if equals(operand.name, other_name) {
+        // The other propagation operator is the one that fits.
+        self.fail(
+          format(
+          "'{str}' unwraps an {str}, but this is a {str}; use '{str}'",
+          u.op,
+          want_name,
+          other_name,
+          is_option ? "!" : "?"
+          ),
+          node
+        );
+        ret checked_unknown();
+      }
       self.fail(format("'{str}' used on a non-{str} expression", u.op, want_name), node);
       ret checked_unknown();
     }

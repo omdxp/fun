@@ -863,3 +863,13 @@ test "a wrapped call nested in another call's arguments closes at the same inden
   );
   assert contains(once, "    true\n    ),\n"), once;
 }
+
+test "the arguments after a closure literal stay on the line its body closes on" {
+  str src = `fun main() {
+  `  num r = apply(fun(num a) num { ret a; }, 3);
+  `}`;
+  str once = format_source(src, "t.fn").unwrap();
+  assert contains(once, "  num r = apply(fun(num a) num {\n    ret a;\n  }, 3);\n"), once;
+  str twice = format_source(once, "t.fn").unwrap();
+  assert equals(once, twice), twice;
+}
