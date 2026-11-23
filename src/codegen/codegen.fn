@@ -6455,6 +6455,31 @@ impl Codegen {
       }
       _ -> {}
     }
+    // `await f()!`/`(await f())!`: typed by what the awaited call returns.
+    if !resolved_operand_type {
+      Node* aw_base = u.operand;
+      for true {
+        fit aw_base.kind {
+          .ExpressionParenthesis(aw_inner) -> { aw_base = aw_inner; }
+          _ -> { break; }
+        }
+      }
+      fit aw_base.kind {
+        .Unary(aw) -> {
+          if equals(aw.op, "await") {
+            let aw_dt = self.infer_let_expr_type(aw_base);
+            if aw_dt.is_some() {
+              let aw_name = self.resolve_type_name(aw_dt.unwrap());
+              if aw_name.is_some() {
+                operand_enum_name = aw_name.unwrap();
+                resolved_operand_type = true;
+              }
+            }
+          }
+        }
+        _ -> {}
+      }
+    }
     if !resolved_operand_type {
       operand_enum_name = self.resolve_field_chain(u.operand)?!(.UnsupportedNode).type_name;
     }
@@ -9167,6 +9192,16 @@ impl Codegen {
       .String(_) -> { ret "char*"; }
       .Character(_) -> { ret "char"; }
       .Boolean(_) -> { ret "bool"; }
+      .TupleLiteral(_) -> {
+        let tuple_dt = self.infer_let_expr_type(first);
+        if tuple_dt.is_some() {
+          str tuple_c = self.write_type_text(tuple_dt.unwrap());
+          if !equals(tuple_c, "") {
+            ret tuple_c;
+          }
+        }
+        ret "int64_t";
+      }
       .Identifier(name) -> {
         let tn = self.lookup_local_type_name(name);
         if tn.is_some() {
@@ -11737,6 +11772,18 @@ impl Codegen {
       // `pointer_depth`, since a dereferenced pointer is a plain value.
       // Only a single, non-left-operanded `*`; `**pp` isn't produced here.
       .Unary(u) -> {
+        // `(await f()).method()`: the awaited value is an rvalue, like a
+        // call result, typed by what the awaited call returns.
+        if equals(u.op, "await") {
+          let await_rdt = self.infer_let_expr_type(recv)?;
+          ChainResolution ar;
+          ar.text = self._render_expr_isolated(recv)?;
+          ar.type_name = self.resolve_type_name(await_rdt)?;
+          ar.is_pointer = dtype_is_pointer(await_rdt);
+          ar.dtype = .Some(await_rdt);
+          ar.is_call_result = true;
+          ret .Some(ar);
+        }
         // `expr?.field`/`expr!.field`: the propagated value used inline
         // as a receiver, with no intermediate `let` binding. Rendered
         // the same way a call-as-receiver is (through the ordinary
@@ -14240,7 +14287,50 @@ impl Codegen {
     ret false;
   }
 
+  // `for ... : [ ... ]`: declares the literal as `let __fun_for_lit_N =
+  // [ ... ];` in a block of its own, then loops over that local.
+  _emit_for_over_literal(ForIterNode fi) Option<CodegenErrorKind> {
+    self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
+    str lit_name = format("__fun_for_lit_{num}", self.for_iter_temp_counter);
+    DataType* let_dt = malloc(sizeof(DataType));
+    *let_dt = dtype_new();
+    let_dt.type_str = "__let_infer__";
+    VariableNode vn;
+    vn.var_type = let_dt;
+    vn.name = lit_name;
+    vn.val = fi.iterable;
+    vn.has_val = true;
+    vn.is_const = false;
+    vn.is_destructure = false;
+    vn.destructure_names.init(0);
+    Node decl = node_new(.Variable(vn));
+    decl.pos = fi.iterable.pos;
+    decl.has_pos = fi.iterable.has_pos;
+    self.state.write_indent();
+    self.state.write("{\n");
+    self.state.indent_level = self.state.indent_level + 1;
+    let derr = self.emit_statement(decl);
+    if derr.is_some() {
+      ret derr;
+    }
+    Node* lit_ident = malloc(sizeof(Node));
+    *lit_ident = node_new(.Identifier(lit_name));
+    ForIterNode over = fi;
+    over.iterable = lit_ident;
+    let lerr = self.emit_for_iter(over);
+    self.state.indent_level = self.state.indent_level - 1;
+    self.state.write_indent();
+    self.state.write("}\n");
+    ret lerr;
+  }
+
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
+    // An array literal (`for x : [1, 2, 3]`) is bound to a hidden local
+    // first, inside its own block, and the loop walks that.
+    fit fi.iterable.kind {
+      .Bracket(_) -> { ret self._emit_for_over_literal(fi); }
+      _ -> {}
+    }
     // The iterable is either a plain identifier, checked structurally via
     // `lookup_local_dtype` or by name, or a chained field access resolved
     // via `resolve_field_chain`. `ChainResolution.dtype` carries the
@@ -19041,6 +19131,32 @@ impl Codegen {
       // `arr` would never be recorded as a known local and a later
       // `for x : arr` would reject it as an unrecognized iterable.
       .Bracket(_) -> {
+        // An element with structure of its own (a tuple) keeps it, so a
+        // later loop can still destructure it.
+        Node* leaf = val;
+        for true {
+          fit leaf.kind {
+            .Bracket(leaf_inner) -> {
+              Vec<Node*> leaf_elems;
+              leaf_elems.init(0);
+              defer leaf_elems.free();
+              self.flatten_call_args(leaf_inner, &leaf_elems);
+              if leaf_elems.len == 0 {
+                break;
+              }
+              leaf = leaf_elems.get(0);
+            }
+            _ -> { break; }
+          }
+        }
+        let leaf_dt = self.infer_let_expr_type(leaf);
+        if leaf_dt.is_some() && leaf_dt.unwrap().is_tuple {
+          DataType tdt = leaf_dt.unwrap();
+          tdt.is_array = true;
+          tdt.flags.is_array = true;
+          tdt.array_depth = self.array_literal_nesting_depth(val);
+          ret .Some(tdt);
+        }
         let i = self.infer_array_literal_elem_type_and_depth(val)?;
         DataType dt = dtype_new();
         dt.type_str = i.type_name;

@@ -1357,6 +1357,15 @@ fun _call_arg_wrap_decision(
   if rparen_idx == lparen_idx + 1 {
     ret false;
   }
+  // A closure literal among the arguments already breaks its body onto
+  // lines of its own, so the arguments around it stay where they are.
+  num k = lparen_idx + 1;
+  for k < rparen_idx {
+    if token_is_keyword(tokens.get(k), "fun") {
+      ret false;
+    }
+    k = k + 1;
+  }
   num width = _inline_width(tokens, lparen_idx + 1, rparen_idx - 1);
   ret start_col + width + 1 > MAX_LINE_WIDTH;
 }
@@ -2013,7 +2022,14 @@ pub fun format_source(str src, str filename) Result<str, str> {
         s.has_prev = true;
         s.prev = t;
         i = i + 1;
-        if equals(text, ";") || equals(text, ",") {
+        // Inside a call whose arguments aren't wrapped one per line, the
+        // arguments after a closure's `}` carry on after it: `}, 3)`.
+        flag inline_args = equals(text, ",") && s.open_delims > 0 &&
+          !(s.call_arg_wrap.len > 0 && s.call_arg_wrap.get(s.call_arg_wrap.len - 1));
+        if inline_args {
+          s.pending_space = true;
+          s.has_prev = false;
+        } elif equals(text, ";") || equals(text, ",") {
           s.force_break = true;
         }
         continue;

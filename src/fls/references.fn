@@ -1,16 +1,16 @@
 // References and rename.
 //
-// Both start from the same list: every place a name is written. That
-// list is built by matching the word itself across the documents a
-// client has open, which is what the outgoing server does too. It finds
-// every real occurrence, and it can also find a different declaration
-// that happens to share the name; resolving each occurrence would need
-// an index of the whole workspace rather than the open files.
+// Both start from the same list: every place a name is written, across
+// the documents a client has open. Each candidate is then resolved to
+// its declaration, and only those reaching the same one as the name at
+// the cursor are kept, so a local `i` in one function never drags along
+// another function's `i` or an unrelated `.i` field.
 
 use documents;
 use analysis;
 use positions;
 use symbols;
+use navigation;
 use protocol;
 use ..lexer.token;
 use std.string;
@@ -38,7 +38,8 @@ pub fun document_highlights(AnalysisCache* cache, Document doc, num line, num ch
   Vec<Occurrence> found;
   found.init(8);
   defer found.free();
-  _occurrences_in_doc(cache, doc, doc.uri, name, &found);
+  let target = _target_at(cache, doc, line, character);
+  _occurrences_in_doc(cache, doc, doc.uri, name, target, &found);
 
   StringBuilder b = string_builder_init(128);
   b.append("[");
@@ -80,7 +81,13 @@ pub fun references(
   Vec<Occurrence> found;
   found.init(16);
   defer found.free();
-  _collect_occurrences(cache, docs, name, &found);
+  _collect_occurrences(
+    cache,
+    docs,
+    name,
+    _target_at(cache, doc, line, character),
+    &found
+  );
 
   StringBuilder b = string_builder_init(256);
   b.append("[");
@@ -160,7 +167,13 @@ pub fun rename_symbol(
   Vec<Occurrence> found;
   found.init(16);
   defer found.free();
-  _collect_occurrences(cache, docs, name, &found);
+  _collect_occurrences(
+    cache,
+    docs,
+    name,
+    _target_at(cache, doc, line, character),
+    &found
+  );
   if found.len == 0 {
     ret "null";
   }
@@ -268,6 +281,7 @@ pub fun _collect_occurrences(
   AnalysisCache* cache,
   Documents* docs,
   str name,
+  Option<Declaration> target,
   Vec<Occurrence>* out
 ) {
   Vec<str> uris = docs.all_uris();
@@ -280,16 +294,65 @@ pub fun _collect_occurrences(
     if held.is_none() {
       continue;
     }
-    _occurrences_in_doc(cache, held.unwrap(), document_uri, name, out);
+    _occurrences_in_doc(cache, held.unwrap(), document_uri, name, target, out);
   }
 }
 
-// Every place `name` is written in `d` alone.
+// What the name at `line`/`character` declares or refers to, when that
+// can be resolved.
+fun _target_at(AnalysisCache* cache, Document doc, num line, num character) Option<Declaration> {
+  Analyzed read = cache.of(doc);
+  if !read.lexed {
+    ret .None;
+  }
+  Vec<Token> tokens = read.tokens;
+  let found = token_at(&tokens, line, character);
+  if found.is_none() {
+    ret .None;
+  }
+  ret resolve_at(cache, doc, &tokens, found.unwrap(), line);
+}
+
+// True when `a` and `b` are the same declaration.
+fun _same_declaration(Declaration a, Declaration b) flag {
+  ret a.kind == b.kind && equals(a.name, b.name) && equals(a.container, b.container) &&
+    a.pos.line == b.pos.line && a.pos.col == b.pos.col &&
+    equals(a.pos.filename, b.pos.filename);
+}
+
+// Whether an occurrence `tok` of the name in `d` belongs with `target`.
+// A local, parameter, field, or variant counts only when it resolves to
+// exactly that declaration; a top-level name also keeps an occurrence
+// nothing resolves, since a file that doesn't parse right now still
+// spells the name.
+fun _occurrence_matches(
+  AnalysisCache* cache,
+  Document d,
+  Vec<Token>* tokens,
+  Token tok,
+  Option<Declaration> target
+) flag {
+  if target.is_none() {
+    ret true;
+  }
+  Declaration want = target.unwrap();
+  let got = resolve_at(cache, d, tokens, tok, tok.pos.line - 1);
+  if got.is_some() {
+    ret _same_declaration(want, got.unwrap());
+  }
+  fit want.kind {
+    .Local, .Parameter, .Field, .Variant -> { ret false; }
+    _ -> { ret true; }
+  }
+}
+
+// Every place `name` is written in `d` alone that belongs with `target`.
 fun _occurrences_in_doc(
   AnalysisCache* cache,
   Document d,
   str document_uri,
   str name,
+  Option<Declaration> target,
   Vec<Occurrence>* out
 ) {
   Analyzed read = cache.of(d);
@@ -303,7 +366,8 @@ fun _occurrences_in_doc(
     t = t + 1;
     fit tok.type {
       .Identifier -> {
-        if equals(token_word(tok), name) {
+        if equals(token_word(tok), name) &&
+          _occurrence_matches(cache, d, &tokens, tok, target) {
           Occurrence o;
           o.document_uri = document_uri;
           o.span = span_of(tok, d.text);

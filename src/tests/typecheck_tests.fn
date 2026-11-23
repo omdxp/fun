@@ -4959,3 +4959,21 @@ test "a discarded value is still checked" {
     "expected a str argument to be rejected even when the result is discarded"
   );
 }
+
+test "using the wrong propagation operator names the right one" {
+  str got = check(
+    `enum Result<T, E> {
+    `  Ok(T),
+    `  Err(E),
+    `}
+    `fun parse() Result<num, str> { ret .Ok(1); }
+    `fun run() Result<num, str> {
+    `  num v = parse()?;
+    `  ret .Ok(v);
+    `}`
+  );
+  assert contains(got, "use '!'"), format(
+    "expected a hint to use '!' on a Result, got: {str}",
+    got
+  );
+}
