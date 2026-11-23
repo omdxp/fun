@@ -59,6 +59,9 @@ pub compound CheckedType {
   // type.
   flag has_closure_sig;
   FnTypeSig* closure_sig;
+  // A closure that captures a local by reference (`fun[&n]`), which must
+  // not outlive the function that local belongs to.
+  flag holds_refs;
   // A real tuple type (`(num, str)`). Like a function type, this has no
   // `name` of its own, so `is_unknown` must never treat one as
   // unresolved just because `name` is empty.
@@ -86,6 +89,7 @@ pub fun checked_unknown() CheckedType {
   t.fn_sig = nil;
   t.has_closure_sig = false;
   t.closure_sig = nil;
+  t.holds_refs = false;
   t.is_tuple = false;
   t.tuple_members.init(0);
   t.function_name = "";
@@ -1441,6 +1445,9 @@ compound Checker {
   // await.
   CheckedType rtype;
   flag in_async;
+  // How many closure literals the walk is inside; a `ret` at depth 0
+  // returns from the function itself.
+  num closure_depth;
   // The type parameters the declaration being walked names. They stand
   // for types the checker never sees, so a name among them is a type
   // rather than one nothing declares.
@@ -1497,6 +1504,7 @@ fun _checker_new() Checker {
   c.declared_import_aliases = set_init("", 8);
   c.current_file = "";
   c.rtype = checked_unknown();
+  c.closure_depth = 0;
   c.in_async = false;
   c.failed = false;
   ret c;
@@ -2650,7 +2658,7 @@ impl Checker {
       .Unary(u) -> { ret self.infer_unary(node, u, env); }
       .Ternary(t) -> { ret self.infer_ternary(node, t, env); }
       .Expression(e) -> { ret self.infer_expression(node, e, env); }
-      .ClosureLiteral(f) -> { ret self.infer_closure_literal(f, env); }
+      .ClosureLiteral(f) -> { ret self.infer_closure_literal(node, f, env); }
       _ -> { ret checked_unknown(); }
     }
     ret checked_unknown();
@@ -2666,7 +2674,15 @@ impl Checker {
   // real function, so a `ret` inside the closure checks against the
   // closure's OWN declared return type, not whatever function the
   // closure literal itself happens to sit inside.
-  infer_closure_literal(FunctionNode f, TypeEnv* env) CheckedType {
+  infer_closure_literal(Node* node, FunctionNode f, TypeEnv* env) CheckedType {
+    // A top-level variable is in `env` too; listing one is harmless, since
+    // the closure reaches it directly either way.
+    for rc : f.ref_captures {
+      if env.lookup(rc).is_none() {
+        self.fail(format("'{str}' in the capture list isn't a variable in scope", rc), node);
+        ret checked_unknown();
+      }
+    }
     CheckedType previous_rtype = self.rtype;
     self.rtype = checked_unknown();
     if f.has_rtype {
@@ -2679,7 +2695,9 @@ impl Checker {
         _ -> {}
       }
     }
+    self.closure_depth = self.closure_depth + 1;
     self.check_statement(f.body, env);
+    self.closure_depth = self.closure_depth - 1;
     env.pop();
     _free_checked_type_contents(&self.rtype);
     self.rtype = previous_rtype;
@@ -2688,6 +2706,7 @@ impl Checker {
     t.has_closure_sig = true;
     t.name = "closure(...)";
     t.closure_sig = f.closure_sig;
+    t.holds_refs = f.ref_captures.len > 0;
     ret t;
   }
 
@@ -4772,6 +4791,20 @@ impl Checker {
     if sig.ambiguous {
       ret checked_unknown();
     }
+    // A new thread may run long after this function returns, so it can't
+    // take a closure pointing at this function's locals.
+    if (equals(name, "spawn") || equals(name, "spawn_value")) &&
+      ends_with(sig.file, "thread_spawn.fn") &&
+      args.len == 1 && self.infer(args.get(0), env).holds_refs {
+      self.fail(
+        format(
+        "'{str}' can't take a closure capturing a local by reference; the thread may outlive it",
+        name
+        ),
+        node
+      );
+      ret checked_unknown();
+    }
     self.check_visibility(name, sig.file, sig.is_public, "function", node);
     if self.failed {
       ret checked_unknown();
@@ -6279,6 +6312,10 @@ impl Checker {
       if self.failed {
         ret;
       }
+      // A local holding a by-reference closure is held to the same rules.
+      if value.holds_refs {
+        declared.holds_refs = true;
+      }
       // A `let` takes the type of its value rather than checking one.
       if is_unknown(declared) {
         // A bare enum-variant shorthand (`let v = .Same;`) has no
@@ -6755,6 +6792,13 @@ impl Checker {
     CheckedType got = self.infer(value, env);
     self.check_shorthand_variant(value, self.rtype, env);
     if self.failed {
+      ret;
+    }
+    if got.holds_refs && self.closure_depth == 0 {
+      self.fail(
+        "a closure capturing a local by reference can't be returned; it would outlive what it captured",
+        stmt
+      );
       ret;
     }
     if !self.assignable(self.rtype, got) {

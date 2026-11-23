@@ -4977,3 +4977,50 @@ test "using the wrong propagation operator names the right one" {
     got
   );
 }
+
+test "a closure capturing by reference can't be returned or spawned" {
+  rejects(
+    `fun make() closure() num {
+    `  num n = 1;
+    `  ret fun[&n]() num { ret n; };
+    `}`,
+    "expected returning a by-reference closure to be rejected"
+  );
+  rejects(
+    `fun make() closure() num {
+    `  num n = 1;
+    `  let c = fun[&n]() num { ret n; };
+    `  ret c;
+    `}`,
+    "expected returning a local holding a by-reference closure to be rejected"
+  );
+  rejects(
+    `fun f() {
+    `  let c = fun[&missing]() {};
+    `  c.free();
+    `}`,
+    "expected a capture list naming nothing in scope to be rejected"
+  );
+  accepts(
+    `fun make() closure() num {
+    `  num n = 1;
+    `  ret fun() num {
+    `    n = n + 1;
+    `    ret n;
+    `  };
+    `}`,
+    "expected returning a by-value closure that writes its own copy to be fine"
+  );
+  accepts(
+    `fun outer() {
+    `  num n = 1;
+    `  let c = fun[&n]() closure() num {
+    `    ret fun() num { ret 2; };
+    `  };
+    `  let inner = c();
+    `  inner.free();
+    `  c.free();
+    `}`,
+    "expected a return inside a closure body not to count as the function's own"
+  );
+}

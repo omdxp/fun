@@ -787,6 +787,18 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
     }
   }
+  // Read inside a closure that captured it: say how.
+  if read.parsed && (d.kind == .Local || d.kind == .Parameter) {
+    str capture = closure_capture_mode(
+      &read.program.nodes,
+      doc.path,
+      line + 1,
+      d.name
+    );
+    if !equals(capture, "") {
+      d.detail = format("{str} (captured {str})", d.detail, capture);
+    }
+  }
   // A generic function's own callee name at a call site
   // (`pick_first(100, 200)`, not `fun pick_first<T>(...)`'s own
   // declaration) shows its signature specialized against that call's
@@ -3007,6 +3019,12 @@ pub fun warning_id_doc(WarningId id) str {
       `thread is very likely to do before the closure ever runs.
       `Best-effort: only catches a direct &local assignment immediately
       `visible in the same function.`;
+    }
+    .EscapingRefCapture -> {
+      ret `Flags a closure that captures a local by reference (fun[&n])
+      `being stored in a field or added to a collection, where it can
+      `outlive the function whose local it points at. Returning or
+      `spawning such a closure is a compile error instead.`;
     }
     .IntegerLiteralOutOfRange -> {
       ret `Flags a compile-time integer literal that can't be

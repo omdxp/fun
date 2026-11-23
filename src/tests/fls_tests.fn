@@ -11481,3 +11481,37 @@ test "rename and references on a local stay inside its own function, and skip fi
     field_refs
   );
 }
+
+test "hover inside a closure says how it captured a name" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document doc;
+  doc.uri = "file:///captures.fn";
+  doc.path = "captures.fn";
+  doc.text = `fun main() {
+  `  num count = 0;
+  `  num step = 2;
+  `  let add = fun[&count]() {
+  `    count = count + step;
+  `  };
+  `  add();
+  `  add.free();
+  `}`;
+  doc.version = 1;
+
+  str by_ref = hover(&reads, doc, 4, 5);
+  assert contains(by_ref, "captured by reference"), format(
+    "expected count by reference, got: {str}",
+    by_ref
+  );
+  str by_val = hover(&reads, doc, 4, 21);
+  assert contains(by_val, "captured by value"), format(
+    "expected step by value, got: {str}",
+    by_val
+  );
+  str outside = hover(&reads, doc, 1, 7);
+  assert !contains(outside, "captured"), format(
+    "expected no capture note outside the closure, got: {str}",
+    outside
+  );
+}

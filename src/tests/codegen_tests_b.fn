@@ -4586,3 +4586,118 @@ test "spawn_value from its module joins each thread's result" {
     out_msvc
   );
 }
+
+test "closures copy their captures into state of their own, and reach listed ones by reference" {
+  str src = `use std.io;
+  `use std.vec;
+  `
+  `compound Acc {
+  `  num total;
+  `}
+  `
+  `fun make_counter(num start) closure() num {
+  `  num n = start;
+  `  ret fun() num {
+  `    n = n + 1;
+  `    ret n;
+  `  };
+  `}
+  `
+  `fun main() {
+  `  num a = 0;
+  `  num b = 10;
+  `  str label = "x";
+  `  let both = fun[&a, &b](num d) {
+  `    a = a + d;
+  `    b = b - d;
+  `  };
+  `  both(2);
+  `  both(3);
+  `  println_fmt("a={num} b={num}", a, b);
+  `  both.free();
+  `
+  `  num count = 0;
+  `  let inc = fun[&count]() {
+  `    count = count + 1;
+  `  };
+  `  let read = fun[&count]() num {
+  `    ret count;
+  `  };
+  `  inc();
+  `  inc();
+  `  println_fmt("shared={num}", read());
+  `  inc.free();
+  `  read.free();
+  `
+  `  num seen = 0;
+  `  let mixed = fun[&seen](num x) num {
+  `    seen = seen + 1;
+  `    ret x + len(label);
+  `  };
+  `  num m = mixed(4) + mixed(5);
+  `  println_fmt("mixed={num} seen={num}", m, seen);
+  `  mixed.free();
+  `
+  `  let c1 = make_counter(0);
+  `  let c2 = make_counter(100);
+  `  num r1 = c1();
+  `  num r2 = c1();
+  `  num r3 = c2();
+  `  println_fmt("counters={num} {num} {num}", r1, r2, r3);
+  `  c1.free();
+  `  c2.free();
+  `
+  `  Acc acc = Acc{total = 0};
+  `  let add = fun[&acc](num x) {
+  `    acc.total = acc.total + x;
+  `  };
+  `  add(7);
+  `  add(8);
+  `  println_fmt("acc={num}", acc.total);
+  `  add.free();
+  `
+  `  num[3] arr = [1, 2, 3];
+  `  let bump = fun[&arr]() {
+  `    arr[0] = arr[0] + 10;
+  `  };
+  `  bump();
+  `  println_fmt("arr0={num}", arr[0]);
+  `  bump.free();
+  `
+  `  num outer = 5;
+  `  let mk = fun[&outer]() num {
+  `    let inner = fun() num {
+  `      ret outer * 2;
+  `    };
+  `    outer = outer + 1;
+  `    num got = inner();
+  `    inner.free();
+  `    ret got;
+  `  };
+  `  println_fmt("nested={num} outer={num}", mk(), outer);
+  `  mk.free();
+  `
+  `  Vec<num> v;
+  `  v.init(2);
+  `  let pushit = fun[&v](num x) {
+  `    v.push(x);
+  `  };
+  `  pushit(1);
+  `  pushit(2);
+  `  println_fmt("vec={num}", v.len());
+  `  pushit.free();
+  `  v.free();
+  `}`;
+  str want = "a=5 b=5\nshared=2\nmixed=11 seen=2\ncounters=1 2 101\nacc=15\narr0=11\nnested=10 outer=6\nvec=2";
+  str out = run_source(src, "closure_capture_modes", "closure capture modes");
+  assert contains(out, want), format("expected every capture mode to behave, got: {str}", out);
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "closure_capture_modes_msvc",
+    "closure capture modes (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}

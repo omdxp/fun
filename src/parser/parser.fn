@@ -6432,6 +6432,54 @@ impl Parser {
 
     let fun_tok = self.state.token_next(); // consume 'fun'
 
+    // A capture list, `[&count, &total]`, names what the closure reaches
+    // by reference instead of copying in.
+    Vec<str> ref_captures;
+    ref_captures.init(0);
+    if self.state.next_token_is_operator("[") {
+      self.state.token_next();
+      for !self.state.next_token_is_symbol(']') {
+        if !self.state.next_token_is_operator("&") {
+          self.state.err(
+            "a closure's capture list names each variable as '&name', captured by reference"
+          );
+          self.state.finish_scope();
+          ret .Some(.InvalidStatement);
+        }
+        self.state.token_next();
+        let cap_tok = self.state.token_next();
+        if cap_tok.is_none() || cap_tok.unwrap().type != .Identifier {
+          report_expected_identifier(
+            self.state,
+            cap_tok,
+            "expected a variable name after '&' in a capture list"
+          );
+          self.state.finish_scope();
+          ret .Some(.InvalidIdentifier);
+        }
+        fit cap_tok.unwrap().data {
+          .Sval(cs) -> {
+            if ref_captures.contains(cs) {
+              self.state.err(format("'{str}' is listed twice in the capture list", cs));
+              self.state.finish_scope();
+              ret .Some(.InvalidStatement);
+            }
+            ref_captures.push(cs);
+          }
+          _ -> {}
+        }
+        if !self.state.next_token_is_operator(",") {
+          break;
+        }
+        self.state.token_next();
+      }
+      let cberr = self.state.expect_sym(']');
+      if cberr.is_some() {
+        self.state.finish_scope();
+        ret cberr;
+      }
+    }
+
     let operr = self.state.expect_op("(");
     if operr.is_some() {
       self.state.finish_scope();
@@ -6460,6 +6508,7 @@ impl Parser {
     fnv.has_name = false;
     fnv.args = cl_args;
     fnv.has_args = cl_args.len > 0;
+    fnv.ref_captures = ref_captures;
 
     Node cl_node = node_new(.ClosureLiteral(fnv));
     fit fun_tok {

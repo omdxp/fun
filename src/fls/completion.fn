@@ -628,6 +628,7 @@ fun _all_warning_ids() Vec<str> {
   out.push(warning_id_name(.BlockingForkDeadlock));
   out.push(warning_id_name(.SharedMutableCaptureRace));
   out.push(warning_id_name(.ClosureCapturesEscapingPointer));
+  out.push(warning_id_name(.EscapingRefCapture));
   out.push(warning_id_name(.IntegerLiteralOutOfRange));
   out.push(warning_id_name(.ChannelCapacityOverflow));
   out.push(warning_id_name(.NoCover));
