@@ -4688,16 +4688,30 @@ test "closures copy their captures into state of their own, and reach listed one
   `  pushit.free();
   `  v.free();
   `}`;
-  str want = "a=5 b=5\nshared=2\nmixed=11 seen=2\ncounters=1 2 101\nacc=15\narr0=11\nnested=10 outer=6\nvec=2";
+  // One line per check: Windows ends each line with `\r\n`.
+  Vec<str> want;
+  want.init(8);
+  defer want.free();
+  want.push("a=5 b=5");
+  want.push("shared=2");
+  want.push("mixed=11 seen=2");
+  want.push("counters=1 2 101");
+  want.push("acc=15");
+  want.push("arr0=11");
+  want.push("nested=10 outer=6");
+  want.push("vec=2");
   str out = run_source(src, "closure_capture_modes", "closure capture modes");
-  assert contains(out, want), format("expected every capture mode to behave, got: {str}", out);
   str out_msvc = run_source_forcing_msvc(
     src,
     "closure_capture_modes_msvc",
     "closure capture modes (strict MSVC-shaped compile)"
   );
-  assert contains(out_msvc, want), format(
-    "expected the same with only standard C, got: {str}",
-    out_msvc
-  );
+  for line : want {
+    assert contains(out, line), format("expected '{str}', got: {str}", line, out);
+    assert contains(out_msvc, line), format(
+      "expected '{str}' with only standard C, got: {str}",
+      line,
+      out_msvc
+    );
+  }
 }
