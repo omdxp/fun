@@ -4551,3 +4551,38 @@ test "a for loop walks an array literal, tuples included" {
     out_msvc
   );
 }
+
+test "spawn_value from its module joins each thread's result" {
+  str src = `use std.io;
+  `use std.thread_spawn;
+  `
+  `fun main() num {
+  `  num total = 0;
+  `  num i = 0;
+  `  for i < 6 {
+  `    num n = i;
+  `    Spawned<num> h = spawn_value(fun() num {
+  `      ret n * 2;
+  `    });
+  `    total = total + h.join().unwrap_or(-100);
+  `    i = i + 1;
+  `  }
+  `  Spawned<num> d = spawn_value(fun() num {
+  `    ret 1;
+  `  });
+  `  println(format("{num} {num}", total, d.detach()));
+  `  ret 0;
+  `}`;
+  str want = "30 0";
+  str out = run_source(src, "spawn_value_module", "spawn_value through its module");
+  assert contains(out, want), format("expected every joined result, got: {str}", out);
+  str out_msvc = run_source_forcing_msvc(
+    src,
+    "spawn_value_module_msvc",
+    "spawn_value through its module (strict MSVC-shaped compile)"
+  );
+  assert contains(out_msvc, want), format(
+    "expected the same with only standard C, got: {str}",
+    out_msvc
+  );
+}

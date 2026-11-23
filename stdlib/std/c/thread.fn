@@ -1,8 +1,7 @@
 // POSIX thread bindings (pthread.h)
 //
 // These are declarations only; implementations come from your system libc.
-// This module targets POSIX pthread APIs. Function-pointer parameters are
-// modeled as raw*. Unless noted otherwise, these return 0 on success and a
+// This module targets POSIX pthread APIs. Unless noted otherwise, these return 0 on success and a
 // nonzero error code on failure (C semantics).
 //
 // Every type below is opaque: its real layout is platform-specific (on
@@ -48,7 +47,7 @@ pub compound pthread_condattr_t {
 pub fun pthread_create(
   pthread_t* thread,
   pthread_attr_t* attr,
-  raw* start_routine,
+  fun(raw*) raw* start_routine,
   raw* arg
 ) num;
 

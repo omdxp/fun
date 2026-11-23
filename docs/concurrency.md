@@ -170,3 +170,38 @@ The thread owns the closure from then on: it frees what the closure
 captured once it has run, so don't call or `free()` it again after
 spawning it. `RuntimeAsyncTask.join`/`detach` manage the underlying
 `Thread` the usual way; see `std.thread`.
+
+### `spawn_value`: a result back from the thread
+
+`spawn_value(closure() T task)` runs a closure that returns a value on its
+own thread and hands back a `Spawned<T>`. `join()` waits for the thread
+and returns `Result<T, num>`: `Ok` with what the closure returned, or
+`Err` with the error code when the thread couldn't start or be joined.
+
+```fun
+use std.io;
+use std.thread_spawn;
+
+fun main() {
+  num base = 10;
+  Spawned<num> h = spawn_value(fun() num {
+    ret base * 4;
+  });
+  fit h.join() {
+    .Ok(v) -> { println_fmt("{num}", v); } // 40
+    .Err(code) -> { println_fmt("join failed {num}", code); }
+  }
+}
+```
+
+Call `join()` or `detach()` on a handle exactly once:
+
+- `join()` gives you the result, and you own it, including any memory it
+  holds (a `str` from `format`, a `Vec`). A second `join()` is `Err(-1)`.
+- `detach()` lets the thread finish on its own; its result is thrown away
+  when it does, so a result holding memory of its own leaks.
+- A handle that does neither leaks its thread and result slot, the same
+  as a `Thread` that's never joined.
+
+As with `spawn`, the thread owns the closure and frees what it captured
+once it has run.

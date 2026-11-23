@@ -11,7 +11,7 @@ pub fun thread_backend_posix_new() Thread {
 }
 
 // Starts a POSIX backend thread handle (same return codes as thread_start).
-pub fun thread_backend_posix_start(Thread* thread, raw* entry, raw* arg) num {
+pub fun thread_backend_posix_start(Thread* thread, ThreadEntry entry, raw* arg) num {
   ret thread_start(thread, entry, arg);
 }
 

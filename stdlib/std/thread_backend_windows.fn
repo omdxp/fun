@@ -22,7 +22,7 @@ pub fun thread_backend_windows_new() Thread {
 
 // Starts a Windows backend thread handle. Returns -1 when `thread` is null,
 // -2 when `entry` is null.
-pub fun thread_backend_windows_start(Thread* thread, raw* entry, raw* arg) num {
+pub fun thread_backend_windows_start(Thread* thread, ThreadEntry entry, raw* arg) num {
   if thread == nil {
     ret -1;
   }
