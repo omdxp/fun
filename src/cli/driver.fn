@@ -344,6 +344,9 @@ pub fun parse_args(str[] argv) Options {
   if parsed.has("freestanding") {
     request_freestanding_build();
   }
+  if parsed.has("os-main-thread") {
+    request_os_main_thread_build();
+  }
   if parsed.has("arch") {
     _arch_override = parsed.get_or("arch", "");
   }
@@ -833,7 +836,45 @@ fun _push_build_link_flags(Vec<str>* argv_args, flag msvc) {
   for flag_text : b.ldflags {
     argv_args.push(flag_text);
   }
+  _push_main_stack_flags(argv_args, msvc);
   _push_env_args(argv_args, "FUN_LDFLAGS");
+}
+
+// With `main` on the process's own first thread, gives that thread the
+// same 128 MiB stack the usual worker thread gets, where the linker can:
+// Windows and macOS set it at link time. Linux leaves it to the OS's
+// stack limit, which a process can't raise for its own first thread.
+fun _push_main_stack_flags(Vec<str>* argv_args, flag msvc) {
+  if !is_os_main_thread_build() || is_freestanding_build() {
+    ret;
+  }
+  if msvc {
+    argv_args.push("/STACK:134217728");
+    ret;
+  }
+  if runtime_backend_is_windows() {
+    argv_args.push("-Wl,--stack,134217728");
+    ret;
+  }
+  if _host_is_macos() {
+    argv_args.push("-Wl,-stack_size,0x8000000");
+  }
+}
+
+// True on a macOS host, read from `uname -s`.
+fun _host_is_macos() flag {
+  Vec<str> argv;
+  argv.init(2);
+  defer argv.free();
+  argv.push("uname");
+  argv.push("-s");
+  str[] cargv = argv_from(&argv);
+  let result = run(cargv);
+  free_argv(cargv);
+  if result.is_err() {
+    ret false;
+  }
+  ret equals(to_lower(trim(result.unwrap().stdout_text)), "darwin");
 }
 
 // `name`'s own value, split on spaces, each piece pushed as an argument.
@@ -1689,6 +1730,7 @@ pub fun help_text() str {
   `  -arch <name>      The CPU to build for (x86_64, x86, aarch64, arm), checked by asm arch blocks; defaults to the C compiler's own target.
   `  -obj              Compile -in to an object file (name.o) and stop, for a separate link step (with fun build: every target, as [build] output = "object" does).
   `  -freestanding     Build for bare metal (a kernel, bootloader, or firmware): no C library, no runtime, no main wrapper.
+  `  -os-main-thread   Run main on the process's own first thread, as a GUI toolkit on macOS needs.
   `  -memcheck-leaks   With -memcheck, also fail on an allocation still live when the program exits (for a long-running program; off by default since a short-lived one never frees everything before exiting anyway).
   `  -fuzz             Build and run -in's own fuzz target, in place of a plain compile.
   `  -fuzz-target <name>  Which target, when -in declares more than one.

@@ -347,6 +347,7 @@ pub fun lower_to_c(
   cg.msvc_mode = msvc_mode;
   cg.emscripten_mode = emscripten_mode;
   cg.freestanding = is_freestanding_build();
+  cg.os_main_thread = is_os_main_thread_build();
   cg.keep_public_roots = project_build_settings().sources.len > 0;
   cg.host_arch = host_arch;
   // A freestanding entry point is called from the program's own startup

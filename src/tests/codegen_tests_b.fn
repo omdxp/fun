@@ -4715,3 +4715,43 @@ test "closures copy their captures into state of their own, and reach listed one
     );
   }
 }
+
+test "with os_main_thread, main runs on the process's own first thread" {
+  str src = `fun main() {
+  `  num x = 1;
+  `  _ = x;
+  `}`;
+  str c = transpile_source_os_main_thread(src).unwrap();
+  assert !contains(c, "__fun_main_run"), "expected no worker-thread wrapper around main";
+  assert contains(c, "int main(int argc, char** argv) {"), "expected a main that calls straight through";
+  str usual = transpile_source(src).unwrap();
+  assert contains(usual, "__fun_main_run"), "expected the usual worker-thread wrapper without the setting";
+}
+
+test "a local closure or function value shadows a function of the same name" {
+  str src = `use std.io;
+  `use std.string;
+  `
+  `fun twice(num x) num {
+  `  ret x * 2;
+  `}
+  `
+  `fun main() num {
+  `  num seen = 0;
+  `  let count = fun[&seen]() num {
+  `    seen = seen + 1;
+  `    ret seen;
+  `  };
+  `  _ = count();
+  `  num c = count();
+  `  fun(num) num len = twice;
+  `  println(format("{num} {num}", c, len(21)));
+  `  count.free();
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "local_shadows_function", "a local shadowing a function");
+  assert contains(out, "2 42"), format(
+    "expected the locals called, not the functions, got: {str}",
+    out
+  );
+}

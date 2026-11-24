@@ -127,6 +127,9 @@ pub compound BuildSettings {
   // A freestanding build: no C library and no runtime (see
   // `is_freestanding_build`).
   flag freestanding;
+  // Runs `main` on the process's own first thread instead of a worker
+  // thread with its own stack (see `is_os_main_thread_build`).
+  flag os_main_thread;
   // The CPU the program is built for (`x86_64`, `aarch64`, ...), when it
   // isn't this machine's own: what `asm arch` blocks are checked against.
   str target_arch;
@@ -146,6 +149,7 @@ pub fun build_settings_new() BuildSettings {
   b.cflags.init(0);
   b.ldflags.init(0);
   b.freestanding = false;
+  b.os_main_thread = false;
   b.target_arch = "";
   b.output = "";
   ret b;
@@ -169,6 +173,20 @@ pub fun project_build_settings() BuildSettings {
     _project_build_loaded.finish();
   }
   ret _project_build;
+}
+
+// Set by `-os-main-thread` on the command line.
+flag _os_main_thread_requested = false;
+
+pub fun request_os_main_thread_build() {
+  _os_main_thread_requested = true;
+}
+
+// True when `main` runs on the process's own first thread: asked for with
+// `-os-main-thread` or `[build] os_main_thread = true`. A GUI toolkit that
+// insists on that thread (macOS's, under a windowing library) needs it.
+pub fun is_os_main_thread_build() flag {
+  ret _os_main_thread_requested || project_build_settings().os_main_thread;
 }
 
 // Set by `-freestanding` on the command line.
@@ -528,11 +546,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     for bk : build_keys {
       fit bk {
         "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "freestanding",
-        "arch", "output" -> {}
+        "os_main_thread", "arch", "output" -> {}
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, arch, or output)",
+            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, os_main_thread, arch, or output)",
             bk
             )
           );
@@ -552,6 +570,14 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         ret .Err("[build] `freestanding` must be true or false");
       }
       m.build.freestanding = fs_flag.unwrap();
+    }
+    let omt_value = build.unwrap().get("os_main_thread");
+    if omt_value.is_some() {
+      let omt_flag = omt_value.unwrap().as_bool();
+      if omt_flag.is_none() {
+        ret .Err("[build] `os_main_thread` must be true or false");
+      }
+      m.build.os_main_thread = omt_flag.unwrap();
     }
     m.build.target_arch = build.unwrap().get_str("arch");
     m.build.output = build.unwrap().get_str("output");
@@ -1217,6 +1243,23 @@ test "parses [build] settings, and rejects an unknown key there" {
   let plain = parse_manifest(`[package]
   `name = "plain"`).unwrap();
   assert plain.build.is_empty(), "expected no settings without a [build] table";
+}
+
+test "[build] os_main_thread takes true or false" {
+  let m = parse_manifest(`[package]
+  `name = "game"
+  `
+  `[build]
+  `os_main_thread = true`)
+    .unwrap();
+  assert m.build.os_main_thread, "expected os_main_thread read";
+  let bad = parse_manifest(`[package]
+  `name = "game"
+  `
+  `[build]
+  `os_main_thread = "yes"`);
+  assert bad.is_err() &&
+    contains(bad.unwrap_err(), "`os_main_thread` must be true or false"), "expected a non-flag rejected";
 }
 
 test "[build] output takes exe or object" {

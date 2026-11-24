@@ -84,6 +84,15 @@ pub fun transpile_source(str src) Result<str, str> {
 // `transpile_source`, as a freestanding (bare-metal) build: the minimal
 // prelude, no runtime, no `main` wrapper.
 pub fun transpile_source_freestanding(str src) Result<str, str> {
+  ret _transpile_source_configured(src, true, false);
+}
+
+// `transpile_source`, with `main` on the process's own first thread.
+pub fun transpile_source_os_main_thread(str src) Result<str, str> {
+  ret _transpile_source_configured(src, false, true);
+}
+
+fun _transpile_source_configured(str src, flag freestanding, flag os_main_thread) Result<str, str> {
   let tok_result = tokenize(src, "test.fn");
   if tok_result.is_err() {
     ret .Err("lex error");
@@ -101,7 +110,8 @@ pub fun transpile_source_freestanding(str src) Result<str, str> {
   }
   CodegenState cst = codegen_state_new();
   Codegen g = codegen_new(&cst);
-  g.freestanding = true;
+  g.freestanding = freestanding;
+  g.os_main_thread = os_main_thread;
   let cerr = g.transpile(state.nodes);
   if cerr.is_some() {
     ret .Err(g.error_note);
