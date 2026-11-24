@@ -842,39 +842,20 @@ fun _push_build_link_flags(Vec<str>* argv_args, flag msvc) {
 
 // With `main` on the process's own first thread, gives that thread the
 // same 128 MiB stack the usual worker thread gets, where the linker can:
-// Windows and macOS set it at link time. Linux leaves it to the OS's
-// stack limit, which a process can't raise for its own first thread.
+// Windows and macOS set it at link time (an MSVC link always gets it
+// already). Linux leaves it to the OS's stack limit, which a process
+// can't raise for its own first thread.
 fun _push_main_stack_flags(Vec<str>* argv_args, flag msvc) {
-  if !is_os_main_thread_build() || is_freestanding_build() {
-    ret;
-  }
-  if msvc {
-    argv_args.push("/STACK:134217728");
+  if msvc || !is_os_main_thread_build() || is_freestanding_build() {
     ret;
   }
   if runtime_backend_is_windows() {
     argv_args.push("-Wl,--stack,134217728");
     ret;
   }
-  if _host_is_macos() {
+  if equals(host_os_name(), "macos") {
     argv_args.push("-Wl,-stack_size,0x8000000");
   }
-}
-
-// True on a macOS host, read from `uname -s`.
-fun _host_is_macos() flag {
-  Vec<str> argv;
-  argv.init(2);
-  defer argv.free();
-  argv.push("uname");
-  argv.push("-s");
-  str[] cargv = argv_from(&argv);
-  let result = run(cargv);
-  free_argv(cargv);
-  if result.is_err() {
-    ret false;
-  }
-  ret equals(to_lower(trim(result.unwrap().stdout_text)), "darwin");
 }
 
 // `name`'s own value, split on spaces, each piece pushed as an argument.

@@ -26,6 +26,8 @@ use std.io;
 use std.fs;
 use std.c.mem;
 use std.atomic;
+use std.map;
+use std.runtime_backend;
 
 // A source file compiled to an executable.
 pub compound ExeTarget {
@@ -107,6 +109,9 @@ pub compound Manifest {
   Vec<str> cover_exclude;
   // `[build]`: what the C compiler and linker get beyond the generated C.
   BuildSettings build;
+  // `[build.macos]`, `[build.linux]` and `[build.windows]`, keyed by that
+  // name: added to `build` when building on that OS.
+  Map<str, BuildSettings> build_for_os;
 }
 
 // `[build]`'s own settings, each a list as written in `fun.toml`. Paths are
@@ -167,12 +172,67 @@ pub fun project_build_settings() BuildSettings {
     if exists("fun.toml") {
       let parsed = parse_manifest(read_to_string("fun.toml"));
       if parsed.is_ok() {
-        _project_build = parsed.unwrap().build;
+        Manifest m = parsed.unwrap();
+        _project_build = build_for_host(&m, host_os_name());
       }
     }
     _project_build_loaded.finish();
   }
   ret _project_build;
+}
+
+// `m.build` with `[build.<os_name>]` added on: its lists after the base
+// ones, and its `os_main_thread` turning that on.
+pub fun build_for_host(Manifest* m, str os_name) BuildSettings {
+  BuildSettings b = m.build;
+  let extra = m.build_for_os.at(os_name);
+  if extra.is_none() {
+    ret b;
+  }
+  BuildSettings e = extra.unwrap();
+  for v : e.sources {
+    b.sources.push(v);
+  }
+  for v : e.include_dirs {
+    b.include_dirs.push(v);
+  }
+  for v : e.lib_dirs {
+    b.lib_dirs.push(v);
+  }
+  for v : e.links {
+    b.links.push(v);
+  }
+  for v : e.cflags {
+    b.cflags.push(v);
+  }
+  for v : e.ldflags {
+    b.ldflags.push(v);
+  }
+  if e.os_main_thread {
+    b.os_main_thread = true;
+  }
+  ret b;
+}
+
+// The OS this compiler is running on: "macos", "linux", or "windows", or
+// "" for any other. Read from files only each OS has, rather than by
+// running a program: this module is also built for the browser, where
+// starting a process isn't available.
+Once _host_os_loaded;
+str _host_os = "";
+
+pub fun host_os_name() str {
+  if _host_os_loaded.begin() {
+    if runtime_backend_is_windows() {
+      _host_os = "windows";
+    } elif exists("/System/Library/CoreServices/SystemVersion.plist") {
+      _host_os = "macos";
+    } elif exists("/proc/version") {
+      _host_os = "linux";
+    }
+    _host_os_loaded.finish();
+  }
+  ret _host_os;
 }
 
 // Set by `-os-main-thread` on the command line.
@@ -473,6 +533,7 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   m.cover_min_tenths = 0;
   m.cover_exclude.init(0);
   m.build = build_settings_new();
+  m.build_for_os.init(4);
 
   let pkg = doc.table("package");
   if pkg.is_none() {
@@ -503,8 +564,9 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   num ti = 0;
   for ti < doc.tables.len {
     str tname = doc.tables.get(ti).name;
+    // A `[build.<os>]` table is checked where it's read, below.
     if !equals(tname, "package") && !equals(tname, "lib") && !equals(tname, "deps") &&
-      !equals(tname, "coverage") && !equals(tname, "build") {
+      !equals(tname, "coverage") && !equals(tname, "build") && !starts_with(tname, "build.") {
       ret .Err(format("unknown table `[{str}]`", tname));
     }
     ti = ti + 1;
@@ -590,6 +652,54 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         )
       );
     }
+  }
+
+  // `[build.<os>]`: more settings for one OS.
+  for t : doc.tables {
+    if !starts_with(t.name, "build.") {
+      continue;
+    }
+    str os_name = substr(t.name, 6, len(t.name) - 6);
+    if !equals(os_name, "macos") && !equals(os_name, "linux") && !equals(os_name, "windows") {
+      ret .Err(
+        format(
+        "unknown table `[{str}]` (expected build.macos, build.linux, or build.windows)",
+        t.name
+        )
+      );
+    }
+    Vec<str> os_keys = t.values.keys();
+    defer os_keys.free();
+    for ok : os_keys {
+      fit ok {
+        "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "os_main_thread" -> {}
+        _ -> {
+          ret .Err(
+            format(
+            "unknown key `{str}` in [{str}] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, or os_main_thread)",
+            ok,
+            t.name
+            )
+          );
+        }
+      }
+    }
+    BuildSettings os_build = build_settings_new();
+    os_build.sources = _parse_string_array(t.get_str("sources"));
+    os_build.include_dirs = _parse_string_array(t.get_str("include_dirs"));
+    os_build.lib_dirs = _parse_string_array(t.get_str("lib_dirs"));
+    os_build.links = _parse_string_array(t.get_str("links"));
+    os_build.cflags = _parse_string_array(t.get_str("cflags"));
+    os_build.ldflags = _parse_string_array(t.get_str("ldflags"));
+    let os_omt = t.get("os_main_thread");
+    if os_omt.is_some() {
+      let os_omt_flag = os_omt.unwrap().as_bool();
+      if os_omt_flag.is_none() {
+        ret .Err(format("[{str}] `os_main_thread` must be true or false", t.name));
+      }
+      os_build.os_main_thread = os_omt_flag.unwrap();
+    }
+    m.build_for_os.put(os_name, os_build);
   }
 
   let lib = doc.table("lib");
@@ -1260,6 +1370,45 @@ test "[build] os_main_thread takes true or false" {
   `os_main_thread = "yes"`);
   assert bad.is_err() &&
     contains(bad.unwrap_err(), "`os_main_thread` must be true or false"), "expected a non-flag rejected";
+}
+
+test "[build.<os>] settings are added to [build] on that OS only" {
+  let m = parse_manifest(
+    `[package]
+  `name = "game"
+  `
+  `[build]
+  `links = ["raylib"]
+  `
+  `[build.macos]
+  `lib_dirs = ["vendor/macos/lib"]
+  `os_main_thread = true
+  `
+  `[build.windows]
+  `links = ["opengl32", "gdi32", "winmm"]`
+  )
+  .unwrap();
+
+  BuildSettings mac = build_for_host(&m, "macos");
+  assert mac.links.len == 1 && mac.lib_dirs.len == 1 && mac.os_main_thread, "expected the macOS table added on";
+  BuildSettings win = build_for_host(&m, "windows");
+  assert win.links.len == 4 && equals(win.links.get(3), "winmm") && !win.os_main_thread, "expected the Windows libraries after the base one";
+  BuildSettings linux = build_for_host(&m, "linux");
+  assert linux.links.len == 1 && linux.lib_dirs.len == 0, "expected only the base settings on Linux";
+  let bad_os = parse_manifest(`[package]
+  `name = "game"
+  `
+  `[build.amiga]
+  `links = ["x"]`);
+  assert bad_os.is_err() &&
+    contains(bad_os.unwrap_err(), "unknown table `[build.amiga]`"), "expected an unknown OS reported";
+  let bad_key = parse_manifest(`[package]
+  `name = "game"
+  `
+  `[build.linux]
+  `arch = "x86_64"`);
+  assert bad_key.is_err() &&
+    contains(bad_key.unwrap_err(), "unknown key `arch` in [build.linux]"), "expected a base-only key reported";
 }
 
 test "[build] output takes exe or object" {
