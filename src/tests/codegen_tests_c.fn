@@ -3379,6 +3379,7 @@ test "a built program observes the file system and other processes" {
 
 test "find_on_path resolves a real program and reports \"\" for one that doesn't exist" {
   str src = `use std.c.io;
+  `use std.c.mem;
   `use std.process;
   `use std.runtime_backend;
   `fun main() num {
@@ -3387,6 +3388,8 @@ test "find_on_path resolves a real program and reports \"\" for one that doesn't
   `  str found = find_on_path(probe);
   `  str missing = find_on_path("definitely_not_a_real_program_xyz123");
   `  printf("found=%d missing_empty=%d\n", len(found) > 0, equals(missing, ""));
+  `  free(found);
+  `  free(missing);
   `  ret 0;
   `}`;
   str out = run_source(

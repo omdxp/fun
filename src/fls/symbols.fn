@@ -9808,3 +9808,105 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
     }
   }
 }
+
+// How the innermost closure literal around `line` in `file` captures
+// `name`: "by reference", "by value", or "" when no closure there
+// captures it at all.
+pub fun closure_capture_mode(Vec<Node>* program, str file, num line, str name) str {
+  str mode = "";
+  num pi = 0;
+  for pi < program.len {
+    Node n = program.get(pi);
+    pi = pi + 1;
+    if !n.has_pos || !equals(n.pos.filename, file) {
+      continue;
+    }
+    fit n.kind {
+      .Function(f) -> {
+        if f.has_body {
+          _capture_mode_in(f.body, line, name, &mode);
+        }
+      }
+      .Impl(im) -> {
+        for m : im.methods {
+          fit m.kind {
+            .Function(mf) -> {
+              if mf.has_body {
+                _capture_mode_in(mf.body, line, name, &mode);
+              }
+            }
+            _ -> {}
+          }
+        }
+      }
+      .Test(t) -> { _capture_mode_in(t.body, line, name, &mode); }
+      _ -> {}
+    }
+  }
+  ret mode;
+}
+
+fun _capture_mode_in(Node* node, num line, str name, str* mode) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .ClosureLiteral(f) -> {
+      if f.has_body && node.has_pos && line >= node.pos.line && line <= _last_line(f.body) {
+        Set<str> free_names = closure_free_identifier_names(f);
+        if free_names.has(name) {
+          *mode = f.ref_captures.contains(name) ? "by reference" : "by value";
+        }
+        free_names.free();
+        _capture_mode_in(f.body, line, name, mode);
+      }
+    }
+    .Body(b) -> {
+      for st : b.statements {
+        _capture_mode_in(st, line, name, mode);
+      }
+    }
+    .Variable(v) -> {
+      if v.has_val {
+        _capture_mode_in(v.val, line, name, mode);
+      }
+    }
+    .Expression(e) -> {
+      if e.has_left {
+        _capture_mode_in(e.left, line, name, mode);
+      }
+      if e.has_right {
+        _capture_mode_in(e.right, line, name, mode);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _capture_mode_in(inner, line, name, mode); }
+    .Unary(u) -> { _capture_mode_in(u.operand, line, name, mode); }
+    .StatementReturn(value) -> { _capture_mode_in(value, line, name, mode); }
+    .StatementIf(ifn) -> {
+      _capture_mode_in(ifn.condition, line, name, mode);
+      _capture_mode_in(ifn.body, line, name, mode);
+    }
+    .StatementElseIf(ein) -> {
+      _capture_mode_in(ein.condition, line, name, mode);
+      _capture_mode_in(ein.body, line, name, mode);
+    }
+    .StatementElse(b) -> { _capture_mode_in(b, line, name, mode); }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> { _capture_mode_in(c.body, line, name, mode); }
+        .Iter(it) -> { _capture_mode_in(it.body, line, name, mode); }
+      }
+    }
+    .StatementFit(fs) -> {
+      for branch : fs.branches {
+        _capture_mode_in(branch.body, line, name, mode);
+      }
+    }
+    .CompoundInit(ci) -> {
+      for fld : ci.fields {
+        _capture_mode_in(fld.value, line, name, mode);
+      }
+    }
+    _ -> {}
+  }
+}

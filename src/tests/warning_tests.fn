@@ -1365,3 +1365,46 @@ test "a compound named only inside a function type is used" {
     "unused compound 'Frame'"
   ), "expected Frame counted as used through the function types that name it";
 }
+
+test "a closure capturing by reference stored in a field or a collection is noticed" {
+  notices(
+    `compound Holder {
+    `  closure() void cb;
+    `}
+    `fun main() {
+    `  num n = 1;
+    `  Holder h = Holder{cb = fun() {}};
+    `  h.cb = fun[&n]() {
+    `    n = 2;
+    `  };
+    `}`,
+    "escaping_ref_capture",
+    "expected a by-reference closure stored in a field to be flagged"
+  );
+  notices(
+    `use std.vec;
+    `fun main() {
+    `  num n = 1;
+    `  Vec<closure() void> list;
+    `  list.init(1);
+    `  let c = fun[&n]() {
+    `    n = 3;
+    `  };
+    `  list.push(c);
+    `  list.free();
+    `}`,
+    "escaping_ref_capture",
+    "expected a by-reference closure pushed into a collection to be flagged"
+  );
+  says_nothing(
+    `fun main() {
+    `  num n = 1;
+    `  let c = fun[&n]() {
+    `    n = 3;
+    `  };
+    `  c();
+    `  c.free();
+    `}`,
+    "expected no warning for a by-reference closure used where it was made"
+  );
+}

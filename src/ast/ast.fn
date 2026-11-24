@@ -150,16 +150,6 @@ pub fun node_flags_new() NodeFlags {
   ret f;
 }
 
-// Links a node back to its owning declaration/enclosing function, used by
-// semantic checks that need to walk from a reference back to context (e.g.
-// visibility checks, "which function is this return statement inside").
-pub compound BindedNode {
-  Node* owner;
-  flag has_owner;
-  Node* function;
-  flag has_function;
-}
-
 // ===== Warning diagnostics =====
 
 // Stable identifier for a compiler warning category, used by diagnostics and
@@ -201,6 +191,10 @@ pub enum WarningId {
   // immediately visible in the same function, the same narrowness
   // `SharedMutableCaptureRace` above already ships with.
   ClosureCapturesEscapingPointer,
+  // A closure that captures a local by reference (`fun[&n]`) stored
+  // somewhere that can outlive the function it was created in: a field
+  // or a collection. Returning or spawning one is a compile error.
+  EscapingRefCapture,
   // An integer literal that can't fit its declared arbitrary-width type.
   IntegerLiteralOutOfRange,
   // More blocking sends issued into a bounded channel than it can hold.
@@ -245,6 +239,7 @@ pub fun warning_id_from_string(str name) Option<WarningId> {
     "blocking_fork_deadlock" -> { ret .Some(.BlockingForkDeadlock); }
     "shared_mutable_capture_race" -> { ret .Some(.SharedMutableCaptureRace); }
     "closure_captures_escaping_pointer" -> { ret .Some(.ClosureCapturesEscapingPointer); }
+    "escaping_ref_capture" -> { ret .Some(.EscapingRefCapture); }
     "integer_literal_out_of_range" -> { ret .Some(.IntegerLiteralOutOfRange); }
     "channel_capacity_overflow" -> { ret .Some(.ChannelCapacityOverflow); }
     "no_cover" -> { ret .Some(.NoCover); }
@@ -297,8 +292,8 @@ test "warning_id_or_plural_from_string resolves every warning id both singular a
   // (`integer_literal_out_of_range` -> `...ranges` is a plain "s"
   // strip, not "es" - the "es" attempt on it must fail closed and fall
   // through rather than matching a bogus "...rang").
-  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,closure_captures_escaping_pointer,integer_literal_out_of_range,channel_capacity_overflow,no_cover";
-  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,closure_captures_escaping_pointers,integer_literal_out_of_ranges,channel_capacity_overflows,no_covers";
+  str singulars = "return_local_ptr,fit_non_exhaustive,fit_unreachable_branch,unreachable_code,assert_constant,unused_variable,unused_import,unused_function,unused_compound,unused_type_alias,missing_return,blocking_fork_deadlock,shared_mutable_capture_race,closure_captures_escaping_pointer,escaping_ref_capture,integer_literal_out_of_range,channel_capacity_overflow,no_cover";
+  str plurals = "return_local_ptrs,fit_non_exhaustives,fit_unreachable_branches,unreachable_codes,assert_constants,unused_variables,unused_imports,unused_functions,unused_compounds,unused_type_aliases,missing_returns,blocking_fork_deadlocks,shared_mutable_capture_races,closure_captures_escaping_pointers,escaping_ref_captures,integer_literal_out_of_ranges,channel_capacity_overflows,no_covers";
   Vec<str> sing = split(singulars, ',');
   Vec<str> plur = split(plurals, ',');
   assert sing.len == plur.len, "expected a matched singular/plural pair per id";
@@ -360,6 +355,7 @@ impl WarningId as To<str> {
       .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
       .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
       .ClosureCapturesEscapingPointer -> { ret "closure_captures_escaping_pointer"; }
+      .EscapingRefCapture -> { ret "escaping_ref_capture"; }
       .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
       .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
       .NoCover -> { ret "no_cover"; }
@@ -540,6 +536,10 @@ pub compound FunctionNode {
   // own live, repeated re-typechecking during an edit session would
   // otherwise leak without bound.
   FnTypeSig* closure_sig;
+  // A closure literal's by-reference captures, the names its capture
+  // list writes with `&` (`fun[&count](...)`). Every other name it
+  // captures is copied in.
+  Vec<str> ref_captures;
 }
 
 pub fun function_node_new() FunctionNode {
@@ -563,6 +563,7 @@ pub fun function_node_new() FunctionNode {
   f.body = nil;
   f.has_body = false;
   f.closure_sig = nil;
+  f.ref_captures.init(0);
   ret f;
 }
 
@@ -1127,8 +1128,6 @@ pub compound Node {
   Pos pos;
   flag has_pos;
   NodeFlags flags;
-  BindedNode* binded;
-  flag has_binded;
 }
 
 // Names `kind` for a diagnostic, so a rejected node can say what it was.
@@ -1167,8 +1166,6 @@ pub fun node_new(NodeKind kind) Node {
   n.kind = kind;
   n.has_pos = false;
   n.flags = node_flags_new();
-  n.binded = nil;
-  n.has_binded = false;
   ret n;
 }
 
@@ -1294,13 +1291,7 @@ fun is_array_operator(str op) flag {
 // pointer directly rather than copying it (`token_word`'s own
 // contract), so a node's string fields and its source token's string
 // data are frequently the same allocation - freeing both would double-
-// free. `BindedNode.owner`/`.function` (see `Parser.create_node`) are
-// each a separately `malloc`'d shallow copy of whatever enclosing
-// body/function node was active at construction time - the copy's own
-// `kind` shares every nested `Node*`/`Vec<T>` pointer the real node
-// still owns (a shallow struct copy copies the pointer values, not
-// what they point to), so only the copy's own outer struct is ever
-// freed here, never anything reachable through it.
+// free.
 
 fun _free_node_vec(Vec<Node*>* v) {
   num i = 0;
@@ -1495,6 +1486,7 @@ fun _free_node_contents(Node* n) {
       if f.has_args {
         _free_node_vec(&f.args);
       }
+      f.ref_captures.free();
       if f.has_body {
         node_free(f.body);
       }
@@ -1599,37 +1591,6 @@ fun _free_node_contents(Node* n) {
       node_free(fz.body);
     }
     _ -> {}
-  }
-  if n.has_binded && n.binded != nil {
-    if n.binded.has_owner && n.binded.owner != nil {
-      free(n.binded.owner);
-    }
-    if n.binded.has_function && n.binded.function != nil {
-      free(n.binded.function);
-    }
-    free(n.binded);
-  }
-}
-
-// Frees only a node's own `binded` context (its `owner`/`function`
-// back-reference copies - see `BindedNode`), never its `kind` payload.
-// For a wrapper a parser-side rotation discards after absorbing its
-// contents elsewhere by value (its former children now live on
-// somewhere else, so freeing them here would double-free): the wrapper
-// itself still carries its own, independent binding context from when
-// it was first built, which nothing else points at or will ever free.
-pub fun free_node_binded_only(Node* n) {
-  if n == nil {
-    ret;
-  }
-  if n.has_binded && n.binded != nil {
-    if n.binded.has_owner && n.binded.owner != nil {
-      free(n.binded.owner);
-    }
-    if n.binded.has_function && n.binded.function != nil {
-      free(n.binded.function);
-    }
-    free(n.binded);
   }
 }
 
@@ -1974,16 +1935,9 @@ fun _clone_enum_variants(Vec<EnumVariant>* variants) Vec<EnumVariant> {
 
 // A deep, independently-owned copy of `n`'s own contents - every
 // `Vec<T>`/`Node*`/`DataType*` field freshly built, string fields
-// shared with the original (see the file-level note above). `binded`
-// is dropped rather than cloned: it's a later pass's own bookkeeping
-// (`Parser.create_node`'s own shallow snapshot of enclosing context),
-// meaningless once detached into an independently-merged program, and
-// its own `owner`/`function` are themselves non-owning references
-// `node_free` already treats specially for the same reason.
+// shared with the original (see the file-level note above).
 pub fun node_clone(Node n) Node {
   Node c = n;
-  c.has_binded = false;
-  c.binded = nil;
   fit n.kind {
     .Import(i) -> {
       ImportNode ci = i;
@@ -2047,6 +2001,7 @@ pub fun node_clone(Node n) Node {
       if f.has_args {
         cf.args = _clone_node_vec(&f.args);
       }
+      cf.ref_captures = _clone_str_vec(&f.ref_captures);
       if f.closure_sig != nil {
         FnTypeSig sig = fn_type_sig_new();
         sig.rtype = cf.rtype;
@@ -2266,6 +2221,155 @@ pub fun closure_free_identifier_names(FunctionNode f) Set<str> {
     _collect_closure_free_names(f.body, &bound, &free_names);
   }
   ret free_names;
+}
+
+// Rewrites every read or write of one of `names` inside `body` into a
+// dereference, `n` becoming `(*n)`, for a closure body whose captures are
+// reached through pointers. A name bound again inside `body` (a local, a
+// loop variable, a `fit` binding) is left alone from there on, and so is
+// a nested closure literal's own body: that closure captures from this
+// one when it's created instead.
+pub fun closure_deref_captures(Node* body, Set<str> names) {
+  Set<str> shadowed = set_init("", 4);
+  defer shadowed.free();
+  _deref_captures(body, &names, &shadowed);
+}
+
+fun _deref_name_node(Node* node, str name) {
+  Node* inner = malloc(sizeof(Node));
+  *inner = node_new(.Identifier(name));
+  inner.pos = node.pos;
+  inner.has_pos = node.has_pos;
+  UnaryNode u;
+  u.is_left_operanded_unary = false;
+  u.op = "*";
+  u.operand = inner;
+  u.has_indirection = true;
+  u.indirection_depth = 1;
+  u.has_error_arg = false;
+  Node* star = malloc(sizeof(Node));
+  *star = node_new(.Unary(u));
+  star.pos = node.pos;
+  star.has_pos = node.has_pos;
+  node.kind = .ExpressionParenthesis(star);
+}
+
+fun _deref_captures(Node* node, Set<str>* names, Set<str>* shadowed) {
+  if node == nil {
+    ret;
+  }
+  fit node.kind {
+    .Identifier(name) -> {
+      if names.has(name) && !shadowed.has(name) {
+        _deref_name_node(node, name);
+      }
+    }
+    .Expression(e) -> {
+      if e.has_left {
+        _deref_captures(e.left, names, shadowed);
+      }
+      // The right of a `.` names a field or method, never a capture.
+      if e.has_right && !equals(e.op, ".") {
+        _deref_captures(e.right, names, shadowed);
+      }
+    }
+    .ExpressionParenthesis(inner) -> { _deref_captures(inner, names, shadowed); }
+    .Unary(u) -> {
+      _deref_captures(u.operand, names, shadowed);
+      if u.has_error_arg {
+        _deref_captures(u.error_arg, names, shadowed);
+      }
+    }
+    .Ternary(t) -> {
+      _deref_captures(t.cond, names, shadowed);
+      _deref_captures(t.then_val, names, shadowed);
+      _deref_captures(t.else_val, names, shadowed);
+    }
+    .Bracket(items) -> { _deref_captures(items, names, shadowed); }
+    .Panic(message) -> { _deref_captures(message, names, shadowed); }
+    .CompoundInit(init) -> {
+      for f : init.fields {
+        _deref_captures(f.value, names, shadowed);
+      }
+    }
+    .TupleLiteral(t) -> {
+      for el : t.elements {
+        _deref_captures(el, names, shadowed);
+      }
+    }
+    .Body(b) -> {
+      for st : b.statements {
+        _deref_captures(st, names, shadowed);
+      }
+    }
+    .Variable(v) -> {
+      if v.has_val {
+        _deref_captures(v.val, names, shadowed);
+      }
+      if v.is_destructure {
+        for n : v.destructure_names {
+          shadowed.add(n);
+        }
+      } else {
+        shadowed.add(v.name);
+      }
+    }
+    .StatementReturn(value) -> { _deref_captures(value, names, shadowed); }
+    .StatementDefer(inner) -> { _deref_captures(inner, names, shadowed); }
+    .StatementFork(call) -> { _deref_captures(call, names, shadowed); }
+    .StatementIf(ifn) -> {
+      _deref_captures(ifn.condition, names, shadowed);
+      _deref_captures(ifn.body, names, shadowed);
+    }
+    .StatementElseIf(ein) -> {
+      _deref_captures(ein.condition, names, shadowed);
+      _deref_captures(ein.body, names, shadowed);
+    }
+    .StatementElse(b) -> { _deref_captures(b, names, shadowed); }
+    .StatementAssert(a) -> {
+      _deref_captures(a.condition, names, shadowed);
+      if a.has_message {
+        _deref_captures(a.message, names, shadowed);
+      }
+    }
+    .StatementFit(f) -> {
+      _deref_captures(f.exp, names, shadowed);
+      for branch : f.branches {
+        for bn : branch.bindings {
+          shadowed.add(bn);
+        }
+        if branch.has_condition {
+          _deref_captures(branch.condition, names, shadowed);
+        }
+        _deref_captures(branch.body, names, shadowed);
+      }
+    }
+    .StatementFor(kind) -> {
+      fit kind {
+        .Cond(c) -> {
+          if c.has_condition {
+            _deref_captures(c.condition, names, shadowed);
+          }
+          _deref_captures(c.body, names, shadowed);
+        }
+        .Iter(it) -> {
+          _deref_captures(it.iterable, names, shadowed);
+          if it.item_is_destructure {
+            for n : it.item_destructure_names {
+              shadowed.add(n);
+            }
+          } else {
+            shadowed.add(it.item_name);
+          }
+          if it.has_index_name {
+            shadowed.add(it.index_name);
+          }
+          _deref_captures(it.body, names, shadowed);
+        }
+      }
+    }
+    _ -> {}
+  }
 }
 
 fun _collect_closure_free_names(Node* node, Set<str>* bound, Set<str>* free_names) {

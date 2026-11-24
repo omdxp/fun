@@ -1394,8 +1394,68 @@ generic function's or method's type parameters, including one inferred
 from what the closure returns (`fun convert<T, U>(closure(T) U f, T x)
 U`).
 
-Capturing a pointer opts into aliasing explicitly, the same as it would
-anywhere else in the language; capturing an ordinary value never does.
+#### Capturing by value and by reference
+
+A name a closure reads is copied in when the closure is created, and
+that copy belongs to the closure: writing it inside the body changes the
+closure's own copy, which keeps its value from one call to the next,
+while the variable outside is never touched. That is what lets a closure
+keep state:
+
+```fun
+use std.io;
+
+fun make_counter(num start) closure() num {
+  num n = start;
+  ret fun() num {
+    n = n + 1;
+    ret n;
+  };
+}
+
+fun main() {
+  let c = make_counter(0);
+  num a = c();
+  num b = c();
+  println_fmt("{num} {num}", a, b); // 1 2
+  c.free();
+}
+```
+
+A capture list before the parameters names the variables the closure
+reaches by reference instead, `&` before each one: reads and writes in
+the body go to the variable itself, and any number can be listed.
+Everything not listed is still copied in.
+
+```fun
+use std.io;
+
+fun main() {
+  num lo = 0;
+  num hi = 10;
+  let narrow = fun[&lo, &hi](num by) {
+    lo = lo + by;
+    hi = hi - by;
+  };
+  narrow(2);
+  narrow(3);
+  println_fmt("{num} {num}", lo, hi); // 5 5
+  narrow.free();
+}
+```
+
+Two closures listing the same variable see each other's writes. A
+closure created inside another closure's body copies (or references) the
+enclosing closure's own captured variable. Listing a top-level variable
+is allowed and changes nothing: a closure reaches it directly anyway.
+
+A by-reference capture points at a local of the function that created
+the closure, so that closure must not outlive it. Returning it, or
+handing it to `spawn`/`spawn_value`, is a compile error; storing it in a
+field or adding it to a collection is the `escaping_ref_capture`
+warning (below), since nothing checks how long that field or collection
+lives.
+
 What a closure captured lives on the heap until `c.free()` releases it,
 once the closure is no longer called. Passing a closure to `spawn`
 hands it to the new thread, which frees it after it runs.
@@ -1412,6 +1472,14 @@ value, a struct field, or a reassignment in a conditional branch.
 Capturing a pointer to something heap-allocated, or a parameter handed
 in from outside, is never flagged - only a pointer to a local this
 same function itself took the address of.
+
+#### `escaping_ref_capture`
+
+A closure that captures a local by reference (`fun[&n]`) is flagged when
+it's assigned into a field or passed to a collection's `push`, `insert`,
+`put`, `add`, or `set`, where it can outlive the local it points at.
+Best-effort, like the warning above: it follows a closure literal and the
+locals it's bound to within one function.
 
 See [Concurrency](concurrency.md) for `std.thread_spawn`'s `spawn`,
 which runs a closure on a new OS thread.
@@ -1957,6 +2025,11 @@ behavior.
   so several tasks mutate the same value without synchronization. Guard
   it with a `Mutex` or give each task its own copy. `Channel`/
   `WaitGroup` (self-synchronizing) are exempt.
+- `closure_captures_escaping_pointer`: a closure captures a pointer to a
+  local of the same function; see [Closures](#language?anchor=language-closures).
+- `escaping_ref_capture`: a closure capturing a local by reference is
+  stored in a field or added to a collection; see
+  [Closures](#language?anchor=language-closures).
 - `integer_literal_out_of_range` (with `-warn-unused`): a compile-time
   integer literal cannot be represented in the declared arbitrary-width
   integer type, a value larger than the type's width (`u2 x = 5;`, `i6 y

@@ -671,3 +671,25 @@ test "a function can read a global declared further down the file, but not a nam
   Parser proto_p = parser_new(&proto_st);
   assert proto_p.parse().is_some(), "expected a prototype's return type never to count as a global";
 }
+
+test "a closure's capture list takes '&name' entries, each once" {
+  assert !parse_fails(
+    `fun main() {
+    `  num a = 0;
+    `  num b = 0;
+    `  let c = fun[&a, &b](num d) { a = d; b = d; };
+    `}`
+  ), "expected a capture list of two references to parse";
+  assert parse_fails(
+    `fun main() {
+    `  num a = 0;
+    `  let c = fun[a]() {};
+    `}`
+  ), "expected a capture without '&' to be rejected";
+  assert parse_fails(
+    `fun main() {
+    `  num a = 0;
+    `  let c = fun[&a, &a]() {};
+    `}`
+  ), "expected a name listed twice to be rejected";
+}

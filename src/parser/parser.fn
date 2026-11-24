@@ -1838,8 +1838,8 @@ fun _builtins_doc_keyword_name(Token tok) str {
 
 // The parser's state, layered on top of the shared `ParseState`: a pointer
 // back to that shared state plus the fields that are genuinely
-// parser-local (current body/function context for `binded` stamping,
-// expression-recursion depth, `fit`-condition tracking).
+// parser-local (current body/function context, expression-recursion
+// depth, `fit`-condition tracking).
 pub compound Parser {
   ParseState* state;
 
@@ -1847,8 +1847,7 @@ pub compound Parser {
   Token last_token;
   flag has_last_token;
 
-  // The body/function node currently being parsed, used to stamp newly
-  // created nodes' `binded` context (see `create_node`).
+  // The body/function node currently being parsed.
   Node* current_body;
   flag has_current_body;
   Node* current_function;
@@ -1947,8 +1946,7 @@ fun _flatten_paren_comma_chain(Node* node, Vec<Node*>* out) {
         // Every element this comma node ever held now lives in `out`
         // instead, reached directly rather than through it - this
         // wrapper itself is never referenced again once this call
-        // returns, its own `binded` context included.
-        free_node_binded_only(node);
+        // returns.
         free(node);
         ret;
       }
@@ -1967,49 +1965,8 @@ compound ChainedTupleIndexParts {
 }
 
 impl Parser {
-  // Creates and registers a new node in the parse state's node list,
-  // stamping its `binded` owner/function context from whatever body/
-  // function is currently being parsed.
+  // Registers a new node in the parse state's node list.
   pub create_node(Node* n) {
-    BindedNode* binded = nil;
-    flag is_bound = false;
-
-    if self.has_current_body {
-      Node* owner = malloc(sizeof(Node));
-      *owner = *self.current_body;
-      owner.has_binded = false;
-      owner.binded = nil;
-      binded = malloc(sizeof(BindedNode));
-      binded.owner = owner;
-      binded.has_owner = true;
-      binded.function = nil;
-      binded.has_function = false;
-      is_bound = true;
-    }
-
-    if self.has_current_function {
-      Node* function = malloc(sizeof(Node));
-      *function = *self.current_function;
-      function.has_binded = false;
-      function.binded = nil;
-      if !is_bound {
-        binded = malloc(sizeof(BindedNode));
-        binded.owner = nil;
-        binded.has_owner = false;
-      }
-      binded.function = function;
-      binded.has_function = true;
-      is_bound = true;
-    }
-
-    if is_bound {
-      n.binded = binded;
-      n.has_binded = true;
-    } else {
-      n.binded = nil;
-      n.has_binded = false;
-    }
-
     self.state.nodes.push(*n);
   }
 
@@ -2364,10 +2321,7 @@ impl Parser {
             // overwritten below; its own fields (`right_exp.left`/`.right`)
             // are already absorbed into `new_left`/the rotated `exp` by
             // value, so only the now-empty wrapper itself - never its
-            // former contents - needs freeing. Its own `binded` context
-            // (stamped when it was first built, independent of its
-            // contents) is still its own, though, and nothing else will
-            // ever free it once this wrapper is gone.
+            // former contents - needs freeing.
             Node* old_right = exp.right;
             exp.left = new_left;
             exp.right = right_exp.right;
@@ -2375,7 +2329,6 @@ impl Parser {
             exp.generic_args = right_exp.generic_args;
             exp.has_generic_args = right_exp.has_generic_args;
             node.kind = .Expression(exp);
-            free_node_binded_only(old_right);
             free(old_right);
           }
           _ -> {}
@@ -2419,8 +2372,7 @@ impl Parser {
             // Same reasoning as `parse_node_shift_children_left`'s own
             // `old_right` free: this wrapper's former contents are
             // already absorbed by value into `completed`/the rotated
-            // `exp`, so only the now-empty wrapper itself needs freeing -
-            // its own `binded` context included.
+            // `exp`, so only the now-empty wrapper itself needs freeing.
             Node* old_right = exp.right;
             exp.left = completed;
             exp.right = right_exp.right;
@@ -2428,7 +2380,6 @@ impl Parser {
             exp.generic_args = right_exp.generic_args;
             exp.has_generic_args = right_exp.has_generic_args;
             node.kind = .Expression(exp);
-            free_node_binded_only(old_right);
             free(old_right);
           }
           _ -> {}
@@ -2482,11 +2433,9 @@ impl Parser {
             // `new_u` above (`ru.operand` into `new_inner` specifically),
             // so only the wrapper itself - same reasoning as
             // `parse_node_shift_children_left`'s own `old_right` free -
-            // needs freeing, not its former contents - its own `binded`
-            // context included.
+            // needs freeing, not its former contents.
             Node* old_right = exp.right;
             node.kind = .Unary(new_u);
-            free_node_binded_only(old_right);
             free(old_right);
             ret true;
           }
@@ -3217,7 +3166,6 @@ impl Parser {
             // own `old_right` free elsewhere in this file.
             Node* old_left = e.left;
             node.kind = .Ternary(tn);
-            free_node_binded_only(old_left);
             free(old_left);
           }
           _ -> {}
@@ -3930,17 +3878,15 @@ impl Parser {
     ret self.state.last_scope_entity_stop_at(self.state.scope_root);
   }
 
-  // Pushes a placeholder `Body` node (its `.statements` filled in once
-  // parsing finishes) via `create_node`, so it picks up `binded` context
-  // from whatever body/function currently encloses it.
+  // Pushes a placeholder `Body` node, its `.statements` filled in once
+  // parsing finishes.
   pub make_body_node() {
     Node body_node = node_new(.Blank);
     self.create_node(&body_node);
   }
 
   // Parses a `{ ... }` block's statements into a `Body` node, tracking that
-  // node as `current_body` until the closing `}` so nested node
-  // construction stamps `binded.owner` correctly. A parse error mid-body
+  // node as `current_body` until the closing `}`. A parse error mid-body
   // leaves `current_body` unrestored, since a parse error aborts the whole
   // parse anyway.
   pub parse_body_multiple_statements() Option<ParseErrorKind> {
@@ -4548,11 +4494,7 @@ impl Parser {
           msg_ptr = e.right;
           has_msg = true;
           // `exp_val` itself - the comma wrapper - is discarded below,
-          // its two children taken over directly rather than copied;
-          // only its own `binded` context still needs freeing, same as
-          // every other wrapper a parser-side rotation discards this
-          // way.
-          free_node_binded_only(&exp_val);
+          // its two children taken over directly rather than copied.
         }
         _ -> {}
       }
@@ -4885,8 +4827,7 @@ impl Parser {
   // Parses a function declaration: `fun <name>(args) [rtype] { body }`, or
   // `fun <name>(args) [rtype];` for a bare signature with no body. Registers
   // its own child scope for the argument list and body, and tracks itself as
-  // `current_function` while parsing so nested node construction stamps
-  // `binded.function` correctly. Reached from
+  // `current_function` while parsing. Reached from
   // `parse_top_level_declaration`, not `parse_statement`, since a function
   // declaration is only valid at the top level.
   pub parse_function(flag is_public, flag is_async) Option<ParseErrorKind> {
@@ -6432,6 +6373,54 @@ impl Parser {
 
     let fun_tok = self.state.token_next(); // consume 'fun'
 
+    // A capture list, `[&count, &total]`, names what the closure reaches
+    // by reference instead of copying in.
+    Vec<str> ref_captures;
+    ref_captures.init(0);
+    if self.state.next_token_is_operator("[") {
+      self.state.token_next();
+      for !self.state.next_token_is_symbol(']') {
+        if !self.state.next_token_is_operator("&") {
+          self.state.err(
+            "a closure's capture list names each variable as '&name', captured by reference"
+          );
+          self.state.finish_scope();
+          ret .Some(.InvalidStatement);
+        }
+        self.state.token_next();
+        let cap_tok = self.state.token_next();
+        if cap_tok.is_none() || cap_tok.unwrap().type != .Identifier {
+          report_expected_identifier(
+            self.state,
+            cap_tok,
+            "expected a variable name after '&' in a capture list"
+          );
+          self.state.finish_scope();
+          ret .Some(.InvalidIdentifier);
+        }
+        fit cap_tok.unwrap().data {
+          .Sval(cs) -> {
+            if ref_captures.contains(cs) {
+              self.state.err(format("'{str}' is listed twice in the capture list", cs));
+              self.state.finish_scope();
+              ret .Some(.InvalidStatement);
+            }
+            ref_captures.push(cs);
+          }
+          _ -> {}
+        }
+        if !self.state.next_token_is_operator(",") {
+          break;
+        }
+        self.state.token_next();
+      }
+      let cberr = self.state.expect_sym(']');
+      if cberr.is_some() {
+        self.state.finish_scope();
+        ret cberr;
+      }
+    }
+
     let operr = self.state.expect_op("(");
     if operr.is_some() {
       self.state.finish_scope();
@@ -6460,6 +6449,7 @@ impl Parser {
     fnv.has_name = false;
     fnv.args = cl_args;
     fnv.has_args = cl_args.len > 0;
+    fnv.ref_captures = ref_captures;
 
     Node cl_node = node_new(.ClosureLiteral(fnv));
     fit fun_tok {
@@ -6471,11 +6461,8 @@ impl Parser {
     }
 
     // Mirrors `parse_test_declaration`'s own save/restore of
-    // `current_function` around a synthetic context: nested node
-    // construction inside this closure's body stamps `binded.function`
-    // from whatever's active at that moment, so it needs to name this
-    // closure (not whatever real function the closure literal itself
-    // appears inside), restored once the body is done either way.
+    // `current_function`: while its body is parsed, the closure is the
+    // function being parsed, restored once the body is done either way.
     let prev_fn = self.current_function;
     let prev_has_fn = self.has_current_function;
     self.current_function = &cl_node;
@@ -9554,34 +9541,11 @@ test "push_scope_entity/get_scope_entity walk the scope chain" {
   assert st.get_scope_entity("missing") == nil, "unregistered name should not be found";
 }
 
-test "create_node stamps binded owner/function context" {
+test "create_node pushes the node into the parse state" {
   ParseState st = _state_from("");
   Parser p = parser_new(&st);
-
-  Node body_node = node_new(.Blank);
-  Node fn_node = node_new(.Blank);
-  p.current_body = &body_node;
-  p.has_current_body = true;
-  p.current_function = &fn_node;
-  p.has_current_function = true;
-
   Node n = node_new(.Blank);
   p.create_node(&n);
-
-  assert n.has_binded, "expected create_node to stamp binded context";
-  assert n.binded.has_owner, "expected binded.owner to be set from current_body";
-  assert n.binded.has_function, "expected binded.function to be set from current_function";
-  assert st.nodes.len == 1, "expected the node to be pushed into state.nodes";
-}
-
-test "create_node leaves binded unset with no active body/function" {
-  ParseState st = _state_from("");
-  Parser p = parser_new(&st);
-
-  Node n = node_new(.Blank);
-  p.create_node(&n);
-
-  assert !n.has_binded, "expected no binded context outside any body/function";
   assert st.nodes.len == 1, "expected the node to be pushed into state.nodes";
 }
 
@@ -11552,9 +11516,6 @@ test "parse_body parses a nested body" {
         }
         _ -> { panic("expected the inner statement to be a Body node"); }
       }
-      // The nested body's `binded.owner` should point back to the outer body.
-      assert inner_stmt.has_binded, "expected the nested body to have binded context";
-      assert inner_stmt.binded.has_owner, "expected the nested body's binded.owner to be set";
     }
     _ -> { panic("expected a Body node"); }
   }

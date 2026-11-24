@@ -682,6 +682,10 @@ pub compound Codegen {
   // Incremented for each closure literal, so each one's own hoisted env
   // struct/body function/entry trampoline gets a unique C name.
   num closure_counter;
+  // While a closure body is emitted, the names it captured: each one is a
+  // pointer parameter there, so a closure created inside it captures
+  // through that pointer.
+  Set<str> closure_alias_names;
   // Each `__fun_fn_as_closure_N` trampoline already emitted, keyed by
   // the C signature it calls through.
   Map<str, str> fn_closure_trampolines;
@@ -837,6 +841,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.try_call_counter = 0;
   g.closure_counter = 0;
   g.fn_closure_trampolines.init(8);
+  g.closure_alias_names = set_init("", 4);
   g.hoist_scratch_depth = 0;
   // Matches `g.state`, so `self.state == self.root_state` is already
   // true for the very first function, not just after the first nested
@@ -9851,6 +9856,54 @@ impl Codegen {
           }
         }
 
+        // How each capture travels. `cap_dtypes` becomes the captured
+        // value's own type (a name the enclosing closure body reaches
+        // through a pointer is that pointer's pointee); `env_dtypes` is
+        // the environment field, a pointer for a by-reference capture;
+        // `through_ptr` marks the ones the body reaches through a pointer
+        // parameter. An array or a plain function value is passed as it
+        // is: an array already reaches its environment copy by decay.
+        Vec<flag> cap_is_ref;
+        cap_is_ref.init(cap_names.len);
+        defer cap_is_ref.free();
+        Vec<flag> cap_outer_alias;
+        cap_outer_alias.init(cap_names.len);
+        defer cap_outer_alias.free();
+        Vec<flag> through_ptr;
+        through_ptr.init(cap_names.len);
+        defer through_ptr.free();
+        Vec<DataType> env_dtypes;
+        env_dtypes.init(cap_names.len);
+        defer env_dtypes.free();
+        Set<str> deref_names = set_init("", 4);
+        defer deref_names.free();
+        num ki = 0;
+        for ki < cap_names.len {
+          str cname = cap_names.get(ki);
+          flag is_ref = f.ref_captures.contains(cname);
+          flag outer_alias = self.closure_alias_names.has(cname);
+          DataType val_dt = cap_dtypes.get(ki);
+          if outer_alias {
+            val_dt = _pointee_dtype(val_dt);
+            cap_dtypes.set(ki, val_dt);
+          }
+          flag plain = !val_dt.is_array && !val_dt.has_fn_sig;
+          DataType env_dt = val_dt;
+          if is_ref && plain {
+            env_dt = _pointer_to_dtype(val_dt);
+          } elif is_ref && val_dt.is_array {
+            env_dt = _decayed_array_dtype(val_dt);
+          }
+          cap_is_ref.push(is_ref);
+          cap_outer_alias.push(outer_alias);
+          through_ptr.push(plain);
+          env_dtypes.push(env_dt);
+          if plain {
+            deref_names.add(cname);
+          }
+          ki = ki + 1;
+        }
+
         // 1. Env struct typedef, hoisted.
         CodegenState env_scratch = self.new_scratch_state();
         CodegenState* saved_state_env = self.state;
@@ -9859,7 +9912,7 @@ impl Codegen {
         num ei = 0;
         for ei < cap_names.len {
           self.state.write("  ");
-          let ewt = self.write_named_type(cap_dtypes.get(ei), cap_names.get(ei));
+          let ewt = self.write_named_type(env_dtypes.get(ei), cap_names.get(ei));
           if ewt.is_some() {
             self.state = saved_state_env;
             ret ewt;
@@ -9887,7 +9940,9 @@ impl Codegen {
         num ai = 0;
         for ai < cap_names.len {
           DataType* cap_dt_ptr = malloc(sizeof(DataType));
-          *cap_dt_ptr = cap_dtypes.get(ai);
+          *cap_dt_ptr = through_ptr.get(ai) ? _pointer_to_dtype(cap_dtypes.get(ai)) : env_dtypes.get(
+            ai
+          );
           VariableNode vn;
           vn.var_type = cap_dt_ptr;
           vn.name = cap_names.get(ai);
@@ -9914,7 +9969,15 @@ impl Codegen {
         synth.has_args = body_args.len > 0;
         synth.rtype = f.rtype;
         synth.has_rtype = f.has_rtype;
-        synth.body = f.body;
+        // Every capture reached through a pointer reads and writes as
+        // `(*name)` in the body, on a copy so the literal itself is left
+        // as written for its next emission.
+        Node* body_copy = f.body;
+        if f.has_body && deref_names.len() > 0 {
+          body_copy = node_clone_ptr(f.body);
+          closure_deref_captures(body_copy, deref_names);
+        }
+        synth.body = body_copy;
         synth.has_body = f.has_body;
         Node synth_node = node_new(.Function(synth));
         synth_node.pos = node.pos;
@@ -9948,7 +10011,10 @@ impl Codegen {
         self.state = &body_scratch;
         self.hoist_insert_pos = .None;
         self.current_stmt_start_pos = .None;
+        Set<str> saved_alias_names = self.closure_alias_names;
+        self.closure_alias_names = deref_names;
         let body_err = self.emit_function_named(synth_node, body_name);
+        self.closure_alias_names = saved_alias_names;
         self.state = saved_state_body;
         self.hoist_insert_pos = saved_hoist_pos;
         self.current_stmt_start_pos = saved_stmt_start_pos;
@@ -10022,6 +10088,11 @@ impl Codegen {
           if ci > 0 {
             self.state.write(", ");
           }
+          // A by-value capture is the field itself, by address; a
+          // by-reference one already holds the address.
+          if through_ptr.get(ci) && !cap_is_ref.get(ci) {
+            self.state.write("&");
+          }
           self.state.write("__e->");
           self.state.write(cap_names.get(ci));
           ci = ci + 1;
@@ -10067,6 +10138,15 @@ impl Codegen {
           cl_sb.append("->");
           cl_sb.append(cap_names.get(wi));
           cl_sb.append(" = ");
+          // Inside another closure's body a captured name is a pointer:
+          // a copy reads through it, and a reference is that pointer.
+          flag wref = cap_is_ref.get(wi);
+          flag walias = cap_outer_alias.get(wi);
+          if wref && !walias && through_ptr.get(wi) {
+            cl_sb.append("&");
+          } elif !wref && walias {
+            cl_sb.append("*");
+          }
           cl_sb.append(cap_names.get(wi));
           cl_sb.append(";\n");
           wi = wi + 1;
@@ -14287,9 +14367,9 @@ impl Codegen {
     ret false;
   }
 
-  // `for ... : [ ... ]`: declares the literal as `let __fun_for_lit_N =
-  // [ ... ];` in a block of its own, then loops over that local.
-  _emit_for_over_literal(ForIterNode fi) Option<CodegenErrorKind> {
+  // `for ... : <expr>`: declares `let __fun_for_lit_N = <expr>;` in a
+  // block of its own, then loops over that local.
+  _emit_for_over_temp(ForIterNode fi) Option<CodegenErrorKind> {
     self.for_iter_temp_counter = self.for_iter_temp_counter + 1;
     str lit_name = format("__fun_for_lit_{num}", self.for_iter_temp_counter);
     DataType* let_dt = malloc(sizeof(DataType));
@@ -14325,10 +14405,16 @@ impl Codegen {
   }
 
   emit_for_iter(ForIterNode fi) Option<CodegenErrorKind> {
-    // An array literal (`for x : [1, 2, 3]`) is bound to a hidden local
-    // first, inside its own block, and the loop walks that.
+    // An array literal (`for x : [1, 2, 3]`) or a dereferenced pointer
+    // (`for x : *v`) is bound to a hidden local first, inside its own
+    // block, and the loop walks that, the copy a loop walks anyway.
     fit fi.iterable.kind {
-      .Bracket(_) -> { ret self._emit_for_over_literal(fi); }
+      .Bracket(_) -> { ret self._emit_for_over_temp(fi); }
+      .Unary(iu) -> {
+        if equals(iu.op, "*") && !iu.is_left_operanded_unary {
+          ret self._emit_for_over_temp(fi);
+        }
+      }
       _ -> {}
     }
     // The iterable is either a plain identifier, checked structurally via
@@ -16426,6 +16512,19 @@ impl Codegen {
     ret .None;
   }
 
+  // Writes one `*` per level of pointer `dt` carries.
+  _write_pointer_stars(DataType dt) {
+    num depth = dt.pointer_depth;
+    if depth == 0 && dt.flags.is_pointer {
+      depth = 1;
+    }
+    num i = 0;
+    for i < depth {
+      self.state.write("*");
+      i = i + 1;
+    }
+  }
+
   write_named_type(DataType dtype, str name) Option<CodegenErrorKind> {
     // A closure-typed value is the ordinary two-word `__fun_closure_t`
     // struct, never a function-pointer declarator (unlike `fun(...)R`
@@ -16434,7 +16533,9 @@ impl Codegen {
     // generic name resolution, which a closure type's fixed placeholder
     // `type_str` ("closure(...)") was never meant to resolve through.
     if dtype.has_closure_sig {
-      self.state.write("__fun_closure_t ");
+      self.state.write("__fun_closure_t");
+      self._write_pointer_stars(dtype);
+      self.state.write(" ");
       self.state.write(name);
       ret .None;
     }
@@ -16486,9 +16587,16 @@ impl Codegen {
     fit param.kind {
       .Variable(v) -> {
         if v.var_type.has_closure_sig {
-          self.state.write("__fun_closure_t ");
+          self.state.write("__fun_closure_t");
+          self._write_pointer_stars(*v.var_type);
+          self.state.write(" ");
           self.state.write(v.name);
-          self.record_local_typed(v.name, "", false, *v.var_type);
+          self.record_local_typed(
+            v.name,
+            "",
+            dtype_is_pointer(*v.var_type),
+            *v.var_type
+          );
           ret .None;
         }
         if v.var_type.has_fn_sig {
@@ -18938,6 +19046,7 @@ impl Codegen {
         }
         ret self.infer_arg_type_name(t.else_val);
       }
+      .ExpressionParenthesis(inner) -> { ret self.infer_arg_type_name(inner); }
       _ -> { ret .None; }
     }
   }
@@ -18951,6 +19060,15 @@ impl Codegen {
         let p = self.lookup_local_is_pointer(name);
         if p.is_some() {
           ret p.unwrap();
+        }
+        ret false;
+      }
+      .ExpressionParenthesis(inner) -> { ret self.infer_arg_is_pointer(inner); }
+      // `*p` is still a pointer when `p` points at one.
+      .Unary(u) -> {
+        if equals(u.op, "*") && !u.is_left_operanded_unary {
+          let pointed = self.infer_arg_dtype(u.operand);
+          ret pointed.is_some() && dtype_is_pointer(_pointee_dtype(pointed.unwrap()));
         }
         ret false;
       }
@@ -19081,8 +19199,16 @@ impl Codegen {
             ret .Some(dt);
           }
         }
+        // `*p` is what `p` points at.
+        if equals(u.op, "*") && !u.is_left_operanded_unary {
+          let pointed = self.infer_arg_dtype(u.operand);
+          if pointed.is_some() && dtype_is_pointer(pointed.unwrap()) {
+            ret .Some(_pointee_dtype(pointed.unwrap()));
+          }
+        }
         ret .None;
       }
+      .ExpressionParenthesis(inner) -> { ret self.infer_arg_dtype(inner); }
       _ -> { ret .None; }
     }
   }
@@ -30061,4 +30187,38 @@ test "typedef_declared_before remembers a hit and stays correct when a later spl
 fun _sig_returns_bare(FnTypeSig* sig, str tp) flag {
   ret sig != nil && sig.rtype != nil && equals(sig.rtype.type_str, tp) &&
     sig.rtype.generic_args.len == 0;
+}
+
+// `dt` with one more level of pointer.
+fun _pointer_to_dtype(DataType dt) DataType {
+  DataType p = dt;
+  if p.pointer_depth == 0 && p.flags.is_pointer {
+    p.pointer_depth = 1;
+  }
+  p.pointer_depth = p.pointer_depth + 1;
+  p.flags.is_pointer = true;
+  ret p;
+}
+
+// `dt` with one level of pointer removed.
+fun _pointee_dtype(DataType dt) DataType {
+  DataType p = dt;
+  if p.pointer_depth == 0 && p.flags.is_pointer {
+    p.pointer_depth = 1;
+  }
+  if p.pointer_depth > 0 {
+    p.pointer_depth = p.pointer_depth - 1;
+  }
+  p.flags.is_pointer = p.pointer_depth > 0;
+  ret p;
+}
+
+// A one-dimensional array type decayed to a pointer to its element.
+fun _decayed_array_dtype(DataType dt) DataType {
+  DataType p = dt;
+  p.is_array = false;
+  p.flags.is_array = false;
+  p.array_depth = 0;
+  p.array_brackets.init(0);
+  ret _pointer_to_dtype(p);
 }

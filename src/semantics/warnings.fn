@@ -43,6 +43,7 @@ pub fun warning_id_name(WarningId id) str {
     .BlockingForkDeadlock -> { ret "blocking_fork_deadlock"; }
     .SharedMutableCaptureRace -> { ret "shared_mutable_capture_race"; }
     .ClosureCapturesEscapingPointer -> { ret "closure_captures_escaping_pointer"; }
+    .EscapingRefCapture -> { ret "escaping_ref_capture"; }
     .IntegerLiteralOutOfRange -> { ret "integer_literal_out_of_range"; }
     .ChannelCapacityOverflow -> { ret "channel_capacity_overflow"; }
     .NoCover -> { ret "no_cover"; }
@@ -1223,8 +1224,73 @@ impl Analysis {
         Map<str, str> last_address_of;
         last_address_of.init(4);
         defer last_address_of.free();
+        Set<str> ref_closures = set_init("", 2);
+        defer ref_closures.free();
         for st : inner.statements {
           self.check_closure_escaping_statement(st, &last_address_of);
+          self.check_ref_capture_store(st, &ref_closures);
+        }
+      }
+      _ -> {}
+    }
+  }
+
+  // Flags a closure that captures by reference being stored where it
+  // can outlive this function: assigned into a field, or handed to a
+  // collection's `push`/`insert`/`put`/`add`/`set`. `ref_closures` holds
+  // the locals bound to such a closure so far in this function.
+  check_ref_capture_store(Node* st, Set<str>* ref_closures) {
+    if st == nil {
+      ret;
+    }
+    fit st.kind {
+      .Variable(v) -> {
+        if v.has_val && _holds_ref_closure(v.val, ref_closures) {
+          ref_closures.add(v.name);
+        }
+      }
+      .Expression(e) -> {
+        if equals(e.op, "=") && e.has_left && e.has_right &&
+          _holds_ref_closure(e.right, ref_closures) {
+          fit e.left.kind {
+            .Identifier(n) -> { ref_closures.add(n); }
+            .Expression(target) -> {
+              if equals(target.op, ".") {
+                self.report(
+                  .EscapingRefCapture,
+                  "a closure capturing a local by reference is stored in a field, where it can outlive that local",
+                  st
+                );
+              }
+            }
+            _ -> {}
+          }
+        }
+        if equals(e.op, "()") && e.has_left && e.has_right {
+          fit e.left.kind {
+            .Expression(callee) -> {
+              str method = "";
+              if equals(callee.op, ".") && callee.has_right {
+                fit callee.right.kind {
+                  .Identifier(m) -> { method = m; }
+                  _ -> {}
+                }
+              }
+              flag stores = equals(method, "push") || equals(method, "insert") ||
+                equals(method, "put") || equals(method, "add") || equals(method, "set");
+              if stores && _args_hold_ref_closure(e.right, ref_closures) {
+                self.report(
+                  .EscapingRefCapture,
+                  format(
+                  "a closure capturing a local by reference is added to a collection with '{str}', where it can outlive that local",
+                  method
+                  ),
+                  st
+                );
+              }
+            }
+            _ -> {}
+          }
         }
       }
       _ -> {}
@@ -2815,4 +2881,37 @@ pub fun collect_reads(Node* node, Set<str>* out) {
     }
     _ -> {}
   }
+}
+
+// True when `n` is a closure literal with a by-reference capture, or a
+// local already bound to one.
+fun _holds_ref_closure(Node* n, Set<str>* ref_closures) flag {
+  if n == nil {
+    ret false;
+  }
+  fit n.kind {
+    .ClosureLiteral(f) -> { ret f.ref_captures.len > 0; }
+    .Identifier(name) -> { ret ref_closures.has(name); }
+    .ExpressionParenthesis(inner) -> { ret _holds_ref_closure(inner, ref_closures); }
+    _ -> {}
+  }
+  ret false;
+}
+
+// True when any argument in a call's argument list `args` holds a
+// by-reference closure.
+fun _args_hold_ref_closure(Node* args, Set<str>* ref_closures) flag {
+  if args == nil {
+    ret false;
+  }
+  fit args.kind {
+    .Expression(e) -> {
+      if equals(e.op, ",") {
+        ret (e.has_left && _args_hold_ref_closure(e.left, ref_closures)) ||
+          (e.has_right && _args_hold_ref_closure(e.right, ref_closures));
+      }
+    }
+    _ -> {}
+  }
+  ret _holds_ref_closure(args, ref_closures);
 }

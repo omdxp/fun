@@ -8,7 +8,7 @@ repository = "https://github.com/omdxp/fun"
 
 [grammars.fun]
 repository = "https://github.com/omdxp/tree-sitter-fun"
-rev = "9179087b0ec6a8e30f87d38aa488d90ea15a727b"
+rev = "dd678f248e752b64bd4ccbda7e69f8abb3c7637e"
 
 [language_servers.fls]
 name = "fls"
