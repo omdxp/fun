@@ -513,6 +513,33 @@ pub fun compiler_is_msvc(str cc) flag {
   ret equals(name, "cl") || equals(name, "cl.exe");
 }
 
+// True when `cc` is clang building for the MSVC ABI, where the C runtime
+// is chosen per build rather than always the DLL one MinGW uses. Asked
+// once per process.
+Once _clang_msvc_loaded;
+flag _clang_msvc = false;
+
+fun _clang_targets_msvc(str cc) flag {
+  if _clang_msvc_loaded.begin() {
+    if runtime_backend_is_windows() && starts_with(basename(cc), "clang") {
+      Vec<str> args;
+      args.init(2);
+      args.push(cc);
+      args.push("-dumpmachine");
+      str[] argv = argv_from(&args);
+      let result = run(argv);
+      free_argv(argv);
+      args.free();
+      if result.is_ok() {
+        ProcessResult pr = result.unwrap();
+        _clang_msvc = pr.exit_code == 0 && contains(pr.stdout_text, "msvc");
+      }
+    }
+    _clang_msvc_loaded.finish();
+  }
+  ret _clang_msvc;
+}
+
 // True when `cc` is the emscripten compiler (targets WebAssembly, output
 // is a `.js` glue file plus a `.wasm`, not a native executable). Emscripten
 // only ever activates via an explicit `FUN_CC=emcc` (or `em++`) override -
@@ -887,6 +914,9 @@ fun _append_compile_args(
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("/O2");
     }
+    if is_dll_c_runtime_build() {
+      argv_args.push("/MD");
+    }
     _push_build_compile_flags(argv_args, true);
     argv_args.push(c_path);
     _push_build_sources(argv_args);
@@ -1001,11 +1031,27 @@ fun _append_compile_args(
     if _wants_optimization(optimize, debug_info) {
       argv_args.push("-O2");
     }
+    flag dll_runtime = is_dll_c_runtime_build() && _clang_targets_msvc(cc);
+    if dll_runtime {
+      argv_args.push("-fms-runtime-lib=dll");
+    }
     _push_build_compile_flags(argv_args, false);
     argv_args.push(c_path);
     _push_build_sources(argv_args);
     argv_args.push("-o");
     argv_args.push(exe_path);
+    if dll_runtime {
+      // clang's own link step always names the static runtime, whatever
+      // the compile asked for, so swap it for the DLL one here.
+      argv_args.push("-Xlinker");
+      argv_args.push("/nodefaultlib:libcmt");
+      argv_args.push("-Xlinker");
+      argv_args.push("/defaultlib:msvcrt");
+      argv_args.push("-Xlinker");
+      argv_args.push("/defaultlib:ucrt");
+      argv_args.push("-Xlinker");
+      argv_args.push("/defaultlib:vcruntime");
+    }
     if debug_info {
       argv_args.push("-g");
     } else {

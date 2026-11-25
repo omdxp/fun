@@ -261,6 +261,25 @@ jobs:
             export FUN_STDLIB_DIR="$PWD/stdlib"
             FUN_EXE="$PWD/fun-out/bin/fun" ./scripts/run_examples.sh
           fi
+      # `c_runtime = "dll"` is only proven by a real link: both Windows
+      # compilers must produce a program that runs and imports the DLL
+      # runtime rather than carrying the static one.
+      - name: Build with the DLL C runtime on Windows
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 10
+        run: |
+          export FUN_STDLIB_DIR="${{ github.workspace }}/stdlib"
+          FUN="$PWD/fun-out/bin/fun.exe"
+          mkdir -p "$RUNNER_TEMP/crt_dll/src"
+          cd "$RUNNER_TEMP/crt_dll"
+          printf '[package]\nname = "crt_dll"\n\n[build.windows]\nc_runtime = "dll"\n\n[[exe]]\nname = "crt_dll"\npath = "src/main.fn"\n' > fun.toml
+          printf 'use std.io;\n\nfun main() num {\n  println_fmt("crt dll: {num}", 6 * 7);\n  ret 0;\n}\n' > src/main.fn
+          for cc in clang cl; do
+            rm -rf fun-out
+            FUN_CC=$cc "$FUN" build
+            ./fun-out/bin/crt_dll.exe | grep -q "crt dll: 42"
+            dumpbin //dependents fun-out/bin/crt_dll.exe | grep -qi "vcruntime140"
+          done
       # A freestanding build is only proven by booting it: this builds the
       # bare-metal kernel in examples/kernel and boots it in QEMU, which
       # exits with the kernel's own status through its debug-exit device

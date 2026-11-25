@@ -135,6 +135,9 @@ pub compound BuildSettings {
   // Runs `main` on the process's own first thread instead of a worker
   // thread with its own stack (see `is_os_main_thread_build`).
   flag os_main_thread;
+  // Which C runtime an MSVC-ABI build links: "" or "static" for the
+  // static one, "dll" for the DLL one most prebuilt Windows libraries use.
+  str c_runtime;
   // The CPU the program is built for (`x86_64`, `aarch64`, ...), when it
   // isn't this machine's own: what `asm arch` blocks are checked against.
   str target_arch;
@@ -155,6 +158,7 @@ pub fun build_settings_new() BuildSettings {
   b.ldflags.init(0);
   b.freestanding = false;
   b.os_main_thread = false;
+  b.c_runtime = "";
   b.target_arch = "";
   b.output = "";
   ret b;
@@ -182,7 +186,8 @@ pub fun project_build_settings() BuildSettings {
 }
 
 // `m.build` with `[build.<os_name>]` added on: its lists after the base
-// ones, and its `os_main_thread` turning that on.
+// ones, its `os_main_thread` turning that on, and its `c_runtime` in
+// place of the base one.
 pub fun build_for_host(Manifest* m, str os_name) BuildSettings {
   BuildSettings b = m.build;
   let extra = m.build_for_os.at(os_name);
@@ -210,6 +215,9 @@ pub fun build_for_host(Manifest* m, str os_name) BuildSettings {
   }
   if e.os_main_thread {
     b.os_main_thread = true;
+  }
+  if !equals(e.c_runtime, "") {
+    b.c_runtime = e.c_runtime;
   }
   ret b;
 }
@@ -247,6 +255,22 @@ pub fun request_os_main_thread_build() {
 // insists on that thread (macOS's, under a windowing library) needs it.
 pub fun is_os_main_thread_build() flag {
   ret _os_main_thread_requested || project_build_settings().os_main_thread;
+}
+
+// True when an MSVC-ABI build links the DLL C runtime:
+// `[build] c_runtime = "dll"`, or the same in `[build.windows]`.
+pub fun is_dll_c_runtime_build() flag {
+  ret equals(project_build_settings().c_runtime, "dll");
+}
+
+// The error for a `c_runtime` other than "static" or "dll", or none.
+fun _c_runtime_error(str table, str value) Option<str> {
+  if equals(value, "") || equals(value, "static") || equals(value, "dll") {
+    ret .None;
+  }
+  ret .Some(
+    format("[{str}] `c_runtime` must be \"static\" or \"dll\", found `{str}`", table, value)
+  );
 }
 
 // Set by `-freestanding` on the command line.
@@ -608,11 +632,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     for bk : build_keys {
       fit bk {
         "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "freestanding",
-        "os_main_thread", "arch", "output" -> {}
+        "os_main_thread", "c_runtime", "arch", "output" -> {}
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, os_main_thread, arch, or output)",
+            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, os_main_thread, c_runtime, arch, or output)",
             bk
             )
           );
@@ -640,6 +664,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         ret .Err("[build] `os_main_thread` must be true or false");
       }
       m.build.os_main_thread = omt_flag.unwrap();
+    }
+    m.build.c_runtime = build.unwrap().get_str("c_runtime");
+    let crt_error = _c_runtime_error("build", m.build.c_runtime);
+    if crt_error.is_some() {
+      ret .Err(crt_error.unwrap());
     }
     m.build.target_arch = build.unwrap().get_str("arch");
     m.build.output = build.unwrap().get_str("output");
@@ -672,11 +701,12 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     defer os_keys.free();
     for ok : os_keys {
       fit ok {
-        "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "os_main_thread" -> {}
+        "sources", "include_dirs", "lib_dirs", "links", "cflags", "ldflags", "os_main_thread",
+        "c_runtime" -> {}
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [{str}] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, or os_main_thread)",
+            "unknown key `{str}` in [{str}] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, os_main_thread, or c_runtime)",
             ok,
             t.name
             )
@@ -698,6 +728,11 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         ret .Err(format("[{str}] `os_main_thread` must be true or false", t.name));
       }
       os_build.os_main_thread = os_omt_flag.unwrap();
+    }
+    os_build.c_runtime = t.get_str("c_runtime");
+    let os_crt_error = _c_runtime_error(t.name, os_build.c_runtime);
+    if os_crt_error.is_some() {
+      ret .Err(os_crt_error.unwrap());
     }
     m.build_for_os.put(os_name, os_build);
   }
@@ -1425,4 +1460,27 @@ test "[build] output takes exe or object" {
   `[build]
   `output = "lib"`);
   assert bad.is_err() && contains(bad.unwrap_err(), "`output` must be"), "expected an unknown output rejected";
+}
+
+test "[build] c_runtime takes static or dll, and [build.windows] overrides it" {
+  let m = parse_manifest(
+    `[package]
+  `name = "game"
+  `
+  `[build]
+  `c_runtime = "static"
+  `
+  `[build.windows]
+  `c_runtime = "dll"`
+  )
+  .unwrap();
+  assert equals(build_for_host(&m, "windows").c_runtime, "dll"), "expected the Windows table's runtime";
+  assert equals(build_for_host(&m, "linux").c_runtime, "static"), "expected the base runtime elsewhere";
+  let bad = parse_manifest(`[package]
+  `name = "game"
+  `
+  `[build]
+  `c_runtime = "shared"`);
+  assert bad.is_err() &&
+    contains(bad.unwrap_err(), "`c_runtime` must be \"static\" or \"dll\""), "expected an unknown runtime rejected";
 }

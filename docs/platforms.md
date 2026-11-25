@@ -69,6 +69,17 @@ allows it: 128 MB on macOS and Windows, as usual. On Linux it is the
 OS's own stack limit (`ulimit -s`, commonly 8 MB), since a process
 can't grow its first thread's stack after it starts.
 
+### Windows C runtime
+
+A Windows program built with clang or `cl` links the static C runtime,
+so it starts on any machine with nothing else installed. A prebuilt C
+library compiled against the DLL runtime (`/MD`, which most are) can't
+link with that: its calls into the C library go unresolved. Set
+`c_runtime = "dll"` in `[build]` or `[build.windows]` to link the DLL
+runtime instead. The program then needs the Visual C++ runtime on the
+machine it runs on. MinGW builds always use the DLL runtime, so the
+setting changes nothing there.
+
 ### WebAssembly target
 
 Set `FUN_CC=emcc` (or `em++`) to target WebAssembly instead of a native
