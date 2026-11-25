@@ -647,6 +647,9 @@ pub compound Codegen {
   // A bare-metal build (see `is_freestanding_build`): no C library, no
   // runtime, no `main` wrapper.
   flag freestanding;
+  // `main` runs on the process's own first thread, not a worker thread
+  // (see `is_os_main_thread_build`).
+  flag os_main_thread;
   // What `emit_asm_stmt` checks a program's own `asm arch "..."` block
   // against, resolved by the caller (`host_arch_name()`, `..codegen.
   // host_arch`) before `transpile()` runs rather than imported and
@@ -904,6 +907,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.aligned_compound_values.init(0);
   g.keep_public_roots = false;
   g.freestanding = false;
+  g.os_main_thread = false;
   g.host_arch = "";
   g.prune_unreachable = false;
   g.reachable_names = set_init("", 256);
@@ -20834,6 +20838,18 @@ impl Codegen {
   }
 
   pub write_prelude() {
+    // GNU-mode C compilers predefine a few bare target names as macros, which
+    // would turn a Fun identifier like `linux` into a number.
+    self.state.write(
+      `#undef linux
+    `#undef unix
+    `#undef i386
+    `#undef sun
+    `#undef sparc
+    `#undef mips
+    `#undef vax
+    ``
+    );
     if self.freestanding {
       self.write_freestanding_prelude();
       ret;
@@ -23668,6 +23684,19 @@ impl Codegen {
     str ginit_call = "";
     if self.pending_global_runtime_inits.len > 0 {
       ginit_call = "  __fun_init_globals();\n";
+    }
+    // Straight through on the process's own first thread, which a GUI
+    // toolkit may insist on; the link step sizes its stack instead.
+    if self.os_main_thread {
+      self.state.write(
+        format(
+        "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
+        mc_leak_suppress,
+        ginit_call,
+        real_name
+        )
+      );
+      ret .None;
     }
     if self.emscripten_mode {
       // A browser's own main (document) thread must never block
@@ -28130,6 +28159,13 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
+    `#undef linux
+    `#undef unix
+    `#undef i386
+    `#undef sun
+    `#undef sparc
+    `#undef mips
+    `#undef vax
     `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE

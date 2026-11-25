@@ -202,6 +202,13 @@ ldflags = ["-Wl,-rpath,vendor/lib"]
   without changing `fun.toml`, and `fun -obj -in file.fn` does it for one
   file. Nothing is left out of an object as unused, since whatever links
   it may call any of its functions.
+- `[build.macos]`, `[build.linux]` and `[build.windows]` take the same
+  lists (and `os_main_thread`) for one OS, added after `[build]`'s own
+  when building on it: a library's per-platform paths, or the system
+  libraries only Windows links.
+- `os_main_thread = true` runs `main` on the process's own first thread,
+  which a windowing library on macOS needs. See Stack size in Platforms &
+  Compilers.
 - `freestanding = true` builds for bare metal, and `arch = "x86_64"`
   names the CPU being built for when it isn't this machine's own. See
   Bare metal in Platforms & Compilers.

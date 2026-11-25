@@ -4756,6 +4756,20 @@ impl Checker {
       }
       ret checked_unknown();
     }
+    // A local closure or function value shadows a function of the same
+    // name, the way any local shadows what's declared outside it.
+    let shadowing = env.lookup(name);
+    if shadowing.is_some() &&
+      (shadowing.unwrap().has_closure_sig || shadowing.unwrap().has_fn_sig) {
+      CheckedType local_callee = shadowing.unwrap();
+      ret self.check_fn_value_call(
+        node,
+        format("'{str}'", name),
+        local_callee.has_closure_sig ? local_callee.closure_sig : local_callee.fn_sig,
+        &args,
+        env
+      );
+    }
     let known = self.fns.at(name);
     if known.is_none() {
       // A name bound in scope holds a function rather than naming one -

@@ -60,6 +60,15 @@ entirely, and gives deep recursion the same headroom on every target.
 `fork`/`await`'s own worker threads use a separate, smaller stack; see
 [Concurrency](#concurrency).
 
+A GUI toolkit may insist on the process's own first thread instead:
+macOS's windowing only works there, so a raylib, SDL, or GLFW window
+crashes on the worker thread. `[build] os_main_thread = true` (or
+`-os-main-thread` for a single file) runs `main` directly on that
+first thread. Its stack is then sized at link time where the platform
+allows it: 128 MB on macOS and Windows, as usual. On Linux it is the
+OS's own stack limit (`ulimit -s`, commonly 8 MB), since a process
+can't grow its first thread's stack after it starts.
+
 ### WebAssembly target
 
 Set `FUN_CC=emcc` (or `em++`) to target WebAssembly instead of a native
