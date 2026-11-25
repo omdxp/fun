@@ -19333,6 +19333,22 @@ impl Codegen {
           const_dt.type_str = top_const_t.unwrap();
           ret .Some(const_dt);
         }
+        // A plain function named as a value (`let f = near;`) is a function
+        // pointer. MSVC has no `__auto_type` to work that out by itself.
+        let fn_rt = self.lookup_function_rtype(name);
+        let fn_params = self.lookup_function_param_types(name);
+        if fn_rt.is_some() && fn_params.is_some() {
+          FnTypeSig* sig = malloc(sizeof(FnTypeSig));
+          *sig = fn_type_sig_new();
+          for fp : fn_params.unwrap() {
+            sig.params.push(fp);
+          }
+          sig.rtype = fn_rt.unwrap();
+          DataType fn_dt = dtype_new();
+          fn_dt.has_fn_sig = true;
+          fn_dt.fn_sig = sig;
+          ret .Some(fn_dt);
+        }
         ret .None;
       }
       // A bare array literal has no declared type to read. Without this,
