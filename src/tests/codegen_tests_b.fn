@@ -4784,7 +4784,7 @@ test "windows.h never declares names a C library like raylib also uses" {
   str c = transpile_source(src).unwrap();
   num first_include = index_of_str(c, "#include <windows.h>");
   assert first_include >= 0, "expected the Windows runtime headers";
-  for name : ["WIN32_LEAN_AND_MEAN", "NOGDI", "NOUSER"] {
+  for name : ["WIN32_LEAN_AND_MEAN", "NOGDI", "NOUSER", "NOMINMAX"] {
     num at = index_of_str(c, format("#define {str}", name));
     assert at >= 0 && at < first_include, format(
       "expected {str} defined before windows.h",
@@ -4995,4 +4995,45 @@ test "a closure parameter named like a top-level function is passed on as itself
   assert contains(out, "got 2"), format("expected the parameter called, got: {str}", out);
   assert contains(out, "got 5"), format("expected the direct call too, got: {str}", out);
   assert contains(out, "t 1"), format("expected the function still callable, got: {str}", out);
+}
+
+test "words windows.h defines as macros stay plain identifiers" {
+  str src = `use std.io;
+  `use std.thread;
+  `
+  `fun near(num a) num {
+  `  ret a;
+  `}
+  `
+  `fun max(num a, num b) num {
+  `  ret a > b ? a : b;
+  `}
+  `
+  `fun main() num {
+  `  num far = max(2, 1);
+  `  num pascal = 3;
+  `  num cdecl = 4;
+  `  num small = 5;
+  `  num interface = 6;
+  `  println_fmt("{num}", near(1) + far + pascal + cdecl + small + interface);
+  `  ret 0;
+  `}`;
+  str c = transpile_source(src).unwrap();
+  num last_include = -1;
+  num from = 0;
+  for true {
+    num at = index_of_str(substr(c, from, len(c) - from), "#include <windows.h>");
+    if at < 0 {
+      break;
+    }
+    last_include = from + at;
+    from = last_include + 1;
+  }
+  assert last_include >= 0, "expected the Windows runtime headers";
+  for name : ["near", "far", "pascal", "cdecl", "small", "interface"] {
+    num at = index_of_str(c, format("#undef {str}", name));
+    assert at > last_include, format("expected {str} undefined after every windows.h", name);
+  }
+  str out = run_source(src, "windows_macro_names", "locals named like windows.h macros");
+  assert contains(out, "21"), format("expected the names added, got: {str}", out);
 }
