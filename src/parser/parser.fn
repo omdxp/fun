@@ -3076,6 +3076,7 @@ impl Parser {
                   *mdot_node = node_new(.Expression(mdot));
                   mdot_node.pos = node.pos;
                   mdot_node.has_pos = node.has_pos;
+                  self.parse_reorder_expression(mdot_node);
                   e.right.kind = .ExpressionParenthesis(mdot_node);
                   Node* old_callee = e.left;
                   e.left = callee.right;
@@ -3108,6 +3109,9 @@ impl Parser {
                 *dot_node = node_new(.Expression(dot));
                 dot_node.pos = node.pos;
                 dot_node.has_pos = node.has_pos;
+                // The lifted access was never reordered as a whole, so
+                // `p.lanes[1]` would stay `p.(lanes[1])` without this.
+                self.parse_reorder_expression(dot_node);
                 ce.right.kind = .ExpressionParenthesis(dot_node);
                 node.kind = .Expression(ce);
                 free(cast_ptr);

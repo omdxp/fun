@@ -1,0 +1,771 @@
+// Portable 128-bit SIMD vectors.
+//
+// `F32x4`, `F64x2`, and `I32x4` each hold one 128-bit register's worth of
+// lanes and map to real vector instructions: SSE2 on x86, NEON on ARM, and
+// plain loops on anything else, with the same results everywhere. Arithmetic
+// uses the usual operators, and comparisons return an `I32x4` mask whose
+// lanes are -1 where the comparison holds and 0 where it doesn't, ready for
+// `select`.
+//
+// ```
+// let a = f32x4(1, 2, 3, 4);
+// let b = f32x4_splat(10);
+// let c = a * b + a;
+// let big = c.cmp_gt(f32x4_splat(25));
+// let clamped = big.select_f32(f32x4_splat(25), c);
+// ```
+
+use std.c.simd;
+use std.c.string;
+
+// Four `f32` lanes.
+pub align(16) compound F32x4 {
+  // The lanes, lowest first.
+  f32[4] lanes;
+}
+
+// Two `f64` lanes.
+pub align(16) compound F64x2 {
+  // The lanes, lowest first.
+  f64[2] lanes;
+}
+
+// Four `i32` lanes, also the mask type every comparison returns.
+pub align(16) compound I32x4 {
+  // The lanes, lowest first.
+  i32[4] lanes;
+}
+
+// Builds an `F32x4` from four lanes, lowest first.
+pub fun f32x4(f32 a, f32 b, f32 c, f32 d) F32x4 {
+  F32x4 v;
+  v.lanes[0] = a;
+  v.lanes[1] = b;
+  v.lanes[2] = c;
+  v.lanes[3] = d;
+  ret v;
+}
+
+// An `F32x4` with every lane set to `x`.
+pub fun f32x4_splat(f32 x) F32x4 {
+  ret f32x4(x, x, x, x);
+}
+
+// Reads four lanes starting at `p`, which needs no particular alignment.
+pub fun f32x4_load(f32* p) F32x4 {
+  F32x4 v;
+  memcpy(&v.lanes[0], p, 16);
+  ret v;
+}
+
+// Builds an `F64x2` from two lanes, lowest first.
+pub fun f64x2(f64 a, f64 b) F64x2 {
+  F64x2 v;
+  v.lanes[0] = a;
+  v.lanes[1] = b;
+  ret v;
+}
+
+// An `F64x2` with both lanes set to `x`.
+pub fun f64x2_splat(f64 x) F64x2 {
+  ret f64x2(x, x);
+}
+
+// Reads two lanes starting at `p`, which needs no particular alignment.
+pub fun f64x2_load(f64* p) F64x2 {
+  F64x2 v;
+  memcpy(&v.lanes[0], p, 16);
+  ret v;
+}
+
+// Builds an `I32x4` from four lanes, lowest first.
+pub fun i32x4(i32 a, i32 b, i32 c, i32 d) I32x4 {
+  I32x4 v;
+  v.lanes[0] = a;
+  v.lanes[1] = b;
+  v.lanes[2] = c;
+  v.lanes[3] = d;
+  ret v;
+}
+
+// An `I32x4` with every lane set to `x`.
+pub fun i32x4_splat(i32 x) I32x4 {
+  ret i32x4(x, x, x, x);
+}
+
+// Reads four lanes starting at `p`, which needs no particular alignment.
+pub fun i32x4_load(i32* p) I32x4 {
+  I32x4 v;
+  memcpy(&v.lanes[0], p, 16);
+  ret v;
+}
+
+impl F32x4 {
+  // Writes the four lanes starting at `p`, which needs no particular
+  // alignment.
+  pub store(f32* p) {
+    memcpy(p, &self.lanes[0], 16);
+  }
+
+  // The lane at `i`, from 0 to 3.
+  op_index(num i) f32 {
+    ret self.lanes[i];
+  }
+
+  // Sets the lane at `i`, from 0 to 3.
+  op_index_set(num i, f32 x) {
+    self.lanes[i] = x;
+  }
+
+  // Lane-wise sum.
+  op_add(F32x4 other) F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_add(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise difference.
+  op_sub(F32x4 other) F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_sub(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise product.
+  op_mul(F32x4 other) F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_mul(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise quotient.
+  op_div(F32x4 other) F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_div(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Every lane negated.
+  op_neg() F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_neg(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // True when every lane equals the matching lane of `other`.
+  op_eq(F32x4 other) flag {
+    ret self.cmp_eq(other).all();
+  }
+
+  // True when any lane differs from the matching lane of `other`.
+  op_ne(F32x4 other) flag {
+    ret !self.cmp_eq(other).all();
+  }
+
+  // Every lane multiplied by `s`.
+  pub scale(f32 s) F32x4 {
+    ret self * f32x4_splat(s);
+  }
+
+  // `self * b + c`, lane by lane.
+  pub mul_add(F32x4 b, F32x4 c) F32x4 {
+    ret self * b + c;
+  }
+
+  // The smaller of each pair of lanes. Where either lane is NaN, the lane
+  // from `other` wins.
+  pub min(F32x4 other) F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_min(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // The larger of each pair of lanes. Where either lane is NaN, the lane
+  // from `other` wins.
+  pub max(F32x4 other) F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_max(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Every lane between `lo` and `hi`.
+  pub clamp(F32x4 lo, F32x4 hi) F32x4 {
+    ret self.max(lo).min(hi);
+  }
+
+  // The absolute value of every lane.
+  pub abs() F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_abs(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // The square root of every lane.
+  pub sqrt() F32x4 {
+    F32x4 r;
+    __fun_simd_f32x4_sqrt(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // All four lanes added together.
+  pub sum() f32 {
+    ret (self.lanes[0] + self.lanes[1]) + (self.lanes[2] + self.lanes[3]);
+  }
+
+  // The dot product with `other`.
+  pub dot(F32x4 other) f32 {
+    ret (self * other).sum();
+  }
+
+  // A mask of the lanes where `self < other`.
+  pub cmp_lt(F32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_lt(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self <= other`.
+  pub cmp_le(F32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_le(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self > other`.
+  pub cmp_gt(F32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_gt(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self >= other`.
+  pub cmp_ge(F32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_ge(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self == other`. NaN never equals anything.
+  pub cmp_eq(F32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_eq(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self != other`.
+  pub cmp_ne(F32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_ne(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Every lane converted to `i32`, rounding toward zero. A lane outside the
+  // `i32` range gives an unspecified value.
+  pub to_i32() I32x4 {
+    I32x4 r;
+    __fun_simd_f32x4_to_i32x4(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+}
+
+impl F64x2 {
+  // Writes both lanes starting at `p`, which needs no particular alignment.
+  pub store(f64* p) {
+    memcpy(p, &self.lanes[0], 16);
+  }
+
+  // The lane at `i`, 0 or 1.
+  op_index(num i) f64 {
+    ret self.lanes[i];
+  }
+
+  // Sets the lane at `i`, 0 or 1.
+  op_index_set(num i, f64 x) {
+    self.lanes[i] = x;
+  }
+
+  // Lane-wise sum.
+  op_add(F64x2 other) F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_add(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise difference.
+  op_sub(F64x2 other) F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_sub(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise product.
+  op_mul(F64x2 other) F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_mul(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise quotient.
+  op_div(F64x2 other) F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_div(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Both lanes negated.
+  op_neg() F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_neg(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // True when both lanes equal the matching lane of `other`.
+  op_eq(F64x2 other) flag {
+    ret self.lanes[0] == other.lanes[0] && self.lanes[1] == other.lanes[1];
+  }
+
+  // True when either lane differs from the matching lane of `other`.
+  op_ne(F64x2 other) flag {
+    ret !(self.lanes[0] == other.lanes[0] && self.lanes[1] == other.lanes[1]);
+  }
+
+  // Both lanes multiplied by `s`.
+  pub scale(f64 s) F64x2 {
+    ret self * f64x2_splat(s);
+  }
+
+  // `self * b + c`, lane by lane.
+  pub mul_add(F64x2 b, F64x2 c) F64x2 {
+    ret self * b + c;
+  }
+
+  // The smaller of each pair of lanes. Where either lane is NaN, the lane
+  // from `other` wins.
+  pub min(F64x2 other) F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_min(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // The larger of each pair of lanes. Where either lane is NaN, the lane
+  // from `other` wins.
+  pub max(F64x2 other) F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_max(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Both lanes between `lo` and `hi`.
+  pub clamp(F64x2 lo, F64x2 hi) F64x2 {
+    ret self.max(lo).min(hi);
+  }
+
+  // The absolute value of both lanes.
+  pub abs() F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_abs(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // The square root of both lanes.
+  pub sqrt() F64x2 {
+    F64x2 r;
+    __fun_simd_f64x2_sqrt(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // Both lanes added together.
+  pub sum() f64 {
+    ret self.lanes[0] + self.lanes[1];
+  }
+
+  // The dot product with `other`.
+  pub dot(F64x2 other) f64 {
+    ret (self * other).sum();
+  }
+}
+
+impl I32x4 {
+  // Writes the four lanes starting at `p`, which needs no particular
+  // alignment.
+  pub store(i32* p) {
+    memcpy(p, &self.lanes[0], 16);
+  }
+
+  // The lane at `i`, from 0 to 3.
+  op_index(num i) i32 {
+    ret self.lanes[i];
+  }
+
+  // Sets the lane at `i`, from 0 to 3.
+  op_index_set(num i, i32 x) {
+    self.lanes[i] = x;
+  }
+
+  // Lane-wise sum, wrapping on overflow.
+  op_add(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_add(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise difference, wrapping on overflow.
+  op_sub(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_sub(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Lane-wise product, wrapping on overflow.
+  op_mul(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_mul(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Every lane negated, wrapping on overflow.
+  op_neg() I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_neg(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // True when every lane equals the matching lane of `other`.
+  op_eq(I32x4 other) flag {
+    ret self.cmp_eq(other).all();
+  }
+
+  // True when any lane differs from the matching lane of `other`.
+  op_ne(I32x4 other) flag {
+    ret !self.cmp_eq(other).all();
+  }
+
+  // The smaller of each pair of lanes.
+  pub min(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_min(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // The larger of each pair of lanes.
+  pub max(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_max(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Every lane between `lo` and `hi`.
+  pub clamp(I32x4 lo, I32x4 hi) I32x4 {
+    ret self.max(lo).min(hi);
+  }
+
+  // The absolute value of every lane, wrapping on overflow.
+  pub abs() I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_abs(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // All four lanes added together, wrapping on overflow.
+  pub sum() i32 {
+    num total = (self.lanes[0] as num) + (self.lanes[1] as num) +
+    (self.lanes[2] as num) + (self.lanes[3] as num);
+    ret total as i32;
+  }
+
+  // Bitwise AND with `other`.
+  pub bit_and(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_and(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Bitwise OR with `other`.
+  pub bit_or(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_or(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Bitwise XOR with `other`.
+  pub bit_xor(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_xor(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Bitwise NOT of every lane.
+  pub bit_not() I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_not(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+
+  // Every lane shifted left by `n`, from 0 to 31.
+  pub shl(num n) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_shl(&r.lanes[0], &self.lanes[0], n as i32);
+    ret r;
+  }
+
+  // Every lane shifted right by `n`, from 0 to 31, keeping the sign.
+  pub shr(num n) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_shr(&r.lanes[0], &self.lanes[0], n as i32);
+    ret r;
+  }
+
+  // A mask of the lanes where `self < other`.
+  pub cmp_lt(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_lt(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self > other`.
+  pub cmp_gt(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_gt(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // A mask of the lanes where `self == other`.
+  pub cmp_eq(I32x4 other) I32x4 {
+    I32x4 r;
+    __fun_simd_i32x4_eq(&r.lanes[0], &self.lanes[0], &other.lanes[0]);
+    ret r;
+  }
+
+  // Treating `self` as a mask, each lane from `a` where the mask lane is all
+  // ones and from `b` everywhere else.
+  pub select(I32x4 a, I32x4 b) I32x4 {
+    I32x4 r;
+    __fun_simd_x128_select(
+      &r.lanes[0],
+      &self.lanes[0],
+      &a.lanes[0],
+      &b.lanes[0]
+    );
+    ret r;
+  }
+
+  // Treating `self` as a mask, each lane from `a` where the mask lane is all
+  // ones and from `b` everywhere else.
+  pub select_f32(F32x4 a, F32x4 b) F32x4 {
+    F32x4 r;
+    __fun_simd_x128_select(
+      &r.lanes[0],
+      &self.lanes[0],
+      &a.lanes[0],
+      &b.lanes[0]
+    );
+    ret r;
+  }
+
+  // True when any lane is nonzero.
+  pub any() flag {
+    ret (self.lanes[0] | self.lanes[1] | self.lanes[2] | self.lanes[3]) != 0;
+  }
+
+  // True when every lane is nonzero.
+  pub all() flag {
+    ret self.lanes[0] != 0 && self.lanes[1] != 0 && self.lanes[2] != 0 &&
+    self.lanes[3] != 0;
+  }
+
+  // Every lane converted to `f32`.
+  pub to_f32() F32x4 {
+    F32x4 r;
+    __fun_simd_i32x4_to_f32x4(&r.lanes[0], &self.lanes[0]);
+    ret r;
+  }
+}
+
+// Writes `a[i] + b[i]` to `dst[i]` for every `i` below `n`. `dst` may be `a`
+// or `b`.
+pub fun add_f32(f32* dst, f32* a, f32* b, num n) {
+  num i = 0;
+  for i + 4 <= n {
+    (f32x4_load(&a[i]) + f32x4_load(&b[i])).store(&dst[i]);
+    i += 4;
+  }
+  for i < n {
+    dst[i] = a[i] + b[i];
+    i += 1;
+  }
+}
+
+// Writes `a[i] * b[i]` to `dst[i]` for every `i` below `n`. `dst` may be `a`
+// or `b`.
+pub fun mul_f32(f32* dst, f32* a, f32* b, num n) {
+  num i = 0;
+  for i + 4 <= n {
+    (f32x4_load(&a[i]) * f32x4_load(&b[i])).store(&dst[i]);
+    i += 4;
+  }
+  for i < n {
+    dst[i] = a[i] * b[i];
+    i += 1;
+  }
+}
+
+// Writes `a[i] * s` to `dst[i]` for every `i` below `n`. `dst` may be `a`.
+pub fun scale_f32(f32* dst, f32* a, f32 s, num n) {
+  let k = f32x4_splat(s);
+  num i = 0;
+  for i + 4 <= n {
+    (f32x4_load(&a[i]) * k).store(&dst[i]);
+    i += 4;
+  }
+  for i < n {
+    dst[i] = a[i] * s;
+    i += 1;
+  }
+}
+
+// The sum of the first `n` values at `a`.
+pub fun sum_f32(f32* a, num n) f32 {
+  let acc = f32x4_splat(0);
+  num i = 0;
+  for i + 4 <= n {
+    acc = acc + f32x4_load(&a[i]);
+    i += 4;
+  }
+  f32 total = acc.sum();
+  for i < n {
+    total += a[i];
+    i += 1;
+  }
+  ret total;
+}
+
+// The dot product of the first `n` values at `a` and `b`.
+pub fun dot_f32(f32* a, f32* b, num n) f32 {
+  let acc = f32x4_splat(0);
+  num i = 0;
+  for i + 4 <= n {
+    acc = f32x4_load(&a[i]).mul_add(f32x4_load(&b[i]), acc);
+    i += 4;
+  }
+  f32 total = acc.sum();
+  for i < n {
+    total += a[i] * b[i];
+    i += 1;
+  }
+  ret total;
+}
+
+test "F32x4 arithmetic, operators and lane access" {
+  let a = f32x4(1, 2, 3, 4);
+  let b = f32x4_splat(2);
+  let c = a * b + a - f32x4(1, 1, 1, 1);
+  assert c == f32x4(2, 5, 8, 11), "expected a * b + a - 1 lane by lane";
+  assert (a / b)[1] == 1, "expected lane 1 of a / b to be 1";
+  assert -a == f32x4(-1, -2, -3, -4), "expected every lane negated";
+  assert a != b, "expected different vectors to compare unequal";
+  let d = a.scale(3);
+  d[0] = 10;
+  assert d == f32x4(10, 6, 9, 12), "expected scale and a lane write";
+  assert a.mul_add(b, a) == f32x4(3, 6, 9, 12), "expected a * b + a";
+}
+
+test "F32x4 min, max, clamp, abs, sqrt, sum and dot" {
+  let a = f32x4(-4, 9, 0, 16);
+  let b = f32x4(1, 1, 1, 1);
+  assert a.min(b) == f32x4(-4, 1, 0, 1), "expected the smaller lanes";
+  assert a.max(b) == f32x4(1, 9, 1, 16), "expected the larger lanes";
+  assert a.clamp(f32x4_splat(0), f32x4_splat(10)) == f32x4(0, 9, 0, 10), "expected every lane between 0 and 10";
+  assert a.abs() == f32x4(4, 9, 0, 16), "expected the absolute values";
+  assert a.abs().sqrt() == f32x4(2, 3, 0, 4), "expected the square roots";
+  assert a.sum() == 21, "expected the lanes added";
+  assert a.dot(b) == 21, "expected the dot product";
+}
+
+test "comparisons build masks that select lanes" {
+  let a = f32x4(1, 5, 3, 7);
+  let b = f32x4(4, 4, 4, 4);
+  let lt = a.cmp_lt(b);
+  assert lt == i32x4(-1, 0, -1, 0), "expected -1 where a < b";
+  assert a.cmp_ge(b) == lt.bit_not(), "expected >= to be the opposite of <";
+  assert a.cmp_le(b) == i32x4(-1, 0, -1, 0) && a.cmp_gt(b) == i32x4(0, -1, 0, -1), "expected <= and >";
+  assert a.cmp_eq(a).all() && !a.cmp_ne(a).any(), "expected a vector equal to itself";
+  assert lt.select_f32(a, b) == f32x4(1, 4, 3, 4), "expected the smaller of each pair";
+  assert lt.any() && !lt.all(), "expected a mixed mask";
+}
+
+test "I32x4 arithmetic wraps and bit operations act lane by lane" {
+  let a = i32x4(1, -2, 3, 2147483647);
+  let one = i32x4_splat(1);
+  assert (a + one) == i32x4(2, -1, 4, -2147483648), "expected the last lane to wrap";
+  assert (a - one) * i32x4_splat(2) == i32x4(0, -6, 4, -4), "expected subtraction then a wrapping product";
+  assert -a == i32x4(-1, 2, -3, -2147483647), "expected every lane negated";
+  assert a.abs() == i32x4(1, 2, 3, 2147483647), "expected the absolute values";
+  assert a.min(one) == i32x4(1, -2, 1, 1) && a.max(one) == i32x4(1, 1, 3, 2147483647), "expected min and max";
+  assert a.sum() == -2147483647, "expected the lanes added, wrapping";
+  let bits = i32x4(12, 10, -1, 0);
+  assert bits.bit_and(i32x4_splat(6)) == i32x4(4, 2, 6, 0), "expected AND";
+  assert bits.bit_or(i32x4_splat(1)) == i32x4(13, 11, -1, 1), "expected OR";
+  assert bits.bit_xor(i32x4_splat(15)) == i32x4(3, 5, -16, 15), "expected XOR";
+  assert bits.shl(2) == i32x4(48, 40, -4, 0) &&
+    i32x4_splat(-8).shr(1) == i32x4_splat(-4), "expected the shifts";
+  assert a.cmp_gt(one) == i32x4(0, 0, -1, -1), "expected the lanes above 1";
+  assert a.cmp_lt(one).select(one, a) == i32x4(1, 1, 3, 2147483647), "expected the negative lane replaced";
+}
+
+test "conversions between F32x4 and I32x4" {
+  assert f32x4(1.9, -1.9, 0, 100).to_i32() == i32x4(1, -1, 0, 100), "expected truncation toward zero";
+  assert i32x4(-3, 0, 7, 1000).to_f32() == f32x4(-3, 0, 7, 1000), "expected exact conversions";
+}
+
+test "F64x2 arithmetic and reductions" {
+  let a = f64x2(9, -16);
+  let b = f64x2_splat(0.5);
+  assert a * b + a == f64x2(13.5, -24), "expected a * b + a";
+  assert a - b == f64x2(8.5, -16.5) && a / b == f64x2(18, -32), "expected - and /";
+  assert -a == f64x2(-9, 16) && a.abs().sqrt() == f64x2(3, 4), "expected negation, abs and sqrt";
+  assert a.min(b) == f64x2(0.5, -16) && a.max(b) == f64x2(9, 0.5), "expected min and max";
+  assert a.sum() == -7 && a.dot(a) == 337, "expected the sum and dot product";
+  let c = a.scale(2);
+  c[1] = 1;
+  assert c == f64x2(18, 1) && c != a, "expected scale and a lane write";
+}
+
+test "loads and stores need no alignment" {
+  f32[9] xs;
+  num i = 0;
+  for i < 9 {
+    xs[i] = i as f32;
+    i += 1;
+  }
+  let v = f32x4_load(&xs[1]);
+  assert v == f32x4(1, 2, 3, 4), "expected four lanes read from an odd offset";
+  (v * f32x4_splat(10)).store(&xs[5]);
+  assert xs[4] == 4 && xs[5] == 10 && xs[8] == 40, "expected four lanes written in place";
+  i32[5] ns;
+  i32x4(7, 8, 9, 10).store(&ns[1]);
+  assert i32x4_load(&ns[1]) == i32x4(7, 8, 9, 10), "expected an I32x4 round trip";
+  f64[3] ds;
+  f64x2(1.5, 2.5).store(&ds[1]);
+  assert f64x2_load(&ds[1]) == f64x2(1.5, 2.5), "expected an F64x2 round trip";
+}
+
+test "bulk helpers cover the tail past the last full vector" {
+  f32[11] a;
+  f32[11] b;
+  f32[11] out;
+  num i = 0;
+  for i < 11 {
+    a[i] = (i + 1) as f32;
+    b[i] = 2;
+    i += 1;
+  }
+  assert sum_f32(&a[0], 11) == 66, "expected 1 + 2 + ... + 11";
+  assert dot_f32(&a[0], &b[0], 11) == 132, "expected twice the sum";
+  add_f32(&out[0], &a[0], &b[0], 11);
+  assert out[0] == 3 && out[10] == 13, "expected every element added";
+  mul_f32(&out[0], &a[0], &b[0], 11);
+  assert out[3] == 8 && out[10] == 22, "expected every element multiplied";
+  scale_f32(&a[0], &a[0], 0.5, 11);
+  assert a[1] == 1 && a[10] == 5.5, "expected the scale done in place";
+  assert sum_f32(&a[0], 0) == 0, "expected an empty sum to be zero";
+}

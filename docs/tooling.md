@@ -582,6 +582,10 @@ quick orientation.
 - `std.shapes`: common shapes, `Sized`, `Display`, `Clearable`,
   `Iterator<T>`, and the generic conversion shapes `To<T>`/`From<T>`.
 - `std.time`, `std.rand`, `std.math`, `std.path`, `std.net`, and more.
+- `std.simd`: portable 128-bit vectors (`F32x4`, `F64x2`, `I32x4`) with
+  lane-wise operators, comparison masks and `select`, plus bulk
+  `add_f32`/`mul_f32`/`scale_f32`/`sum_f32`/`dot_f32` over arrays. SSE2 on
+  x86, NEON on ARM, plain loops elsewhere, with the same results on each.
 - `std.mock_time`: `Clock`/`SystemClock`/`MockClock`, see Testing above.
 - `std.sys`: environment and process helpers (`env`/`env_or`/`set_env`/
   `clear_env`, `sys_exit`, `sys_abort`, `sys_system`).

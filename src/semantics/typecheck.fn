@@ -1955,7 +1955,12 @@ impl Checker {
     CheckedType left = self.infer(e.left, env);
     CheckedType right = self.infer(e.right, env);
     if _is_comparison(e.op) {
-      let dispatched = self.try_operator_dispatch(node, left, e.op, .Some(right));
+      let dispatched = self.try_operator_dispatch(
+        node,
+        operator_operand_type(e.left, left, e.right, right),
+        e.op,
+        .Some(operator_operand_type(e.right, right, e.left, left))
+      );
       if dispatched.is_some() || self.failed {
         ret;
       }
@@ -2934,9 +2939,17 @@ impl Checker {
     if equals(u.op, "-") {
       // Not `operator_method_name` - that maps the same `"-"` text to
       // `op_sub`, the *binary* operator's own method name, which would
-      // collide here.
-      if operand.pointer_depth == 0 && !operand.is_array && !equals(operand.name, "") {
-        let sig = self.receiver_method(operand, "op_neg");
+      // collide here. Negating a pointer means nothing, so `-self` is the
+      // receiver's own `op_neg`.
+      CheckedType neg_operand = operator_operand_type(
+        u.operand,
+        operand,
+        nil,
+        checked_of(.Num)
+      );
+      if neg_operand.pointer_depth == 0 && !neg_operand.is_array &&
+        !equals(neg_operand.name, "") {
+        let sig = self.receiver_method(neg_operand, "op_neg");
         if sig.is_some() && sig.unwrap().args.len == 0 {
           ret sig.unwrap().rtype;
         }
@@ -3180,7 +3193,12 @@ impl Checker {
       ret left;
     }
     CheckedType right = self.infer(e.right, env);
-    let dispatched = self.try_operator_dispatch(node, left, e.op, .Some(right));
+    let dispatched = self.try_operator_dispatch(
+      node,
+      operator_operand_type(e.left, left, e.right, right),
+      e.op,
+      .Some(operator_operand_type(e.right, right, e.left, left))
+    );
     if dispatched.is_some() {
       ret dispatched.unwrap();
     }
@@ -4961,6 +4979,40 @@ fun _checked_type_references_param(CheckedType t, str param) flag {
   ret false;
 }
 
+// The type an operator sees for `operand`. Inside a method `self` is a
+// pointer to the receiver, but `self * other` means the receiver's own
+// operator, so `self` reads as its pointee unless the other side is a
+// different pointer (`self == p` still compares addresses).
+fun operator_operand_type(
+  Node* operand,
+  CheckedType t,
+  Node* other_node,
+  CheckedType other
+) CheckedType {
+  if t.pointer_depth != 1 || !is_self_identifier(operand) {
+    ret t;
+  }
+  if !is_self_identifier(other_node) &&
+    (other.pointer_depth != 0 || other.is_array || other.is_null_literal ||
+    other.base == .Raw || is_unknown(other)) {
+    ret t;
+  }
+  CheckedType v = t;
+  v.pointer_depth = 0;
+  ret v;
+}
+
+// True when `n` is the bare identifier `self`.
+pub fun is_self_identifier(Node* n) flag {
+  if n == nil {
+    ret false;
+  }
+  fit n.kind {
+    .Identifier(name) -> { ret equals(name, "self"); }
+    _ -> { ret false; }
+  }
+}
+
 // True when some subtree of `n` reads the identifier `self` - used to
 // reject it inside a parameter's own default-value expression (see
 // `check_function_with_self`'s own caller for why). Walks only the
@@ -5860,6 +5912,18 @@ impl Checker {
         self.check_statement(c.body, env);
       }
       .Iter(it) -> {
+        // `for x : a..b` builds a `Range`, which lives in `std.range`.
+        fit it.iterable.kind {
+          .CompoundInit(ci) -> {
+            if ci.has_dtype && equals(ci.init_dtype.type_str, "Range") &&
+              self.compounds.at(self.canonical_type_name("Range")).is_none() {
+              self.fail("a range 'for' loop needs `use std.range;`", stmt);
+              env.pop();
+              ret;
+            }
+          }
+          _ -> {}
+        }
         CheckedType iterable_type = self.infer(it.iterable, env);
         // The real general resolution: does the iterable's own type
         // directly implement `Iterator<Elem>`? Covers `Range`, `Vec`,

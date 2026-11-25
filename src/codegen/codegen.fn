@@ -5706,9 +5706,18 @@ impl Codegen {
     }
     if right.is_some() {
       self.state.write(", ");
+      // `x + self` passes the receiver's value, not the pointer to it.
+      flag deref_self = is_self_identifier(right.unwrap()) &&
+        self.lookup_local_is_pointer("self").unwrap_or(false);
+      if deref_self {
+        self.state.write("(*");
+      }
       let rerr = self.emit_expr(*right.unwrap());
       if rerr.is_some() {
         ret rerr;
+      }
+      if deref_self {
+        self.state.write(")");
       }
     }
     self.state.write(")");
@@ -6035,12 +6044,39 @@ impl Codegen {
     ret .Some(r);
   }
 
-  resolve_operator_dispatch(str op, Node* operand) Option<OperatorDispatchTarget> {
+  // Mirrors the checker's rule for a pointer operand: only `self` reaches
+  // its pointee's operator, and only against a value or `self` itself, so
+  // `p + 1` stays pointer arithmetic and `self == nil` compares addresses.
+  // Indexing a pointer always indexes the pointer.
+  operator_receiver_dispatches(
+    str op,
+    ChainResolution recv,
+    Node* operand,
+    Option<Node*> other
+  ) flag {
+    if !recv.is_pointer {
+      ret true;
+    }
+    if equals(op, "[]") || equals(op, "[]=") || !is_self_identifier(operand) {
+      ret false;
+    }
+    if other.is_none() || is_self_identifier(other.unwrap()) {
+      ret true;
+    }
+    let other_dt = self.infer_let_expr_type(other.unwrap());
+    ret other_dt.is_some() && !dtype_is_pointer(other_dt.unwrap()) &&
+      !other_dt.unwrap().is_array && !equals(other_dt.unwrap().type_str, "raw");
+  }
+
+  resolve_operator_dispatch(str op, Node* operand, Option<Node*> other) Option<OperatorDispatchTarget> {
     let method = operator_method_name(op);
     if equals(method, "") {
       ret .None;
     }
     let recv_r0 = self.resolve_operator_operand(operand)?;
+    if !self.operator_receiver_dispatches(op, recv_r0, operand, other) {
+      ret .None;
+    }
     let recv_r = self.materialize_operator_operand(recv_r0, operand)?;
     let mangled = self.lookup_impl_method(recv_r.type_name, method)?;
     OperatorDispatchTarget t;
@@ -7485,7 +7521,11 @@ impl Codegen {
                   _ -> {}
                 }
                 if has_bracket {
-                  let dispatched_set = self.resolve_operator_dispatch("[]=", idx_e.left);
+                  let dispatched_set = self.resolve_operator_dispatch(
+                    "[]=",
+                    idx_e.left,
+                    .None
+                  );
                   if dispatched_set.is_some() {
                     let target = dispatched_set.unwrap();
                     let emit_err = self.ensure_generic_impl_method_emitted(
@@ -7556,7 +7596,7 @@ impl Codegen {
         // plain call instead of raw infix - already self-delimiting,
         // so `suppress_next_expr_parens` is simply cleared rather than
         // consumed the way the raw-infix path below consumes it.
-        let dispatched = self.resolve_operator_dispatch(e.op, e.left);
+        let dispatched = self.resolve_operator_dispatch(e.op, e.left, .Some(e.right));
         if dispatched.is_some() {
           self.suppress_next_expr_parens = false;
           let target = dispatched.unwrap();
@@ -10951,7 +10991,7 @@ impl Codegen {
       _ -> {}
     }
     if has_bracket_inner {
-      let dispatched = self.resolve_operator_dispatch("[]", e.left);
+      let dispatched = self.resolve_operator_dispatch("[]", e.left, .None);
       if dispatched.is_some() {
         let target = dispatched.unwrap();
         let emit_err = self.ensure_generic_impl_method_emitted(
@@ -18934,18 +18974,17 @@ impl Codegen {
           if self._operand_is_str(e.left) {
             ret .Some("chr");
           }
-          fit e.left.kind {
-            .Identifier(_) -> {
-              let dispatched = self.resolve_operator_dispatch("[]", e.left);
-              if dispatched.is_some() {
-                let target = dispatched.unwrap();
-                let rt = self.lookup_impl_method_rtype(target.recv.type_name, "op_index");
-                if rt.is_some() {
-                  ret .Some(rt.unwrap().type_str);
-                }
-              }
+          // Type-only: the receiver may be a field chain, a call result, or
+          // a parenthesized operator expression, none of it rendered here.
+          let index_recv = self.resolve_operator_operand(e.left);
+          if index_recv.is_some() && !index_recv.unwrap().is_pointer {
+            let rt = self.lookup_impl_method_rtype(
+              index_recv.unwrap().type_name,
+              "op_index"
+            );
+            if rt.is_some() {
+              ret .Some(rt.unwrap().type_str);
             }
-            _ -> {}
           }
         }
         if !equals(e.op, "()") || !e.has_left {
@@ -19435,6 +19474,18 @@ impl Codegen {
         // the pointer-elem branch below, unchanged: indexing that one
         // really does yield a `str` element, not a `chr`.
         if equals(e.op, "[]") && e.has_left {
+          // A receiver with its own `op_index` yields that method's return
+          // type, never its own or a field's element type.
+          let index_recv = self.resolve_operator_operand(e.left);
+          if index_recv.is_some() && !index_recv.unwrap().is_pointer {
+            let index_rt = self.lookup_impl_method_rtype(
+              index_recv.unwrap().type_name,
+              "op_index"
+            );
+            if index_rt.is_some() {
+              ret .Some(*index_rt.unwrap());
+            }
+          }
           fit e.left.kind {
             .Identifier(recv_name) -> {
               let t = self.lookup_local_type_name(recv_name);
@@ -19509,7 +19560,14 @@ impl Codegen {
         let op_method = operator_method_name(e.op);
         if !equals(op_method, "") && !equals(e.op, "[]") && e.has_left {
           let op_recv = self.resolve_operator_operand(e.left);
-          if op_recv.is_some() {
+          flag op_dispatches = op_recv.is_some() &&
+            (!e.has_right || self.operator_receiver_dispatches(
+            e.op,
+            op_recv.unwrap(),
+            e.left,
+            .Some(e.right)
+          ));
+          if op_dispatches {
             let op_rt = self.lookup_impl_method_rtype(
               op_recv.unwrap().type_name,
               op_method
@@ -20863,6 +20921,9 @@ impl Codegen {
     );
     if self.freestanding {
       self.write_freestanding_prelude();
+      if program_uses_std_c_header(self.all_nodes, "simd.fn") {
+        self.emit_simd_runtime();
+      }
       ret;
     }
     self.state.write(
@@ -22567,6 +22628,9 @@ impl Codegen {
     `#endif
     ``
     );
+    if program_uses_std_c_header(self.all_nodes, "simd.fn") {
+      self.emit_simd_runtime();
+    }
     // `std.c.sys`'s `__fun_cpu_count` binding (behind `std.sys.cpu_count`),
     // always emitted like the atomic wrappers above rather than gated on
     // program contents, since worker-pool sizing (`fun test`'s parallel
@@ -22759,6 +22823,176 @@ impl Codegen {
   // synchronization may not finish first; stdlib uses synchronize through
   // a `WaitGroup` or channel. Cooperative, not preemptive: a blocked task
   // holds its worker, the blocking primitives being the yield points.
+  // `std.c.simd`'s 128-bit lane operations: vector extensions under GCC and
+  // Clang, SSE2 under MSVC on x86, and plain loops anywhere else. Each one
+  // reads and writes lanes through pointers, so the Fun side needs no vector type.
+  emit_simd_runtime() {
+    self.state.write(
+      `#if (defined(__GNUC__) || defined(__clang__)) && !defined(__FUN_SIMD_SCALAR)
+    `typedef float __fun_v4f __attribute__((vector_size(16)));
+    `typedef double __fun_v2d __attribute__((vector_size(16)));
+    `typedef int32_t __fun_v4i __attribute__((vector_size(16)));
+    `typedef uint32_t __fun_v4u __attribute__((vector_size(16)));
+    `typedef int64_t __fun_v2l __attribute__((vector_size(16)));
+    `static inline __fun_v4f __fun_ld_f(const void* p) { __fun_v4f v; __builtin_memcpy(&v, p, 16); return v; }
+    `static inline __fun_v2d __fun_ld_d(const void* p) { __fun_v2d v; __builtin_memcpy(&v, p, 16); return v; }
+    `static inline __fun_v4i __fun_ld_i(const void* p) { __fun_v4i v; __builtin_memcpy(&v, p, 16); return v; }
+    `static inline __fun_v2l __fun_ld_l(const void* p) { __fun_v2l v; __builtin_memcpy(&v, p, 16); return v; }
+    `#define __fun_st(o, v) __builtin_memcpy((o), &(v), 16)
+    `static inline void __fun_simd_f32x4_add(float* o, const float* a, const float* b) { __fun_v4f r = __fun_ld_f(a) + __fun_ld_f(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_add(double* o, const double* a, const double* b) { __fun_v2d r = __fun_ld_d(a) + __fun_ld_d(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_sub(float* o, const float* a, const float* b) { __fun_v4f r = __fun_ld_f(a) - __fun_ld_f(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_sub(double* o, const double* a, const double* b) { __fun_v2d r = __fun_ld_d(a) - __fun_ld_d(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_mul(float* o, const float* a, const float* b) { __fun_v4f r = __fun_ld_f(a) * __fun_ld_f(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_mul(double* o, const double* a, const double* b) { __fun_v2d r = __fun_ld_d(a) * __fun_ld_d(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_div(float* o, const float* a, const float* b) { __fun_v4f r = __fun_ld_f(a) / __fun_ld_f(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_div(double* o, const double* a, const double* b) { __fun_v2d r = __fun_ld_d(a) / __fun_ld_d(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_add(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) + (__fun_v4u)__fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_sub(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) - (__fun_v4u)__fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_mul(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) * (__fun_v4u)__fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_and(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) & (__fun_v4u)__fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_or(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) | (__fun_v4u)__fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_xor(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) ^ (__fun_v4u)__fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_min(float* o, const float* a, const float* b) { __fun_v4f x = __fun_ld_f(a), y = __fun_ld_f(b); __fun_v4i k = (__fun_v4i)(x < y); __fun_v4i r = ((__fun_v4i)x & k) | ((__fun_v4i)y & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_max(float* o, const float* a, const float* b) { __fun_v4f x = __fun_ld_f(a), y = __fun_ld_f(b); __fun_v4i k = (__fun_v4i)(x > y); __fun_v4i r = ((__fun_v4i)x & k) | ((__fun_v4i)y & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_min(double* o, const double* a, const double* b) { __fun_v2d x = __fun_ld_d(a), y = __fun_ld_d(b); __fun_v2l k = (__fun_v2l)(x < y); __fun_v2l r = ((__fun_v2l)x & k) | ((__fun_v2l)y & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_max(double* o, const double* a, const double* b) { __fun_v2d x = __fun_ld_d(a), y = __fun_ld_d(b); __fun_v2l k = (__fun_v2l)(x > y); __fun_v2l r = ((__fun_v2l)x & k) | ((__fun_v2l)y & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_min(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4i x = __fun_ld_i(a), y = __fun_ld_i(b); __fun_v4i k = (__fun_v4i)(x < y); __fun_v4i r = ((__fun_v4i)x & k) | ((__fun_v4i)y & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_max(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4i x = __fun_ld_i(a), y = __fun_ld_i(b); __fun_v4i k = (__fun_v4i)(x > y); __fun_v4i r = ((__fun_v4i)x & k) | ((__fun_v4i)y & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_neg(float* o, const float* a) { __fun_v4f r = -__fun_ld_f(a); __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_neg(double* o, const double* a) { __fun_v2d r = -__fun_ld_d(a); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_neg(int32_t* o, const int32_t* a) { __fun_v4u r = -(__fun_v4u)__fun_ld_i(a); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_abs(float* o, const float* a) { __fun_v4i r = __fun_ld_i(a) & 0x7fffffff; __fun_st(o, r); }
+    `static inline void __fun_simd_f64x2_abs(double* o, const double* a) { __fun_v2l r = __fun_ld_l(a) & 0x7fffffffffffffffLL; __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_abs(int32_t* o, const int32_t* a) { __fun_v4i x = __fun_ld_i(a); __fun_v4i k = x >> 31; __fun_v4u r = (__fun_v4u)(x ^ k) - (__fun_v4u)k; __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_not(int32_t* o, const int32_t* a) { __fun_v4i r = ~__fun_ld_i(a); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_shl(int32_t* o, const int32_t* a, int32_t n) { __fun_v4u r = (__fun_v4u)__fun_ld_i(a) << n; __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_shr(int32_t* o, const int32_t* a, int32_t n) { __fun_v4i r = __fun_ld_i(a) >> n; __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_lt(int32_t* o, const float* a, const float* b) { __fun_v4i r = (__fun_v4i)(__fun_ld_f(a) < __fun_ld_f(b)); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_le(int32_t* o, const float* a, const float* b) { __fun_v4i r = (__fun_v4i)(__fun_ld_f(a) <= __fun_ld_f(b)); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_gt(int32_t* o, const float* a, const float* b) { __fun_v4i r = (__fun_v4i)(__fun_ld_f(a) > __fun_ld_f(b)); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_ge(int32_t* o, const float* a, const float* b) { __fun_v4i r = (__fun_v4i)(__fun_ld_f(a) >= __fun_ld_f(b)); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_eq(int32_t* o, const float* a, const float* b) { __fun_v4i r = (__fun_v4i)(__fun_ld_f(a) == __fun_ld_f(b)); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_ne(int32_t* o, const float* a, const float* b) { __fun_v4i r = (__fun_v4i)(__fun_ld_f(a) != __fun_ld_f(b)); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_lt(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4i r = __fun_ld_i(a) < __fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_gt(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4i r = __fun_ld_i(a) > __fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_eq(int32_t* o, const int32_t* a, const int32_t* b) { __fun_v4i r = __fun_ld_i(a) == __fun_ld_i(b); __fun_st(o, r); }
+    `static inline void __fun_simd_x128_select(void* o, const int32_t* m, const void* a, const void* b) { __fun_v4i k = __fun_ld_i(m); __fun_v4i r = (__fun_ld_i(a) & k) | (__fun_ld_i(b) & ~k); __fun_st(o, r); }
+    `static inline void __fun_simd_i32x4_to_f32x4(float* o, const int32_t* a) { __fun_v4f r = __builtin_convertvector(__fun_ld_i(a), __fun_v4f); __fun_st(o, r); }
+    `static inline void __fun_simd_f32x4_to_i32x4(int32_t* o, const float* a) { __fun_v4i r = __builtin_convertvector(__fun_ld_f(a), __fun_v4i); __fun_st(o, r); }
+    `#if defined(__SSE2__)
+    `#include <emmintrin.h>
+    `static inline void __fun_simd_f32x4_sqrt(float* o, const float* a) { _mm_storeu_ps(o, _mm_sqrt_ps(_mm_loadu_ps(a))); }
+    `static inline void __fun_simd_f64x2_sqrt(double* o, const double* a) { _mm_storeu_pd(o, _mm_sqrt_pd(_mm_loadu_pd(a))); }
+    `#elif defined(__aarch64__)
+    `#include <arm_neon.h>
+    `static inline void __fun_simd_f32x4_sqrt(float* o, const float* a) { vst1q_f32(o, vsqrtq_f32(vld1q_f32(a))); }
+    `static inline void __fun_simd_f64x2_sqrt(double* o, const double* a) { vst1q_f64(o, vsqrtq_f64(vld1q_f64(a))); }
+    `#else
+    `static inline void __fun_simd_f32x4_sqrt(float* o, const float* a) { for (int i = 0; i < 4; i++) o[i] = __builtin_sqrtf(a[i]); }
+    `static inline void __fun_simd_f64x2_sqrt(double* o, const double* a) { for (int i = 0; i < 2; i++) o[i] = __builtin_sqrt(a[i]); }
+    `#endif
+    `#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86)) && !defined(__FUN_SIMD_SCALAR)
+    `#include <emmintrin.h>
+    `#define __fun_li(p) _mm_loadu_si128((const __m128i*)(p))
+    `#define __fun_si(o, v) _mm_storeu_si128((__m128i*)(o), (v))
+    `static inline void __fun_simd_f32x4_add(float* o, const float* a, const float* b) { _mm_storeu_ps(o, _mm_add_ps(_mm_loadu_ps(a), _mm_loadu_ps(b))); }
+    `static inline void __fun_simd_f64x2_add(double* o, const double* a, const double* b) { _mm_storeu_pd(o, _mm_add_pd(_mm_loadu_pd(a), _mm_loadu_pd(b))); }
+    `static inline void __fun_simd_f32x4_sub(float* o, const float* a, const float* b) { _mm_storeu_ps(o, _mm_sub_ps(_mm_loadu_ps(a), _mm_loadu_ps(b))); }
+    `static inline void __fun_simd_f64x2_sub(double* o, const double* a, const double* b) { _mm_storeu_pd(o, _mm_sub_pd(_mm_loadu_pd(a), _mm_loadu_pd(b))); }
+    `static inline void __fun_simd_f32x4_mul(float* o, const float* a, const float* b) { _mm_storeu_ps(o, _mm_mul_ps(_mm_loadu_ps(a), _mm_loadu_ps(b))); }
+    `static inline void __fun_simd_f64x2_mul(double* o, const double* a, const double* b) { _mm_storeu_pd(o, _mm_mul_pd(_mm_loadu_pd(a), _mm_loadu_pd(b))); }
+    `static inline void __fun_simd_f32x4_div(float* o, const float* a, const float* b) { _mm_storeu_ps(o, _mm_div_ps(_mm_loadu_ps(a), _mm_loadu_ps(b))); }
+    `static inline void __fun_simd_f64x2_div(double* o, const double* a, const double* b) { _mm_storeu_pd(o, _mm_div_pd(_mm_loadu_pd(a), _mm_loadu_pd(b))); }
+    `static inline void __fun_simd_f32x4_min(float* o, const float* a, const float* b) { _mm_storeu_ps(o, _mm_min_ps(_mm_loadu_ps(a), _mm_loadu_ps(b))); }
+    `static inline void __fun_simd_f64x2_min(double* o, const double* a, const double* b) { _mm_storeu_pd(o, _mm_min_pd(_mm_loadu_pd(a), _mm_loadu_pd(b))); }
+    `static inline void __fun_simd_f32x4_max(float* o, const float* a, const float* b) { _mm_storeu_ps(o, _mm_max_ps(_mm_loadu_ps(a), _mm_loadu_ps(b))); }
+    `static inline void __fun_simd_f64x2_max(double* o, const double* a, const double* b) { _mm_storeu_pd(o, _mm_max_pd(_mm_loadu_pd(a), _mm_loadu_pd(b))); }
+    `static inline void __fun_simd_f32x4_sqrt(float* o, const float* a) { _mm_storeu_ps(o, _mm_sqrt_ps(_mm_loadu_ps(a))); }
+    `static inline void __fun_simd_f64x2_sqrt(double* o, const double* a) { _mm_storeu_pd(o, _mm_sqrt_pd(_mm_loadu_pd(a))); }
+    `static inline void __fun_simd_f32x4_neg(float* o, const float* a) { _mm_storeu_ps(o, _mm_xor_ps(_mm_loadu_ps(a), _mm_set1_ps(-0.0f))); }
+    `static inline void __fun_simd_f64x2_neg(double* o, const double* a) { _mm_storeu_pd(o, _mm_xor_pd(_mm_loadu_pd(a), _mm_set1_pd(-0.0))); }
+    `static inline void __fun_simd_f32x4_abs(float* o, const float* a) { _mm_storeu_ps(o, _mm_andnot_ps(_mm_set1_ps(-0.0f), _mm_loadu_ps(a))); }
+    `static inline void __fun_simd_f64x2_abs(double* o, const double* a) { _mm_storeu_pd(o, _mm_andnot_pd(_mm_set1_pd(-0.0), _mm_loadu_pd(a))); }
+    `static inline void __fun_simd_f32x4_lt(int32_t* o, const float* a, const float* b) { __fun_si(o, _mm_castps_si128(_mm_cmplt_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)))); }
+    `static inline void __fun_simd_f32x4_le(int32_t* o, const float* a, const float* b) { __fun_si(o, _mm_castps_si128(_mm_cmple_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)))); }
+    `static inline void __fun_simd_f32x4_gt(int32_t* o, const float* a, const float* b) { __fun_si(o, _mm_castps_si128(_mm_cmpgt_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)))); }
+    `static inline void __fun_simd_f32x4_ge(int32_t* o, const float* a, const float* b) { __fun_si(o, _mm_castps_si128(_mm_cmpge_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)))); }
+    `static inline void __fun_simd_f32x4_eq(int32_t* o, const float* a, const float* b) { __fun_si(o, _mm_castps_si128(_mm_cmpeq_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)))); }
+    `static inline void __fun_simd_f32x4_ne(int32_t* o, const float* a, const float* b) { __fun_si(o, _mm_castps_si128(_mm_cmpneq_ps(_mm_loadu_ps(a), _mm_loadu_ps(b)))); }
+    `static inline void __fun_simd_i32x4_add(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_add_epi32(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_sub(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_sub_epi32(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_and(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_and_si128(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_or(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_or_si128(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_xor(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_xor_si128(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_lt(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_cmplt_epi32(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_gt(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_cmpgt_epi32(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_eq(int32_t* o, const int32_t* a, const int32_t* b) { __fun_si(o, _mm_cmpeq_epi32(__fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_mul(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = (int32_t)((uint32_t)a[i] * (uint32_t)b[i]); }
+    `static inline __m128i __fun_blend_i(__m128i k, __m128i x, __m128i y) { return _mm_or_si128(_mm_and_si128(k, x), _mm_andnot_si128(k, y)); }
+    `static inline void __fun_simd_i32x4_min(int32_t* o, const int32_t* a, const int32_t* b) { __m128i x = __fun_li(a), y = __fun_li(b); __fun_si(o, __fun_blend_i(_mm_cmplt_epi32(x, y), x, y)); }
+    `static inline void __fun_simd_i32x4_max(int32_t* o, const int32_t* a, const int32_t* b) { __m128i x = __fun_li(a), y = __fun_li(b); __fun_si(o, __fun_blend_i(_mm_cmpgt_epi32(x, y), x, y)); }
+    `static inline void __fun_simd_i32x4_neg(int32_t* o, const int32_t* a) { __fun_si(o, _mm_sub_epi32(_mm_setzero_si128(), __fun_li(a))); }
+    `static inline void __fun_simd_i32x4_abs(int32_t* o, const int32_t* a) { __m128i x = __fun_li(a); __m128i k = _mm_srai_epi32(x, 31); __fun_si(o, _mm_sub_epi32(_mm_xor_si128(x, k), k)); }
+    `static inline void __fun_simd_i32x4_not(int32_t* o, const int32_t* a) { __fun_si(o, _mm_xor_si128(__fun_li(a), _mm_set1_epi32(-1))); }
+    `static inline void __fun_simd_i32x4_shl(int32_t* o, const int32_t* a, int32_t n) { __fun_si(o, _mm_sll_epi32(__fun_li(a), _mm_cvtsi32_si128(n))); }
+    `static inline void __fun_simd_i32x4_shr(int32_t* o, const int32_t* a, int32_t n) { __fun_si(o, _mm_sra_epi32(__fun_li(a), _mm_cvtsi32_si128(n))); }
+    `static inline void __fun_simd_x128_select(void* o, const int32_t* m, const void* a, const void* b) { __fun_si(o, __fun_blend_i(__fun_li(m), __fun_li(a), __fun_li(b))); }
+    `static inline void __fun_simd_i32x4_to_f32x4(float* o, const int32_t* a) { _mm_storeu_ps(o, _mm_cvtepi32_ps(__fun_li(a))); }
+    `static inline void __fun_simd_f32x4_to_i32x4(int32_t* o, const float* a) { __fun_si(o, _mm_cvttps_epi32(_mm_loadu_ps(a))); }
+    `#else
+    `#include <string.h>
+    `#include <math.h>
+    `static inline void __fun_simd_f32x4_add(float* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] + b[i]; }
+    `static inline void __fun_simd_f32x4_sub(float* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] - b[i]; }
+    `static inline void __fun_simd_f32x4_mul(float* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] * b[i]; }
+    `static inline void __fun_simd_f32x4_div(float* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] / b[i]; }
+    `static inline void __fun_simd_f32x4_min(float* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] < b[i] ? a[i] : b[i]; }
+    `static inline void __fun_simd_f32x4_max(float* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] > b[i] ? a[i] : b[i]; }
+    `static inline void __fun_simd_f32x4_neg(float* o, const float* a) { for (int i = 0; i < 4; i++) o[i] = -a[i]; }
+    `static inline void __fun_simd_f64x2_add(double* o, const double* a, const double* b) { for (int i = 0; i < 2; i++) o[i] = a[i] + b[i]; }
+    `static inline void __fun_simd_f64x2_sub(double* o, const double* a, const double* b) { for (int i = 0; i < 2; i++) o[i] = a[i] - b[i]; }
+    `static inline void __fun_simd_f64x2_mul(double* o, const double* a, const double* b) { for (int i = 0; i < 2; i++) o[i] = a[i] * b[i]; }
+    `static inline void __fun_simd_f64x2_div(double* o, const double* a, const double* b) { for (int i = 0; i < 2; i++) o[i] = a[i] / b[i]; }
+    `static inline void __fun_simd_f64x2_min(double* o, const double* a, const double* b) { for (int i = 0; i < 2; i++) o[i] = a[i] < b[i] ? a[i] : b[i]; }
+    `static inline void __fun_simd_f64x2_max(double* o, const double* a, const double* b) { for (int i = 0; i < 2; i++) o[i] = a[i] > b[i] ? a[i] : b[i]; }
+    `static inline void __fun_simd_f64x2_neg(double* o, const double* a) { for (int i = 0; i < 2; i++) o[i] = -a[i]; }
+    `static inline void __fun_simd_f32x4_abs(float* o, const float* a) { for (int i = 0; i < 4; i++) { uint32_t u; memcpy(&u, &a[i], 4); u &= 0x7fffffffu; memcpy(&o[i], &u, 4); } }
+    `static inline void __fun_simd_f64x2_abs(double* o, const double* a) { for (int i = 0; i < 2; i++) { uint64_t u; memcpy(&u, &a[i], 8); u &= 0x7fffffffffffffffull; memcpy(&o[i], &u, 8); } }
+    `static inline float __fun_simd_sqrtf(float x) { float r = x > 0 ? x : 1; if (x != x || x < 0) return (x - x) / (x - x); if (x == 0) return x; for (int i = 0; i < 40; i++) r = 0.5f * (r + x / r); return r; }
+    `static inline double __fun_simd_sqrt(double x) { double r = x > 0 ? x : 1; if (x != x || x < 0) return (x - x) / (x - x); if (x == 0) return x; for (int i = 0; i < 80; i++) r = 0.5 * (r + x / r); return r; }
+    `static inline void __fun_simd_f32x4_sqrt(float* o, const float* a) { for (int i = 0; i < 4; i++) o[i] = sqrtf(a[i]); }
+    `static inline void __fun_simd_f64x2_sqrt(double* o, const double* a) { for (int i = 0; i < 2; i++) o[i] = sqrt(a[i]); }
+    `static inline void __fun_simd_f32x4_lt(int32_t* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] < b[i] ? -1 : 0; }
+    `static inline void __fun_simd_f32x4_le(int32_t* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] <= b[i] ? -1 : 0; }
+    `static inline void __fun_simd_f32x4_gt(int32_t* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] > b[i] ? -1 : 0; }
+    `static inline void __fun_simd_f32x4_ge(int32_t* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] >= b[i] ? -1 : 0; }
+    `static inline void __fun_simd_f32x4_eq(int32_t* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] == b[i] ? -1 : 0; }
+    `static inline void __fun_simd_f32x4_ne(int32_t* o, const float* a, const float* b) { for (int i = 0; i < 4; i++) o[i] = a[i] != b[i] ? -1 : 0; }
+    `static inline void __fun_simd_i32x4_add(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = (int32_t)((uint32_t)a[i] + (uint32_t)b[i]); }
+    `static inline void __fun_simd_i32x4_sub(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = (int32_t)((uint32_t)a[i] - (uint32_t)b[i]); }
+    `static inline void __fun_simd_i32x4_mul(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = (int32_t)((uint32_t)a[i] * (uint32_t)b[i]); }
+    `static inline void __fun_simd_i32x4_and(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] & b[i]; }
+    `static inline void __fun_simd_i32x4_or(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] | b[i]; }
+    `static inline void __fun_simd_i32x4_xor(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] ^ b[i]; }
+    `static inline void __fun_simd_i32x4_lt(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] < b[i] ? -1 : 0; }
+    `static inline void __fun_simd_i32x4_gt(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] > b[i] ? -1 : 0; }
+    `static inline void __fun_simd_i32x4_eq(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] == b[i] ? -1 : 0; }
+    `static inline void __fun_simd_i32x4_min(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] < b[i] ? a[i] : b[i]; }
+    `static inline void __fun_simd_i32x4_max(int32_t* o, const int32_t* a, const int32_t* b) { for (int i = 0; i < 4; i++) o[i] = a[i] > b[i] ? a[i] : b[i]; }
+    `static inline void __fun_simd_i32x4_neg(int32_t* o, const int32_t* a) { for (int i = 0; i < 4; i++) o[i] = (int32_t)(0u - (uint32_t)a[i]); }
+    `static inline void __fun_simd_i32x4_abs(int32_t* o, const int32_t* a) { for (int i = 0; i < 4; i++) o[i] = a[i] < 0 ? (int32_t)(0u - (uint32_t)a[i]) : a[i]; }
+    `static inline void __fun_simd_i32x4_not(int32_t* o, const int32_t* a) { for (int i = 0; i < 4; i++) o[i] = ~a[i]; }
+    `static inline void __fun_simd_i32x4_shl(int32_t* o, const int32_t* a, int32_t n) { for (int i = 0; i < 4; i++) o[i] = (int32_t)((uint32_t)a[i] << n); }
+    `static inline void __fun_simd_i32x4_shr(int32_t* o, const int32_t* a, int32_t n) { for (int i = 0; i < 4; i++) o[i] = a[i] >> n; }
+    `static inline void __fun_simd_x128_select(void* o, const int32_t* m, const void* a, const void* b) { int32_t x[4], y[4], r[4]; memcpy(x, a, 16); memcpy(y, b, 16); for (int i = 0; i < 4; i++) r[i] = (x[i] & m[i]) | (y[i] & ~m[i]); memcpy(o, r, 16); }
+    `static inline void __fun_simd_i32x4_to_f32x4(float* o, const int32_t* a) { for (int i = 0; i < 4; i++) o[i] = (float)a[i]; }
+    `static inline void __fun_simd_f32x4_to_i32x4(int32_t* o, const float* a) { for (int i = 0; i < 4; i++) o[i] = (int32_t)a[i]; }
+    `#endif
+    ``
+    );
+  }
+
   emit_scheduler_runtime() {
     self.state.write(
       ` // --- M:N cooperative virtual-thread scheduler (the fork keyword) ---
