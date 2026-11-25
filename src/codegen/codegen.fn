@@ -23528,17 +23528,25 @@ impl Codegen {
       );
     }
     self.write_prelude();
-    // Windows headers define a few plain words as macros, `near` and `far`
-    // as nothing at all, which would erase a Fun name like `near`. Every
-    // Windows header is in by now, so the program gets the words back.
+    // Windows headers define a few plain words as macros (`near` and `far`
+    // as nothing at all), and MSVC still reads `near`, `far` and `cdecl`
+    // as keywords. With every Windows header already in, each word is
+    // renamed for the rest of the file, so a Fun name like `near` stays a
+    // name.
     self.state.write(
       `#ifdef _WIN32
     `#undef near
+    `#define near __fun_near
     `#undef far
+    `#define far __fun_far
     `#undef pascal
+    `#define pascal __fun_pascal
     `#undef cdecl
+    `#define cdecl __fun_cdecl
     `#undef small
+    `#define small __fun_small
     `#undef interface
+    `#define interface __fun_interface
     `#endif
     ``
     );
@@ -28755,11 +28763,17 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
     `#ifdef _WIN32
     `#undef near
+    `#define near __fun_near
     `#undef far
+    `#define far __fun_far
     `#undef pascal
+    `#define pascal __fun_pascal
     `#undef cdecl
+    `#define cdecl __fun_cdecl
     `#undef small
+    `#define small __fun_small
     `#undef interface
+    `#define interface __fun_interface
     `#endif
     `typedef struct Outer Outer;
     `typedef struct Box__num {
