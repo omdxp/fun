@@ -9074,56 +9074,25 @@ impl Codegen {
           ptype = .Some(*plain_ptype.unwrap());
         }
       }
-      str prev_expected = self.expected_enum_type;
-      str prev_expected_compound2 = self.expected_compound_type;
-      let prev_expected_let_dt2 = self.expected_let_dt;
-      flag prev_has_expected_tuple2 = self.has_expected_tuple_type;
-      DataType prev_expected_tuple2 = self.expected_tuple_type;
-      flag arg_did_shape_coerce = false;
+      // A local function value (`fun(Src) num g = plain;`) declares its own
+      // parameter types.
+      if ptype.is_none() {
+        let local_fn_dt = self.lookup_local_dtype(template_callee_name);
+        if local_fn_dt.is_some() && local_fn_dt.unwrap().has_fn_sig &&
+          arg_idx < local_fn_dt.unwrap().fn_sig.params.len {
+          ptype = .Some(*local_fn_dt.unwrap().fn_sig.params.get(arg_idx));
+        }
+      }
       if ptype.is_some() {
-        if ptype.unwrap().is_tuple {
-          self.has_expected_tuple_type = true;
-          self.expected_tuple_type = ptype.unwrap();
+        let aerr = self.emit_expr_as(arg, ptype.unwrap());
+        if aerr.is_some() {
+          ret aerr;
         }
-        // A nested generic call passed directly as this argument
-        // (`take_box(make_zero_box())`, no intermediate `let`) has
-        // this declared parameter type as its own only context to
-        // infer an unreachable-from-its-own-arguments type param
-        // from - the same fallback `expected_let_dt` already gives a
-        // declared local's own initializer.
-        if ptype.unwrap().generic_args.len > 0 {
-          self.expected_let_dt = .Some(ptype.unwrap());
+      } else {
+        let aerr = self.emit_expr(*arg);
+        if aerr.is_some() {
+          ret aerr;
         }
-        let resolved = self.resolve_type_name(ptype.unwrap());
-        if resolved.is_some() {
-          self.expected_enum_type = resolved.unwrap();
-          self.expected_compound_type = resolved.unwrap();
-          // A concrete-typed argument passed where the declared parameter
-          // is a shape type needs the same coercion wrap a `Variable` or
-          // `ret` initializer gets; without it the argument's concrete
-          // pointer would be passed where C expects the shape's
-          // fat-pointer struct by value.
-          arg_did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
-        }
-      }
-      flag arg_did_closure_coerce = false;
-      if ptype.is_some() && !arg_did_shape_coerce {
-        arg_did_closure_coerce = self._open_closure_coerce(ptype.unwrap(), arg);
-      }
-      let aerr = self.emit_expr(*arg);
-      self.expected_enum_type = prev_expected;
-      self.expected_compound_type = prev_expected_compound2;
-      self.expected_let_dt = prev_expected_let_dt2;
-      self.has_expected_tuple_type = prev_has_expected_tuple2;
-      self.expected_tuple_type = prev_expected_tuple2;
-      if aerr.is_some() {
-        ret aerr;
-      }
-      if arg_did_shape_coerce {
-        self.state.write(")");
-      }
-      if arg_did_closure_coerce {
-        self.state.write("))");
       }
       arg_idx = arg_idx + 1;
     }
@@ -9833,7 +9802,12 @@ impl Codegen {
   // a plain field read already uses, then calls it, `(*recv.field_name)`
   // implicit in the member-access-then-call syntax already written
   // exactly this way.
-  emit_fn_sig_field_call(ChainResolution recv, str field_name, Node* args_node) Option<CodegenErrorKind> {
+  emit_fn_sig_field_call(
+    ChainResolution recv,
+    str field_name,
+    FnTypeSig* sig,
+    Node* args_node
+  ) Option<CodegenErrorKind> {
     self.state.write(recv.text);
     if recv.is_pointer {
       self.state.write("->");
@@ -9851,11 +9825,16 @@ impl Codegen {
       if i > 0 {
         self.state.write(", ");
       }
-      i = i + 1;
-      let aerr = self.emit_expr(*arg);
+      Option<CodegenErrorKind> aerr = .None;
+      if i < sig.params.len {
+        aerr = self.emit_expr_as(arg, *sig.params.get(i));
+      } else {
+        aerr = self.emit_expr(*arg);
+      }
       if aerr.is_some() {
         ret aerr;
       }
+      i = i + 1;
     }
     self.state.write(")");
     ret .None;
@@ -10280,12 +10259,48 @@ impl Codegen {
   // plain function or function value passed where a closure is expected
   // into a closure that captures nothing.
   emit_expr_as(Node* arg, DataType target) Option<CodegenErrorKind> {
-    flag wrapped = self._open_closure_coerce(target, arg);
+    str prev_expected = self.expected_enum_type;
+    str prev_expected_compound = self.expected_compound_type;
+    let prev_expected_let_dt = self.expected_let_dt;
+    flag prev_has_expected_tuple = self.has_expected_tuple_type;
+    DataType prev_expected_tuple = self.expected_tuple_type;
+    if target.is_tuple {
+      self.has_expected_tuple_type = true;
+      self.expected_tuple_type = target;
+    }
+    // A nested generic call passed directly here (`take_box(make_zero_box())`,
+    // no intermediate `let`) has `target` as its only context to infer a
+    // type param its own arguments can't reach.
+    if target.generic_args.len > 0 {
+      self.expected_let_dt = .Some(target);
+    }
+    // `target` also resolves a bare `.Variant` or `.{...}` shorthand, and a
+    // concrete value passed where a shape is expected gets wrapped into the
+    // shape's fat pointer.
+    flag did_shape_coerce = false;
+    let resolved = self.resolve_type_name(target);
+    if resolved.is_some() {
+      self.expected_enum_type = resolved.unwrap();
+      self.expected_compound_type = resolved.unwrap();
+      did_shape_coerce = self._open_shape_coerce(resolved.unwrap(), arg);
+    }
+    flag did_closure_coerce = false;
+    if !did_shape_coerce {
+      did_closure_coerce = self._open_closure_coerce(target, arg);
+    }
     let err = self.emit_expr(*arg);
+    self.expected_enum_type = prev_expected;
+    self.expected_compound_type = prev_expected_compound;
+    self.expected_let_dt = prev_expected_let_dt;
+    self.has_expected_tuple_type = prev_has_expected_tuple;
+    self.expected_tuple_type = prev_expected_tuple;
     if err.is_some() {
       ret err;
     }
-    if wrapped {
+    if did_shape_coerce {
+      self.state.write(")");
+    }
+    if did_closure_coerce {
       self.state.write("))");
     }
     ret .None;
@@ -10488,7 +10503,12 @@ impl Codegen {
     if field_info.is_some() {
       let finfo = field_info.unwrap();
       if finfo.dtype.is_some() && finfo.dtype.unwrap().has_fn_sig {
-        ret self.emit_fn_sig_field_call(recv_r, method_name, args_node);
+        ret self.emit_fn_sig_field_call(
+          recv_r,
+          method_name,
+          finfo.dtype.unwrap().fn_sig,
+          args_node
+        );
       }
       if finfo.dtype.is_some() && finfo.dtype.unwrap().has_closure_sig {
         str sep = recv_r.is_pointer ? "->" : ".";
@@ -11579,6 +11599,25 @@ impl Codegen {
         r.is_pointer = ptr_found.unwrap();
         r.dtype = self.lookup_local_dtype(name);
         r.is_call_result = false;
+        ret .Some(r);
+      }
+      // A compound literal as the receiver (`Quat{...}.normalize()`):
+      // its own written type, rendered like a call result so a caller
+      // needing its address hoists it to a temp first.
+      .CompoundInit(ci) -> {
+        if !ci.has_dtype {
+          ret .None;
+        }
+        str lit_type = ci.init_dtype.type_str;
+        if ci.init_dtype.generic_args.len > 0 {
+          lit_type = self.ensure_compound_instantiated(*ci.init_dtype)?;
+        }
+        ChainResolution r;
+        r.text = self._render_expr_isolated(recv)?;
+        r.type_name = lit_type;
+        r.is_pointer = false;
+        r.dtype = .Some(*ci.init_dtype);
+        r.is_call_result = true;
         ret .Some(r);
       }
       .Expression(inner_e) -> {

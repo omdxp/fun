@@ -4222,6 +4222,7 @@ impl Checker {
     str name,
     FnSig sig,
     Vec<Node*>* args,
+    TypeEnv* env,
     Vec<str>* type_params,
     Vec<CheckedType>* generic_args
   ) flag {
@@ -4235,6 +4236,11 @@ impl Checker {
       FnTypeSig* want_sig = want.has_fn_sig ? want.fn_sig : want.closure_sig;
       fit args.get(i - 1).kind {
         .Identifier(fname) -> {
+          // A parameter or local of the same name hides the function, and
+          // the ordinary argument check below covers it.
+          if env.lookup(fname).is_some() {
+            continue;
+          }
           let known = self.fns.at(fname);
           if known.is_some() &&
             !self._fn_sig_matches(
@@ -4293,7 +4299,7 @@ impl Checker {
     // function-typed parameter's declared signature isn't a type-param
     // bound at all - `Vec<T>.sort_by(cmp)`'s `cmp` needs this checked
     // regardless of `sort_by` being generic in `T`.
-    if self.check_fn_sig_args(node, name, sig, args, type_params, generic_args) {
+    if self.check_fn_sig_args(node, name, sig, args, env, type_params, generic_args) {
       ret;
     }
     if sig.is_generic {

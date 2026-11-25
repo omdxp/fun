@@ -4894,3 +4894,105 @@ test "only a program importing std.c.simd carries the SIMD runtime" {
   str out = run_source(src, "simd_runtime_run", "a std.simd program");
   assert contains(out, "20"), format("expected 20, got: {str}", out);
 }
+
+test "a compound literal is a method receiver of its own" {
+  str src = `use std.io;
+  `
+  `compound Box<T> {
+  `  T v;
+  `}
+  `
+  `impl Box<T> {
+  `  get() T { ret self.v; }
+  `}
+  `
+  `compound G {
+  `  num x;
+  `}
+  `
+  `impl G {
+  `  twice() num { ret self.x * 2; }
+  `  bump() G { ret G{x = self.x + 1}; }
+  `}
+  `
+  `fun main() num {
+  `  let g = G{x = 1}.bump();
+  `  println_fmt(
+  `    "{num} {num} {num} {num}",
+  `    G{x = 4}.twice(),
+  `    g.x,
+  `    G{x = 5}.bump().twice(),
+  `    Box<num>{v = 7}.get()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "compound_literal_receiver", "a compound literal receiver");
+  assert contains(out, "8 2 12 7"), format("expected 8 2 12 7, got: {str}", out);
+}
+
+test "a bare enum variant passed to a closure or function value resolves against its parameter" {
+  str src = `use std.io;
+  `enum Src {
+  `  Key(i32),
+  `  Pad(i32),
+  `}
+  `fun plain(Src s) num {
+  `  fit s {
+  `    .Key(k) -> { ret k as num; }
+  `    .Pad(p) -> { ret 100 + p as num; }
+  `  }
+  `}
+  `compound H {
+  `  fun(Src) num fp;
+  `  closure(Src) num cl;
+  `}
+  `impl H {
+  `  m(Src s) num { ret plain(s); }
+  `}
+  `fun main() num {
+  `  fun(Src) num g = plain;
+  `  H h;
+  `  h.fp = plain;
+  `  h.cl = fun(Src s) num { ret plain(s) * 2; };
+  `  println_fmt("{num} {num} {num} {num}", g(.Pad(1)), h.fp(.Key(5)), h.cl(.Key(6)), h.m(.Pad(7)));
+  `  h.cl.free();
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "shorthand_variant_fn_values",
+    "shorthand variants through function values"
+  );
+  assert contains(out, "101 5 12 107"), format("expected 101 5 12 107, got: {str}", out);
+}
+
+test "a closure parameter named like a top-level function is passed on as itself" {
+  str src = `use std.io;
+  `
+  `fun inner(num k, closure(f32) void f) {
+  `  f(k as f32);
+  `}
+  `
+  `fun outer(closure(f32) void tick) {
+  `  inner(2, tick);
+  `  tick(5);
+  `}
+  `
+  `fun tick(str a, num b) {
+  `  println_fmt("{str} {num}", a, b);
+  `}
+  `
+  `fun main() num {
+  `  let c = fun(f32 x) {
+  `    println_fmt("got {dec}", x as dec);
+  `  };
+  `  outer(c);
+  `  c.free();
+  `  tick("t", 1);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "param_shadows_function", "a parameter shadowing a function");
+  assert contains(out, "got 2"), format("expected the parameter called, got: {str}", out);
+  assert contains(out, "got 5"), format("expected the direct call too, got: {str}", out);
+  assert contains(out, "t 1"), format("expected the function still callable, got: {str}", out);
+}
