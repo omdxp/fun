@@ -246,3 +246,13 @@ test "private names declared in several files stay private to each" {
     assert contains(out, name), format("expected {str} in the generated C", name);
   }
 }
+
+test "another file's public constants and globals are readable by name" {
+  let out = emit_file(
+    "examples/imports/pub_globals/main.fn",
+    "another file's public constants and globals are readable by name"
+  );
+  for name : ["squares[", "origin.x", "answer", "scale"] {
+    assert contains(out, name), format("expected {str} in the generated C", name);
+  }
+}

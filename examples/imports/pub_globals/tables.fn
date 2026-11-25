@@ -1,0 +1,14 @@
+// Public constants and globals another file reads by name.
+
+pub const num answer = 42;
+
+pub u8[4] squares = [0, 1, 4, 9];
+
+pub compound Point {
+  num x;
+  num y;
+}
+
+pub Point origin;
+
+pub f32 scale = 2.5;

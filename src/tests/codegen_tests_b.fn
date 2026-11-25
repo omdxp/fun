@@ -5063,3 +5063,22 @@ test "a let holding a plain function is a function pointer, MSVC mode included" 
   );
   assert contains(msvc_out, "42"), format("expected 42 in MSVC mode, got: {str}", msvc_out);
 }
+
+test "an array literal with thousands of elements parses and keeps its order" {
+  StringBuilder sb = string_builder_init(16000);
+  sb.append("use std.io;\nfun main() num {\n  num[1500] big = [");
+  num i = 0;
+  for i < 1500 {
+    if i > 0 {
+      sb.append(", ");
+    }
+    sb.append(format("{num}", i * 3));
+    i += 1;
+  }
+  sb.append("];\n  println_fmt(\"{num} {num}\", big[0], big[1499]);\n  ret 0;\n}\n");
+  str out = run_source(sb.build(), "long_array_literal", "a long array literal");
+  assert contains(out, "0 4497"), format(
+    "expected the first and last elements, got: {str}",
+    out
+  );
+}

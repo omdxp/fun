@@ -1271,9 +1271,44 @@ fun _scan_compound_names(
         out.push(finfo);
       }
     }
+    // `pub const [T] name = ...;` or a `pub T name ...;` global: the name is
+    // the identifier right before the first `=` or `;`.
+    if depth == 0 && prev_was_pub && !_starts_non_value_declaration(t) {
+      num v = i;
+      Option<str> last_ident = .None;
+      for v < tokens.len {
+        let vt = tokens.get(v);
+        if token_is_operator(vt, "=") || token_is_symbol(vt, ';') ||
+        token_is_symbol(vt, '{') || token_is_operator(vt, "(") {
+          break;
+        }
+        if vt.type == .Identifier {
+          fit vt.data {
+            .Sval(s) -> { last_ident = .Some(s); }
+            _ -> {}
+          }
+        }
+        v = v + 1;
+      }
+      if v < tokens.len && last_ident.is_some() &&
+        (token_is_operator(tokens.get(v), "=") || token_is_symbol(tokens.get(v), ';')) {
+        out.push(global_symbol_info_new(last_ident.unwrap(), path));
+      }
+    }
     prev_was_pub = token_is_keyword(t, "pub");
     i = i + 1;
   }
+}
+
+// True when `t`, the token after `pub`, starts a declaration that is not a
+// constant or global variable.
+fun _starts_non_value_declaration(Token t) flag {
+  for kw : ["fun", "compound", "enum", "shape", "impl", "als", "async", "packed", "union", "align"] {
+    if token_is_keyword(t, kw) {
+      ret true;
+    }
+  }
+  ret false;
 }
 
 fun _parse_and_merge(
