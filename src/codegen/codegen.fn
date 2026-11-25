@@ -20848,6 +20848,17 @@ impl Codegen {
     `#undef sparc
     `#undef mips
     `#undef vax
+    `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
+    `#ifndef NOUSER
+    `#define NOUSER
+    `#endif
+    `#endif
     ``
     );
     if self.freestanding {
@@ -20939,12 +20950,6 @@ impl Codegen {
     if self.memcheck {
       self.state.write(
         `#ifdef _WIN32
-      `#ifndef WIN32_LEAN_AND_MEAN
-      `#define WIN32_LEAN_AND_MEAN
-      `#endif
-      `#ifndef NOGDI
-      `#define NOGDI
-      `#endif
       `#include <windows.h>
       `#else
       `#include <signal.h>
@@ -21206,9 +21211,6 @@ impl Codegen {
       self.state.write(
         `
       `#if defined(_WIN32)
-      `#ifndef WIN32_LEAN_AND_MEAN
-      `#define WIN32_LEAN_AND_MEAN
-      `#endif
       `#pragma push_macro("close")
       `#undef close
       `#include <windows.h>
@@ -21522,9 +21524,6 @@ impl Codegen {
       self.state.write(
         `
       `#if defined(_WIN32)
-      `#ifndef WIN32_LEAN_AND_MEAN
-      `#define WIN32_LEAN_AND_MEAN
-      `#endif
       `#include <windows.h>
       `#define SECURITY_WIN32
       `#include <security.h>
@@ -21946,9 +21945,6 @@ impl Codegen {
       `  return out;
       `}
       `#if defined(_WIN32)
-      `#ifndef WIN32_LEAN_AND_MEAN
-      `#define WIN32_LEAN_AND_MEAN
-      `#endif
       `#include <windows.h>
       `#include <bcrypt.h>
       `#pragma comment(lib, "bcrypt.lib")
@@ -22351,12 +22347,6 @@ impl Codegen {
     // rather than relying on a header to provide one.
     self.state.write(
       `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
     `#include <windows.h>
     `#include <time.h>
     `static int setenv(const char* name, const char* value, int overwrite) {
@@ -22458,12 +22448,6 @@ impl Codegen {
     // is matched exactly to its Fun type.
     self.state.write(
       `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
     `#include <windows.h>
     `#include <direct.h>
     `#include <sys/stat.h>
@@ -22506,12 +22490,6 @@ impl Codegen {
     // has been enough for real `fork`/`await` bodies in practice.
     self.state.write(
       `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
     `#include <windows.h>
     `#ifdef __MINGW32__
     `#include <pthread.h>
@@ -22641,9 +22619,6 @@ impl Codegen {
     // touching `_close` at all.
     self.state.write(
       `#if defined(_WIN32)
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
     `#include <winsock2.h>
     `#include <ws2tcpip.h>
     `#include <io.h>
@@ -28166,6 +28141,17 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#undef sparc
     `#undef mips
     `#undef vax
+    `#ifdef _WIN32
+    `#ifndef WIN32_LEAN_AND_MEAN
+    `#define WIN32_LEAN_AND_MEAN
+    `#endif
+    `#ifndef NOGDI
+    `#define NOGDI
+    `#endif
+    `#ifndef NOUSER
+    `#define NOUSER
+    `#endif
+    `#endif
     `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE
@@ -28190,12 +28176,6 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static FILE* stderr_stream(void){ return stderr; }
     `static FILE* stdin_stream(void){ return stdin; }
     `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
     `#include <windows.h>
     `#include <time.h>
     `static int setenv(const char* name, const char* value, int overwrite) {
@@ -28273,12 +28253,6 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#define __fun_tag(x) _Generic((x), char*: 's', const char*: 's', long long: 'n', long: 'n', int: 'n', unsigned long long: 'u', unsigned long: 'u', unsigned int: 'n', short: 'n', unsigned short: 'n', signed char: 'n', unsigned char: 'n', double: 'd', float: 'd', _Bool: 'b', char: 'c', void*: 'p', default: 'p')
     `static void __fun_free_vargs(char** data, const char* tags, long long n) { if (!data) { return; } long long __fun_fv_i = 0; for (; __fun_fv_i < n; __fun_fv_i++) { free(data[__fun_fv_i]); } free(data); }
     `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
     `#include <windows.h>
     `#include <direct.h>
     `#include <sys/stat.h>
@@ -28298,12 +28272,6 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static long long __fun_make_dir(const char* path) { if (!path) return -1; return mkdir(path, 0755); }
     `#endif
     `#ifdef _WIN32
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
-    `#ifndef NOGDI
-    `#define NOGDI
-    `#endif
     `#include <windows.h>
     `#ifdef __MINGW32__
     `#include <pthread.h>
@@ -28382,9 +28350,6 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `static long __fun_process_id(void) { return (long)getpid(); }
     `#endif
     `#if defined(_WIN32)
-    `#ifndef WIN32_LEAN_AND_MEAN
-    `#define WIN32_LEAN_AND_MEAN
-    `#endif
     `#include <winsock2.h>
     `#include <ws2tcpip.h>
     `#include <io.h>
