@@ -5041,3 +5041,25 @@ test "words windows.h defines as macros stay plain identifiers" {
   str out = run_source(src, "windows_macro_names", "locals named like windows.h macros");
   assert contains(out, "21"), format("expected the names added, got: {str}", out);
 }
+
+test "a let holding a plain function is a function pointer, MSVC mode included" {
+  str src = `use std.io;
+  `
+  `fun near(num x) num {
+  `  ret x + 1;
+  `}
+  `
+  `fun main() num {
+  `  let f = near;
+  `  println_fmt("{num}", f(41));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "let_function_value", "a let holding a function");
+  assert contains(out, "42"), format("expected 42, got: {str}", out);
+  str msvc_out = run_source_forcing_msvc(
+    src,
+    "let_function_value_msvc",
+    "a let holding a function, MSVC mode"
+  );
+  assert contains(msvc_out, "42"), format("expected 42 in MSVC mode, got: {str}", msvc_out);
+}
