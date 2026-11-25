@@ -20955,6 +20955,9 @@ impl Codegen {
     `#ifndef NOUSER
     `#define NOUSER
     `#endif
+    `#ifndef NOMINMAX
+    `#define NOMINMAX
+    `#endif
     `#endif
     ``
     );
@@ -23525,6 +23528,20 @@ impl Codegen {
       );
     }
     self.write_prelude();
+    // Windows headers define a few plain words as macros, `near` and `far`
+    // as nothing at all, which would erase a Fun name like `near`. Every
+    // Windows header is in by now, so the program gets the words back.
+    self.state.write(
+      `#ifdef _WIN32
+    `#undef near
+    `#undef far
+    `#undef pascal
+    `#undef cdecl
+    `#undef small
+    `#undef interface
+    `#endif
+    ``
+    );
     self.register_function_signatures(nodes);
     self.register_top_level_consts(nodes);
     // Registers every shape's declaration, pure bookkeeping with no C
@@ -28424,6 +28441,9 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#ifndef NOUSER
     `#define NOUSER
     `#endif
+    `#ifndef NOMINMAX
+    `#define NOMINMAX
+    `#endif
     `#endif
     `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
@@ -28733,6 +28753,14 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `  __fun_g_wd.blocked++;
     `}
     `void __fun_wd_leave_wait(void){ if(!__fun_g_wd.armed) return; if(__fun_g_wd.blocked>0)__fun_g_wd.blocked--; __fun_g_wd.progress_seq++; }
+    `#ifdef _WIN32
+    `#undef near
+    `#undef far
+    `#undef pascal
+    `#undef cdecl
+    `#undef small
+    `#undef interface
+    `#endif
     `typedef struct Outer Outer;
     `typedef struct Box__num {
     `  int64_t value;
