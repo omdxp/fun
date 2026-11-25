@@ -20838,6 +20838,18 @@ impl Codegen {
   }
 
   pub write_prelude() {
+    // GNU-mode C compilers predefine a few bare target names as macros, which
+    // would turn a Fun identifier like `linux` into a number.
+    self.state.write(
+      `#undef linux
+    `#undef unix
+    `#undef i386
+    `#undef sun
+    `#undef sparc
+    `#undef mips
+    `#undef vax
+    ``
+    );
     if self.freestanding {
       self.write_freestanding_prelude();
       ret;
@@ -28147,6 +28159,13 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
   assert g.transpile(nodes).is_none(), "expected the whole program to transpile";
   assert equals(
     st.out.build(),
+    `#undef linux
+    `#undef unix
+    `#undef i386
+    `#undef sun
+    `#undef sparc
+    `#undef mips
+    `#undef vax
     `#ifndef _WIN32
     `#ifndef _DEFAULT_SOURCE
     `#define _DEFAULT_SOURCE

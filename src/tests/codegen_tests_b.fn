@@ -4755,3 +4755,19 @@ test "a local closure or function value shadows a function of the same name" {
     out
   );
 }
+
+test "names a C compiler predefines as target macros stay plain identifiers" {
+  str src = `use std.io;
+  `use std.string;
+  `
+  `fun main() num {
+  `  num linux = 1;
+  `  num unix = 2;
+  `  println(format("{num}", linux + unix));
+  `  ret 0;
+  `}`;
+  str c = transpile_source(src).unwrap();
+  assert contains(c, "#undef linux"), "expected the prelude to undefine linux";
+  str out = run_source(src, "predefined_target_macros", "locals named like target macros");
+  assert contains(out, "3"), format("expected the locals added, got: {str}", out);
+}
