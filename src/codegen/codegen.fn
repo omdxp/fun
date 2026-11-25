@@ -23532,7 +23532,8 @@ impl Codegen {
     // as nothing at all), and MSVC still reads `near`, `far` and `cdecl`
     // as keywords. With every Windows header already in, each word is
     // renamed for the rest of the file, so a Fun name like `near` stays a
-    // name.
+    // name. MSVC's own <stdlib.h> also defines `min` and `max` in C, which
+    // `NOMINMAX` doesn't reach.
     self.state.write(
       `#ifdef _WIN32
     `#undef near
@@ -23547,6 +23548,8 @@ impl Codegen {
     `#define small __fun_small
     `#undef interface
     `#define interface __fun_interface
+    `#undef min
+    `#undef max
     `#endif
     ``
     );
@@ -28774,6 +28777,8 @@ test "pub transpile hoists a generic compound's monomorphized typedef BEFORE ano
     `#define small __fun_small
     `#undef interface
     `#define interface __fun_interface
+    `#undef min
+    `#undef max
     `#endif
     `typedef struct Outer Outer;
     `typedef struct Box__num {
