@@ -11515,3 +11515,37 @@ test "hover inside a closure says how it captured a name" {
     outside
   );
 }
+
+test "go-to-definition and hover find a file's own private name when other files declare it too" {
+  AnalysisCache reads = analysis_cache_new();
+  defer reads.free();
+  Document main_doc;
+  main_doc.path = "examples/imports/private_names/main.fn";
+  main_doc.uri = format("file:///{str}", main_doc.path);
+  main_doc.text = read_to_string(main_doc.path);
+  main_doc.version = 1;
+  // `near(5)` in main.fn: zero-based line 12.
+  str in_main = definition(&reads, main_doc, 12, 56);
+  assert contains(in_main, "private_names/main.fn"), format(
+    "expected main.fn's own near, got {str}",
+    in_main
+  );
+  assert contains(in_main, "\"line\":7"), format(
+    "expected the declaration on line 8, got {str}",
+    in_main
+  );
+
+  Document a_doc;
+  a_doc.path = "examples/imports/private_names/a.fn";
+  a_doc.uri = format("file:///{str}", a_doc.path);
+  a_doc.text = read_to_string(a_doc.path);
+  a_doc.version = 1;
+  // `near(1)` and `World` in a.fn's from_a.
+  str in_a = definition(&reads, a_doc, 17, 7);
+  assert contains(in_a, "private_names/a.fn"), format(
+    "expected a.fn's own near, got {str}",
+    in_a
+  );
+  str world = hover(&reads, a_doc, 15, 3);
+  assert contains(world, "World"), format("expected hover on a.fn's World, got {str}", world);
+}

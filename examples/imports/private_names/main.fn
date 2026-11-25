@@ -1,0 +1,14 @@
+// Each of these three files keeps its own private `near`, and `a` and `b`
+// each their own private `World`: private names never collide across files.
+
+use std.io;
+use a;
+use b;
+
+fun near(num x) num {
+  ret x - 1;
+}
+
+fun main() {
+  println_fmt("{num} {num} {num}", from_a(), from_b(), near(5));
+}

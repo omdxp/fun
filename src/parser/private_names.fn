@@ -1,0 +1,533 @@
+// Keeps private top-level names private to their own file. Imports are
+// flattened into one program, so two files that each declare a private
+// `near` or `World` would otherwise collide. After the merge, every name
+// declared in more than one file gets a file-specific name on each of its
+// private declarations, with that file's own references renamed to match.
+// Public names keep their spelling, since other files refer to them.
+
+use ..ast.ast;
+use std.string;
+use std.vec;
+use std.map;
+use std.set;
+use std.option;
+use std.path;
+
+// One top-level declaration: what it's called, which file declares it,
+// whether that's a type, and whether it's public.
+compound TopDecl {
+  str name;
+  str file;
+  flag is_type;
+  flag is_public;
+}
+
+// The name a top-level node declares, if it declares one that can collide.
+fun declared_name(Node* n, flag* is_type) Option<str> {
+  fit n.kind {
+    .Function(f) -> {
+      // A bodyless function names an existing C symbol, which must keep
+      // its spelling; codegen handles that clash itself.
+      if !f.has_name || !f.has_body {
+        ret .None;
+      }
+      *is_type = false;
+      ret .Some(f.name);
+    }
+    .Compound(c) -> {
+      *is_type = true;
+      ret .Some(c.name);
+    }
+    .Enum(e) -> {
+      *is_type = true;
+      ret .Some(e.name);
+    }
+    .Shape(s) -> {
+      *is_type = true;
+      ret .Some(s.name);
+    }
+    _ -> { ret .None; }
+  }
+}
+
+// A short, C-safe tag for `file`, made unique among `used`.
+fun file_tag(str file, Set<str>* used) str {
+  str base = strip_ext(basename(file));
+  StringBuilder sb = string_builder_init(16);
+  num i = 0;
+  for i < len(base) {
+    chr c = base[i];
+    flag ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    sb.append_char(ok ? c : '_');
+    i += 1;
+  }
+  str tag = sb.build();
+  if len(tag) == 0 {
+    tag = "file";
+  }
+  str unique = tag;
+  num n = 2;
+  for used.has(unique) {
+    unique = format("{str}{num}", tag, n);
+    n += 1;
+  }
+  used.add(unique);
+  ret unique;
+}
+
+// Renames colliding private top-level names in `nodes`, the merged program.
+// The entry file, `entry_file`, keeps its own names as written, so tools
+// reading it see them unchanged, unless another file makes one of them
+// public.
+pub fun separate_private_names(Vec<Node>* nodes, str entry_file) {
+  Vec<TopDecl> decls;
+  decls.init(16);
+  defer decls.free();
+  for n : *nodes {
+    flag is_type = false;
+    let name = declared_name(&n, &is_type);
+    if name.is_none() || !n.has_pos {
+      continue;
+    }
+    decls.push(
+      TopDecl{
+      name = name.unwrap(),
+      file = n.pos.filename,
+      is_type = is_type,
+      is_public = n.flags.is_public
+      }
+    );
+  }
+  // Each file's tag, assigned the first time one of its names needs one.
+  Map<str, str> tags;
+  tags.init(8);
+  defer tags.free();
+  Set<str> used_tags = set_init<str>("", 8);
+  defer used_tags.free();
+  num i = 0;
+  for i < decls.len() {
+    TopDecl d = decls.get(i);
+    i += 1;
+    if d.is_public {
+      continue;
+    }
+    // Only a name some other file also declares needs separating.
+    flag elsewhere = false;
+    for other : decls {
+      if equals(other.name, d.name) && !equals(other.file, d.file) {
+        elsewhere = true;
+        break;
+      }
+    }
+    if !elsewhere {
+      continue;
+    }
+    if equals(d.file, entry_file) {
+      flag public_elsewhere = false;
+      for other : decls {
+        if equals(other.name, d.name) && other.is_public {
+          public_elsewhere = true;
+          break;
+        }
+      }
+      if !public_elsewhere {
+        continue;
+      }
+    }
+    let known = tags.at(d.file);
+    str tag = "";
+    if known.is_some() {
+      tag = known.unwrap();
+    } else {
+      tag = file_tag(d.file, &used_tags);
+      tags.put(d.file, tag);
+    }
+    str renamed = format("{str}__{str}", d.name, tag);
+    num j = 0;
+    for j < nodes.len() {
+      Node cur = nodes.get(j);
+      if cur.has_pos && equals(cur.pos.filename, d.file) {
+        rename_in(&cur, d.name, renamed, d.is_type);
+        nodes.set(j, cur);
+      }
+      j += 1;
+    }
+  }
+}
+
+// Renames `old` to `new` in `dt` and every type nested inside it.
+fun rename_dtype(DataType* dt, str old, str new) {
+  if dt == nil {
+    ret;
+  }
+  if equals(dt.type_str, old) {
+    dt.type_str = new;
+  }
+  for g : dt.generic_args {
+    rename_dtype(g, old, new);
+  }
+  for m : dt.tuple_members {
+    rename_dtype(m, old, new);
+  }
+  if dt.has_fn_sig && dt.fn_sig != nil {
+    for p : dt.fn_sig.params {
+      rename_dtype(p, old, new);
+    }
+    rename_dtype(dt.fn_sig.rtype, old, new);
+  }
+  if dt.has_closure_sig && dt.closure_sig != nil {
+    for p : dt.closure_sig.params {
+      rename_dtype(p, old, new);
+    }
+    rename_dtype(dt.closure_sig.rtype, old, new);
+  }
+  for b : dt.array_brackets {
+    rename_node(b, old, new, false);
+  }
+}
+
+// Renames `old` in a list of names, such as a type parameter's bounds.
+fun rename_names(Vec<str>* names, str old, str new) {
+  num i = 0;
+  for i < names.len() {
+    if equals(names.get(i), old) {
+      names.set(i, new);
+    }
+    i += 1;
+  }
+}
+
+// True when `body` declares a local, parameter, loop name or pattern
+// binding spelled `name`, which hides a top-level declaration of it.
+fun declares_local(Node* n, str name) flag {
+  if n == nil {
+    ret false;
+  }
+  fit n.kind {
+    .Variable(v) -> {
+      if equals(v.name, name) {
+        ret true;
+      }
+      for d : v.destructure_names {
+        if equals(d, name) {
+          ret true;
+        }
+      }
+      ret v.has_val && declares_local(v.val, name);
+    }
+    .Body(b) -> {
+      for s : b.statements {
+        if declares_local(s, name) {
+          ret true;
+        }
+      }
+    }
+    .StatementIf(s) -> { ret declares_local(s.body, name); }
+    .StatementElseIf(s) -> { ret declares_local(s.body, name); }
+    .StatementElse(inner) -> { ret declares_local(inner, name); }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(c) -> { ret declares_local(c.body, name); }
+        .Iter(it) -> {
+          if (it.has_index_name && equals(it.index_name, name)) ||
+            equals(it.item_name, name) {
+            ret true;
+          }
+          for d : it.item_destructure_names {
+            if equals(d, name) {
+              ret true;
+            }
+          }
+          ret declares_local(it.body, name);
+        }
+      }
+    }
+    .StatementFit(f) -> {
+      for br : f.branches {
+        for b : br.bindings {
+          if equals(b, name) {
+            ret true;
+          }
+        }
+        if declares_local(br.body, name) {
+          ret true;
+        }
+      }
+    }
+    .ClosureLiteral(f) -> {
+      for a : f.args {
+        if declares_local(a, name) {
+          ret true;
+        }
+      }
+      ret f.has_body && declares_local(f.body, name);
+    }
+    _ -> {}
+  }
+  ret false;
+}
+
+fun rename_function(FunctionNode* f, str old, str new, flag is_type) {
+  rename_dtype(f.rtype, old, new);
+  for a : f.args {
+    rename_node(a, old, new, is_type);
+  }
+  for c : f.type_param_constraints {
+    rename_names(&c, old, new);
+  }
+  for d : f.type_param_defaults {
+    rename_dtype(d, old, new);
+  }
+  if f.closure_sig != nil {
+    for p : f.closure_sig.params {
+      rename_dtype(p, old, new);
+    }
+    rename_dtype(f.closure_sig.rtype, old, new);
+  }
+  if !f.has_body {
+    ret;
+  }
+  // A parameter or local spelled like the renamed declaration means every
+  // use of that spelling in this body is the local, not the declaration.
+  for a : f.args {
+    if declares_local(a, old) {
+      ret;
+    }
+  }
+  if declares_local(f.body, old) {
+    ret;
+  }
+  rename_node(f.body, old, new, is_type);
+}
+
+// Renames `old` to `new` everywhere it refers to the top-level declaration
+// inside `n`: type positions always, and identifiers too.
+fun rename_in(Node* n, str old, str new, flag is_type) {
+  rename_node(n, old, new, is_type);
+}
+
+fun rename_node(Node* n, str old, str new, flag is_type) {
+  if n == nil {
+    ret;
+  }
+  fit n.kind {
+    .Identifier(name) -> {
+      if equals(name, old) {
+        n.kind = .Identifier(new);
+      }
+    }
+    .Expression(e) -> {
+      for g : e.generic_args {
+        rename_dtype(g, old, new);
+      }
+      if e.has_left {
+        rename_node(e.left, old, new, is_type);
+      }
+      // The right side of `.` is a field or method name, never a top-level
+      // declaration, except an enum variant's own enum on the left.
+      if e.has_right && !equals(e.op, ".") {
+        rename_node(e.right, old, new, is_type);
+      } elif e.has_right {
+        fit e.right.kind {
+          .Identifier(_) -> {}
+          _ -> { rename_node(e.right, old, new, is_type); }
+        }
+      }
+    }
+    .ExpressionParenthesis(inner) -> { rename_node(inner, old, new, is_type); }
+    .Panic(inner) -> { rename_node(inner, old, new, is_type); }
+    .Variable(v) -> {
+      rename_dtype(v.var_type, old, new);
+      if v.has_val {
+        rename_node(v.val, old, new, is_type);
+      }
+    }
+    .Function(f) -> {
+      if equals(f.name, old) && !is_type {
+        f.name = new;
+      }
+      rename_function(&f, old, new, is_type);
+      n.kind = .Function(f);
+    }
+    .ClosureLiteral(f) -> {
+      rename_function(&f, old, new, is_type);
+      n.kind = .ClosureLiteral(f);
+    }
+    .Body(b) -> {
+      for s : b.statements {
+        rename_node(s, old, new, is_type);
+      }
+    }
+    .StatementReturn(inner) -> { rename_node(inner, old, new, is_type); }
+    .StatementDefer(inner) -> { rename_node(inner, old, new, is_type); }
+    .StatementFork(inner) -> { rename_node(inner, old, new, is_type); }
+    .StatementElse(inner) -> { rename_node(inner, old, new, is_type); }
+    .StatementIf(s) -> {
+      rename_node(s.condition, old, new, is_type);
+      rename_node(s.body, old, new, is_type);
+    }
+    .StatementElseIf(s) -> {
+      rename_node(s.condition, old, new, is_type);
+      rename_node(s.body, old, new, is_type);
+    }
+    .StatementFor(fk) -> {
+      fit fk {
+        .Cond(c) -> {
+          if c.has_condition {
+            rename_node(c.condition, old, new, is_type);
+          }
+          rename_node(c.body, old, new, is_type);
+        }
+        .Iter(it) -> {
+          rename_node(it.iterable, old, new, is_type);
+          rename_node(it.body, old, new, is_type);
+        }
+      }
+    }
+    .StatementAssert(a) -> {
+      rename_node(a.condition, old, new, is_type);
+      if a.has_message {
+        rename_node(a.message, old, new, is_type);
+      }
+    }
+    .StatementFit(f) -> {
+      rename_node(f.exp, old, new, is_type);
+      for br : f.branches {
+        if br.has_condition {
+          rename_node(br.condition, old, new, is_type);
+        }
+        for o : br.or_conditions {
+          rename_node(o, old, new, is_type);
+        }
+        rename_node(br.body, old, new, is_type);
+      }
+    }
+    .StatementAsm(a) -> {
+      for o : a.outputs {
+        rename_node(o.expr, old, new, is_type);
+      }
+      for i : a.inputs {
+        rename_node(i.expr, old, new, is_type);
+      }
+    }
+    .Unary(u) -> {
+      rename_node(u.operand, old, new, is_type);
+      if u.has_error_arg {
+        rename_node(u.error_arg, old, new, is_type);
+      }
+    }
+    .Ternary(t) -> {
+      rename_node(t.cond, old, new, is_type);
+      rename_node(t.then_val, old, new, is_type);
+      rename_node(t.else_val, old, new, is_type);
+    }
+    .Bracket(inner) -> { rename_node(inner, old, new, is_type); }
+    .CompoundInit(ci) -> {
+      if ci.has_dtype {
+        rename_dtype(ci.init_dtype, old, new);
+      }
+      for f : ci.fields {
+        rename_node(f.value, old, new, is_type);
+      }
+    }
+    .TupleLiteral(t) -> {
+      for el : t.elements {
+        rename_node(el, old, new, is_type);
+      }
+    }
+    .Compound(c) -> {
+      if is_type && equals(c.name, old) {
+        c.name = new;
+      }
+      for f : c.fields {
+        rename_dtype(f.dtype, old, new);
+      }
+      for k : c.type_param_constraints {
+        rename_names(&k, old, new);
+      }
+      for d : c.type_param_defaults {
+        rename_dtype(d, old, new);
+      }
+      n.kind = .Compound(c);
+    }
+    .Enum(e) -> {
+      if is_type && equals(e.name, old) {
+        e.name = new;
+      }
+      for v : e.variants {
+        for p : v.payload {
+          rename_dtype(p, old, new);
+        }
+      }
+      for d : e.type_param_defaults {
+        rename_dtype(d, old, new);
+      }
+      n.kind = .Enum(e);
+    }
+    .Shape(s) -> {
+      if is_type && equals(s.name, old) {
+        s.name = new;
+      }
+      for m : s.methods {
+        rename_dtype(m.rtype, old, new);
+        for a : m.args {
+          rename_dtype(a.dtype, old, new);
+        }
+      }
+      for d : s.type_param_defaults {
+        rename_dtype(d, old, new);
+      }
+      n.kind = .Shape(s);
+    }
+    .Impl(im) -> {
+      if is_type && equals(im.type_name, old) {
+        im.type_name = new;
+      }
+      if is_type && im.has_shape_name && equals(im.shape_name, old) {
+        im.shape_name = new;
+      }
+      for k : im.type_param_constraints {
+        rename_names(&k, old, new);
+      }
+      if im.has_shape_arg_dtype {
+        rename_dtype(im.shape_arg_dtype, old, new);
+      }
+      if im.has_concrete_dtype {
+        rename_dtype(im.concrete_dtype, old, new);
+      }
+      // A method's own name lives in its type's namespace, never the top
+      // level. It is stored as `Type__method`, though, so it follows a
+      // renamed type.
+      str method_prefix = format("{str}__", old);
+      for m : im.methods {
+        fit m.kind {
+          .Function(f) -> {
+            if is_type && starts_with(f.name, method_prefix) {
+              f.name = format(
+                "{str}__{str}",
+                new,
+                substr(
+                f.name,
+                len(method_prefix),
+                len(f.name) - len(method_prefix)
+                )
+              );
+            }
+            rename_function(&f, old, new, is_type);
+            m.kind = .Function(f);
+          }
+          _ -> {}
+        }
+      }
+      n.kind = .Impl(im);
+    }
+    .TypeAlias(ta) -> {
+      rename_dtype(ta.body, old, new);
+      rename_names(&ta.bound_alternatives, old, new);
+      for d : ta.type_param_defaults {
+        rename_dtype(d, old, new);
+      }
+    }
+    _ -> {}
+  }
+}
