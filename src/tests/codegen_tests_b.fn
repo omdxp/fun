@@ -5034,6 +5034,10 @@ test "words windows.h defines as macros stay plain identifiers" {
     num at = index_of_str(c, format("#define {str} __fun_{str}", name, name));
     assert at > last_include, format("expected {str} renamed after every windows.h", name);
   }
+  for name : ["min", "max"] {
+    num at = index_of_str(c, format("#undef {str}", name));
+    assert at > last_include, format("expected {str} undefined after every windows.h", name);
+  }
   str out = run_source(src, "windows_macro_names", "locals named like windows.h macros");
   assert contains(out, "21"), format("expected the names added, got: {str}", out);
 }
