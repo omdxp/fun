@@ -1,0 +1,19 @@
+compound World {
+  num a;
+}
+
+fun near(num x) num {
+  ret x + 1;
+}
+
+impl World {
+  near(num k) num {
+    ret self.a + k;
+  }
+}
+
+pub fun from_a() num {
+  World w = World{a = 10};
+  let f = near;
+  ret near(1) + w.near(100) + f(0);
+}

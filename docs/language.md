@@ -1944,18 +1944,14 @@ fun main() {
   giving every file its own scoped symbol table, a structural change
   disproportionate to the mild "completion offers a name I didn't
   import directly" symptom this currently produces.
-- **A private (non-`pub`) top-level name must be unique across the
-  whole compiled program, not just within its own file.** Two files
-  each declaring their own private `_collect` conflict:
-  `'_collect' is already declared as a function in a.fn:1`. This is
-  intentional too, for the same reason: the merged program is one flat
-  namespace, and true per-module privacy would need every private
-  name's own C symbol mangled with its declaring file, which is a wide
-  change for real code that already works around this today the same
-  way most C code does - a project-specific prefix (`_mymod_collect`)
-  on a private helper whose bare name would otherwise collide. The
-  diagnostic names the exact conflict and where, so the fix (rename, or
-  make one `pub`) is immediate.
+- **A private (non-`pub`) top-level name belongs to its own file.** Two
+  files can each declare a private function, compound, enum or shape
+  with the same name, such as a `near` helper or a `World` type, and
+  each file's code uses its own. In the generated C, an imported
+  file's private name that another file also declares gets its file's
+  name added (`near__clock`). A file's own private name also wins over a public
+  one of the same name from another file. A public name is still one
+  name for the whole program, so two `pub` declarations of it conflict.
 
 ## C Interop
 

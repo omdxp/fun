@@ -1,0 +1,22 @@
+enum Mode {
+  On,
+  Off,
+}
+
+compound World {
+  str name;
+  Mode mode;
+}
+
+fun near(num x) num {
+  ret x * 10;
+}
+
+pub fun from_b() num {
+  World w = World{name = "b", mode = Mode.On};
+  num near_local = near(2);
+  fit w.mode {
+    Mode.On -> { ret near_local + sizeof(World) * 0; }
+    Mode.Off -> { ret 0; }
+  }
+}

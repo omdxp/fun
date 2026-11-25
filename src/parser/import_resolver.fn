@@ -7,6 +7,7 @@
 use parse_state;
 use parser;
 use deps_lock;
+use private_names;
 use ..ast.ast;
 use ..lexer.lexer;
 use ..lexer.token;
@@ -721,6 +722,9 @@ pub fun parse_program_cached(
   // for a top-level entry) rather than ever returning no entry nodes.
   ProgramMergeResult r;
   str normalized_entry_path = _normalize_path(entry_path);
+  // Two files may each keep a private name to themselves; see
+  // `separate_private_names`.
+  separate_private_names(&merged, normalized_entry_path);
   let cached_entry = cache.files.at(normalized_entry_path);
   if cached_entry.is_some() {
     ParsedFile held_entry = cached_entry.unwrap();

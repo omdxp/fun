@@ -236,3 +236,13 @@ test "'let' from an imported untyped const resolves a real type, not the __let_i
   assert !contains(out, "__let_infer__"), "expected the sentinel never to reach the generated C";
   assert contains(out, "int64_t x = MAX;"), "expected 'x' to be declared with MAX's own real inferred type";
 }
+
+test "private names declared in several files stay private to each" {
+  let out = emit_file(
+    "examples/imports/private_names/main.fn",
+    "private names declared in several files stay private to each"
+  );
+  for name : ["near__a(", "near__b(", "int64_t near(", "World__a__near(", "typedef struct World__a", "typedef struct World__b"] {
+    assert contains(out, name), format("expected {str} in the generated C", name);
+  }
+}
