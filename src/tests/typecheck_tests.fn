@@ -5024,3 +5024,17 @@ test "a closure capturing by reference can't be returned or spawned" {
     "expected a return inside a closure body not to count as the function's own"
   );
 }
+
+test "a range for loop without std.range names the missing import" {
+  str got = check(
+    `fun main() {
+    `  for i : 0..3 {
+    `    _ = i;
+    `  }
+    `}`
+  );
+  assert contains(got, "use std.range;"), format(
+    "expected the missing import named, got: {str}",
+    got
+  );
+}

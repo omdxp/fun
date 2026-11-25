@@ -4792,3 +4792,105 @@ test "windows.h never declares names a C library like raylib also uses" {
     );
   }
 }
+
+test "self on either side of an overloaded operator is the receiver's own value" {
+  str src = `use std.io;
+  `
+  `compound V {
+  `  num x;
+  `}
+  `
+  `impl V {
+  `  op_add(V o) V { V r; r.x = self.x + o.x; ret r; }
+  `  op_mul(num k) V { V r; r.x = self.x * k; ret r; }
+  `  op_neg() V { V r; r.x = 0 - self.x; ret r; }
+  `  op_eq(V o) flag { ret self.x == o.x; }
+  `  twice() V { ret self + self; }
+  `  scaled() V { ret self * 3; }
+  `  flipped() V { ret -self; }
+  `  same(V o) flag { ret self == o; }
+  `  added_to(V o) V { ret o + self; }
+  `  is_null() flag { ret self == nil; }
+  `}
+  `
+  `fun main() num {
+  `  V a;
+  `  a.x = 4;
+  `  V b;
+  `  b.x = 1;
+  `  println_fmt(
+  `    "{num} {num} {num} {flag} {num} {flag}",
+  `    a.twice().x,
+  `    a.scaled().x,
+  `    a.flipped().x,
+  `    a.same(a),
+  `    a.added_to(b).x,
+  `    a.is_null()
+  `  );
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "self_operator_dispatch", "self as an operator operand");
+  assert contains(out, "8 12 -4 true 5 false"), format(
+    "expected each operator on the receiver's value, got: {str}",
+    out
+  );
+}
+
+test "an indexed field converts with as, and an operator result indexes through op_index" {
+  str src = `use std.io;
+  `
+  `compound G {
+  `  num x;
+  `  num y;
+  `}
+  `
+  `impl G {
+  `  op_add(G o) G { G r; r.x = self.x + o.x; r.y = self.y + o.y; ret r; }
+  `  op_index(num i) num {
+  `    if i == 0 { ret self.x; }
+  `    ret self.y;
+  `  }
+  `}
+  `
+  `compound P {
+  `  i32[4] lanes;
+  `  G g;
+  `}
+  `
+  `fun main() num {
+  `  P p;
+  `  p.lanes[1] = 7;
+  `  p.g.x = 1;
+  `  p.g.y = 2;
+  `  G b;
+  `  b.x = 10;
+  `  b.y = 20;
+  `  num t = p.lanes[1] as num * 2;
+  `  let v = (p.g + b)[1];
+  `  println_fmt("{num} {num} {num}", t, v, p.g[0]);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "indexed_conversion", "indexed conversion and op_index results");
+  assert contains(out, "14 22 1"), format("expected 14 22 1, got: {str}", out);
+}
+
+test "only a program importing std.c.simd carries the SIMD runtime" {
+  str plain = transpile_source(
+    `fun main() num {
+    `  ret 0;
+    `}`
+  ).unwrap();
+  assert !contains(plain, "__fun_simd_f32x4_add"), "expected no SIMD runtime without the import";
+  str src = `use std.io;
+  `use std.simd;
+  `
+  `fun main() num {
+  `  let v = f32x4(1, 2, 3, 4) * f32x4_splat(2);
+  `  println_fmt("{dec}", v.sum());
+  `  ret 0;
+  `}`;
+  str c = emit_c_with_imports(src, "simd_runtime", "std.simd runtime");
+  assert contains(c, "__fun_simd_f32x4_mul"), "expected the SIMD runtime with the import";
+  str out = run_source(src, "simd_runtime_run", "a std.simd program");
+  assert contains(out, "20"), format("expected 20, got: {str}", out);
+}

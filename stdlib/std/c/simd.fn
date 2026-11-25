@@ -1,0 +1,136 @@
+// 128-bit lane operations backing `std.simd`.
+//
+// The compiler emits each of these into the prelude of any program that
+// imports this module: vector extensions under GCC and Clang, SSE2 under
+// MSVC on x86, and plain loops anywhere else. Every one reads its inputs
+// and writes `o` through pointers to 16 bytes of lanes, so `o` may alias an
+// input. Use `std.simd` rather than calling these directly.
+
+// Adds each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f32x4_add(f32* o, f32* a, f32* b);
+
+// Subtracts each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f32x4_sub(f32* o, f32* a, f32* b);
+
+// Multiplies each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f32x4_mul(f32* o, f32* a, f32* b);
+
+// Divides each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f32x4_div(f32* o, f32* a, f32* b);
+
+// Takes the smaller of each pair of lanes of `a` and `b` into `o`.
+pub fun __fun_simd_f32x4_min(f32* o, f32* a, f32* b);
+
+// Takes the larger of each pair of lanes of `a` and `b` into `o`.
+pub fun __fun_simd_f32x4_max(f32* o, f32* a, f32* b);
+
+// Negates each lane of `a` into `o`.
+pub fun __fun_simd_f32x4_neg(f32* o, f32* a);
+
+// Takes the absolute value of each lane of `a` into `o`.
+pub fun __fun_simd_f32x4_abs(f32* o, f32* a);
+
+// Takes the square root of each lane of `a` into `o`.
+pub fun __fun_simd_f32x4_sqrt(f32* o, f32* a);
+
+// Adds each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f64x2_add(f64* o, f64* a, f64* b);
+
+// Subtracts each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f64x2_sub(f64* o, f64* a, f64* b);
+
+// Multiplies each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f64x2_mul(f64* o, f64* a, f64* b);
+
+// Divides each lane of `a` and `b` into `o`.
+pub fun __fun_simd_f64x2_div(f64* o, f64* a, f64* b);
+
+// Takes the smaller of each pair of lanes of `a` and `b` into `o`.
+pub fun __fun_simd_f64x2_min(f64* o, f64* a, f64* b);
+
+// Takes the larger of each pair of lanes of `a` and `b` into `o`.
+pub fun __fun_simd_f64x2_max(f64* o, f64* a, f64* b);
+
+// Negates each lane of `a` into `o`.
+pub fun __fun_simd_f64x2_neg(f64* o, f64* a);
+
+// Takes the absolute value of each lane of `a` into `o`.
+pub fun __fun_simd_f64x2_abs(f64* o, f64* a);
+
+// Takes the square root of each lane of `a` into `o`.
+pub fun __fun_simd_f64x2_sqrt(f64* o, f64* a);
+
+// Sets each lane of `o` to -1 where `a < b`, else 0.
+pub fun __fun_simd_f32x4_lt(i32* o, f32* a, f32* b);
+
+// Sets each lane of `o` to -1 where `a <= b`, else 0.
+pub fun __fun_simd_f32x4_le(i32* o, f32* a, f32* b);
+
+// Sets each lane of `o` to -1 where `a > b`, else 0.
+pub fun __fun_simd_f32x4_gt(i32* o, f32* a, f32* b);
+
+// Sets each lane of `o` to -1 where `a >= b`, else 0.
+pub fun __fun_simd_f32x4_ge(i32* o, f32* a, f32* b);
+
+// Sets each lane of `o` to -1 where `a == b`, else 0.
+pub fun __fun_simd_f32x4_eq(i32* o, f32* a, f32* b);
+
+// Sets each lane of `o` to -1 where `a != b`, else 0.
+pub fun __fun_simd_f32x4_ne(i32* o, f32* a, f32* b);
+
+// Adds each lane of `a` and `b` into `o`, wrapping on overflow.
+pub fun __fun_simd_i32x4_add(i32* o, i32* a, i32* b);
+
+// Subtracts each lane of `a` and `b` into `o`, wrapping on overflow.
+pub fun __fun_simd_i32x4_sub(i32* o, i32* a, i32* b);
+
+// Multiplies each lane of `a` and `b` into `o`, wrapping on overflow.
+pub fun __fun_simd_i32x4_mul(i32* o, i32* a, i32* b);
+
+// Bitwise AND of `a` and `b` into `o`.
+pub fun __fun_simd_i32x4_and(i32* o, i32* a, i32* b);
+
+// Bitwise OR of `a` and `b` into `o`.
+pub fun __fun_simd_i32x4_or(i32* o, i32* a, i32* b);
+
+// Bitwise XOR of `a` and `b` into `o`.
+pub fun __fun_simd_i32x4_xor(i32* o, i32* a, i32* b);
+
+// Takes the smaller of each pair of lanes of `a` and `b` into `o`.
+pub fun __fun_simd_i32x4_min(i32* o, i32* a, i32* b);
+
+// Takes the larger of each pair of lanes of `a` and `b` into `o`.
+pub fun __fun_simd_i32x4_max(i32* o, i32* a, i32* b);
+
+// Sets each lane of `o` to -1 where `a < b`, else 0.
+pub fun __fun_simd_i32x4_lt(i32* o, i32* a, i32* b);
+
+// Sets each lane of `o` to -1 where `a > b`, else 0.
+pub fun __fun_simd_i32x4_gt(i32* o, i32* a, i32* b);
+
+// Sets each lane of `o` to -1 where `a == b`, else 0.
+pub fun __fun_simd_i32x4_eq(i32* o, i32* a, i32* b);
+
+// Negates each lane of `a` into `o`, wrapping on overflow.
+pub fun __fun_simd_i32x4_neg(i32* o, i32* a);
+
+// Takes the absolute value of each lane of `a` into `o`, wrapping on overflow.
+pub fun __fun_simd_i32x4_abs(i32* o, i32* a);
+
+// Bitwise NOT of `a` into `o`.
+pub fun __fun_simd_i32x4_not(i32* o, i32* a);
+
+// Shifts each lane of `a` left by `n` (0 to 31) into `o`.
+pub fun __fun_simd_i32x4_shl(i32* o, i32* a, i32 n);
+
+// Shifts each lane of `a` right by `n` (0 to 31), keeping the sign, into `o`.
+pub fun __fun_simd_i32x4_shr(i32* o, i32* a, i32 n);
+
+// Converts each lane of `a` to `f32` into `o`.
+pub fun __fun_simd_i32x4_to_f32x4(f32* o, i32* a);
+
+// Converts each lane of `a` to `i32`, rounding toward zero, into `o`.
+pub fun __fun_simd_f32x4_to_i32x4(i32* o, f32* a);
+
+// Copies each 32-bit lane from `a` where `m` is all ones, else from `b`, into `o`.
+pub fun __fun_simd_x128_select(raw* o, i32* m, raw* a, raw* b);

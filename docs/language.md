@@ -920,6 +920,10 @@ fun main() {
 - A binary operator's one declared parameter is the right-hand operand
   (taken by value, like any other method parameter); a unary `-`/`!`
   takes none. The result type is whatever the method declares.
+- Inside a method, `self` on either side of an operator is the receiver's
+  own value, so `self * 2`, `other + self` and `-self` call the type's own
+  operator. Against another pointer or `nil`, `self` stays a pointer:
+  `self == nil` still compares addresses.
 - There is no overloading *by parameter type* - a type gets exactly
   one `op_mul`, for instance, not one for `Vec3 * Vec3` and a separate
   one for `Vec3 * num`. This matches `impl`'s own existing rule (one

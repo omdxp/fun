@@ -1,0 +1,41 @@
+// Portable 128-bit SIMD with std.simd: lane-wise math through the usual
+// operators, a comparison mask feeding select, and the bulk helpers over
+// a plain array.
+
+use std.io;
+use std.simd;
+
+fun main() {
+  let pos = f32x4(1, 2, 3, 4);
+  let vel = f32x4_splat(0.5);
+  let next = pos + vel.scale(4);
+  println_fmt(
+    "next = {dec} {dec} {dec} {dec}",
+    next[0],
+    next[1],
+    next[2],
+    next[3]
+  );
+
+  let too_far = next.cmp_gt(f32x4_splat(5));
+  let wrapped = too_far.select_f32(next - f32x4_splat(5), next);
+  println_fmt(
+    "wrapped = {dec} {dec} {dec} {dec}",
+    wrapped[0],
+    wrapped[1],
+    wrapped[2],
+    wrapped[3]
+  );
+
+  f32[10] samples;
+  num i = 0;
+  for i < 10 {
+    samples[i] = i as f32;
+    i += 1;
+  }
+  println_fmt(
+    "sum = {dec} dot = {dec}",
+    sum_f32(&samples[0], 10),
+    dot_f32(&samples[0], &samples[0], 10)
+  );
+}
