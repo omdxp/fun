@@ -3358,9 +3358,36 @@ impl Parser {
     // value in `Row{ cols = [1, 2, 3] }`.
     let prev_stop_comma = self.stop_at_comma;
     let prev_stop_binary = self.stop_at_binary_op;
-    self.stop_at_comma = false;
     self.stop_at_binary_op = false;
+    // Elements are parsed one at a time, each stopping at its own comma,
+    // and joined into the same left-nested `,` chain the comma operator
+    // would build. Parsed as one comma expression instead, every element
+    // nested one level deeper, so a table of a few hundred entries ran
+    // into the parser's depth limit.
+    self.stop_at_comma = true;
     let eerr = self.parse_expressionable_root();
+    for eerr.is_none() && self.state.next_token_is_operator(",") {
+      self.state.token_next();
+      let left_elem = self.state.node_pop();
+      eerr = self.parse_expressionable_root();
+      if eerr.is_some() || left_elem.is_none() {
+        break;
+      }
+      Node* l = malloc(sizeof(Node));
+      *l = left_elem.unwrap();
+      Node* r = malloc(sizeof(Node));
+      *r = self.state.node_pop().unwrap();
+      ExprNode comma = expr_node_new();
+      comma.left = l;
+      comma.has_left = true;
+      comma.right = r;
+      comma.has_right = true;
+      comma.op = ",";
+      Node comma_node = node_new(.Expression(comma));
+      comma_node.pos = l.pos;
+      comma_node.has_pos = l.has_pos;
+      self.state.nodes.push(comma_node);
+    }
     self.stop_at_comma = prev_stop_comma;
     self.stop_at_binary_op = prev_stop_binary;
     if eerr.is_some() {
@@ -9320,6 +9347,11 @@ impl Parser {
         }
         if pub_mods != 0 {
           ret self._parse_modified_declaration(true, pub_mods);
+        }
+        // `pub u8[16] table = ...;` or `pub Grid world;`: a global whose type
+        // is a name rather than a type keyword.
+        if nt.type == .Identifier {
+          ret self._parse_bare_type_variable_declaration(true);
         }
         if nt_is_keyword {
           let msg = format("keyword '{str}' is not yet supported after 'pub'", nkw);

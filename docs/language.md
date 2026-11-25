@@ -7,7 +7,8 @@
 - **Blocks** are delimited with `{}`.
 - **Comments**: `//` single-line, `/* ... */` block.
 - **Visibility**: prefix a declaration with `pub` to export it; without
-  `pub` it is module-private.
+  `pub` it is module-private. That covers functions, types, constants and
+  global variables (`pub u8[256] table = [...];`, `pub Grid world;`).
 - **Declaration order**: top-level declarations can appear in any order.
   A function can call a function, name a type, or read a global
   declared further down the same file.

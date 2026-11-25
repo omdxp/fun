@@ -1,0 +1,12 @@
+// Reads another file's public constant and globals, including ones whose
+// names aren't all capitals and whose types are names rather than keywords.
+
+use std.io;
+use tables;
+
+fun main() {
+  origin.x = 3;
+  num sq = squares[3] as num;
+  num got = answer;
+  println_fmt("{num} {num} {num} {dec}", got, sq, origin.x, scale as dec);
+}
