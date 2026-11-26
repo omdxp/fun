@@ -663,6 +663,7 @@ fun _is_ternary_colon(Vec<Token>* tokens, num idx) flag {
 // name, a closing generic argument, or the end of a declaration.
 fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, flag in_decl_only) flag {
   Token base = prev;
+  num base_idx = _prev_significant(tokens, idx);
   if equals(token_text(prev), "*") {
     num walk = _prev_significant(tokens, idx);
     if walk < 0 {
@@ -677,6 +678,26 @@ fun _is_pointer_star(Vec<Token>* tokens, num idx, Token prev, flag in_decl_only)
       wt = tokens.get(walk);
     }
     base = wt;
+    base_idx = walk;
+  }
+  // The type of a cast, `p as u8*`, ends at whatever delimiter follows
+  // its stars, inside call arguments as anywhere else.
+  if base_idx >= 0 && _is_type_token(base) {
+    num before_base = _prev_significant(tokens, base_idx);
+    if before_base >= 0 && equals(token_text(tokens.get(before_base)), "as") {
+      num after = _next_significant(tokens, idx + 1);
+      for after >= 0 && equals(token_text(tokens.get(after)), "*") {
+        after = _next_significant(tokens, after + 1);
+      }
+      if after < 0 {
+        ret true;
+      }
+      str after_text = token_text(tokens.get(after));
+      if equals(after_text, ",") || equals(after_text, ")") || equals(after_text, ";") ||
+        equals(after_text, "]") || equals(after_text, "}") {
+        ret true;
+      }
+    }
   }
   if !in_decl_only && !_is_type_token(base) {
     if _is_close_run(token_text(base)) == 0 {

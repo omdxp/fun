@@ -118,6 +118,43 @@ impl Fs {
     ret buf;
   }
 
+  // Reads a whole file as bytes, zeros and all, for binary files.
+  pub read_binary(str path) Result<Vec<u8>, Error> {
+    Vec<u8> out;
+    out.init(4096);
+    FILE* h = fopen(path, "rb");
+    if h == nil {
+      ret err_kind(.Io, format("could not open {str}", path), out);
+    }
+    defer fclose(h);
+    u8[4096] chunk;
+    for true {
+      num got = fread(&chunk[0], 1, 4096, h);
+      out.push_many(&chunk[0], got);
+      if got < 4096 {
+        break;
+      }
+    }
+    if ferror(h) != 0 {
+      out.free();
+      ret err_kind(.Io, format("could not read {str}", path), out);
+    }
+    ret .Ok(out);
+  }
+
+  // Writes the `len` bytes at `data` to a file, replacing it.
+  pub write_binary(str path, u8* data, num len) Result<flag, Error> {
+    FILE* h = fopen(path, "wb");
+    if h == nil {
+      ret err_kind(.Io, format("could not open {str}", path), false);
+    }
+    defer fclose(h);
+    if len > 0 && fwrite(data, 1, len, h) != len {
+      ret err_kind(.Io, format("could not write {str}", path), false);
+    }
+    ret .Ok(true);
+  }
+
   // Reads up to max_len bytes into a string, with Result.
   pub try_read_bytes(str path, num max_len) Result<str, Error> {
     let out = self.read_bytes(path, max_len);
@@ -322,6 +359,18 @@ pub fun read_to_string(str path) str {
 pub fun read_bytes(str path, num max_len) str {
   let f = fs();
   ret f.read_bytes(path, max_len);
+}
+
+// Reads a whole file as bytes, zeros and all, for binary files.
+pub fun read_binary(str path) Result<Vec<u8>, Error> {
+  let f = fs();
+  ret f.read_binary(path);
+}
+
+// Writes the `len` bytes at `data` to a file, replacing it.
+pub fun write_binary(str path, u8* data, num len) Result<flag, Error> {
+  let f = fs();
+  ret f.write_binary(path, data, len);
 }
 
 // Writes `data` to a file, returning true on success.
@@ -590,6 +639,36 @@ test "write, read, append, size and copy round-trip a file" {
   free(copied);
   assert remove_file(path) && remove_file(copy), "expected both files removed";
   assert !exists(path) && !remove_file(path), "expected a removed file to be gone, and removing it again to say so";
+}
+
+test "binary files round-trip every byte value, zeros included" {
+  str dir = _scratch("binary");
+  str path = format("{str}/all.bin", dir);
+  u8[10000] data;
+  num i = 0;
+  for i < 10000 {
+    data[i] = (i % 256) as u8;
+    i += 1;
+  }
+  assert write_binary(path, &data[0], 10000).is_ok(), "expected the bytes written";
+  assert size(path) == 10000, "expected every byte on disk";
+  let back = read_binary(path);
+  assert back.is_ok(), "expected the bytes read back";
+  Vec<u8> bytes = back.unwrap();
+  defer bytes.free();
+  assert bytes.len() == 10000, "expected every byte read, past the zeros";
+  i = 0;
+  flag same = true;
+  for i < 10000 {
+    if bytes.get(i) != data[i] {
+      same = false;
+    }
+    i += 1;
+  }
+  assert same, "expected the same bytes back";
+  assert write_binary(path, nil, 0).is_ok() && size(path) == 0, "expected an empty write to empty the file";
+  assert remove_file(path), "expected the file removed";
+  assert read_binary(path).is_err(), "expected a missing file to be an error";
 }
 
 test "the fs value has the same operations as the free functions" {

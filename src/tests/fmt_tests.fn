@@ -912,3 +912,10 @@ test "a multi-line raw string's lines line up with the line it starts on" {
   assert contains(got, "pub const str Q =\n  `a\n  `b`;\n"), "expected every line of a wrapped raw string at its continuation indent";
   assert contains(got, "  str s = `x\n  `y`;\n"), "expected later lines at the indent of the line the string starts on";
 }
+
+test "a cast to a pointer type keeps its star in a call's arguments" {
+  str src = "fun main() num {\n  raw* p = nil;\n  _ = g(p as u8 *, 1);\n  _ = g(p as Foo *, 2);\n  ret 0;\n}\n";
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "g(p as u8*, 1);"), "expected a builtin pointer cast written as one type";
+  assert contains(got, "g(p as Foo*, 2);"), "expected a named pointer cast written as one type";
+}
