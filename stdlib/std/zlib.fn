@@ -1,0 +1,560 @@
+// DEFLATE and zlib decompression, as PNG files, ZIP archives and HTTP
+// bodies hold data, and the Adler-32 and CRC-32 checksums they use.
+
+use std.vec;
+use std.result;
+use std.error;
+use std.string;
+use std.base64;
+
+// A canonical Huffman code: how many codes there are of each length, and
+// the symbols in code order.
+compound Huffman {
+  u16[16] count;
+  u16[320] symbol;
+}
+
+// Reads a DEFLATE stream bit by bit, low bits first.
+compound Inflater {
+  u8* data;
+  num len;
+  num pos;
+  num bitbuf;
+  num bitcnt;
+  flag ran_out;
+  Vec<u8> out;
+}
+
+// Length codes 257..285: the base length and how many extra bits follow.
+const u16[29] LENGTH_BASE = [
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  13,
+  15,
+  17,
+  19,
+  23,
+  27,
+  31,
+  35,
+  43,
+  51,
+  59,
+  67,
+  83,
+  99,
+  115,
+  131,
+  163,
+  195,
+  227,
+  258,
+];
+const u8[29] LENGTH_EXTRA = [
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  1,
+  1,
+  1,
+  1,
+  2,
+  2,
+  2,
+  2,
+  3,
+  3,
+  3,
+  3,
+  4,
+  4,
+  4,
+  4,
+  5,
+  5,
+  5,
+  5,
+  0,
+];
+// Distance codes 0..29: the base distance and how many extra bits follow.
+const u16[30] DIST_BASE = [
+  1,
+  2,
+  3,
+  4,
+  5,
+  7,
+  9,
+  13,
+  17,
+  25,
+  33,
+  49,
+  65,
+  97,
+  129,
+  193,
+  257,
+  385,
+  513,
+  769,
+  1025,
+  1537,
+  2049,
+  3073,
+  4097,
+  6145,
+  8193,
+  12289,
+  16385,
+  24577,
+];
+const u8[30] DIST_EXTRA = [
+  0,
+  0,
+  0,
+  0,
+  1,
+  1,
+  2,
+  2,
+  3,
+  3,
+  4,
+  4,
+  5,
+  5,
+  6,
+  6,
+  7,
+  7,
+  8,
+  8,
+  9,
+  9,
+  10,
+  10,
+  11,
+  11,
+  12,
+  12,
+  13,
+  13,
+];
+// The order a dynamic block lists its code length code lengths in.
+const u8[19] CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+// Builds the code whose symbols have the `n` bit lengths at `lengths`
+// (0 for unused). False when the lengths over-subscribe the code.
+fun build_huffman(Huffman* h, u8* lengths, num n) flag {
+  num len = 0;
+  for len < 16 {
+    h.count[len] = 0;
+    len += 1;
+  }
+  num s = 0;
+  for s < n {
+    h.count[lengths[s]] = h.count[lengths[s]] + 1;
+    s += 1;
+  }
+  if (h.count[0] as num) == n {
+    ret true;
+  }
+  num left = 1;
+  len = 1;
+  for len < 16 {
+    left = left * 2 - (h.count[len] as num);
+    if left < 0 {
+      ret false;
+    }
+    len += 1;
+  }
+  u16[16] offs;
+  offs[1] = 0;
+  len = 1;
+  for len < 15 {
+    offs[len + 1] = offs[len] + h.count[len];
+    len += 1;
+  }
+  s = 0;
+  for s < n {
+    if lengths[s] != 0 {
+      h.symbol[offs[lengths[s]]] = s as u16;
+      offs[lengths[s]] = offs[lengths[s]] + 1;
+    }
+    s += 1;
+  }
+  ret true;
+}
+
+impl Inflater {
+  // The next `n` bits, low bit first.
+  bits(num n) num {
+    for self.bitcnt < n {
+      if self.pos >= self.len {
+        self.ran_out = true;
+        ret 0;
+      }
+      self.bitbuf = self.bitbuf | ((self.data[self.pos] as num) << self.bitcnt);
+      self.pos += 1;
+      self.bitcnt += 8;
+    }
+    num value = self.bitbuf & ((1 << n) - 1);
+    self.bitbuf = self.bitbuf >> n;
+    self.bitcnt -= n;
+    ret value;
+  }
+
+  // The next symbol in code `h`, or -1 when the bits match no code.
+  decode(Huffman* h) num {
+    num code = 0;
+    num first = 0;
+    num index = 0;
+    num len = 1;
+    for len < 16 {
+      code = code | self.bits(1);
+      num count = h.count[len] as num;
+      if code - count < first {
+        ret h.symbol[index + (code - first)] as num;
+      }
+      index += count;
+      first += count;
+      first = first << 1;
+      code = code << 1;
+      len += 1;
+      if self.ran_out {
+        ret -1;
+      }
+    }
+    ret -1;
+  }
+
+  // A stored block: its bytes copied as they are.
+  stored() str {
+    self.bitbuf = 0;
+    self.bitcnt = 0;
+    if self.pos + 4 > self.len {
+      ret "a stored block runs past the end";
+    }
+    num n = (self.data[self.pos] as num) | ((self.data[self.pos + 1] as num) << 8);
+    num check = (self.data[self.pos + 2] as num) | ((self.data[self.pos + 3] as num) << 8);
+    self.pos += 4;
+    if n != (~check & 0xFFFF) {
+      ret "a stored block's length doesn't match its check";
+    }
+    if self.pos + n > self.len {
+      ret "a stored block runs past the end";
+    }
+    self.out.push_many(&self.data[self.pos], n);
+    self.pos += n;
+    ret "";
+  }
+
+  // A compressed block's symbols, read with the two codes, until its end.
+  codes(Huffman* lencode, Huffman* distcode) str {
+    for true {
+      num symbol = self.decode(lencode);
+      if symbol < 0 {
+        ret "a compressed block holds a code that isn't in its table";
+      }
+      if symbol < 256 {
+        self.out.push(symbol as u8);
+        continue;
+      }
+      if symbol == 256 {
+        ret "";
+      }
+      symbol -= 257;
+      if symbol >= 29 {
+        ret "a compressed block holds a length past the table";
+      }
+      num length = (LENGTH_BASE[symbol] as num) + self.bits(LENGTH_EXTRA[symbol] as num);
+      num dsym = self.decode(distcode);
+      if dsym < 0 || dsym >= 30 {
+        ret "a compressed block holds a distance past the table";
+      }
+      num dist = (DIST_BASE[dsym] as num) + self.bits(DIST_EXTRA[dsym] as num);
+      if dist > self.out.len() {
+        ret "a compressed block refers back before its start";
+      }
+      num from = self.out.len() - dist;
+      num k = 0;
+      for k < length {
+        self.out.push(self.out.get(from + k));
+        k += 1;
+      }
+      if self.ran_out {
+        ret "the data ends inside a block";
+      }
+    }
+    ret "";
+  }
+
+  // A block compressed with the fixed codes.
+  fixed() str {
+    u8[320] lengths;
+    num s = 0;
+    for s < 288 {
+      lengths[s] = s < 144 ? 8 : s < 256 ? 9 : s < 280 ? 7 : 8;
+      s += 1;
+    }
+    Huffman lencode;
+    _ = build_huffman(&lencode, &lengths[0], 288);
+    s = 0;
+    for s < 30 {
+      lengths[s] = 5;
+      s += 1;
+    }
+    Huffman distcode;
+    _ = build_huffman(&distcode, &lengths[0], 30);
+    ret self.codes(&lencode, &distcode);
+  }
+
+  // A block that carries its own codes.
+  dynamic() str {
+    num nlen = self.bits(5) + 257;
+    num ndist = self.bits(5) + 1;
+    num ncode = self.bits(4) + 4;
+    if nlen > 286 || ndist > 30 {
+      ret "a block declares more codes than DEFLATE has";
+    }
+    u8[320] lengths;
+    num i = 0;
+    for i < 19 {
+      lengths[CODE_LENGTH_ORDER[i]] = i < ncode ? self.bits(3) as u8 : 0;
+      i += 1;
+    }
+    Huffman lencode;
+    if !build_huffman(&lencode, &lengths[0], 19) {
+      ret "a block's code length code is malformed";
+    }
+    i = 0;
+    for i < nlen + ndist {
+      num symbol = self.decode(&lencode);
+      if symbol < 0 {
+        ret "a block's code lengths don't decode";
+      }
+      if symbol < 16 {
+        lengths[i] = symbol as u8;
+        i += 1;
+        continue;
+      }
+      u8 repeat_value = 0;
+      num repeat = 0;
+      if symbol == 16 {
+        if i == 0 {
+          ret "a block repeats a code length before giving one";
+        }
+        repeat_value = lengths[i - 1];
+        repeat = 3 + self.bits(2);
+      } elif symbol == 17 {
+        repeat = 3 + self.bits(3);
+      } else {
+        repeat = 11 + self.bits(7);
+      }
+      if i + repeat > nlen + ndist {
+        ret "a block's code lengths run past the codes";
+      }
+      for repeat > 0 {
+        lengths[i] = repeat_value;
+        i += 1;
+        repeat -= 1;
+      }
+    }
+    if lengths[256] == 0 {
+      ret "a block has no end-of-block code";
+    }
+    Huffman litcode;
+    if !build_huffman(&litcode, &lengths[0], nlen) {
+      ret "a block's literal code is malformed";
+    }
+    Huffman distcode;
+    if !build_huffman(&distcode, &lengths[nlen], ndist) {
+      ret "a block's distance code is malformed";
+    }
+    ret self.codes(&litcode, &distcode);
+  }
+}
+
+// The bytes the raw DEFLATE stream of `len` bytes at `data` stands for.
+pub fun inflate(u8* data, num len) Result<Vec<u8>, Error> {
+  Inflater z = Inflater{
+    data = data,
+    len = len,
+    pos = 0,
+    bitbuf = 0,
+    bitcnt = 0,
+    ran_out = false
+  };
+  z.out.init(len * 4 + 16);
+  flag last = false;
+  for !last {
+    last = z.bits(1) == 1;
+    num kind = z.bits(2);
+    str bad = "";
+    if z.ran_out {
+      bad = "the data ends before its last block";
+    } elif kind == 0 {
+      bad = z.stored();
+    } elif kind == 1 {
+      bad = z.fixed();
+    } elif kind == 2 {
+      bad = z.dynamic();
+    } else {
+      bad = "a block of a kind DEFLATE doesn't have";
+    }
+    if !equals(bad, "") {
+      z.out.free();
+      Vec<u8> none;
+      none.init(0);
+      ret err_kind(.Parse, bad, none);
+    }
+  }
+  ret .Ok(z.out);
+}
+
+// The bytes the zlib stream of `len` bytes at `data` stands for: a
+// DEFLATE stream between a two-byte header and the Adler-32 of what it
+// holds, which is checked.
+pub fun zlib_decompress(u8* data, num len) Result<Vec<u8>, Error> {
+  Vec<u8> none;
+  none.init(0);
+  if len < 6 {
+    ret err_kind(.Parse, "too short for zlib data", none);
+  }
+  num cmf = data[0] as num;
+  num flg = data[1] as num;
+  if (cmf & 15) != 8 || ((cmf << 8) | flg) % 31 != 0 {
+    ret err_kind(.Parse, "not a zlib header", none);
+  }
+  if (flg & 32) != 0 {
+    ret err_kind(.Parse, "zlib data that needs a preset dictionary", none);
+  }
+  let inflated = inflate(&data[2], len - 6);
+  if inflated.is_err() {
+    ret inflated;
+  }
+  Vec<u8> out = inflated.unwrap();
+  u8* tail = &data[len - 4];
+  num want = ((tail[0] as num) << 24) | ((tail[1] as num) << 16) | ((tail[2] as num) << 8) |
+    (tail[3] as num);
+  if adler32(out.data, out.len()) as num != want {
+    out.free();
+    ret err_kind(.Parse, "zlib data whose checksum doesn't match", none);
+  }
+  ret .Ok(out);
+}
+
+// The Adler-32 checksum of the `len` bytes at `data`.
+pub fun adler32(u8* data, num len) u32 {
+  num a = 1;
+  num b = 0;
+  num i = 0;
+  for i < len {
+    a = (a + (data[i] as num)) % 65521;
+    b = (b + a) % 65521;
+    i += 1;
+  }
+  ret ((b << 16) | a) as u32;
+}
+
+// The CRC-32 of the `len` bytes at `data`, carried on from `crc` (0 to
+// start), as zlib's `crc32` and PNG compute it.
+pub fun crc32(u32 crc, u8* data, num len) u32 {
+  num c = (crc as num) ^ 0xFFFFFFFF;
+  num i = 0;
+  for i < len {
+    c = c ^ (data[i] as num);
+    num k = 0;
+    for k < 8 {
+      if (c & 1) != 0 {
+        c = (c >> 1) ^ 0xEDB88320;
+      } else {
+        c = c >> 1;
+      }
+      k += 1;
+    }
+    i += 1;
+  }
+  ret (c ^ 0xFFFFFFFF) as u32;
+}
+
+// The text zlib data in base64 decompresses to.
+fun _unzlib(str b64) str {
+  Vec<u8> packed = decode(b64).unwrap();
+  defer packed.free();
+  let out = zlib_decompress(packed.data, packed.len());
+  if out.is_err() {
+    ret "<error>";
+  }
+  Vec<u8> bytes = out.unwrap();
+  bytes.push(0);
+  ret bytes.data as str;
+}
+
+test "zlib data with fixed codes, stored blocks, or nothing at all" {
+  assert equals(_unzlib("eNrLSM3JyddRyECiFMrzi3JSAHSHCR0="), "hello, hello, hello world"), "expected the fixed-code text";
+  assert equals(_unzlib("eAEBDADz/3N0b3JlZCBieXRlcx/PBNk="), "stored bytes"), "expected the stored text";
+  assert equals(_unzlib("eNoDAAAAAAE="), ""), "expected nothing from an empty stream";
+}
+
+test "zlib data with its own codes gives every byte back" {
+  str b64 = "eNoLyUhVKCzNTM5WSCrKL89TSMuvUMgqzS0oVsgvSy1SKAFK5yRWVSqk5KfrKYSMKh5VPKp4VPGo4lHFw0sxAyMTMwsrGzsHJxc3Dy8fv4CgkLCIqJi4hKSUtIysnLyCopKyiqqauoamlraOrp6+gaGRsYmpmbmFpZW1ja2dvYOjk7OLq5u7h6eXt4+vn39AYFBwSGhYeERkVHRMbFx8QmJSckpqWnpGZlZ2Tm5efkFhUXFJaVl5RWVVdU1tXX1DY1NzS2tbe0dnV3dPb1//hImTJk+ZOm36jJmzZs+ZO2/+goWLFi9Zumz5ipWrVq9Zu279ho2bNm/Zum37jp27du/Zu2//gYOHDh85euz4iZOnTp85e+78hYuXLl+5eu36jZu3bt+5e+/+g4ePHj95+uz5i5evXr95++79h4+fPn/5+u37j5+/fv/5++8/AHPpBcY=";
+  Vec<u8> packed = decode(b64).unwrap();
+  defer packed.free();
+  let out = zlib_decompress(packed.data, packed.len());
+  assert out.is_ok(), "expected the stream to decompress";
+  Vec<u8> bytes = out.unwrap();
+  defer bytes.free();
+  str line = "The quick brown fox jumps over the lazy dog. ";
+  num text = 40 * len(line);
+  assert bytes.len() == text + 256, "expected the repeated text and every byte value";
+  num i = 0;
+  flag same = true;
+  for i < text {
+    if bytes.get(i) != line[i % len(line)] as u8 {
+      same = false;
+    }
+    i += 1;
+  }
+  i = 0;
+  for i < 256 {
+    if bytes.get(text + i) != i as u8 {
+      same = false;
+    }
+    i += 1;
+  }
+  assert same, "expected the same bytes back";
+}
+
+test "damaged zlib data is refused" {
+  Vec<u8> packed = decode("eNrLSM3JyddRyECiFMrzi3JSAHSHCR0=").unwrap();
+  defer packed.free();
+  packed.set(packed.len() - 1, packed.get(packed.len() - 1) ^ 1);
+  assert zlib_decompress(packed.data, packed.len()).is_err(), "expected a wrong checksum refused";
+  packed.set(0, 0x79);
+  assert zlib_decompress(packed.data, packed.len()).is_err(), "expected a wrong header refused";
+  u8[3] cut = [0x78, 0xDA, 0x0B];
+  assert zlib_decompress(&cut[0], 3).is_err(), "expected cut-off data refused";
+  u8[2] bad_kind = [0x07, 0x00];
+  assert inflate(&bad_kind[0], 2).is_err(), "expected a reserved block kind refused";
+}
+
+test "checksums match zlib's" {
+  assert adler32("Wikipedia" as u8*, 9) == 0x11E60398, "expected the Adler-32 of Wikipedia";
+  assert crc32(0, "123456789" as u8*, 9) == 0xCBF43926, "expected the standard CRC-32 check value";
+  u32 half = crc32(0, "1234" as u8*, 4);
+  assert crc32(half, "56789" as u8*, 5) == 0xCBF43926, "expected a CRC carried across two calls";
+}
