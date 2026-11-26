@@ -1823,7 +1823,17 @@ impl Codegen {
     // declaration) - falling through to the placeholder text below is
     // harmless there, since nothing real reads it before an actual
     // instantiation resolves it properly.
+    // A closure is always the same two-word `__fun_closure_t` in C, but
+    // its signature still names a distinct type: `Vec<closure(f32) void>`
+    // and `Vec<closure() void>` are different instantiations, so each
+    // signature gets its own name, typedef'd to that one struct.
     if rdt.has_closure_sig {
+      if rdt.closure_sig != nil {
+        let closure_type_name = self.mangled_fn_type_name(rdt);
+        if closure_type_name.is_some() {
+          ret closure_type_name;
+        }
+      }
       ret .Some("__fun_closure_t");
     }
     if rdt.has_fn_sig && rdt.fn_sig != nil {
@@ -1869,12 +1879,14 @@ impl Codegen {
 
   // Synthesizes (and, on first use, emits) the C function-pointer typedef
   // backing a bare function type used as a generic argument, mangled
-  // `__Fn__<ret>[_ptrN]__<param1>[_ptrN]...`. Once emitted it's an
+  // `__Fn__<ret>[_ptrN]__<param1>[_ptrN]...`, or for a closure type
+  // `__Closure__...`, typedef'd to `__fun_closure_t`. Once emitted it's an
   // ordinary typedef'd pointer type like any other - ensuing usage sites
   // (a substituted `T value;` field, say) need no function-type-specific
   // handling at all.
   mangled_fn_type_name(DataType dt) Option<str> {
-    let sig = dt.fn_sig;
+    flag is_closure = dt.has_closure_sig && dt.closure_sig != nil;
+    let sig = is_closure ? dt.closure_sig : dt.fn_sig;
     // Not every function type seen here is real yet: `Comparator<T>`
     // read off `Vec<T>.sort_by`'s own parameter mid-template-registration
     // (before any concrete call site exists) still has its bare, unsubstituted
@@ -1894,7 +1906,7 @@ impl Codegen {
     }
 
     StringBuilder name_sb = string_builder_init(24);
-    name_sb.append("__Fn");
+    name_sb.append(is_closure ? "__Closure" : "__Fn");
     let rname = self.resolve_type_name(*sig.rtype)?;
     name_sb.append("__");
     name_sb.append(rname);
@@ -1936,6 +1948,14 @@ impl Codegen {
     CodegenState fn_scratch = self.new_scratch_state();
     CodegenState* saved_state = self.state;
     self.state = &fn_scratch;
+    if is_closure {
+      self.state.write("typedef __fun_closure_t ");
+      self.state.write(mangled_name);
+      self.state.write(";\n");
+      self.state = saved_state;
+      self.emit_hoisted(fn_scratch.out.build());
+      ret .Some(mangled_name);
+    }
     self.state.write("typedef ");
     let rt = self.write_type(*sig.rtype);
     if rt.is_none() {
@@ -3754,6 +3774,10 @@ impl Codegen {
             // ahead of that position before trusting it.
             Vec<str> proto_type_names;
             proto_type_names.init(2);
+            // The receiver's own struct too: the prototype names it as
+            // `self`, and it can be emitted after the position the other
+            // types alone would allow.
+            proto_type_names.push(owner_type);
             fit m.kind {
               .Function(proto_fnv) -> {
                 if proto_fnv.has_rtype {
@@ -6331,12 +6355,16 @@ impl Codegen {
       if equals(name, "") || equals(name, "void") || !equals(map_type_to_c(name), name) {
         continue;
       }
+      // The name and then a space, so `Vec__A` isn't taken as declared
+      // because `Vec__A__B` is.
       StringBuilder struct_needle_sb = string_builder_init(20);
       struct_needle_sb.append("typedef struct ");
       struct_needle_sb.append(name);
+      struct_needle_sb.append(" ");
       StringBuilder enum_needle_sb = string_builder_init(20);
       enum_needle_sb.append("typedef enum ");
       enum_needle_sb.append(name);
+      enum_needle_sb.append(" ");
       str struct_needle = struct_needle_sb.build();
       str enum_needle = enum_needle_sb.build();
       flag found = self.typedef_declared_before(struct_needle, pos) ||
@@ -7068,6 +7096,61 @@ impl Codegen {
         } else {
           ret .Some(.UnsupportedNode);
         }
+        // A fixed-size array field given another array value can't be
+        // initialized from it in C, so the literal is built in a
+        // temporary before the statement and those fields copied in.
+        if self.current_stmt_start_pos.is_some() || self.hoist_scratch_depth > 0 {
+          Vec<CompoundInitField> plain_fields;
+          plain_fields.init(ci.fields.len);
+          Vec<CompoundInitField> array_fields;
+          array_fields.init(0);
+          for f : ci.fields {
+            let afi = self.lookup_compound_field(type_name, f.name);
+            flag copies_array = afi.is_some() && afi.unwrap().dtype.is_some() &&
+              _is_fixed_array_dtype(afi.unwrap().dtype.unwrap()) &&
+              !_is_bracket_literal(f.value);
+            if copies_array {
+              array_fields.push(f);
+            } else {
+              plain_fields.push(f);
+            }
+          }
+          if array_fields.len > 0 {
+            CompoundInitNode plain = ci;
+            plain.fields = plain_fields;
+            Node plain_node = node_new(.CompoundInit(plain));
+            let plain_text = self._render_expr_isolated(&plain_node)?!(.UnsupportedNode);
+            self.closure_counter = self.closure_counter + 1;
+            str tmp = format("__fun_lit_{num}", self.closure_counter);
+            StringBuilder hoist = string_builder_init(64);
+            hoist.append(type_name);
+            hoist.append(" ");
+            hoist.append(tmp);
+            hoist.append(" = ");
+            hoist.append(plain_text);
+            hoist.append(";");
+            for af : array_fields {
+              let src_text = self._render_expr_isolated(af.value)?!(.UnsupportedNode);
+              hoist.append(
+                format(
+                  " memcpy({str}.{str}, {str}, sizeof({str}.{str}));",
+                  tmp,
+                  af.name,
+                  src_text,
+                  tmp,
+                  af.name
+                )
+              );
+            }
+            hoist.append("\n");
+            self._splice_before_statement(hoist.build());
+            self.state.write(tmp);
+            array_fields.free();
+            ret .None;
+          }
+          plain_fields.free();
+          array_fields.free();
+        }
         if !self.in_bare_initializer_context {
           self.state.write("(");
           self.state.write(type_name);
@@ -7629,6 +7712,31 @@ impl Codegen {
         // 64-bit: `1 << 40` or `3000000 * 3000000` would overflow before
         // ever reaching the `num` it is assigned to. A literal shifted, or
         // combined only with another literal, is widened first.
+        // One fixed-size array assigned to another is copied: C can't
+        // assign arrays.
+        if equals(e.op, "=") && e.has_left && e.has_right &&
+          self._is_fixed_array_value(e.left) &&
+          !_is_bracket_literal(e.right) {
+          self.state.write("memcpy(");
+          let alerr = self.emit_expr(*e.left);
+          if alerr.is_some() {
+            ret alerr;
+          }
+          self.state.write(", ");
+          let arerr = self.emit_expr(*e.right);
+          if arerr.is_some() {
+            ret arerr;
+          }
+          self.state.write(", sizeof(");
+          let aserr = self.emit_expr(*e.left);
+          if aserr.is_some() {
+            ret aserr;
+          }
+          // Closes the copy and the binary expression's own parenthesis
+          // as well, opened before this branch.
+          self.state.write(")))");
+          ret .None;
+        }
         flag widen_left = _is_int_literal_node(e.left) && e.has_right &&
           (equals(e.op, "<<") || equals(e.op, ">>") ||
           ((equals(e.op, "*") || equals(e.op, "+") || equals(e.op, "-")) && _is_int_literal_node(
@@ -11575,6 +11683,16 @@ impl Codegen {
   // suspended scratch render, where `current_stmt_start_pos` is cleared,
   // is routed through `root_stmt_start_pos` instead, the same fallback
   // `?`/`!` propagation uses.
+  // True when `n` is a fixed-size array value, not a pointer: what C
+  // can't copy with `=`.
+  _is_fixed_array_value(Node* n) flag {
+    if _is_bracket_literal(n) {
+      ret false;
+    }
+    let dt = self.infer_arg_dtype(n);
+    ret dt.is_some() && _is_fixed_array_dtype(dt.unwrap());
+  }
+
   _splice_before_statement(str text) {
     let hoist_save = self.hoist_insert_pos;
     let splice_pos = self.current_stmt_start_pos;
@@ -12771,7 +12889,21 @@ impl Codegen {
             }
           }
         }
-        if v.has_val {
+        // A fixed-size array initialized from another array value, not a
+        // `[...]` literal: C can't initialize an array from an array, so
+        // it's declared and then copied.
+        if v.has_val && _is_fixed_array_dtype(*v.var_type) && !_is_bracket_literal(v.val) {
+          self.state.write("; memcpy(");
+          self.state.write(v.name);
+          self.state.write(", ");
+          let cerr = self.emit_expr(*v.val);
+          if cerr.is_some() {
+            ret cerr;
+          }
+          self.state.write(", sizeof(");
+          self.state.write(v.name);
+          self.state.write("))");
+        } elif v.has_val {
           self.state.write(" = ");
           // A bare shorthand in a `Variable` initializer resolves against
           // the variable's declared type, via `resolve_type_name` rather
@@ -30605,4 +30737,18 @@ fun _decayed_array_dtype(DataType dt) DataType {
   p.array_depth = 0;
   p.array_brackets.init(0);
   ret _pointer_to_dtype(p);
+}
+
+// True for a fixed-size array type (`f32[4]`), not a pointer or a slice.
+fun _is_fixed_array_dtype(DataType dt) flag {
+  ret dt.is_array && dt.pointer_depth == 0 && dt.array_brackets.len > 0;
+}
+
+// True for a `[...]` array literal.
+fun _is_bracket_literal(Node* n) flag {
+  fit n.kind {
+    .Bracket(_) -> { ret true; }
+    _ -> { ret false; }
+  }
+  ret false;
 }

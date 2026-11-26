@@ -3673,3 +3673,52 @@ test "a shape's second impl is ready before a function above it coerces to the s
   assert made >= 0 && used >= 0, "expected the coercion helper and its use";
   assert made < used, "expected the coercion helper defined before the function using it";
 }
+
+test "collections of closures with different signatures are different instantiations" {
+  str src = `use std.io;
+  `use std.vec;
+  `fun main() num {
+  `  num base = 100;
+  `  Vec<closure(num) num> a;
+  `  a.init(1);
+  `  Vec<closure() num> b;
+  `  b.init(1);
+  `  a.push(fun(num x) num { ret base + x; });
+  `  b.push(fun() num { ret base; });
+  `  let add = a.get(0);
+  `  let get = b.get(0);
+  `  println_fmt("{num} {num}", add(5), get());
+  `  add.free();
+  `  get.free();
+  `  a.free();
+  `  b.free();
+  `  ret 0;
+  `}`;
+  str out = run_source(
+    src,
+    "closure_vec_signatures",
+    "collections of closures with different signatures are different instantiations"
+  );
+  assert contains(out, "105 100"), format(
+    "expected each closure called through its own vector, got {str}",
+    out
+  );
+}
+
+test "a fixed-size array copied by declaration, assignment or literal field uses memcpy" {
+  str src = `compound Swatch {
+  `  f32[4] rgba;
+  `}
+  `fun main() {
+  `  f32[4] teal = [0.0, 0.5, 0.5, 1.0];
+  `  f32[4] copy = teal;
+  `  Swatch s = Swatch{rgba = teal};
+  `  s.rgba = copy;
+  `}`;
+  let out = transpile_source_with_detail(src);
+  assert out.is_ok(), "expected the program to transpile";
+  str c = out.unwrap();
+  assert contains(c, "memcpy(copy, teal, sizeof(copy))"), "expected the declaration copied";
+  assert contains(c, "memcpy(s.rgba, copy, sizeof(s.rgba))"), "expected the assignment copied";
+  assert contains(c, ".rgba, teal, sizeof(__fun_lit_"), "expected the literal field copied into a temporary";
+}

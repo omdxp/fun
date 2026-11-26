@@ -169,6 +169,8 @@ run_with_timeout() {
 expected_content_for() {
   case "$1" in
     "examples/test.fn") printf '%s' $'The factorial of' ;;
+    "examples/advanced/array_copies.fn") printf '%s' $'0.5 0.5 0.25' ;;
+    "examples/advanced/callable_collections.fn") printf '%s' $'8 7\n105 100' ;;
     "examples/advanced/custom_functions.fn") printf '%s' $'The result of subtracting' ;;
     "examples/advanced/fit_exhaustive_ok.fn") printf '%s' $'x was true' ;;
     "examples/advanced/fit_exhaustive_warning.fn") printf '%s' $'x was true' ;;

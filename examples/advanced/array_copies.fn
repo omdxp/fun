@@ -1,0 +1,25 @@
+// A fixed-size array is a value: declaring one from another, assigning one
+// to another, or giving one to a compound literal's array field copies its
+// elements, the same as any other value.
+
+use std.io;
+
+compound Swatch {
+  str name;
+  f32[4] rgba;
+}
+
+fun main() {
+  f32[4] teal = [0.0, 0.5, 0.5, 1.0];
+  f32[4] copy = teal;
+  Swatch s = Swatch{name = "teal", rgba = teal};
+  teal[1] = 0.25;
+  Swatch t = Swatch{name = "later"};
+  t.rgba = teal;
+  println_fmt(
+    "{dec} {dec} {dec}",
+    copy[1] as f64,
+    s.rgba[1] as f64,
+    t.rgba[1] as f64
+  );
+}
