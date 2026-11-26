@@ -5182,7 +5182,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `test "leaks" {
     `  raw* p = malloc(16);
     `}
-);
+    );
   // Off by default: a `-test` binary's own process is short-lived, so
   // "still allocated when it exits a moment later anyway" isn't a bug
   // (see `Codegen.memcheck_leaks`'s own note) - this is exactly the
@@ -5226,7 +5226,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  raw* p = malloc(16);
     `  free(p);
     `}
-
+    
   );
   assert run_tests(
     clean,
@@ -5252,7 +5252,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  free(p);
     `  free(p);
     `}
-
+    
   );
   // A double-free is never a matter of process lifetime, so it's
   // caught unconditionally, with no opt-in needed.
@@ -5284,7 +5284,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  num* arr = malloc(8 * 4);
     `  arr[4] = 1;
     `}
-
+    
   );
   assert run_tests(
     overflow,
@@ -5324,7 +5324,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `    i = i + 1;
     `  }
     `}
-
+    
   );
   assert run_tests(
     underflow,
@@ -5355,7 +5355,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  free(p);
     `  p = p + 1;
     `}
-
+    
   );
   assert run_tests(
     arith_only,
@@ -5388,7 +5388,7 @@ test "run_tests under -memcheck ignores an ordinary leak by default, but catches
     `  num x = *p;
     `  _ = x;
     `}
-
+    
   );
   assert run_tests(
     arith_then_deref,

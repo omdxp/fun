@@ -518,7 +518,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         ret _hover_result(
           _doc(
             `align(N) compound Name { ... }
-          `align(N) Type name;`,
+            `align(N) Type name;`,
             `Makes a type, variable, or field start at an address that is a multiple of N bytes (a power of two), for a page table, a DMA buffer, or a cache line.`
           ),
           span_of(t, doc.text)
@@ -854,7 +854,7 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
     // scoped to these two kinds since a trailing comment on a
     // function/compound/etc. is rarely meant as its doc.
     if equals(doc_comment, "") &&
-    (d.kind == .Field || d.kind == .Variant) {
+      (d.kind == .Field || d.kind == .Variant) {
       doc_comment = doc_comment_trailing(source_text, d.pos.line);
     }
   }
@@ -1098,7 +1098,7 @@ pub fun definition_workspace_wide(
     // variant, or method the table also indexes.
     flag is_top_level = (d.kind == .Function || d.kind == .Compound || d.kind == .Enum || d.kind == .Shape ||
       d.kind == .Global || d.kind == .TypeAlias) &&
-    equals(
+      equals(
       d.container,
       ""
     );
@@ -1565,7 +1565,7 @@ fun _preceded_by_dot(Vec<Token>* tokens, Token t) flag {
   // something ending in `)` precedes the dot) - only the bare, no-
   // argument `!?` needs its own explicit check here, same as `?`/`!`.
   ret token_is_symbol(bd, ')') || token_is_symbol(bd, ']') ||
-  token_is_operator(bd, "?") || token_is_operator(bd, "!") || token_is_operator(bd, "!?");
+    token_is_operator(bd, "?") || token_is_operator(bd, "!") || token_is_operator(bd, "!?");
 }
 
 // True when `t` is a bare `.Name` fit-pattern shorthand: directly
@@ -2981,7 +2981,7 @@ pub fun warning_id_doc(WarningId id) str {
       `purpose.`;
     }
     .UnusedImport -> { ret `Flags a use statement naming a module nothing in the file
-      `reads from.`; }
+    `reads from.`; }
     .UnusedFunction -> {
       ret `Flags a private (non-pub), non-main function with a body
       `that nothing in the file calls.`;

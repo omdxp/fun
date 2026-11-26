@@ -344,7 +344,7 @@ pub fun is_safe_dep_name(str s) flag {
   for i < n {
     chr c = s[i];
     flag ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-    (c >= '0' && c <= '9') || c == '_';
+      (c >= '0' && c <= '9') || c == '_';
     if !ok {
       ret false;
     }
@@ -384,8 +384,8 @@ pub fun is_safe_git_ref(str s) flag {
   for i < n {
     chr c = s[i];
     flag ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
-    c == '/';
+      (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
+      c == '/';
     if !ok {
       ret false;
     }
@@ -402,7 +402,7 @@ pub fun is_safe_git_ref(str s) flag {
 // arbitrary local commands via a crafted "URL".
 pub fun is_safe_git_url(str s) flag {
   ret starts_with(s, "https://") || starts_with(s, "ssh://") ||
-  starts_with(s, "git@") || starts_with(s, "file://");
+    starts_with(s, "git@") || starts_with(s, "file://");
 }
 
 // A dependency's own `path` subfolder inside its repo: rejects the
@@ -1410,17 +1410,17 @@ test "[build] os_main_thread takes true or false" {
 test "[build.<os>] settings are added to [build] on that OS only" {
   let m = parse_manifest(
     `[package]
-  `name = "game"
-  `
-  `[build]
-  `links = ["raylib"]
-  `
-  `[build.macos]
-  `lib_dirs = ["vendor/macos/lib"]
-  `os_main_thread = true
-  `
-  `[build.windows]
-  `links = ["opengl32", "gdi32", "winmm"]`
+    `name = "game"
+    `
+    `[build]
+    `links = ["raylib"]
+    `
+    `[build.macos]
+    `lib_dirs = ["vendor/macos/lib"]
+    `os_main_thread = true
+    `
+    `[build.windows]
+    `links = ["opengl32", "gdi32", "winmm"]`
   )
   .unwrap();
 
@@ -1465,13 +1465,13 @@ test "[build] output takes exe or object" {
 test "[build] c_runtime takes static or dll, and [build.windows] overrides it" {
   let m = parse_manifest(
     `[package]
-  `name = "game"
-  `
-  `[build]
-  `c_runtime = "static"
-  `
-  `[build.windows]
-  `c_runtime = "dll"`
+    `name = "game"
+    `
+    `[build]
+    `c_runtime = "static"
+    `
+    `[build.windows]
+    `c_runtime = "dll"`
   )
   .unwrap();
   assert equals(build_for_host(&m, "windows").c_runtime, "dll"), "expected the Windows table's runtime";

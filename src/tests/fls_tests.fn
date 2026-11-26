@@ -11448,17 +11448,17 @@ test "rename and references on a local stay inside its own function, and skip fi
   docs.opened(
     "file:///scoped.fn",
     `compound P {
-  `  num count;
-  `}
-  `fun first() num {
-  `  num count = 1;
-  `  P p = P{count = 2};
-  `  ret count + p.count;
-  `}
-  `fun second() num {
-  `  num count = 3;
-  `  ret count;
-  `}`,
+    `  num count;
+    `}
+    `fun first() num {
+    `  num count = 1;
+    `  P p = P{count = 2};
+    `  ret count + p.count;
+    `}
+    `fun second() num {
+    `  num count = 3;
+    `  ret count;
+    `}`,
     1
   );
   let doc = docs.at("file:///scoped.fn").unwrap();

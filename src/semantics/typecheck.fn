@@ -248,7 +248,7 @@ pub const str LET_INFER_TYPE = "__let_infer__";
 // pointer, a tuple, or a function value.
 fun _is_scalar_value(CheckedType t) flag {
   if t.is_array || t.pointer_depth > 0 || t.is_tuple || t.has_fn_sig ||
-  t.has_closure_sig {
+    t.has_closure_sig {
     ret false;
   }
   fit t.base {
@@ -420,13 +420,13 @@ pub fun can_assign(CheckedType to, CheckedType from) flag {
   // A raw pointer stands for any pointer, in either direction, and a
   // string is a pointer.
   if to.base == .Raw &&
-  (from.pointer_depth > 0 || from.base == .Str) {
+    (from.pointer_depth > 0 || from.base == .Str) {
     ret true;
   }
   // A raw pointer stands for any pointer, and for the array storage a
   // pointer is how you allocate.
   if from.base == .Raw &&
-  (to.pointer_depth > 0 || to.is_array || to.base == .Str) {
+    (to.pointer_depth > 0 || to.is_array || to.base == .Str) {
     ret true;
   }
   // An array stands for a pointer to what it holds, as it does in C,
@@ -4638,8 +4638,8 @@ impl Checker {
     flag got_enum = !got_ptr && self.plain_enums.has(got.name);
     flag want_enum = !want_ptr && self.plain_enums.has(want.name);
     flag ok = got_num && want_num || got_ptr && want_ptr || got_ptr && want_int ||
-    got_int && want_ptr || got_enum && want_int || got_int && want_enum ||
-    got_enum && want_enum || self.assignable(want, got);
+      got_int && want_ptr || got_enum && want_int || got_int && want_enum ||
+      got_enum && want_enum || self.assignable(want, got);
     if !ok {
       self.fail(
         format(
@@ -5120,7 +5120,7 @@ fun _is_assignment(str op) flag {
 // a caller elsewhere recognizing it by text (a test, a client-side
 // quick-fix) only has one string to match against.
 const str MIXED_ARRAY_DIMENSIONS_MSG =
-"an array type's own size must be written for every dimension or none at all, not a mix of the two";
+  "an array type's own size must be written for every dimension or none at all, not a mix of the two";
 
 // True when `dt` is a multi-dimensional array mixing a sized and a
 // bare dimension (`num[3][] arr`) - no real size for codegen to emit

@@ -469,7 +469,7 @@ impl I32x4 {
   // All four lanes added together, wrapping on overflow.
   pub sum() i32 {
     num total = (self.lanes[0] as num) + (self.lanes[1] as num) +
-    (self.lanes[2] as num) + (self.lanes[3] as num);
+      (self.lanes[2] as num) + (self.lanes[3] as num);
     ret total as i32;
   }
 
@@ -570,7 +570,7 @@ impl I32x4 {
   // True when every lane is nonzero.
   pub all() flag {
     ret self.lanes[0] != 0 && self.lanes[1] != 0 && self.lanes[2] != 0 &&
-    self.lanes[3] != 0;
+      self.lanes[3] != 0;
   }
 
   // Every lane converted to `f32`.

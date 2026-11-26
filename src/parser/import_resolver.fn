@@ -1279,7 +1279,7 @@ fun _scan_compound_names(
       for v < tokens.len {
         let vt = tokens.get(v);
         if token_is_operator(vt, "=") || token_is_symbol(vt, ';') ||
-        token_is_symbol(vt, '{') || token_is_operator(vt, "(") {
+          token_is_symbol(vt, '{') || token_is_operator(vt, "(") {
           break;
         }
         if vt.type == .Identifier {

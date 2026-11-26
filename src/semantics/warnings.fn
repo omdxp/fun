@@ -1302,7 +1302,7 @@ impl Analysis {
                 }
               }
               if equals(method, "push") || equals(method, "insert") ||
-              equals(method, "put") || equals(method, "add") || equals(method, "set") {
+                equals(method, "put") || equals(method, "add") || equals(method, "set") {
                 self.report_closure_escape(
                   why,
                   format("is added to a collection with '{str}'", method),

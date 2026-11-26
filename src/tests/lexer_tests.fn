@@ -290,11 +290,11 @@ test "'imp'/'bin' are no longer reserved words, lexing as ordinary identifiers" 
 test "an asm body is skipped as raw text, whatever characters it holds" {
   let tokens = lex_ok(
     `asm {
-  `  .macro isr n
-  `  isr_\n: # it's "quoted" {nested} @note
-  `  .endm
-  `};
-  `num x = 1;`
+    `  .macro isr n
+    `  isr_\n: # it's "quoted" {nested} @note
+    `  .endm
+    `};
+    `num x = 1;`
   );
   num braces = 0;
   flag saw_x = false;

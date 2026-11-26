@@ -3722,3 +3722,25 @@ test "a fixed-size array copied by declaration, assignment or literal field uses
   assert contains(c, "memcpy(s.rgba, copy, sizeof(s.rgba))"), "expected the assignment copied";
   assert contains(c, ".rgba, teal, sizeof(__fun_lit_"), "expected the literal field copied into a temporary";
 }
+
+test "a bare block is its own scope and runs its defers when it closes" {
+  str src = `use std.io;
+  `fun main() num {
+  `  num x = 1;
+  `  {
+  `    num y = x + 1;
+  `    defer println("closed");
+  `    println_fmt("inner {num}", y);
+  `  }
+  `  num y = 10;
+  `  println_fmt("outer {num}", y);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "bare_block", "a bare block is its own scope");
+  assert contains(out, "inner 2"), format("expected the block's own local, got {str}", out);
+  assert contains(out, "closed"), format("expected the block's defer, got {str}", out);
+  assert contains(out, "outer 10"), format(
+    "expected the outer local after the block, got {str}",
+    out
+  );
+}

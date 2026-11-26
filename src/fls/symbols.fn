@@ -809,7 +809,7 @@ fun _infer_global_const_type_depth(Node* val, Vec<Node>* program, num depth) str
     // operator too, not just `-`.
     .Unary(u) -> {
       if equals(u.op, "-") || equals(u.op, "+") || equals(u.op, "!") ||
-      equals(u.op, "~") || equals(u.op, "++") || equals(u.op, "--") {
+        equals(u.op, "~") || equals(u.op, "++") || equals(u.op, "--") {
         ret _infer_global_const_type_depth(u.operand, program, depth + 1);
       }
       ret "";
@@ -1176,8 +1176,8 @@ pub fun _paren_group_text(Vec<Token>* tokens, num close, num* open_out) str {
 // type name.
 fun _is_builtin_scalar_type_word(str w) flag {
   ret equals(w, "num") || equals(w, "dec") || equals(w, "str") ||
-  equals(w, "flag") || equals(w, "chr") || equals(w, "void") ||
-  equals(w, "raw");
+    equals(w, "flag") || equals(w, "chr") || equals(w, "void") ||
+    equals(w, "raw");
 }
 
 // `name`'s own declared type, read straight off the raw tokens rather
@@ -1365,7 +1365,7 @@ pub fun _field_type_from_tokens(Vec<Token>* tokens, str type_name, str field_nam
         continue;
       }
       if depth == 1 && bt.type == .Identifier &&
-      equals(token_word(bt), field_name) {
+        equals(token_word(bt), field_name) {
         let after = _next_real_token(tokens, j);
         if after.is_some() && token_is_symbol(after.unwrap(), ';') {
           // A fresh copy, not `_base_type_before`'s own borrowed
@@ -1494,7 +1494,7 @@ pub fun chain_tail_type_from_tokens(
   Token prev_tok = tokens.get(prev_idx);
   let prev_before = token_before(tokens, prev_idx);
   flag prev_has_dot = prev_before.is_some() &&
-  token_is_dot_like(prev_before.unwrap());
+    token_is_dot_like(prev_before.unwrap());
   let prev_after = token_after(tokens, prev_idx + 1);
   flag prev_is_call = prev_after.is_some() && token_is_operator(prev_after.unwrap(), "(");
   // `_receiver_type_from_tokens`'s own result is borrowed (a `token_
@@ -3336,10 +3336,10 @@ pub fun local_method_return_type_from_tokens(
               continue;
             }
             if depth == 1 && kt.type == .Identifier &&
-            equals(token_word(kt), method_name) {
+              equals(token_word(kt), method_name) {
               let maybe_lparen = token_after(tokens, k + 1);
               if maybe_lparen.is_some() &&
-              token_is_operator(maybe_lparen.unwrap(), "(") {
+                token_is_operator(maybe_lparen.unwrap(), "(") {
                 num lparen_idx = index_of_token(tokens, maybe_lparen.unwrap());
                 num pdepth = 1;
                 num m = lparen_idx + 1;
@@ -3446,10 +3446,10 @@ pub fun local_method_signature_from_tokens(
               continue;
             }
             if depth == 1 && kt.type == .Identifier &&
-            equals(token_word(kt), method_name) {
+              equals(token_word(kt), method_name) {
               let maybe_lparen = token_after(tokens, k + 1);
               if maybe_lparen.is_some() &&
-              token_is_operator(maybe_lparen.unwrap(), "(") {
+                token_is_operator(maybe_lparen.unwrap(), "(") {
                 Token lp = maybe_lparen.unwrap();
                 num lparen_idx = index_of_token(tokens, lp);
                 num pdepth = 1;
@@ -4378,7 +4378,7 @@ pub fun call_paren_is_declaration(Vec<Token>* tokens, num name_idx, num lparen_i
       ret true;
     }
     flag typeish = k.type == .Identifier || k.type == .Keyword ||
-    token_is_operator(
+      token_is_operator(
       k,
       "*"
     ) || token_is_symbol(k, '[') || token_is_operator(k, "[") || token_is_symbol(k, ']') ||
@@ -5536,13 +5536,13 @@ fun _looks_like_ternary_question(Vec<Token>* tokens, num q_idx) flag {
       ret false;
     }
     if token_is_operator(t, "(") || token_is_operator(t, "[") ||
-    token_is_symbol(t, '{') {
+      token_is_symbol(t, '{') {
       depth = depth + 1;
       i = i + 1;
       continue;
     }
     if token_is_symbol(t, ')') || token_is_symbol(t, ']') ||
-    token_is_symbol(t, '}') {
+      token_is_symbol(t, '}') {
       if depth == 0 {
         ret false;
       }
@@ -5696,7 +5696,7 @@ fun _infer_type(
   // here, so `out_args` is cleared rather than left stale.
   if (token_is_operator(op_tok, "?") || token_is_operator(op_tok, "!") ||
     token_is_operator(op_tok, "?!") || token_is_operator(op_tok, "!?")) &&
-  out_args != nil && out_args.len > 0 {
+    out_args != nil && out_args.len > 0 {
     str unwrapped = out_args.get(0);
     out_args.init(0);
     end_idx = index_of_token(tokens, op_tok);
