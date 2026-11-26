@@ -873,3 +873,13 @@ test "the arguments after a closure literal stay on the line its body closes on"
   str twice = format_source(once, "t.fn").unwrap();
   assert equals(once, twice), twice;
 }
+
+test "a function or closure type as a generic argument keeps its angle brackets tight" {
+  str src = `compound Schedule {
+  `  Vec<closure(f32) void> systems;
+  `  Vec < fun(num) str > names;
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "Vec<closure(f32) void> systems;"), "expected a closure type argument written tight";
+  assert contains(got, "Vec<fun(num) str> names;"), "expected a spread-out function type argument pulled tight";
+}

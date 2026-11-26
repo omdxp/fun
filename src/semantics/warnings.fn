@@ -941,52 +941,6 @@ fun _calls_method(Node* node, str method) flag {
   ret false;
 }
 
-// Every `.ClosureLiteral` node directly reachable from `node`'s own
-// expression/statement tree, not recursing inside one once found - each
-// closure is checked independently against the known-address-of state
-// live at its own point of definition, not merged into an ancestor's.
-fun _find_closure_literals(Node* node, Vec<Node*>* out) {
-  if node == nil {
-    ret;
-  }
-  fit node.kind {
-    .ClosureLiteral(_) -> { out.push(node); }
-    .Expression(e) -> {
-      if e.has_left {
-        _find_closure_literals(e.left, out);
-      }
-      if e.has_right {
-        _find_closure_literals(e.right, out);
-      }
-    }
-    .ExpressionParenthesis(inner) -> { _find_closure_literals(inner, out); }
-    .Unary(u) -> { _find_closure_literals(u.operand, out); }
-    .Ternary(t) -> {
-      _find_closure_literals(t.cond, out);
-      _find_closure_literals(t.then_val, out);
-      _find_closure_literals(t.else_val, out);
-    }
-    .Bracket(items) -> { _find_closure_literals(items, out); }
-    .CompoundInit(init) -> {
-      for f : init.fields {
-        _find_closure_literals(f.value, out);
-      }
-    }
-    .TupleLiteral(t) -> {
-      for el : t.elements {
-        _find_closure_literals(el, out);
-      }
-    }
-    .Variable(v) -> {
-      if v.has_val {
-        _find_closure_literals(v.val, out);
-      }
-    }
-    .StatementReturn(value) -> { _find_closure_literals(value, out); }
-    _ -> {}
-  }
-}
-
 // True when a body forks a task.
 fun _contains_fork(Node* node) flag {
   if node == nil {
@@ -1249,14 +1203,14 @@ impl Analysis {
     ret false;
   }
 
-  // Reports a closure literal that captures a pointer to a local
-  // declared in the same enclosing function - best-effort, same
-  // narrowness as `check_shared_captures` above: only a direct
-  // `name = &local;`/`T* name = &local;` assignment textually visible
-  // in the same top-level body is tracked, so a pointer that flows
-  // through a helper function's return value, a struct field, or a
-  // conditional branch this walk doesn't descend into stays
-  // undetected.
+  // Reports a closure that escapes the function it was made in while it
+  // still depends on that function's stack: one capturing a local by
+  // reference, or one capturing a pointer this same function took to a
+  // local of its own. Escaping means returned, stored in a field, added to
+  // a collection or spawned; a closure only called while its function
+  // runs is fine. Best-effort like `check_shared_captures`: only a direct
+  // `&local` assignment textually visible in the same top-level body is
+  // tracked as such a pointer.
   check_closure_escaping_captures(Node* body) {
     if body == nil {
       ret;
@@ -1266,80 +1220,27 @@ impl Analysis {
         Map<str, str> last_address_of;
         last_address_of.init(4);
         defer last_address_of.free();
-        Set<str> ref_closures = set_init("", 2);
-        defer ref_closures.free();
+        Map<str, str> tracked;
+        tracked.init(2);
+        defer tracked.free();
         for st : inner.statements {
-          self.check_closure_escaping_statement(st, &last_address_of);
-          self.check_ref_capture_store(st, &ref_closures);
+          self.check_closure_escape(st, &last_address_of, &tracked);
         }
       }
       _ -> {}
     }
   }
 
-  // Flags a closure that captures by reference being stored where it
-  // can outlive this function: assigned into a field, or handed to a
-  // collection's `push`/`insert`/`put`/`add`/`set`. `ref_closures` holds
-  // the locals bound to such a closure so far in this function.
-  check_ref_capture_store(Node* st, Set<str>* ref_closures) {
-    if st == nil {
-      ret;
-    }
-    fit st.kind {
-      .Variable(v) -> {
-        if v.has_val && _holds_ref_closure(v.val, ref_closures) {
-          ref_closures.add(v.name);
-        }
-      }
-      .Expression(e) -> {
-        if equals(e.op, "=") && e.has_left && e.has_right &&
-          _holds_ref_closure(e.right, ref_closures) {
-          fit e.left.kind {
-            .Identifier(n) -> { ref_closures.add(n); }
-            .Expression(target) -> {
-              if equals(target.op, ".") {
-                self.report(
-                  .EscapingRefCapture,
-                  "a closure capturing a local by reference is stored in a field, where it can outlive that local",
-                  st
-                );
-              }
-            }
-            _ -> {}
-          }
-        }
-        if equals(e.op, "()") && e.has_left && e.has_right {
-          fit e.left.kind {
-            .Expression(callee) -> {
-              str method = "";
-              if equals(callee.op, ".") && callee.has_right {
-                fit callee.right.kind {
-                  .Identifier(m) -> { method = m; }
-                  _ -> {}
-                }
-              }
-              flag stores = equals(method, "push") || equals(method, "insert") ||
-                equals(method, "put") || equals(method, "add") || equals(method, "set");
-              if stores && _args_hold_ref_closure(e.right, ref_closures) {
-                self.report(
-                  .EscapingRefCapture,
-                  format(
-                  "a closure capturing a local by reference is added to a collection with '{str}', where it can outlive that local",
-                  method
-                  ),
-                  st
-                );
-              }
-            }
-            _ -> {}
-          }
-        }
-      }
-      _ -> {}
-    }
-  }
-
-  check_closure_escaping_statement(Node* st, Map<str, str>* last_address_of) {
+  // Follows one statement of a body: notes pointers taken to locals and
+  // the locals bound to stack-dependent closures, and reports such a
+  // closure leaving the function.
+  check_closure_escape(
+    Node* st,
+    Map<str,
+    str>* last_address_of,
+    Map<str,
+    str>* tracked
+  ) {
     if st == nil {
       ret;
     }
@@ -1350,55 +1251,95 @@ impl Analysis {
           if !equals(aliased, "") {
             last_address_of.put(v.name, aliased);
           }
+          str why = _stack_closure(v.val, last_address_of, tracked);
+          if !equals(why, "") {
+            tracked.put(v.name, why);
+          }
         }
+      }
+      .StatementReturn(value) -> {
+        self.report_closure_escape(
+          _stack_closure(value, last_address_of, tracked),
+          "is returned",
+          st
+        );
       }
       .Expression(e) -> {
         if equals(e.op, "=") && e.has_left && e.has_right {
-          str lhs = "";
+          str why = _stack_closure(e.right, last_address_of, tracked);
           fit e.left.kind {
-            .Identifier(n) -> { lhs = n; }
+            .Identifier(n) -> {
+              str aliased = _address_of_name(e.right);
+              if !equals(aliased, "") {
+                last_address_of.put(n, aliased);
+              }
+              if !equals(why, "") {
+                tracked.put(n, why);
+              }
+            }
+            .Expression(target) -> {
+              if equals(target.op, ".") {
+                self.report_closure_escape(why, "is stored in a field", st);
+              }
+            }
             _ -> {}
           }
-          if !equals(lhs, "") {
-            str aliased = _address_of_name(e.right);
-            if !equals(aliased, "") {
-              last_address_of.put(lhs, aliased);
+        }
+        if equals(e.op, "()") && e.has_left && e.has_right {
+          str why = _args_stack_closure(e.right, last_address_of, tracked);
+          fit e.left.kind {
+            .Identifier(callee) -> {
+              if equals(callee, "spawn") {
+                self.report_closure_escape(why, "is spawned onto another thread", st);
+              }
             }
+            .Expression(callee) -> {
+              str method = "";
+              if equals(callee.op, ".") && callee.has_right {
+                fit callee.right.kind {
+                  .Identifier(m) -> { method = m; }
+                  _ -> {}
+                }
+              }
+              if equals(method, "push") || equals(method, "insert") ||
+              equals(method, "put") || equals(method, "add") || equals(method, "set") {
+                self.report_closure_escape(
+                  why,
+                  format("is added to a collection with '{str}'", method),
+                  st
+                );
+              }
+            }
+            _ -> {}
           }
         }
       }
       _ -> {}
     }
+  }
 
-    Vec<Node*> closures;
-    closures.init(2);
-    defer closures.free();
-    _find_closure_literals(st, &closures);
-    for c : closures {
-      fit c.kind {
-        .ClosureLiteral(f) -> {
-          if f.has_body {
-            Set<str> free_names = closure_free_identifier_names(f);
-            defer free_names.free();
-            for name : free_names {
-              let aliased = last_address_of.at(name);
-              if aliased.is_some() {
-                self.report(
-                  .ClosureCapturesEscapingPointer,
-                  format(
-                  "closure captures '{str}', a pointer to '{str}' (a local in the same function); unsafe once this function returns",
-                  name,
-                  aliased.unwrap()
-                  ),
-                  c
-                );
-              }
-            }
-          }
-        }
-        _ -> {}
-      }
+  // Reports a closure leaving its function, `why` being what
+  // `_stack_closure` said about it; nothing when `why` is empty.
+  report_closure_escape(str why, str where, Node* at) {
+    if equals(why, "") {
+      ret;
     }
+    if equals(why, "&") {
+      self.report(
+        .EscapingRefCapture,
+        format(
+        "a closure capturing a local by reference {str}, where it can outlive that local",
+        where
+        ),
+        at
+      );
+      ret;
+    }
+    self.report(
+      .ClosureCapturesEscapingPointer,
+      format("a closure capturing {str} {str}, where it can outlive that local", why, where),
+      at
+    );
   }
 
   // Reports a literal a sized integer cannot hold, which is a value the
@@ -2203,6 +2144,20 @@ impl Analysis {
             collect_dtype_reads(field.dtype, &read);
           }
         }
+        // A shape's method signatures name types the same way a
+        // function's do.
+        .Shape(q) -> {
+          for sig : q.methods {
+            for a : sig.args {
+              if a.dtype != nil {
+                collect_dtype_reads(a.dtype, &read);
+              }
+            }
+            if sig.rtype != nil {
+              collect_dtype_reads(sig.rtype, &read);
+            }
+          }
+        }
         .Variable(v) -> { collect_reads(node, &read); }
         .Test(t) -> { collect_reads(t.body, &read); }
         _ -> {}
@@ -2928,35 +2883,71 @@ pub fun collect_reads(Node* node, Set<str>* out) {
   }
 }
 
-// True when `n` is a closure literal with a by-reference capture, or a
-// local already bound to one.
-fun _holds_ref_closure(Node* n, Set<str>* ref_closures) flag {
+// What makes `n` a closure that depends on its function's stack, or ""
+// when it doesn't: "&" for one capturing a local by reference, or a
+// description of the pointer to a local it captures. A name stands for
+// the closure bound to it, as `tracked` records.
+fun _stack_closure(Node* n, Map<str, str>* last_address_of, Map<str, str>* tracked) str {
   if n == nil {
-    ret false;
+    ret "";
   }
   fit n.kind {
-    .ClosureLiteral(f) -> { ret f.ref_captures.len > 0; }
-    .Identifier(name) -> { ret ref_closures.has(name); }
-    .ExpressionParenthesis(inner) -> { ret _holds_ref_closure(inner, ref_closures); }
+    .ClosureLiteral(f) -> {
+      if f.ref_captures.len > 0 {
+        ret "&";
+      }
+      if !f.has_body {
+        ret "";
+      }
+      Set<str> free_names = closure_free_identifier_names(f);
+      defer free_names.free();
+      for name : free_names {
+        let aliased = last_address_of.at(name);
+        if aliased.is_some() {
+          ret format("'{str}', a pointer to the local '{str}',", name, aliased.unwrap());
+        }
+      }
+    }
+    .Identifier(name) -> {
+      let why = tracked.at(name);
+      if why.is_some() {
+        ret why.unwrap();
+      }
+    }
+    .ExpressionParenthesis(inner) -> { ret _stack_closure(inner, last_address_of, tracked); }
     _ -> {}
   }
-  ret false;
+  ret "";
 }
 
-// True when any argument in a call's argument list `args` holds a
-// by-reference closure.
-fun _args_hold_ref_closure(Node* args, Set<str>* ref_closures) flag {
+// `_stack_closure` for the first argument in a call's argument list
+// `args` that is such a closure.
+fun _args_stack_closure(
+  Node* args,
+  Map<str,
+  str>* last_address_of,
+  Map<str,
+  str>* tracked
+) str {
   if args == nil {
-    ret false;
+    ret "";
   }
   fit args.kind {
     .Expression(e) -> {
       if equals(e.op, ",") {
-        ret (e.has_left && _args_hold_ref_closure(e.left, ref_closures)) ||
-          (e.has_right && _args_hold_ref_closure(e.right, ref_closures));
+        if e.has_left {
+          str left = _args_stack_closure(e.left, last_address_of, tracked);
+          if !equals(left, "") {
+            ret left;
+          }
+        }
+        if e.has_right {
+          ret _args_stack_closure(e.right, last_address_of, tracked);
+        }
+        ret "";
       }
     }
     _ -> {}
   }
-  ret _holds_ref_closure(args, ref_closures);
+  ret _stack_closure(args, last_address_of, tracked);
 }

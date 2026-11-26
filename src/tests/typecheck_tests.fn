@@ -5038,3 +5038,86 @@ test "a range for loop without std.range names the missing import" {
     got
   );
 }
+
+test "indexing a pointer reads what it points at" {
+  accepts(
+    `fun first(str* names) str {
+    `  ret names[0];
+    `}`,
+    "expected a str* indexed to give a str"
+  );
+  rejects(
+    `fun first(num* values) str {
+    `  ret values[0];
+    `}`,
+    "expected a num* indexed to give a num, not a str"
+  );
+  accepts(
+    `fun letter(str s) chr {
+    `  ret s[0];
+    `}`,
+    "expected a str indexed to still give a chr"
+  );
+}
+
+test "test bodies and assert conditions are checked" {
+  rejects(
+    `test "t" {
+    `  _ = nothing_here(1);
+    `}`,
+    "expected an unknown call inside a test body to be rejected"
+  );
+  rejects(
+    `fun main() {
+    `  assert nothing_here(1) == 2, "never";
+    `}`,
+    "expected an unknown call in an assert condition to be rejected"
+  );
+}
+
+test "a sized number meets a num or dec bound" {
+  accepts(
+    `fun mag<T: num | dec>(T x) T { ret x; }
+    `fun main() {
+    `  f32 a = 1.5;
+    `  i32 b = 2;
+    `  _ = mag(a);
+    `  _ = mag(b);
+    `}`,
+    "expected f32 and i32 accepted where num or dec is"
+  );
+  rejects(
+    `fun whole<T: num>(T x) T { ret x; }
+    `fun main() {
+    `  f32 a = 1.5;
+    `  _ = whole(a);
+    `}`,
+    "expected an f32 still turned away where only num is"
+  );
+}
+
+test "a method's type parameter hides a type of the same name" {
+  accepts(
+    `compound A {
+    `  num x;
+    `}
+    `compound Box {
+    `  num v;
+    `}
+    `impl Box {
+    `  pick<A>(A start, closure(A, num) A f) A {
+    `    A acc = start;
+    `    ret f(acc, self.v);
+    `  }
+    `}
+    `fun main() {
+    `  Box b = Box{v = 1};
+    `  let f = fun(num a, num v) num {
+    `    ret a + v;
+    `  };
+    `  num r = b.pick(2, f);
+    `  _ = r == 3;
+    `}`,
+    "expected A inside pick to mean pick's own type parameter"
+  );
+}

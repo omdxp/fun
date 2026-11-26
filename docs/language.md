@@ -1467,22 +1467,24 @@ hands it to the new thread, which frees it after it runs.
 
 #### `closure_captures_escaping_pointer`
 
-Capturing a pointer to a local declared in the *same* enclosing
-function is flagged, since the closure may well run after that
-function has already returned - exactly the situation spawning a
-closure onto another thread creates. Best-effort: it only catches a
-direct `&local` assignment immediately visible in the same function,
-not one that reaches the capture through a helper function's return
-value, a struct field, or a reassignment in a conditional branch.
-Capturing a pointer to something heap-allocated, or a parameter handed
-in from outside, is never flagged - only a pointer to a local this
-same function itself took the address of.
+A closure that captures a pointer to a local declared in the *same*
+enclosing function is flagged when it escapes that function: returned,
+assigned into a field, passed to a collection's `push`, `insert`, `put`,
+`add` or `set`, or handed to `spawn`. There it can run after the
+function has returned and the local is gone. A closure that only runs
+while the function does, called directly or passed to a function that
+calls it, is fine. Best-effort: it only catches a direct `&local`
+assignment visible in the same function, not one that reaches the
+capture through a helper function's return value, a struct field, or a
+reassignment in a conditional branch. Capturing a pointer to something
+heap-allocated, or a parameter handed in from outside, is never flagged.
 
 #### `escaping_ref_capture`
 
 A closure that captures a local by reference (`fun[&n]`) is flagged when
 it's assigned into a field or passed to a collection's `push`, `insert`,
 `put`, `add`, or `set`, where it can outlive the local it points at.
+Returning or spawning one is already a compile error.
 Best-effort, like the warning above: it follows a closure literal and the
 locals it's bound to within one function.
 
@@ -1514,6 +1516,9 @@ fun main() {
   }
 }
 ```
+
+A further condition is always `elif`; writing `else if` is an error that
+says so.
 
 ### Ternary Conditional
 
@@ -2028,8 +2033,8 @@ behavior.
   so several tasks mutate the same value without synchronization. Guard
   it with a `Mutex` or give each task its own copy. `Channel`/
   `WaitGroup` (self-synchronizing) are exempt.
-- `closure_captures_escaping_pointer`: a closure captures a pointer to a
-  local of the same function; see [Closures](#language?anchor=language-closures).
+- `closure_captures_escaping_pointer`: a closure capturing a pointer to a
+  local of the same function escapes it; see [Closures](#language?anchor=language-closures).
 - `escaping_ref_capture`: a closure capturing a local by reference is
   stored in a field or added to a collection; see
   [Closures](#language?anchor=language-closures).

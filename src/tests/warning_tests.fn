@@ -1296,8 +1296,37 @@ test "expect no_cover is rejected: nothing ever reports it, so it could never be
   );
 }
 
-test "a closure capturing a pointer to a same-function local is noticed" {
+test "a closure capturing a pointer to a same-function local is noticed once it escapes" {
   notices(
+    `fun make() closure() void {
+    `  num x = 1;
+    `  num* px = &x;
+    `  closure() void c = fun() {
+    `    _ = *px;
+    `  };
+    `  ret c;
+    `}`,
+    "closure_captures_escaping_pointer",
+    "expected a returned closure capturing a pointer to a stack local to be flagged"
+  );
+  notices(
+    `compound Holder {
+    `  closure() void cb;
+    `}
+    `fun keep(Holder* h) {
+    `  num x = 1;
+    `  num* px = &x;
+    `  h.cb = fun() {
+    `    _ = *px;
+    `  };
+    `}`,
+    "closure_captures_escaping_pointer",
+    "expected a closure capturing a pointer to a stack local stored in a field to be flagged"
+  );
+  says_nothing(
+    `fun run(closure() void cb) {
+    `  cb();
+    `}
     `fun main() {
     `  num x = 1;
     `  num* px = &x;
@@ -1305,9 +1334,11 @@ test "a closure capturing a pointer to a same-function local is noticed" {
     `    _ = *px;
     `  };
     `  c();
+    `  run(fun() {
+    `    _ = *px;
+    `  });
     `}`,
-    "closure_captures_escaping_pointer",
-    "expected a closure capturing a pointer to a same-function stack local to be flagged - unsafe once this function returns"
+    "expected no warning for closures that only run while the local they point at is alive"
   );
 }
 
@@ -1438,5 +1469,21 @@ test "returning an array that lives on the function's own stack is noticed" {
     `  ret out;
     `}`,
     "expected an unsized array pointing at the heap to be fine to return"
+  );
+}
+
+test "an import whose type only a shape's method signatures name is used" {
+  str found = notice(
+    `use std.option;
+    `pub shape Finder {
+    `  find(num key) Option<num>;
+    `}
+    `fun main() {
+    `}`,
+    true
+  );
+  assert !contains(found, "unused import 'std.option'"), format(
+    "expected std.option counted as used by the shape signature, got: {str}",
+    found
   );
 }

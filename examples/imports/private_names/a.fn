@@ -17,3 +17,7 @@ pub fun from_a() num {
   let f = near;
   ret near(1) + w.near(100) + f(0);
 }
+
+test "a test reaches this file's own near" {
+  assert near(1) == 2, "expected a's near";
+}

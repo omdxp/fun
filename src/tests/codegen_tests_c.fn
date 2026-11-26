@@ -3619,3 +3619,20 @@ test "a runtime-deferred global's own declaration drops 'const' under MSVC codeg
   assert !contains(out_c, "const int64_t G"), "expected no C 'const' on a global whose real value is assigned later, under MSVC mode too";
   assert contains(out_c, "__fun_init_globals"), "expected the runtime-init function to exist under MSVC mode too";
 }
+
+test "a string from a call through a function value reaches format as a string" {
+  str src = `use std.io;
+  `fun name_of(num x) str { _ = x; ret "hi"; }
+  `compound Api { fun(num) str Name; }
+  `fun main() {
+  `  Api a = Api{Name = name_of};
+  `  println(format("{str}", a.Name(1)));
+  `  let f = name_of;
+  `  println(format("{str}", f(1)));
+  `}`;
+  let out = transpile_source_with_detail(src);
+  assert out.is_ok(), "expected the program to transpile";
+  str c = out.unwrap();
+  assert !contains(c, "(int64_t)(a.Name(1))"), "expected the field call's string not cast to a number";
+  assert !contains(c, "(int64_t)(f(1))"), "expected the local function value's string not cast to a number";
+}

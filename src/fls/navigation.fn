@@ -3013,12 +3013,11 @@ pub fun warning_id_doc(WarningId id) str {
       `own copy.`;
     }
     .ClosureCapturesEscapingPointer -> {
-      ret `Flags a closure literal that captures a pointer to a local
-      `declared in the same enclosing function - unsafe once that
-      `function returns, which spawning the closure onto another
-      `thread is very likely to do before the closure ever runs.
-      `Best-effort: only catches a direct &local assignment immediately
-      `visible in the same function.`;
+      ret `Flags a closure that captures a pointer to a local declared
+      `in the same enclosing function and then escapes it: returned,
+      `stored in a field, added to a collection or spawned, where it
+      `can run after the local is gone. Best-effort: only catches a
+      `direct &local assignment visible in the same function.`;
     }
     .EscapingRefCapture -> {
       ret `Flags a closure that captures a local by reference (fun[&n])

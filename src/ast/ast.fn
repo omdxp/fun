@@ -184,12 +184,9 @@ pub enum WarningId {
   BlockingForkDeadlock,
   // A mutable compound forked into concurrently with no synchronization.
   SharedMutableCaptureRace,
-  // A closure literal captures a pointer to a local declared in the same
-  // enclosing function - unsafe once that function returns, which a
-  // fire-and-forget `spawn` is very likely to do before the closure
-  // ever runs. Best-effort: only catches a direct `&local` assignment
-  // immediately visible in the same function, the same narrowness
-  // `SharedMutableCaptureRace` above already ships with.
+  // A closure capturing a pointer to a local of the same function
+  // escapes it (returned, stored, collected or spawned). Best-effort:
+  // only a direct `&local` assignment visible in the same function.
   ClosureCapturesEscapingPointer,
   // A closure that captures a local by reference (`fun[&n]`) stored
   // somewhere that can outlive the function it was created in: a field

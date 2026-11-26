@@ -693,3 +693,16 @@ test "a closure's capture list takes '&name' entries, each once" {
     `}`
   ), "expected a name listed twice to be rejected";
 }
+
+test "else if is rejected in favor of elif" {
+  assert parse_fails(
+    `fun f(num x) num {
+    `  if x > 1 {
+    `    ret 1;
+    `  } else if x > 0 {
+    `    ret 2;
+    `  }
+    `  ret 0;
+    `}`
+  ), "expected 'else if' to be a parse error";
+}
