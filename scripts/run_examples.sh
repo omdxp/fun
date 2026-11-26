@@ -174,7 +174,7 @@ expected_content_for() {
     "examples/advanced/fit_exhaustive_warning.fn") printf '%s' $'x was true' ;;
     "examples/advanced/for_loops.fn") printf '%s' $'arr[0]=1\narr[2]=3' ;;
     "examples/imports/main.fn") printf '%s' $'grand_child\nchild' ;;
-    "examples/imports/private_names/main.fn") printf '%s' $'113 20 4' ;;
+    "examples/imports/private_names/main.fn") printf '%s' $'113 20 4 7 9' ;;
     "examples/imports/pub_globals/main.fn") printf '%s' $'42 9 3 2.5' ;;
     *) return 1 ;;
   esac

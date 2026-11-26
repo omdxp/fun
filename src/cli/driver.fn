@@ -1276,14 +1276,14 @@ fun _compile_with_msvc_bat(
   if !write_string(
     bat_path,
     format(
-    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17{str} \"{str}\"{str}{str} \"/Fe:{str}\" /link /STACK:134217728{str}\nexit /b %ERRORLEVEL%\n",
-    vcvarsall,
-    _quoted_args(&bat_pre),
-    c_path,
-    _quoted_args(&bat_sources),
-    debug_flag,
-    exe_path,
-    _quoted_args(&bat_link)
+      "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17{str} \"{str}\"{str}{str} \"/Fe:{str}\" /link /STACK:134217728{str}\nexit /b %ERRORLEVEL%\n",
+      vcvarsall,
+      _quoted_args(&bat_pre),
+      c_path,
+      _quoted_args(&bat_sources),
+      debug_flag,
+      exe_path,
+      _quoted_args(&bat_link)
     )
   ) {
     writeln_to(Sink.Stderr, "could not write MSVC build wrapper");
@@ -2542,10 +2542,10 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines, flag objects 
     writeln_to(
       Sink.Stderr,
       format(
-      "[Error]\npackage `{str}` requires fun {str} or newer (this is {str}) - run `fun upgrade`",
-      m.package_name,
-      m.min_fun_version,
-      PACKAGE_VERSION
+        "[Error]\npackage `{str}` requires fun {str} or newer (this is {str}) - run `fun upgrade`",
+        m.package_name,
+        m.min_fun_version,
+        PACKAGE_VERSION
       )
     );
     ret 1;
@@ -2920,8 +2920,8 @@ pub fun init_project(str kind) num {
     writeln_to(
       Sink.Stderr,
       format(
-      "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
-      resolved_kind
+        "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
+        resolved_kind
       )
     );
     ret 1;
@@ -2947,8 +2947,8 @@ pub fun init_project(str kind) num {
   // available rather than leaving a newcomer to find them in the docs.
   toml.append(
     format(
-    "# description = \"\"\n# license = \"\"\n# authors = []\n# repository = \"\"\n# min_fun_version = \"{str}\"\n",
-    PACKAGE_VERSION
+      "# description = \"\"\n# license = \"\"\n# authors = []\n# repository = \"\"\n# min_fun_version = \"{str}\"\n",
+      PACKAGE_VERSION
     )
   );
 
@@ -3128,10 +3128,10 @@ fun _cover_finish(CoverReport* full, CoverOptions* cover) num {
       writeln_to(
         Sink.Stderr,
         format(
-        "coverage {str}% is below the required {num}.{num}%",
-        percent_text(report.covered(), report.statements()),
-        cover.min_tenths / 10,
-        cover.min_tenths % 10
+          "coverage {str}% is below the required {num}.{num}%",
+          percent_text(report.covered(), report.statements()),
+          cover.min_tenths / 10,
+          cover.min_tenths % 10
         )
       );
       code = 1;
@@ -3538,12 +3538,12 @@ fun _test_suite_worker(raw* arg) raw* {
       if ctx.timing {
         println(
           format(
-          "  ok  {str}  ({num} tests)  lower {num}ms, cc {num}ms, run {num}ms",
-          path,
-          n,
-          res.lower_ms,
-          res.cc_ms,
-          res.run_ms
+            "  ok  {str}  ({num} tests)  lower {num}ms, cc {num}ms, run {num}ms",
+            path,
+            n,
+            res.lower_ms,
+            res.cc_ms,
+            res.run_ms
           )
         );
       } else {
@@ -3773,12 +3773,12 @@ pub fun run_test_suite(
   if ctx.timing {
     println(
       format(
-      "wall {num}ms across {num} workers; summed per phase: lower {num}ms, cc {num}ms, run {num}ms",
-      _wall_ms() - suite_start_ms,
-      workers,
-      ctx.total_lower_ms,
-      ctx.total_cc_ms,
-      ctx.total_run_ms
+        "wall {num}ms across {num} workers; summed per phase: lower {num}ms, cc {num}ms, run {num}ms",
+        _wall_ms() - suite_start_ms,
+        workers,
+        ctx.total_lower_ms,
+        ctx.total_cc_ms,
+        ctx.total_run_ms
       )
     );
   }
@@ -4634,12 +4634,12 @@ pub fun run_lint(str root, flag summary_only) num {
       if f.has_pos {
         println(
           format(
-          "{str}:{num}:{num}: warning[{str}]: {str}",
-          f.file,
-          f.line,
-          f.col,
-          f.id,
-          f.message
+            "{str}:{num}:{num}: warning[{str}]: {str}",
+            f.file,
+            f.line,
+            f.col,
+            f.id,
+            f.message
           )
         );
       } else {
@@ -4693,10 +4693,10 @@ pub fun run_lint(str root, flag summary_only) num {
     }
     println(
       format(
-      "{str} in {num} of {str}",
-      _counted(outcome.findings.len, "warning", "warnings"),
-      with_findings.len,
-      _counted(outcome.files, "file", "files")
+        "{str} in {num} of {str}",
+        _counted(outcome.findings.len, "warning", "warnings"),
+        with_findings.len,
+        _counted(outcome.files, "file", "files")
       )
     );
   } else {
@@ -4705,8 +4705,8 @@ pub fun run_lint(str root, flag summary_only) num {
   if outcome.failures.len > 0 {
     println(
       format(
-      "{str} could not be analyzed",
-      _counted(outcome.failures.len, "file", "files")
+        "{str} could not be analyzed",
+        _counted(outcome.failures.len, "file", "files")
       )
     );
   }

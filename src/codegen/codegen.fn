@@ -6975,7 +6975,7 @@ impl Codegen {
           flag panic_is_aggregate = !panic_is_ptr &&
             (panic_rtype.is_tuple ||
             (equals(map_type_to_c(panic_rtype.type_str), panic_rtype.type_str) &&
-            parse_dynamic_int_datatype(panic_rtype.type_str).is_none()));
+              parse_dynamic_int_datatype(panic_rtype.type_str).is_none()));
           StringBuilder ptb = string_builder_init(16);
           ptb.append("(");
           let panic_wt = self.write_type_text(panic_rtype);
@@ -7115,7 +7115,7 @@ impl Codegen {
               if self.shape_names.contains(finfo.type_name) {
                 let field_concrete = self.resolve_shape_coerce_concrete_type(f.value);
                 if field_concrete.is_some() {
-                  self.ensure_generic_impl_shape_vtable_instantiated(
+                  self.ensure_shape_coerce_ready(
                     field_concrete.unwrap(),
                     finfo.type_name
                   );
@@ -7295,7 +7295,7 @@ impl Codegen {
           if !equals(bracket_elem_shape, "") {
             let elem_concrete = self.resolve_shape_coerce_concrete_type(elem);
             if elem_concrete.is_some() {
-              self.ensure_generic_impl_shape_vtable_instantiated(
+              self.ensure_shape_coerce_ready(
                 elem_concrete.unwrap(),
                 bracket_elem_shape
               );
@@ -7632,7 +7632,7 @@ impl Codegen {
         flag widen_left = _is_int_literal_node(e.left) && e.has_right &&
           (equals(e.op, "<<") || equals(e.op, ">>") ||
           ((equals(e.op, "*") || equals(e.op, "+") || equals(e.op, "-")) && _is_int_literal_node(
-          e.right
+            e.right
         )));
         if widen_left {
           self.state.write("(int64_t)");
@@ -7665,7 +7665,7 @@ impl Codegen {
             if self.shape_names.contains(lhs_type_name2) {
               let concrete2 = self.resolve_shape_coerce_concrete_type(e.right);
               if concrete2.is_some() {
-                self.ensure_generic_impl_shape_vtable_instantiated(
+                self.ensure_shape_coerce_ready(
                   concrete2.unwrap(),
                   lhs_type_name2
                 );
@@ -9542,7 +9542,7 @@ impl Codegen {
     if arg_concrete.is_none() {
       ret false;
     }
-    self.ensure_generic_impl_shape_vtable_instantiated(arg_concrete.unwrap(), target);
+    self.ensure_shape_coerce_ready(arg_concrete.unwrap(), target);
     self.state.write("__fun_coerce_");
     self.state.write(arg_concrete.unwrap());
     self.state.write("_");
@@ -9636,8 +9636,8 @@ impl Codegen {
           }
           ret .Some(
             self.lookup_compound_field(
-            self.resolve_field_chain(e.left)?.type_name,
-            field_name
+              self.resolve_field_chain(e.left)?.type_name,
+              field_name
             )?.type_name
           );
         }
@@ -9665,7 +9665,11 @@ impl Codegen {
   // non-generic and already-concrete-at-parse-time cases are already
   // built eagerly, so no matching template is ever found here for
   // them), or `concrete_type_name` isn't a tracked generic instantiation.
-  ensure_generic_impl_shape_vtable_instantiated(str concrete_type_name, str shape_concrete_name) {
+  // For a plain, non-generic impl it instead makes sure the impl's own
+  // machinery is emitted before this use: it is otherwise emitted at the
+  // impl's source position, which can come after a function that already
+  // coerces to the shape.
+  ensure_shape_coerce_ready(str concrete_type_name, str shape_concrete_name) {
     num ii = 0;
     flag found_inst = false;
     for ii < self.instantiation_mangled_name.len {
@@ -9676,6 +9680,13 @@ impl Codegen {
       ii = ii + 1;
     }
     if !found_inst {
+      StringBuilder key_sb = string_builder_init(16);
+      key_sb.append(concrete_type_name);
+      key_sb.append("::");
+      key_sb.append(shape_concrete_name);
+      if !self.emitted_shape_impl_vtables.contains(key_sb.build()) {
+        self._ensure_plain_shape_impl_vtable_emitted(concrete_type_name, shape_concrete_name);
+      }
       ret;
     }
     str base_name = self.instantiation_base_name.get(ii);
@@ -12326,7 +12337,7 @@ impl Codegen {
           if ret_concrete.is_some() {
             ret_did_shape_coerce = true;
             ret_shape_concrete = ret_concrete.unwrap();
-            self.ensure_generic_impl_shape_vtable_instantiated(
+            self.ensure_shape_coerce_ready(
               ret_shape_concrete,
               self.current_fn_rtype_name
             );
@@ -12834,7 +12845,7 @@ impl Codegen {
             if !equals(var_shape_type, "") {
               let concrete = self.resolve_shape_coerce_concrete_type(v.val);
               if concrete.is_some() {
-                self.ensure_generic_impl_shape_vtable_instantiated(
+                self.ensure_shape_coerce_ready(
                   concrete.unwrap(),
                   var_shape_type
                 );
@@ -15996,7 +16007,7 @@ impl Codegen {
           // shape_vtable_for_instantiation`'s own comment). The lazy
           // trigger every `__fun_coerce_` call site already uses
           // covers this one too.
-          self.ensure_generic_impl_shape_vtable_instantiated(
+          self.ensure_shape_coerce_ready(
             shape_downcast_type,
             subj_type.unwrap()
           );
@@ -18507,7 +18518,7 @@ impl Codegen {
                 ginit_arr_elem
               );
               if ginit_arr_elem_concrete.is_some() {
-                self.ensure_generic_impl_shape_vtable_instantiated(
+                self.ensure_shape_coerce_ready(
                   ginit_arr_elem_concrete.unwrap(),
                   ginit_arr_elem_shape
                 );
@@ -18666,7 +18677,7 @@ impl Codegen {
             if !equals(global_shape_type, "") {
               let global_concrete = self.resolve_shape_coerce_concrete_type(v.val);
               if global_concrete.is_some() {
-                self.ensure_generic_impl_shape_vtable_instantiated(
+                self.ensure_shape_coerce_ready(
                   global_concrete.unwrap(),
                   global_shape_type
                 );
@@ -24018,10 +24029,10 @@ impl Codegen {
     if self.os_main_thread {
       self.state.write(
         format(
-        "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
-        mc_leak_suppress,
-        ginit_call,
-        real_name
+          "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
+          mc_leak_suppress,
+          ginit_call,
+          real_name
         )
       );
       ret .None;
@@ -24039,17 +24050,17 @@ impl Codegen {
       // thread, no wrapper needed at all for this target.
       self.state.write(
         format(
-        "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
-        mc_leak_suppress,
-        ginit_call,
-        real_name
+          "int main(int argc, char** argv) {\n{str}{str}  return {str}(argc, argv);\n}\n",
+          mc_leak_suppress,
+          ginit_call,
+          real_name
         )
       );
       ret .None;
     }
     self.state.write(
       format(
-      `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
+        `typedef struct { int argc; char** argv; int result; } __fun_main_run_args;
       `static void* __fun_main_run(void* __fun_main_p) {
       `  __fun_main_run_args* __fun_main_a = (__fun_main_run_args*)__fun_main_p;
       `{str}  __fun_main_a->result = {str}(__fun_main_a->argc, __fun_main_a->argv);
@@ -24082,9 +24093,9 @@ impl Codegen {
       `  return __fun_main_a.result;
       `}
       ``,
-      ginit_call,
-      real_name,
-      mc_leak_suppress
+        ginit_call,
+        real_name,
+        mc_leak_suppress
       )
     );
     ret .None;
@@ -24168,9 +24179,9 @@ impl Codegen {
     for di < names.len {
       self.state.write(
         format(
-        "        case {str}: __fun_test_{str}(); break;\n",
-        format_num(di),
-        format_num(di)
+          "        case {str}: __fun_test_{str}(); break;\n",
+          format_num(di),
+          format_num(di)
         )
       );
       di = di + 1;

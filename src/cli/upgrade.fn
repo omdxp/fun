@@ -117,8 +117,8 @@ fun _fetch_latest_release() Result<JsonValue, str> {
   if res.exit_code != 0 {
     ret .Err(
       format(
-      "curl exited {num} fetching the latest release (is curl installed, and is there a network connection?)",
-      res.exit_code
+        "curl exited {num} fetching the latest release (is curl installed, and is there a network connection?)",
+        res.exit_code
       )
     );
   }
@@ -295,9 +295,9 @@ fun _prepare_work_dir(str dir) Option<str> {
   if made.is_err() {
     ret .Some(
       format(
-      "couldn't create a scratch directory at {str}: {str}",
-      dir,
-      made.unwrap_err().message
+        "couldn't create a scratch directory at {str}: {str}",
+        dir,
+        made.unwrap_err().message
       )
     );
   }
@@ -468,9 +468,9 @@ pub fun upgrade_cli(flag check_only) num {
     writeln_to(
       Sink.Stderr,
       format(
-      "[Error]\nv{str} has no release asset named `{str}` for this platform",
-      latest_version,
-      asset_name
+        "[Error]\nv{str} has no release asset named `{str}` for this platform",
+        latest_version,
+        asset_name
       )
     );
     ret 1;
@@ -488,8 +488,8 @@ pub fun upgrade_cli(flag check_only) num {
     writeln_to(
       Sink.Stderr,
       format(
-      "[Error]\n{str} is installed system-wide under Program Files, most likely via the MSI installer - fun upgrade only replaces a user-writable install in place, not one Windows' own installer database tracks.\nDownload and run the latest .msi from https://github.com/omdxp/fun/releases/latest instead.",
-      fun_path
+        "[Error]\n{str} is installed system-wide under Program Files, most likely via the MSI installer - fun upgrade only replaces a user-writable install in place, not one Windows' own installer database tracks.\nDownload and run the latest .msi from https://github.com/omdxp/fun/releases/latest instead.",
+        fun_path
       )
     );
     ret 1;
@@ -538,9 +538,9 @@ pub fun upgrade_cli(flag check_only) num {
     all_ok = false;
     pending.push(
       format(
-      "fun{str} is in use - close it (and any editor's fls) and run: {str}",
-      exe_ext,
-      _manual_move_hint(fun_src, fun_dst, is_windows)
+        "fun{str} is in use - close it (and any editor's fls) and run: {str}",
+        exe_ext,
+        _manual_move_hint(fun_src, fun_dst, is_windows)
       )
     );
   }
@@ -551,9 +551,9 @@ pub fun upgrade_cli(flag check_only) num {
     all_ok = false;
     pending.push(
       format(
-      "fls{str} is in use - close your editor's language server and run: {str}",
-      exe_ext,
-      _manual_move_hint(fls_src, fls_dst, is_windows)
+        "fls{str} is in use - close your editor's language server and run: {str}",
+        exe_ext,
+        _manual_move_hint(fls_src, fls_dst, is_windows)
       )
     );
   }
@@ -564,9 +564,9 @@ pub fun upgrade_cli(flag check_only) num {
     all_ok = false;
     pending.push(
       format(
-      "the standard library at {str} wasn't replaced - run: {str}",
-      share_dst,
-      _manual_move_hint(share_src, share_dst, is_windows)
+        "the standard library at {str} wasn't replaced - run: {str}",
+        share_dst,
+        _manual_move_hint(share_src, share_dst, is_windows)
       )
     );
   }
@@ -581,9 +581,9 @@ pub fun upgrade_cli(flag check_only) num {
 
   println(
     format(
-    "partially upgraded (v{str} -> v{str}); finish manually:",
-    PACKAGE_VERSION,
-    latest_version
+      "partially upgraded (v{str} -> v{str}); finish manually:",
+      PACKAGE_VERSION,
+      latest_version
     )
   );
   for line : pending {

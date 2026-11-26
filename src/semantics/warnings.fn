@@ -1045,8 +1045,8 @@ impl Analysis {
                 self.report(
                   .ReturnLocalPtr,
                   format(
-                  "returning '{str}', an array on this function's stack; return a Vec<T> or fill an array the caller passes in",
-                  name
+                    "returning '{str}', an array on this function's stack; return a Vec<T> or fill an array the caller passes in",
+                    name
                   ),
                   stmt
                 );
@@ -1328,8 +1328,8 @@ impl Analysis {
       self.report(
         .EscapingRefCapture,
         format(
-        "a closure capturing a local by reference {str}, where it can outlive that local",
-        where
+          "a closure capturing a local by reference {str}, where it can outlive that local",
+          where
         ),
         at
       );
@@ -1367,11 +1367,11 @@ impl Analysis {
       self.report(
         .IntegerLiteralOutOfRange,
         format(
-        "{num} does not fit in {str}, which holds {num} to {num}",
-        value,
-        v.var_type.type_str,
-        low,
-        high
+          "{num} does not fit in {str}, which holds {num} to {num}",
+          value,
+          v.var_type.type_str,
+          low,
+          high
         ),
         stmt
       );
@@ -1917,10 +1917,10 @@ impl Analysis {
             self.report(
               .ChannelCapacityOverflow,
               format(
-              "'{str}' holds {num} but is sent {num} values with nothing receiving them",
-              name,
-              room.unwrap(),
-              count.unwrap()
+                "'{str}' holds {num} but is sent {num} values with nothing receiving them",
+                name,
+                room.unwrap(),
+                count.unwrap()
               ),
               body
             );

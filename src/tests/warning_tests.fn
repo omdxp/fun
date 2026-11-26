@@ -108,12 +108,12 @@ test "a control silences what it names, wherever it is written" {
 test "an expectation that never fires is an error" {
   assert contains(
     notice(
-    `fun ok() num* {
+      `fun ok() num* {
       `  expect return_local_ptr, "should fail when the warning disappears";
       `  num* p = nil;
       `  ret p;
       `}`,
-    false
+      false
     ),
     "was not emitted"
   ), "expected the unmet expectation to be reported";
@@ -843,12 +843,12 @@ test "an unused top-level const is noticed, a used one is not" {
   );
   assert !contains(
     notice(
-    `const str NAME = "used";
+      `const str NAME = "used";
       `fun main() num {
       `  println(NAME);
       `  ret 0;
       `}`,
-    true
+      true
     ),
     "unused constant"
   ), "expected the read top-level const not to be flagged";
@@ -1387,11 +1387,11 @@ test "a local used only as an asm operand is not unused" {
 test "a compound named only inside a function type is used" {
   assert !contains(
     notice(
-    `compound Frame { num eax; }
+      `compound Frame { num eax; }
     `fun(Frame*) void[2] handlers;
     `fun run(fun(Frame*) void cb) { _ = cb; }
     `fun main() { handlers[0] = nil; run(nil); }`,
-    true
+      true
     ),
     "unused compound 'Frame'"
   ), "expected Frame counted as used through the function types that name it";

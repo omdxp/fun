@@ -508,8 +508,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       if is_union_head_token(&tokens, word_idx) {
         ret _hover_result(
           _doc(
-          `union Name { ... }`,
-          `Declares a type whose fields all share the same storage: it is as large as its largest field and holds one of them at a time, as in C. A literal sets exactly one field.`
+            `union Name { ... }`,
+            `Declares a type whose fields all share the same storage: it is as large as its largest field and holds one of them at a time, as in C. A literal sets exactly one field.`
           ),
           span_of(t, doc.text)
         );
@@ -517,9 +517,9 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       if is_align_prefix_token(&tokens, word_idx) {
         ret _hover_result(
           _doc(
-          `align(N) compound Name { ... }
+            `align(N) compound Name { ... }
           `align(N) Type name;`,
-          `Makes a type, variable, or field start at an address that is a multiple of N bytes (a power of two), for a page table, a DMA buffer, or a cache line.`
+            `Makes a type, variable, or field start at an address that is a multiple of N bytes (a power of two), for a page table, a DMA buffer, or a cache line.`
           ),
           span_of(t, doc.text)
         );
@@ -530,8 +530,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         if after_packed.is_some() && token_is_keyword(after_packed.unwrap(), "compound") {
           ret _hover_result(
             _doc(
-            `packed compound Name { ... }`,
-            `Lays the compound's fields out with no padding between or after them, for a layout fixed by hardware or a file format.`
+              `packed compound Name { ... }`,
+              `Lays the compound's fields out with no padding between or after them, for a layout fixed by hardware or a file format.`
             ),
             span_of(t, doc.text)
           );
@@ -568,8 +568,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         if _is_known_enum(&read.program.nodes, tv_recv_type) {
           ret _hover_result(
             _doc(
-            "tag_value() num",
-            "Any enum's own underlying C discriminant, read back as `num` - a plain enum already IS that value; a tagged-union enum keeps it on its own `.tag` field instead. Built in, no `impl` needed."
+              "tag_value() num",
+              "Any enum's own underlying C discriminant, read back as `num` - a plain enum already IS that value; a tagged-union enum keeps it on its own `.tag` field instead. Built in, no `impl` needed."
             ),
             span_of(t, doc.text)
           );
@@ -588,8 +588,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         if starts_with(cf_recv_type, "closure(") {
           ret _hover_result(
             _doc(
-            "free()",
-            "Releases what the closure captured. Call it once you're done calling the closure; `spawn` does it for you after the thread runs."
+              "free()",
+              "Releases what the closure captured. Call it once you're done calling the closure; `spawn` does it for you after the thread runs."
             ),
             span_of(t, doc.text)
           );
@@ -627,8 +627,8 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
         }
         ret _hover_result(
           _doc(
-          format("{str} x;", token_word(t)),
-          format("A {num}-bit {str} integer.", dit.bits, sign_word)
+            format("{str} x;", token_word(t)),
+            format("A {num}-bit {str} integer.", dit.bits, sign_word)
           ),
           span_of(t, doc.text)
         );
@@ -750,11 +750,11 @@ pub fun hover(AnalysisCache* cache, Document doc, num line, num character) str {
       }
       ret _hover_result(
         _doc(
-        token_word(t),
-        format(
-        "A C builtin the language accepts without a declaration of its own, documented by {str}.",
-        builtin_module
-        )
+          token_word(t),
+          format(
+            "A C builtin the language accepts without a declaration of its own, documented by {str}.",
+            builtin_module
+          )
         ),
         span_of(t, doc.text)
       );

@@ -743,8 +743,8 @@ impl ParseState {
         if _has_earlier_default(out_defaults) {
           self.err(
             format(
-            "type parameter '{str}' needs a default because an earlier parameter has one",
-            name
+              "type parameter '{str}' needs a default because an earlier parameter has one",
+              name
             )
           );
           ret .Some(.InvalidIdentifier);
@@ -867,8 +867,8 @@ impl ParseState {
         if _has_earlier_default(out_defaults) {
           self.err(
             format(
-            "type parameter '{str}' needs a default because an earlier parameter has one",
-            name
+              "type parameter '{str}' needs a default because an earlier parameter has one",
+              name
             )
           );
           ret .Some(.InvalidIdentifier);
@@ -3368,6 +3368,11 @@ impl Parser {
     let eerr = self.parse_expressionable_root();
     for eerr.is_none() && self.state.next_token_is_operator(",") {
       self.state.token_next();
+      // A comma after the last element, as a literal written one
+      // element per line ends, the same as a compound literal allows.
+      if self.state.next_token_is_symbol(']') {
+        break;
+      }
       let left_elem = self.state.node_pop();
       eerr = self.parse_expressionable_root();
       if eerr.is_some() || left_elem.is_none() {

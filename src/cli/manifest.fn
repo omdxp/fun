@@ -579,8 +579,8 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
   if !equals(m.min_fun_version, "") && !is_valid_semver(m.min_fun_version) {
     ret .Err(
       format(
-      "[package] `min_fun_version` must be a plain `MAJOR.MINOR.PATCH` version, found `{str}`",
-      m.min_fun_version
+        "[package] `min_fun_version` must be a plain `MAJOR.MINOR.PATCH` version, found `{str}`",
+        m.min_fun_version
       )
     );
   }
@@ -636,8 +636,8 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, os_main_thread, c_runtime, arch, or output)",
-            bk
+              "unknown key `{str}` in [build] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, freestanding, os_main_thread, c_runtime, arch, or output)",
+              bk
             )
           );
         }
@@ -676,8 +676,8 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       !equals(m.build.output, "object") {
       ret .Err(
         format(
-        "[build] `output` must be \"exe\" or \"object\", found `{str}`",
-        m.build.output
+          "[build] `output` must be \"exe\" or \"object\", found `{str}`",
+          m.build.output
         )
       );
     }
@@ -692,8 +692,8 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
     if !equals(os_name, "macos") && !equals(os_name, "linux") && !equals(os_name, "windows") {
       ret .Err(
         format(
-        "unknown table `[{str}]` (expected build.macos, build.linux, or build.windows)",
-        t.name
+          "unknown table `[{str}]` (expected build.macos, build.linux, or build.windows)",
+          t.name
         )
       );
     }
@@ -706,9 +706,9 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
         _ -> {
           ret .Err(
             format(
-            "unknown key `{str}` in [{str}] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, os_main_thread, or c_runtime)",
-            ok,
-            t.name
+              "unknown key `{str}` in [{str}] (expected sources, include_dirs, lib_dirs, links, cflags, ldflags, os_main_thread, or c_runtime)",
+              ok,
+              t.name
             )
           );
         }
@@ -778,8 +778,8 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       if !is_safe_dep_name(dname) {
         ret .Err(
           format(
-          "[deps] `{str}`: a dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)",
-          dname
+            "[deps] `{str}`: a dependency's name must be a plain identifier (letters, digits, underscore, not starting with a digit)",
+            dname
           )
         );
       }
@@ -787,9 +787,9 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       if !entry_val.is_table() {
         ret .Err(
           format(
-          "[deps] `{str}` must be an inline table: {str} = { git = \"...\" }",
-          dname,
-          dname
+            "[deps] `{str}` must be an inline table: {str} = { git = \"...\" }",
+            dname,
+            dname
           )
         );
       }
@@ -806,16 +806,16 @@ pub fun parse_manifest(str text) Result<Manifest, str> {
       if !is_safe_git_url(dgit) {
         ret .Err(
           format(
-          "[deps] `{str}`: `git` must start with https://, ssh://, git@, or file://",
-          dname
+            "[deps] `{str}`: `git` must start with https://, ssh://, git@, or file://",
+            dname
           )
         );
       }
       if !is_safe_dep_path(dpath) {
         ret .Err(
           format(
-          "[deps] `{str}`: `path` must be a relative path with no `..` segments",
-          dname
+            "[deps] `{str}`: `path` must be a relative path with no `..` segments",
+            dname
           )
         );
       }

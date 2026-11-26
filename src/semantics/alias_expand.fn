@@ -772,13 +772,13 @@ pub fun expand_type_aliases(Vec<Node>* nodes) Option<str> {
       resolved.put(
         name,
         _ResolvedAlias{
-        is_resolved = !saw_unresolved,
-        type_params = a.type_params,
-        type_param_is_spread = a.type_param_is_spread,
-        is_bound_list = a.is_bound_list,
-        body = a.body,
-        bound_alternatives = a.bound_alternatives,
-        is_used = prev_used
+          is_resolved = !saw_unresolved,
+          type_params = a.type_params,
+          type_param_is_spread = a.type_param_is_spread,
+          is_bound_list = a.is_bound_list,
+          body = a.body,
+          bound_alternatives = a.bound_alternatives,
+          is_used = prev_used
         }
       );
       if saw_unresolved {

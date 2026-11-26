@@ -188,7 +188,7 @@ try {
     'examples\advanced\fit_exhaustive_warning.fn' = @('x was true')
     'examples\advanced\for_loops.fn'              = @('arr[0]=1', 'arr[2]=3')
     'examples\imports\main.fn'                    = @('grand_child', 'child')
-    'examples\imports\private_names\main.fn'      = @('113 20 4')
+    'examples\imports\private_names\main.fn'      = @('113 20 4 7 9')
     'examples\imports\pub_globals\main.fn'        = @('42 9 3 2.5')
   }
 

@@ -359,10 +359,10 @@ pub fun cover_to_cobertura(CoverReport* r) str {
   sb.append("<?xml version=\"1.0\" ?>\n");
   sb.append(
     format(
-    "<coverage line-rate=\"{str}\" branch-rate=\"0\" lines-covered=\"{num}\" lines-valid=\"{num}\" branches-covered=\"0\" branches-valid=\"0\" complexity=\"0\" version=\"1.9\" timestamp=\"0\">\n",
-    _rate_text(covered, total),
-    covered,
-    total
+      "<coverage line-rate=\"{str}\" branch-rate=\"0\" lines-covered=\"{num}\" lines-valid=\"{num}\" branches-covered=\"0\" branches-valid=\"0\" complexity=\"0\" version=\"1.9\" timestamp=\"0\">\n",
+      _rate_text(covered, total),
+      covered,
+      total
     )
   );
   sb.append("  <sources>\n    <source>.</source>\n  </sources>\n  <packages>\n");
@@ -393,9 +393,9 @@ pub fun cover_to_cobertura(CoverReport* r) str {
     }
     sb.append(
       format(
-      "    <package name=\"{str}\" line-rate=\"{str}\" branch-rate=\"0\" complexity=\"0\">\n      <classes>\n",
-      xml_escape(d),
-      _rate_text(pkg_covered, pkg_total)
+        "    <package name=\"{str}\" line-rate=\"{str}\" branch-rate=\"0\" complexity=\"0\">\n      <classes>\n",
+        xml_escape(d),
+        _rate_text(pkg_covered, pkg_total)
       )
     );
     for p : all {
@@ -404,19 +404,19 @@ pub fun cover_to_cobertura(CoverReport* r) str {
       }
       sb.append(
         format(
-        "        <class name=\"{str}\" filename=\"{str}\" line-rate=\"{str}\" branch-rate=\"0\" complexity=\"0\">\n          <methods/>\n          <lines>\n",
-        xml_escape(basename(p)),
-        xml_escape(p),
-        _rate_text(r.covered_in(p), r.statements_in(p))
+          "        <class name=\"{str}\" filename=\"{str}\" line-rate=\"{str}\" branch-rate=\"0\" complexity=\"0\">\n          <methods/>\n          <lines>\n",
+          xml_escape(basename(p)),
+          xml_escape(p),
+          _rate_text(r.covered_in(p), r.statements_in(p))
         )
       );
       Vec<num> lines = r.lines_of(p);
       for line : lines {
         sb.append(
           format(
-          "            <line number=\"{num}\" hits=\"{num}\" branch=\"false\"/>\n",
-          line,
-          r.hits_of(p, line)
+            "            <line number=\"{num}\" hits=\"{num}\" branch=\"false\"/>\n",
+            line,
+            r.hits_of(p, line)
           )
         );
       }
@@ -557,10 +557,10 @@ pub fun cover_to_html(CoverReport* r) str {
   sb.append("</style>\n</head>\n<body>\n");
   sb.append(
     format(
-    "<h1>Coverage {str}%</h1>\n<p>{num} of {num} statements covered.</p>\n",
-    percent_text(covered, total),
-    covered,
-    total
+      "<h1>Coverage {str}%</h1>\n<p>{num} of {num} statements covered.</p>\n",
+      percent_text(covered, total),
+      covered,
+      total
     )
   );
   sb.append(
@@ -570,12 +570,12 @@ pub fun cover_to_html(CoverReport* r) str {
   for p : all {
     sb.append(
       format(
-      "<tr><td><a href=\"#f{num}\">{str}</a></td><td class=\"n\">{num}</td><td class=\"n\">{num}</td><td class=\"n\">{str}</td></tr>\n",
-      fi,
-      _html_escape(p),
-      r.covered_in(p),
-      r.statements_in(p),
-      percent_text(r.covered_in(p), r.statements_in(p))
+        "<tr><td><a href=\"#f{num}\">{str}</a></td><td class=\"n\">{num}</td><td class=\"n\">{num}</td><td class=\"n\">{str}</td></tr>\n",
+        fi,
+        _html_escape(p),
+        r.covered_in(p),
+        r.statements_in(p),
+        percent_text(r.covered_in(p), r.statements_in(p))
       )
     );
     fi = fi + 1;
@@ -605,10 +605,10 @@ pub fun cover_to_html(CoverReport* r) str {
         }
         sb.append(
           format(
-          "<span{str}><span class=\"ln\">{num}</span>{str}</span>",
-          cls,
-          ln,
-          _html_escape(row)
+            "<span{str}><span class=\"ln\">{num}</span>{str}</span>",
+            cls,
+            ln,
+            _html_escape(row)
           )
         );
         ln = ln + 1;

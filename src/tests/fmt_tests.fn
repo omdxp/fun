@@ -883,3 +883,12 @@ test "a function or closure type as a generic argument keeps its angle brackets 
   assert contains(got, "Vec<closure(f32) void> systems;"), "expected a closure type argument written tight";
   assert contains(got, "Vec<fun(num) str> names;"), "expected a spread-out function type argument pulled tight";
 }
+
+test "a wrapped construct inside another wrapped one indents one level deeper" {
+  str src = `fun f() {
+  `  _ = h(1, g(100000000000, 200000000000, 300000000000, 400000000000, 500000000000, 600000000000, 700000000000), 3);
+  `}`;
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n    g(\n      100000000000,\n"), "expected the inner call's arguments one level under it";
+  assert contains(got, "\n    ),\n    3\n  );"), "expected the inner call closed level with it";
+}

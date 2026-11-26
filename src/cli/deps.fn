@@ -240,10 +240,10 @@ fun _git_fetch_rev(str url, str rev, str dest) Result<flag, str> {
   if !_git_ok(&checkout_res) {
     ret .Err(
       format(
-      "git checkout {str} in {str} failed: {str}",
-      rev,
-      dest,
-      checkout_res.stderr_text
+        "git checkout {str} in {str} failed: {str}",
+        rev,
+        dest,
+        checkout_res.stderr_text
       )
     );
   }
@@ -325,11 +325,11 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
     if !is_dir(dest) {
       println(
         format(
-        "  fetching {str} @ {str} ({str}){str}",
-        d.name,
-        ref_value,
-        d.git,
-        provenance
+          "  fetching {str} @ {str} ({str}){str}",
+          d.name,
+          ref_value,
+          d.git,
+          provenance
         )
       );
       _ = _git_fetch_rev(d.git, ref_value, dest)!;
@@ -345,21 +345,21 @@ pub fun resolve_one(Dependency* d, str required_by) Result<ResolvedDep, str> {
     if default_branch {
       println(
         format(
-        "  fetching {str} @ default branch ({str}){str}",
-        d.name,
-        d.git,
-        provenance
+          "  fetching {str} @ default branch ({str}){str}",
+          d.name,
+          d.git,
+          provenance
         )
       );
     } else {
       println(
         format(
-        "  fetching {str} @ {str} {str} ({str}){str}",
-        d.name,
-        ref_kind,
-        ref_value,
-        d.git,
-        provenance
+          "  fetching {str} @ {str} {str} ({str}){str}",
+          d.name,
+          ref_kind,
+          ref_value,
+          d.git,
+          provenance
         )
       );
     }
@@ -537,8 +537,8 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
     if visited_nodes.len > max_deps_graph_size {
       ret .Err(
         format(
-        "[deps] the dependency graph reaches more than {num} distinct fetched repositories, likely a cycle; check for a dependency that transitively depends on itself",
-        max_deps_graph_size
+          "[deps] the dependency graph reaches more than {num} distinct fetched repositories, likely a cycle; check for a dependency that transitively depends on itself",
+          max_deps_graph_size
         )
       );
     }
@@ -552,9 +552,9 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
     if child_manifest_r.is_err() {
       ret .Err(
         format(
-        "[deps] `{str}`'s own fun.toml is invalid: {str}",
-        parent.name,
-        child_manifest_r.unwrap_err()
+          "[deps] `{str}`'s own fun.toml is invalid: {str}",
+          parent.name,
+          child_manifest_r.unwrap_err()
         )
       );
     }
@@ -606,13 +606,13 @@ pub fun resolve_all(Manifest* m, str root, flag force_update) Result<Vec<Resolve
       }
       ret .Err(
         format(
-        "[deps] `{str}` is required by both `{str}` and `{str}` pinned to different commits ({str} vs {str}); add `{str}` to this project's own [deps] to pick one",
-        cd.name,
-        owners.get(existing_idx),
-        parent.name,
-        existing.resolved_rev,
-        resolved_child.resolved_rev,
-        cd.name
+          "[deps] `{str}` is required by both `{str}` and `{str}` pinned to different commits ({str} vs {str}); add `{str}` to this project's own [deps] to pick one",
+          cd.name,
+          owners.get(existing_idx),
+          parent.name,
+          existing.resolved_rev,
+          resolved_child.resolved_rev,
+          cd.name
         )
       );
     }
