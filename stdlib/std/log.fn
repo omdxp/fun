@@ -522,7 +522,7 @@ impl Logger {
 // threshold (so every one-off message is emitted).
 
 // Logs `msg` at `level` through a default stdout Text logger.
-pub fun log(LogLevel level, str msg) {
+pub fun log_at(LogLevel level, str msg) {
   let l = logger_init(.Trace);
   l.log(level, msg);
 }
@@ -712,7 +712,7 @@ test "the one-off helpers log through a default logger" {
   log_info("one-off info");
   log_warn("one-off warn");
   log_error("one-off error");
-  log(.Info, "one-off generic");
+  log_at(.Info, "one-off generic");
   allow assert_constant, "documents that reaching this line means every helper returned";
   assert true, "expected every helper to return";
 }

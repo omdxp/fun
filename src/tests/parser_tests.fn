@@ -42,6 +42,16 @@ fun parse_fails(str src) flag {
   ret p.parse().is_some();
 }
 
+// The message the parser reports for `src`, or "" when it parses.
+fun parse_error_message(str src) str {
+  ParseState st = state_from(src);
+  Parser p = parser_new(&st);
+  if p.parse().is_none() || !st.has_error {
+    ret "";
+  }
+  ret st.error_message;
+}
+
 // Returns the statement list of a function node's body.
 fun fn_body_statements(Node fn_node) Vec<Node*> {
   fit fn_node.kind {
@@ -717,4 +727,20 @@ test "an array literal may end with a comma" {
     `  ];
     `}`
   ), "expected a trailing comma to parse";
+}
+
+test "a keyword where a declaration's name goes says so" {
+  str msg = parse_error_message(
+    `compound Box {
+    `  num v;
+    `}
+    `fun main() num {
+    `  Box fit = Box{v = 1};
+    `  ret 0;
+    `}`
+  );
+  assert contains(msg, "'fit' is a reserved word"), format(
+    "expected the keyword named, got {str}",
+    msg
+  );
 }
