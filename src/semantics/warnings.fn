@@ -78,6 +78,9 @@ compound Analysis {
   Map<str, CompoundNode> compound_decls;
   // What each local in the function being walked is declared as.
   Map<str, str> local_types;
+  // Locals of the function being walked that are arrays on its own stack,
+  // which a `ret` must not hand back.
+  Set<str> stack_arrays;
   // A `Channel<T>` local's own element type, by name - `local_types`
   // itself only ever carries the bare "Channel", never its own
   // generic argument, and a `fit <- ch { ... }` needs T to check
@@ -126,6 +129,7 @@ fun _analysis_new() Analysis {
   a.methods.init(16);
   a.compound_decls.init(16);
   a.local_types.init(16);
+  a.stack_arrays = set_init("", 8);
   a.channel_element_types.init(4);
   a.waits_on_unsized_group = false;
   a.allowed.init(8);
@@ -1040,6 +1044,19 @@ impl Analysis {
       }
       .Variable(v) -> {
         locals.add(v.name);
+        flag literal_value = false;
+        if v.has_val {
+          fit v.val.kind {
+            .Bracket(_) -> { literal_value = true; }
+            _ -> {}
+          }
+        }
+        // A sized array, or one made from a literal, is stack memory; an
+        // unsized `T[]` is only a pointer, as to a `malloc`ed block.
+        if literal_value ||
+          (v.var_type != nil && v.var_type.array_brackets.len > 0 && v.var_type.pointer_depth == 0) {
+          self.stack_arrays.add(v.name);
+        }
         if v.var_type != nil {
           str vtype = substr(v.var_type.type_str, 0, len(v.var_type.type_str));
           if v.var_type.pointer_depth > 0 || v.var_type.flags.is_pointer {
@@ -1058,6 +1075,31 @@ impl Analysis {
       .StatementReturn(value) -> {
         if _takes_address_of_local(value, locals) {
           self.report(.ReturnLocalPtr, "returning address of local variable", stmt);
+        } elif value != nil {
+          // An array literal, or an array this function declared, lives on
+          // its own stack and is gone once it returns.
+          fit value.kind {
+            .Bracket(_) -> {
+              self.report(
+                .ReturnLocalPtr,
+                "returning an array literal, which lives on this function's stack; return a Vec<T> or fill an array the caller passes in",
+                stmt
+              );
+            }
+            .Identifier(name) -> {
+              if self.stack_arrays.has(name) {
+                self.report(
+                  .ReturnLocalPtr,
+                  format(
+                  "returning '{str}', an array on this function's stack; return a Vec<T> or fill an array the caller passes in",
+                  name
+                  ),
+                  stmt
+                );
+              }
+            }
+            _ -> {}
+          }
         }
       }
       .StatementAssert(a) -> {
@@ -2003,6 +2045,7 @@ impl Analysis {
     Set<str> locals = set_init("", 8);
     defer locals.free();
     _clear_local_types(&self.local_types);
+    self.stack_arrays.clear();
     self.channel_element_types.clear();
     for arg : f.args {
       self._register_param_local(arg, &locals);
@@ -2031,6 +2074,7 @@ impl Analysis {
     Set<str> locals = set_init("", 8);
     defer locals.free();
     _clear_local_types(&self.local_types);
+    self.stack_arrays.clear();
     self.channel_element_types.clear();
     self.walk_declared_body(t.body, &locals);
   }
@@ -2042,6 +2086,7 @@ impl Analysis {
     Set<str> locals = set_init("", 8);
     defer locals.free();
     _clear_local_types(&self.local_types);
+    self.stack_arrays.clear();
     self.channel_element_types.clear();
     self._register_param_local(fz.data_param, &locals);
     self._register_param_local(fz.len_param, &locals);

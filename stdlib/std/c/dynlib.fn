@@ -1,0 +1,17 @@
+// Shared-library loading backing `std.dynlib`.
+//
+// The compiler emits each of these into the prelude of any program that
+// imports this module: `dlopen` and friends on POSIX, `LoadLibraryA` and
+// friends on Windows. Use `std.dynlib` rather than calling these directly.
+
+// Loads the shared library at `path`, or returns nil.
+pub fun __fun_dl_open(str path) raw*;
+
+// The address of `name` in `lib`, or nil.
+pub fun __fun_dl_sym(raw* lib, str name) raw*;
+
+// Unloads `lib`, returning 0 on success.
+pub fun __fun_dl_close(raw* lib) num;
+
+// Why the last load or lookup failed, or "".
+pub fun __fun_dl_error() str;

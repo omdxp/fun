@@ -1408,3 +1408,35 @@ test "a closure capturing by reference stored in a field or a collection is noti
     "expected no warning for a by-reference closure used where it was made"
   );
 }
+
+test "returning an array that lives on the function's own stack is noticed" {
+  notices(
+    `fun names() str[] {
+    `  ret ["a", "b"];
+    `}`,
+    "returning an array literal",
+    "expected a returned array literal to be noticed"
+  );
+  notices(
+    `fun nums() num[] {
+    `  num[2] local = [1, 2];
+    `  ret local;
+    `}`,
+    "returning 'local', an array on this function's stack",
+    "expected a returned local array to be noticed"
+  );
+  says_nothing(
+    `fun pass_on(num[] given) num[] {
+    `  ret given;
+    `}`,
+    "expected an array parameter, the caller's own array, to be fine to return"
+  );
+  says_nothing(
+    `use std.c.mem;
+    `fun heap_names(num n) str[] {
+    `  str[] out = malloc(sizeof(str) * n);
+    `  ret out;
+    `}`,
+    "expected an unsized array pointing at the heap to be fine to return"
+  );
+}

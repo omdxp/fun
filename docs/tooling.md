@@ -586,6 +586,10 @@ quick orientation.
   lane-wise operators, comparison masks and `select`, plus bulk
   `add_f32`/`mul_f32`/`scale_f32`/`sum_f32`/`dot_f32` over arrays. SSE2 on
   x86, NEON on ARM, plain loops elsewhere, with the same results on each.
+- `std.dynlib`: loads shared libraries while a program runs:
+  `library_open`/`library_open_any`, `symbol` to look up a function's
+  address (convert it with `as fun(...) R` to call it), and `close`.
+  `dlopen` on macOS and Linux, `LoadLibrary` on Windows.
 - `std.mock_time`: `Clock`/`SystemClock`/`MockClock`, see Testing above.
 - `std.sys`: environment and process helpers (`env`/`env_or`/`set_env`/
   `clear_env`, `sys_exit`, `sys_abort`, `sys_system`).

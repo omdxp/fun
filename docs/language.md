@@ -2002,7 +2002,9 @@ behavior.
 
 ### Warning IDs
 
-- `return_local_ptr`
+- `return_local_ptr`: returning the address of a local, an array literal,
+  or an array the function itself declared with a size, all of which live
+  on the function's own stack
 - `fit_non_exhaustive`
 - `fit_unreachable_branch`
 - `unreachable_code`
