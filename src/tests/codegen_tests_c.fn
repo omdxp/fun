@@ -3797,3 +3797,27 @@ test "a method called on an operator over array elements resolves its receiver" 
     out
   );
 }
+
+test "a closure reading a field doesn't capture a local named like the field" {
+  str src = `use std.io;
+  `compound P {
+  `  num size;
+  `}
+  `fun main() num {
+  `  num i = 0;
+  `  for i < 2 {
+  `    num size = i;
+  `    _ = size;
+  `    i += 1;
+  `  }
+  `  P p = P{size = 7};
+  `  let show = fun() {
+  `    println_fmt("size {num}", p.size);
+  `  };
+  `  show();
+  `  show.free();
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "closure_field_name", "a closure reading a field");
+  assert contains(out, "size 7"), format("expected only p captured, got {str}", out);
+}

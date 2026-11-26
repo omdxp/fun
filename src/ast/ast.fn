@@ -2383,7 +2383,8 @@ fun _collect_closure_free_names(Node* node, Set<str>* bound, Set<str>* free_name
       if e.has_left {
         _collect_closure_free_names(e.left, bound, free_names);
       }
-      if e.has_right {
+      // The right of a `.` names a field or method, never a capture.
+      if e.has_right && !equals(e.op, ".") {
         _collect_closure_free_names(e.right, bound, free_names);
       }
     }
