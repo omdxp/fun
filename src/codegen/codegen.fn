@@ -259,6 +259,9 @@ pub compound Codegen {
   // loop to wrap each element in the same coercion every other shape-
   // typed destination already gets. "" means no coercion is needed.
   str expected_array_elem_shape_type;
+  // The C element type an array literal being copied into a fixed-size
+  // array takes from that array, or "" to infer it from the elements.
+  str copied_literal_elem_c_type;
   // True only for a global array (set alongside `expected_array_elem_
   // shape_type` above): each element's own coercion is inlined as a
   // constant brace literal rather than a `__fun_coerce_` function
@@ -882,6 +885,7 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.in_array_initializer = false;
   g.in_bare_initializer_context = false;
   g.expected_array_elem_shape_type = "";
+  g.copied_literal_elem_c_type = "";
   g.expected_array_elem_shape_coerce_as_constant = false;
   g.in_global_constant_initializer = false;
   g.shape_names.init(0);
@@ -1369,6 +1373,12 @@ fun _one_level_pointer_decay(DataType dt) DataType {
 // True for an unsized array type (`T[]`, no bracket dimension), which
 // decays to a plain C pointer. A sized array (`T[3]`) is excluded; it
 // stays a fixed-size inline array.
+// True when a parameter of type `dt` is a pointer in C: an unsized
+// array, or a fixed-size one, which the body copies from it.
+fun dtype_param_is_array_pointer(DataType dt) flag {
+  ret dtype_is_array_as_pointer(dt) || _is_fixed_array_dtype(dt);
+}
+
 fun dtype_is_array_as_pointer(DataType dt) flag {
   if !dt.is_array {
     ret false;
@@ -3072,7 +3082,7 @@ impl Codegen {
             // An unsized array parameter's decay star must be added
             // here too, or the prototype and the definition disagree;
             // see `emit_function_param`.
-            flag arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
+            flag arr_as_ptr = dtype_param_is_array_pointer(*v.var_type);
             let wt = self.write_type(*v.var_type);
             if wt.is_none() {
               ret .Some(.UnsupportedNode);
@@ -4177,7 +4187,7 @@ impl Codegen {
         self.write_type(*pf_pt4);
         // An array parameter decays to a pointer, matching what the
         // definition writes.
-        if dtype_is_array_as_pointer(*pf_pt4) {
+        if dtype_param_is_array_pointer(*pf_pt4) {
           self.state.write("*");
         }
       }
@@ -5851,6 +5861,16 @@ impl Codegen {
         ret .Some(lit_r);
       }
       .Expression(inner_e) -> {
+        // `p[1] - p[0]`: an element of an array or pointer, resolved the
+        // way any other receiver chain is. Indexing a type with its own
+        // `op_index` is that method's call, handled elsewhere.
+        if equals(inner_e.op, "[]") && inner_e.has_left {
+          let base_dt = self.infer_arg_dtype(inner_e.left);
+          if base_dt.is_some() &&
+            (base_dt.unwrap().is_array || dtype_is_pointer(base_dt.unwrap())) {
+            ret self.resolve_field_chain(operand);
+          }
+        }
         // A call result used directly (`mk() + b`) resolves only for a
         // non-generic plain function, whose return type is a pure table
         // lookup. A generic one would go through
@@ -7345,9 +7365,16 @@ impl Codegen {
       // elements the same way `let arr = [1, 2, 3];` already infers its
       // own declared type.
       .Bracket(inner) -> {
+        // Taken by this literal alone, never one nested in it or after it.
+        str copied_elem = self.copied_literal_elem_c_type;
+        self.copied_literal_elem_c_type = "";
         if !self.in_array_initializer {
           self.state.write("(");
-          self.state.write(self.infer_array_literal_elem_c_type(inner));
+          if !equals(copied_elem, "") {
+            self.state.write(copied_elem);
+          } else {
+            self.state.write(self.infer_array_literal_elem_c_type(inner));
+          }
           self.state.write("[])");
         }
         // An array literal whose own declared element type is a
@@ -7712,18 +7739,26 @@ impl Codegen {
         // 64-bit: `1 << 40` or `3000000 * 3000000` would overflow before
         // ever reaching the `num` it is assigned to. A literal shifted, or
         // combined only with another literal, is widened first.
-        // One fixed-size array assigned to another is copied: C can't
-        // assign arrays.
+        // A fixed-size array assigned another array, or an array literal,
+        // is copied: C can't assign arrays.
         if equals(e.op, "=") && e.has_left && e.has_right &&
-          self._is_fixed_array_value(e.left) &&
-          !_is_bracket_literal(e.right) {
+          self._is_fixed_array_value(e.left) {
           self.state.write("memcpy(");
           let alerr = self.emit_expr(*e.left);
           if alerr.is_some() {
             ret alerr;
           }
           self.state.write(", ");
+          // An array literal takes the target's element type, so its
+          // bytes match what they're copied into.
+          if _is_bracket_literal(e.right) {
+            let target_dt = self.infer_arg_dtype(e.left);
+            if target_dt.is_some() {
+              self.copied_literal_elem_c_type = self.array_elem_c_type(target_dt.unwrap());
+            }
+          }
           let arerr = self.emit_expr(*e.right);
+          self.copied_literal_elem_c_type = "";
           if arerr.is_some() {
             ret arerr;
           }
@@ -7732,9 +7767,12 @@ impl Codegen {
           if aserr.is_some() {
             ret aserr;
           }
-          // Closes the copy and the binary expression's own parenthesis
-          // as well, opened before this branch.
-          self.state.write(")))");
+          self.state.write("))");
+          // The binary expression's own parenthesis, when this branch
+          // opened one.
+          if wrote_own_parens {
+            self.state.write(")");
+          }
           ret .None;
         }
         flag widen_left = _is_int_literal_node(e.left) && e.has_right &&
@@ -10378,6 +10416,11 @@ impl Codegen {
   // plain function or function value passed where a closure is expected
   // into a closure that captures nothing.
   emit_expr_as(Node* arg, DataType target) Option<CodegenErrorKind> {
+    // An array literal takes the element type of the array it is passed
+    // as, so its bytes are what the parameter reads.
+    if target.is_array && _is_bracket_literal(arg) {
+      self.copied_literal_elem_c_type = self.array_elem_c_type(target);
+    }
     str prev_expected = self.expected_enum_type;
     str prev_expected_compound = self.expected_compound_type;
     let prev_expected_let_dt = self.expected_let_dt;
@@ -16731,6 +16774,48 @@ impl Codegen {
   // a type and a name cannot simply be written one after the other.
   // Writes an array type's own `[N]` sizes, which C puts after the
   // declared name.
+  // The C type of one element of array type `dt`.
+  array_elem_c_type(DataType dt) str {
+    DataType elem = dt;
+    elem.is_array = false;
+    elem.array_depth = 0;
+    elem.array_brackets.init(0);
+    ret self.write_type_text(elem);
+  }
+
+  // Copies each fixed-size array parameter, which arrived as a pointer,
+  // into a local of its own name, so the body works on its own copy.
+  emit_array_param_copies(Vec<Node*> args, Pos pos) Option<CodegenErrorKind> {
+    for arg : args {
+      fit arg.kind {
+        .Variable(v) -> {
+          if v.var_type.has_closure_sig || v.var_type.has_fn_sig ||
+            !_is_fixed_array_dtype(*v.var_type) {
+            continue;
+          }
+          self.state.write_indent_pinned(pos);
+          let wt = self.write_type(*v.var_type)?!(.UnsupportedNode);
+          self.state.write(" ");
+          self.state.write(v.name);
+          let berr = self._write_array_brackets(*v.var_type);
+          if berr.is_some() {
+            ret berr;
+          }
+          self.state.write("; memcpy(");
+          self.state.write(v.name);
+          self.state.write(", __fun_arr_");
+          self.state.write(v.name);
+          self.state.write(", sizeof(");
+          self.state.write(v.name);
+          self.state.write("));\n");
+          self.record_local_typed(v.name, wt, false, *v.var_type);
+        }
+        _ -> {}
+      }
+    }
+    ret .None;
+  }
+
   _write_array_brackets(DataType dt) Option<CodegenErrorKind> {
     for bnode : dt.array_brackets {
       self.state.write("[");
@@ -16874,6 +16959,16 @@ impl Codegen {
         // would drop the array's level whenever the element is itself a
         // pointer: `Vec<Node*>`'s `push_many(Node* src, ...)` needs
         // `Node** src`, one level for the array and one for the element.
+        // A fixed-size array parameter arrives as a pointer under a name
+        // of its own, and the body starts by copying it into a local of
+        // the parameter's name: arrays pass as values.
+        if _is_fixed_array_dtype(*v.var_type) {
+          let fwt = self.write_type(*v.var_type)?!(.UnsupportedNode);
+          _ = fwt;
+          self.state.write("* __fun_arr_");
+          self.state.write(v.name);
+          ret .None;
+        }
         flag arr_as_ptr = dtype_is_array_as_pointer(*v.var_type);
         let wt = self.write_type(*v.var_type)?!(.UnsupportedNode);
         let param_dt = self.resolve_type_subst(*v.var_type);
@@ -17516,6 +17611,12 @@ impl Codegen {
         }
         self.state.write(") {\n");
         self.state.indent_level = self.state.indent_level + 1;
+        if f.has_args {
+          let cperr = self.emit_array_param_copies(f.args, node.pos);
+          if cperr.is_some() {
+            ret cperr;
+          }
+        }
         // A variadic body starts by unpacking its varargs, through
         // `__fun_vtags` and `va_arg`, into a `Vec<str>` named `vargs`:
         // the synthetic local the parser registers in scope but never

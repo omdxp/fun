@@ -37,6 +37,10 @@ pub compound CheckedType {
   // `panic(...)`, which never produces a value and so stands for any
   // type expected of it.
   flag is_panic_literal;
+  // An array literal of plain number literals, `[1, 0, 2]`, whose
+  // elements take whichever number type the array is stored as, the way
+  // a single number literal does.
+  flag is_number_literal_array;
   // The written name of a user-defined type, empty for a builtin.
   str name;
   // A fixed-width number's own spelling (`u8`, `i32`, `f32`), which the
@@ -82,6 +86,7 @@ pub fun checked_unknown() CheckedType {
   t.pointer_depth = 0;
   t.is_null_literal = false;
   t.is_panic_literal = false;
+  t.is_number_literal_array = false;
   t.name = "";
   t.width = "";
   t.generic_args.init(0);
@@ -448,6 +453,20 @@ pub fun can_assign(CheckedType to, CheckedType from) flag {
   }
   if to.array_depth != from.array_depth {
     ret false;
+  }
+  // A literal array of numbers fits an array of any number type its
+  // elements would fit one at a time.
+  if from.is_number_literal_array && to.is_array && to.array_depth == from.array_depth &&
+    to.pointer_depth == from.pointer_depth {
+    CheckedType to_elem = to;
+    to_elem.is_array = false;
+    to_elem.array_depth = 0;
+    CheckedType from_elem = from;
+    from_elem.is_array = false;
+    from_elem.array_depth = 0;
+    if _is_numeric(to_elem) && _is_numeric(from_elem) {
+      ret to_elem.base == .Dec || from_elem.base != .Dec;
+    }
   }
   // A whole number widens into a decimal, but a decimal does not narrow
   // back into one without being asked to.
@@ -2822,8 +2841,12 @@ impl Checker {
     _call_args(items, &elements);
 
     CheckedType held = checked_unknown();
+    flag all_number_literals = elements.len > 0;
     num i = 0;
     for i < elements.len {
+      if !_is_number_literal_node(elements.get(i)) {
+        all_number_literals = false;
+      }
       CheckedType element = self.infer(elements.get(i), env);
       i = i + 1;
       if is_unknown(element) {
@@ -2851,6 +2874,7 @@ impl Checker {
     CheckedType t = held;
     t.is_array = true;
     t.array_depth = held.array_depth + 1;
+    t.is_number_literal_array = all_number_literals;
     ret t;
   }
 
@@ -7750,4 +7774,19 @@ test "a scope hides an outer binding of the same name" {
   env.pop();
   let outer = env.lookup("x");
   assert outer.unwrap().base == .Num, "expected the outer binding to return";
+}
+
+// A number written out, or one negated: `3`, `0.5`, `-2`.
+fun _is_number_literal_node(Node* n) flag {
+  fit n.kind {
+    .Number(_) -> { ret true; }
+    .Unary(u) -> {
+      if equals(u.op, "-") && u.operand != nil {
+        ret _is_number_literal_node(u.operand);
+      }
+      ret false;
+    }
+    _ -> { ret false; }
+  }
+  ret false;
 }

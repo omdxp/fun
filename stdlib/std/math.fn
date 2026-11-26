@@ -4,6 +4,12 @@ use std.c.math as cmath;
 use std.result;
 use std.error;
 
+// The ratio of a circle's circumference to its diameter.
+pub const dec PI = 3.141592653589793;
+
+// A full turn in radians, twice `PI`.
+pub const dec TAU = 6.283185307179586;
+
 // The sign of a value, as a type-safe alternative to the -1/0/1 returned by
 // `sign()`. Match it with `fit`:
 //
@@ -377,12 +383,12 @@ pub fun lerp_dec(dec a, dec b, dec t) dec {
 
 // Convert degrees to radians.
 pub fun deg_to_rad(dec degrees) dec {
-  ret degrees * (3.141592653589793 / 180);
+  ret degrees * (PI / 180);
 }
 
 // Convert radians to degrees.
 pub fun rad_to_deg(dec radians) dec {
-  ret radians * (180 / 3.141592653589793);
+  ret radians * (180 / PI);
 }
 
 // Raise an integer base to a non-negative integer exponent. A negative
@@ -469,8 +475,9 @@ test "abs, sign, min, max and clamp" {
 
 test "interpolation and angle conversion" {
   assert _near(lerp_dec(10.0, 20.0, 0.25), 12.5), "expected a quarter of the way";
-  assert _near(deg_to_rad(180.0), 3.141592653589793), "expected 180 degrees to be pi";
-  assert _near(rad_to_deg(3.141592653589793), 180.0), "expected pi to be 180 degrees";
+  assert _near(deg_to_rad(180.0), PI), "expected 180 degrees to be pi";
+  assert _near(rad_to_deg(PI), 180.0), "expected pi to be 180 degrees";
+  assert _near(TAU, 2 * PI), "expected a full turn to be twice pi";
 }
 
 test "integer powers, and the checked form rejects a negative exponent" {
