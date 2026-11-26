@@ -1498,13 +1498,13 @@ impl ParseState {
         ret false;
       }
       if token_is_operator(tok, "(") || token_is_operator(tok, "[") ||
-      token_is_symbol(tok, '{') {
+        token_is_symbol(tok, '{') {
         depth = depth + 1;
         i = i + 1;
         continue;
       }
       if token_is_symbol(tok, ')') || token_is_symbol(tok, ']') ||
-      token_is_symbol(tok, '}') {
+        token_is_symbol(tok, '}') {
         if depth == 0 {
           ret false;
         }
@@ -2561,7 +2561,7 @@ impl Parser {
         // string-literal patterns, not bare enum-variant shorthand
         // (`.A, .B -> {}` fails to parse where `"a", "b" -> {}` works).
         if t.type == .Number || t.type == .Boolean ||
-        t.type == .String {
+          t.type == .String {
           ret self.parse_single_token_to_node();
         }
         if t.type == .Identifier {
@@ -8782,7 +8782,7 @@ impl Parser {
         }
       }
     } elif peek_after_type.is_some() &&
-    peek_after_type.unwrap().type == .Identifier {
+      peek_after_type.unwrap().type == .Identifier {
       self.state.err("expected 'as' before shape name in impl header");
       ret .Some(.InvalidIdentifier);
     } elif peek_after_type.is_none() || !token_is_symbol(peek_after_type.unwrap(), '{') {

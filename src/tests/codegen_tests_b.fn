@@ -3781,10 +3781,10 @@ test "a freestanding build emits only freestanding headers and no runtime, and c
 test "a freestanding build rejects a global that needs startup code to initialize" {
   let emitted = transpile_source_freestanding(
     `fun seed() num {
-  `  ret 4;
-  `}
-  `num start = seed();
-  `pub fun kmain() {}`
+    `  ret 4;
+    `}
+    `num start = seed();
+    `pub fun kmain() {}`
   );
   assert emitted.is_err() &&
     contains(emitted.unwrap_err(), "freestanding build has no startup code"), "expected a clear error";
@@ -4204,7 +4204,7 @@ test "str ordering compares contents, and an indexed str is a chr" {
     "str ordering by contents (strict MSVC-shaped compile)"
   );
   assert contains(out_msvc, want1) && contains(out_msvc, want2) &&
-  contains(out_msvc, want3), format(
+    contains(out_msvc, want3), format(
     "expected the same with only standard C, got: {str}",
     out_msvc
   );

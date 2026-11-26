@@ -1021,9 +1021,9 @@ test "unreachable_code is noticed inside a test block" {
 
 test "unused_variable is noticed inside a test block, but only with -warn-unused" {
   str src = `test "t" {
-    `  num unused_here = 1;
-    `  assert 1 + 1 == 2, "keeps the test from being empty, not a bare boolean literal";
-    `}`;
+  `  num unused_here = 1;
+  `  assert 1 + 1 == 2, "keeps the test from being empty, not a bare boolean literal";
+  `}`;
   says_nothing(src, "expected unused_variable to stay quiet without -warn-unused");
   notices_unused(
     src,
@@ -1034,8 +1034,8 @@ test "unused_variable is noticed inside a test block, but only with -warn-unused
 
 test "unused_variable is noticed inside a fuzz block, but only with -warn-unused" {
   str src = `fuzz "f" (raw* data, num len) {
-    `  num unused_here = 1;
-    `}`;
+  `  num unused_here = 1;
+  `}`;
   says_nothing(src, "expected unused_variable to stay quiet without -warn-unused");
   notices_unused(
     src,
@@ -1388,9 +1388,9 @@ test "a compound named only inside a function type is used" {
   assert !contains(
     notice(
       `compound Frame { num eax; }
-    `fun(Frame*) void[2] handlers;
-    `fun run(fun(Frame*) void cb) { _ = cb; }
-    `fun main() { handlers[0] = nil; run(nil); }`,
+      `fun(Frame*) void[2] handlers;
+      `fun run(fun(Frame*) void cb) { _ = cb; }
+      `fun main() { handlers[0] = nil; run(nil); }`,
       true
     ),
     "unused compound 'Frame'"

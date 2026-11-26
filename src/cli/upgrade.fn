@@ -658,8 +658,8 @@ test "_find_asset_url matches an asset by exact name" {
     `  {"name": "fun-x86_64-linux-gnu.tar.gz", "browser_download_url": "https://example.com/a.tar.gz"},
     `  {"name": "fun-aarch64-macos.tar.gz", "browser_download_url": "https://example.com/b.tar.gz"}
     `]
-  `}
-
+    `}
+    
   );
   assert parsed.is_ok(), "expected the sample release JSON to parse";
   JsonValue release = parsed.unwrap();

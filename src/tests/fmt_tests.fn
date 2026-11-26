@@ -774,7 +774,7 @@ test "a packed compound formats like any other compound" {
   `  _ = packed;
   `}
   `
-;
+  ;
   assert equals(format_source(src, "t.fn").unwrap(), src), "expected a packed compound left exactly as written";
 }
 
@@ -785,7 +785,7 @@ test "an asm statement whose operands are separated by semicolons is kept exactl
   `  };
   `}
   `
-;
+  ;
   assert equals(format_source(src, "t.fn").unwrap(), src), "expected the asm statement untouched";
 }
 
@@ -812,7 +812,7 @@ test "unions, packed unions, and align(N) declarations format like compounds" {
   `  _ = buf;
   `}
   `
-;
+  ;
   assert equals(format_source(src, "t.fn").unwrap(), src), "expected every declaration kept exactly as written";
 }
 
@@ -891,4 +891,24 @@ test "a wrapped construct inside another wrapped one indents one level deeper" {
   str got = format_source(src, "t.fn").unwrap();
   assert contains(got, "\n    g(\n      100000000000,\n"), "expected the inner call's arguments one level under it";
   assert contains(got, "\n    ),\n    3\n  );"), "expected the inner call closed level with it";
+}
+
+test "a statement carried onto the next line indents under it" {
+  str src = "fun main() num {\n  num q =\n5;\n  num r = 1 +\n2;\n  ret q + r;\n}\n";
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n  num q =\n    5;\n"), "expected the value after a trailing = indented";
+  assert contains(got, "\n  num r = 1 +\n    2;\n"), "expected the operand after a trailing operator indented";
+}
+
+test "a condition the source breaks after && indents its next line" {
+  str src = "fun main() num {\n  flag a = true;\n  if a &&\n(a) {\n    ret 1;\n  }\n  ret 0;\n}\n";
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "\n  if a &&\n    (a) {\n"), "expected the continued condition indented";
+}
+
+test "a multi-line raw string's lines line up with the line it starts on" {
+  str src = "pub const str Q =\n`a\n      `b`;\nfun main() num {\n  str s = `x\n        `y`;\n  ret 0;\n}\n";
+  str got = format_source(src, "t.fn").unwrap();
+  assert contains(got, "pub const str Q =\n  `a\n  `b`;\n"), "expected every line of a wrapped raw string at its continuation indent";
+  assert contains(got, "  str s = `x\n  `y`;\n"), "expected later lines at the indent of the line the string starts on";
 }

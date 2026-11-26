@@ -1831,6 +1831,22 @@ fun main() {
   `continue`/`break`, defers in the current loop iteration run before
   control leaves it.
 
+A bare block, `{ ... }` written as a statement, opens a scope of its own:
+names declared in it end with it, and its defers run when it closes.
+
+```fun
+use std.io;
+
+fun main() {
+  {
+    num x = 2;
+    defer println("left the block");
+    println_fmt("x={num}", x);
+  }
+  println("after the block");
+}
+```
+
 ## Inline Assembly
 
 ```fun

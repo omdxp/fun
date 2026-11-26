@@ -31,6 +31,8 @@ pub compound FmtState {
   // Width already written on the current line, which is what a
   // decision about breaking a construct is measured against.
   num col;
+  // The indent the current line was written at.
+  num line_indent;
   // Lines written so far, and the line each still-open compound literal
   // opened on, so a literal whose fields went onto lines of their own
   // closes on a line of its own too.
@@ -128,6 +130,7 @@ pub fun fmt_state_new() FmtState {
   s.indent = 0;
   s.at_line_start = true;
   s.col = 0;
+  s.line_indent = 0;
   s.line_count = 0;
   s.literal_open_lines.init(0);
   s.open_delims = 0;
@@ -258,6 +261,47 @@ pub fun is_char_literal(Token t) flag {
   }
 }
 
+// Whether a line ending in `text` leaves its statement waiting for an
+// operand, so the next line continues it.
+fun _expects_operand(str text) flag {
+  for op : ["=", "+=", "-=", "*=", "/=", "%=", "+", "-", "*", "/", "%", "==", "!=", "<=", ">=",
+    "&&", "||", "&", "|", "^", "<<", ">>"] {
+    if equals(text, op) {
+      ret true;
+    }
+  }
+  ret false;
+}
+
+// A multi-line raw string with every line after its first starting at
+// `column`, the indent of the line it starts on, however the source
+// indented it.
+fun _reindent_raw(str text, num column) str {
+  Vec<str> lines = split(text, '\n');
+  defer lines.free();
+  StringBuilder b = string_builder_init(len(text) + lines.len * column);
+  num i = 0;
+  for i < lines.len {
+    str line = lines.get(i);
+    if i > 0 {
+      b.append_char('\n');
+      num c = 0;
+      for c < column {
+        b.append_char(' ');
+        c = c + 1;
+      }
+      str rest = trim_left(line);
+      b.append(rest);
+      free(rest);
+    } else {
+      b.append(line);
+    }
+    free(line);
+    i = i + 1;
+  }
+  ret b.build();
+}
+
 // A string literal is re-emitted with the delimiters it was written
 // with, since a raw string's body is kept verbatim.
 fun _string_text(Token t) str {
@@ -293,7 +337,15 @@ impl FmtState {
         i = i + 1;
       }
       self.col = level * 2;
+      self.line_indent = level * 2;
       self.at_line_start = false;
+    }
+    if starts_with(text, "`") && contains(text, "\n") {
+      str lined = _reindent_raw(text, self.line_indent);
+      defer free(lined);
+      self.out.append(lined);
+      self.col = self.col + len(text);
+      ret;
     }
     self.out.append(text);
     self.col = self.col + len(text);
@@ -366,7 +418,7 @@ impl FmtState {
 // Tokens that carry a word: a space always separates two of them.
 fun _is_word_like(Token t) flag {
   ret t.type == .Identifier || t.type == .Keyword ||
-  t.type == .Number || t.type == .String || t.type == .Boolean;
+    t.type == .Number || t.type == .String || t.type == .Boolean;
 }
 
 fun _is_closing(str text) flag {
@@ -1017,7 +1069,7 @@ fun _needs_space_at(
   // A leading dot opens an enum shorthand, which is a value, not a
   // member access.
   if _is_dot_run(c) && prev.type == .Keyword &&
-  (equals(p, "ret") || equals(p, "for")) {
+    (equals(p, "ret") || equals(p, "for")) {
     ret true;
   }
   // The same after a ternary's own `?` (`t ? .A : .B`): pressed against
@@ -2362,7 +2414,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
         block_baseline = s.open_delims_at_block.get(s.open_delims_at_block.len - 1);
       }
       s.continuation = s.nest_levels(block_baseline, _leading_closers(&tokens, i));
-      if s.continuation == 0 && (s.bool_chain_wrap || s.method_chain_wrap) &&
+      // A statement carried onto a new line outside any delimiter, after
+      // a trailing `=` or binary operator, indents one level under it.
+      flag mid_statement = s.has_prev && _expects_operand(token_text(s.prev));
+      if s.continuation == 0 &&
+        (s.bool_chain_wrap || s.method_chain_wrap || mid_statement) &&
         s.open_delims == block_baseline {
         s.continuation = 1;
       }
@@ -2505,6 +2561,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
         s.pending_newlines = 0;
       } else {
         s.pending_space = true;
+        // A break the source already has after the operator wraps the
+        // chain just the same.
+        if i + 1 < tokens.len && tokens.get(i + 1).type == .NewLine {
+          s.bool_chain_wrap = true;
+        }
       }
       s.has_prev = false;
       s.prev_unary = false;
@@ -2583,7 +2644,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
       if equals(text, "fun") {
         s.in_fun_signature = true;
       } elif equals(text, "compound") || equals(text, "shape") ||
-      equals(text, "impl") {
+        equals(text, "impl") {
         s.pending_decl_block = true;
       } elif equals(text, "enum") {
         s.pending_enum_block = true;

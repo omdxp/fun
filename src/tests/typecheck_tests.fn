@@ -1322,12 +1322,12 @@ test "a shape-bounded generic parameter rejects a non-implementor" {
   assert contains(
     check(
       `shape Renderable { render() str; }
-    `compound Other { num v; }
-    `fun show<T: Renderable>(T x) str { ret x.render(); }
-    `fun main() str {
-    `  Other o;
-    `  ret show(&o);
-    `}`
+      `compound Other { num v; }
+      `fun show<T: Renderable>(T x) str { ret x.render(); }
+      `fun main() str {
+      `  Other o;
+      `  ret show(&o);
+      `}`
     ),
     "does not accept"
   ), "expected a non-implementor rejected";
@@ -1345,14 +1345,14 @@ test "a generic function's own shape-typed parameter still checks the caller's a
   assert contains(
     check(
       `shape Container<T> { get() T; }
-    `compound Box<T> { T val; }
-    `fun show<T>(Container<T> c) { ret; }
-    `fun main() num {
-    `  Box<num> b;
-    `  b.val = 42;
-    `  show(b);
-    `  ret 0;
-    `}`
+      `compound Box<T> { T val; }
+      `fun show<T>(Container<T> c) { ret; }
+      `fun main() num {
+      `  Box<num> b;
+      `  b.val = 42;
+      `  show(b);
+      `  ret 0;
+      `}`
     ),
     "expects"
   ), "expected a generic shape-typed parameter to reject a mismatched argument";
@@ -1375,11 +1375,11 @@ test "a generic-instantiation bound alternative rejects a mismatching instantiat
   assert contains(
     check(
       `compound Box<T> { T value; }
-    `fun identity<T: num | Box<num>>(T x) T { ret x; }
-    `fun main() str {
-    `  let out = identity("nope");
-    `  ret out;
-    `}`
+      `fun identity<T: num | Box<num>>(T x) T { ret x; }
+      `fun main() str {
+      `  let out = identity("nope");
+      `  ret out;
+      `}`
     ),
     "does not accept"
   ), "expected a type outside the bound list rejected";
@@ -1462,14 +1462,14 @@ test "a bound naming a generic shape's own instantiation still rejects a non-imp
   assert contains(
     check(
       `shape Steppable<T> { succ() T; }
-    `compound Other { num v; }
-    `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
-    `fun main() num {
-    `  Other o;
-    `  o.v = 1;
-    `  let b = bump(o);
-    `  ret b.v;
-    `}`
+      `compound Other { num v; }
+      `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
+      `fun main() num {
+      `  Other o;
+      `  o.v = 1;
+      `  let b = bump(o);
+      `  ret b.v;
+      `}`
     ),
     "does not accept"
   ), "expected a non-implementor still rejected, not accidentally accepted by the suffix-stripping fix";
@@ -1521,10 +1521,10 @@ test "a bound-list type alias is usable as a generic constraint" {
   assert contains(
     check(
       `als Numeric = num | dec;
-    `fun identity<T: Numeric>(T x) T { ret x; }
-    `fun main() str {
-    `  ret identity("nope");
-    `}`
+      `fun identity<T: Numeric>(T x) T { ret x; }
+      `fun main() str {
+      `  ret identity("nope");
+      `}`
     ),
     "does not accept"
   ), "expected a type outside the bound-list alias rejected";
@@ -1583,11 +1583,11 @@ test "a bound-list type alias is usable as a generic constraint on a compound" {
   assert contains(
     check(
       `als Numeric = num | dec;
-    `compound Box<T: Numeric> { T value; }
-    `fun main() str {
-    `  Box<str> b = Box<str>{value = "nope"};
-    `  ret b.value;
-    `}`
+      `compound Box<T: Numeric> { T value; }
+      `fun main() str {
+      `  Box<str> b = Box<str>{value = "nope"};
+      `  ret b.value;
+      `}`
     ),
     "does not accept"
   ), "expected a type outside a compound's bound-list alias rejected";
@@ -1677,13 +1677,13 @@ test "two different enums are not compared by ordinal" {
   // whether two unrelated ordinals coincide, which is never the point.
   str found = check(
     `enum A { X }
-  `enum B { P }
-  `fun main() num {
-  `  A a = .X;
-  `  B b = .P;
-  `  if a == b { ret 1; }
-  `  ret 0;
-  `}`
+    `enum B { P }
+    `fun main() num {
+    `  A a = .X;
+    `  B b = .P;
+    `  if a == b { ret 1; }
+    `  ret 0;
+    `}`
   );
   assert contains(found, "share no variants"), "expected the cross-enum comparison rejected";
 }
@@ -3228,36 +3228,36 @@ test "an enum whose variants carry data cannot be compared with == or !=, but a 
   assert contains(msg, "use `fit`"), "expected the message to point at fit";
   rejects(
     `enum Outcome {
-  `  Done(num),
-  `  Failed,
-  `}
-  `fun main() {
-  `  Outcome a = Outcome.Failed;
-  `  flag differs = a != Outcome.Failed;
-  `}`,
+    `  Done(num),
+    `  Failed,
+    `}
+    `fun main() {
+    `  Outcome a = Outcome.Failed;
+    `  flag differs = a != Outcome.Failed;
+    `}`,
     "expected != to be rejected too"
   );
   accepts(
     `enum Color {
-  `  Red,
-  `  Green,
-  `}
-  `fun main() {
-  `  Color c = Color.Red;
-  `  flag same = c == Color.Green;
-  `}`,
+    `  Red,
+    `  Green,
+    `}
+    `fun main() {
+    `  Color c = Color.Red;
+    `  flag same = c == Color.Green;
+    `}`,
     "expected a plain enum to compare fine"
   );
   accepts(
     `enum Outcome {
-  `  Done(num),
-  `  Failed,
-  `}
-  `fun main() {
-  `  Outcome a = Outcome.Failed;
-  `  Outcome* p = &a;
-  `  flag same = p == nil;
-  `}`,
+    `  Done(num),
+    `  Failed,
+    `}
+    `fun main() {
+    `  Outcome a = Outcome.Failed;
+    `  Outcome* p = &a;
+    `  flag same = p == nil;
+    `}`,
     "expected a pointer to a data-carrying enum to compare against nil"
   );
 }
@@ -4799,7 +4799,7 @@ test "a union literal sets one field, and align(N) needs a power of two" {
   ), "expected a two-field union literal rejected";
   accepts(
     `union V { u32 a; f32 b; }
-  `fun main() { V v = V{b = 2.0}; }`,
+    `fun main() { V v = V{b = 2.0}; }`,
     "expected a one-field union literal accepted"
   );
   assert equals(check(`align(24) compound C { u8 x; }
@@ -4829,38 +4829,38 @@ test "array element stores, literal fields, and function values are checked agai
   assert contains(
     check(
       `fun a(num x) num { ret x; }
-    `fun b(str x) str { ret x; }
-    `fun main() { fun(num) num f = a; fun(str) str g = b; f = g; }`
+      `fun b(str x) str { ret x; }
+      `fun main() { fun(num) num f = a; fun(str) str g = b; f = g; }`
     ),
     "cannot assign fun(str) str to 'f' of type fun(num) num"
   ), "expected one function value checked against another";
   assert contains(
     check(
       `fun neg(str x) str { ret x; }
-    `compound Ops { fun(num) num op; }
-    `fun main() { Ops o = Ops{op = neg}; }`
+      `compound Ops { fun(num) num op; }
+      `fun main() { Ops o = Ops{op = neg}; }`
     ),
     "field 'op' of 'Ops' expects fun(num) num, found function 'neg'"
   ), "expected a function checked against the field it fills";
   assert contains(
     check(
       `fun inc(num x) num { ret x + 1; }
-    `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0](1, 2); }`
+      `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0](1, 2); }`
     ),
     "this function value expects 1 argument, got 2"
   ), "expected a call through an element checked for arity";
   assert contains(
     check(
       `fun inc(num x) num { ret x + 1; }
-    `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0]("a"); }`
+      `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0]("a"); }`
     ),
     "argument 1 of this function value expects num, found str"
   ), "expected a call through an element checked for argument types";
   accepts(
     `fun inc(num x) num { ret x + 1; }
-  `als Op = fun(num) num;
-  `Op[2] table;
-  `fun main() { table[0] = inc; fun(num) num f = table[0]; num r = f(1) + table[0](2); }`,
+    `als Op = fun(num) num;
+    `Op[2] table;
+    `fun main() { table[0] = inc; fun(num) num f = table[0]; num r = f(1) + table[0](2); }`,
     "expected matching function values accepted"
   );
 }
@@ -4869,14 +4869,14 @@ test "comparisons need comparable values, and a for loop needs something to walk
   assert contains(
     check(
       `compound P { num x; }
-    `fun main() { P a = P{x = 1}; P b = P{x = 1}; flag r = a == b; }`
+      `fun main() { P a = P{x = 1}; P b = P{x = 1}; flag r = a == b; }`
     ),
     "'==' cannot compare 'P' values; give 'P' an `op_eq` method, or compare their fields"
   ), "expected a compound comparison rejected";
   assert contains(
     check(
       `compound P { num x; }
-    `fun main() { P a = P{x = 1}; flag r = a < a; }`
+      `fun main() { P a = P{x = 1}; flag r = a < a; }`
     ),
     "give 'P' an `op_lt` method"
   ), "expected the method named for the operator used";
@@ -4898,8 +4898,8 @@ test "comparisons need comparable values, and a for loop needs something to walk
   ), "expected a for loop over a number rejected";
   accepts(
     `compound P { num x; }
-  `impl P { op_eq(P o) flag { ret self.x == o.x; } }
-  `fun main() { P a = P{x = 1}; P b = P{x = 1}; P* pa = &a; flag r = a == b && pa == &a && pa != nil; }`,
+    `impl P { op_eq(P o) flag { ret self.x == o.x; } }
+    `fun main() { P a = P{x = 1}; P b = P{x = 1}; P* pa = &a; flag r = a == b && pa == &a && pa != nil; }`,
     "expected an op_eq compound and pointer comparisons accepted"
   );
 }
@@ -4911,7 +4911,7 @@ test "a name that is no type is reported wherever a type is written" {
   ), "expected a local's unknown type reported";
   assert contains(
     check(`compound Box<T> { T v; }
-  `fun main() { Box<Nope> b; }`),
+    `fun main() { Box<Nope> b; }`),
     "no type called 'Nope'"
   ), "expected an unknown generic argument reported";
   assert contains(check(`fun main() { (num, Nope) t; }`), "no type called 'Nope'"), "expected an unknown tuple member reported";
@@ -4923,8 +4923,8 @@ test "a name that is no type is reported wherever a type is written" {
   ), "expected an unknown field type reported by field";
   accepts(
     `compound Box<T> { T v; }
-  `fun first<T>(Box<T> b) T { T copy = b.v; ret copy; }
-  `fun main() { Box<num> b = Box<num>{v = 1}; let n = first(b); }`,
+    `fun first<T>(Box<T> b) T { T copy = b.v; ret copy; }
+    `fun main() { Box<num> b = Box<num>{v = 1}; let n = first(b); }`,
     "expected type parameters and declared generics accepted"
   );
 }

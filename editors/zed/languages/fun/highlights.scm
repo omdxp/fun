@@ -52,7 +52,8 @@
 (primitive_type) @type.builtin
 ((type_identifier) @type.builtin
   (#match? @type.builtin "^([iu][1-9][0-9]*|size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|u?int(8|16|32|64)_t|time_t|clock_t)$"))
-(type_identifier) @type
+((type_identifier) @type
+  (#not-match? @type "^([iu][1-9][0-9]*|size_t|ptrdiff_t|ssize_t|intptr_t|uintptr_t|u?int(8|16|32|64)_t|time_t|clock_t)$"))
 (module) @namespace
 
 ; Declarations

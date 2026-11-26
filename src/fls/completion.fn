@@ -1568,7 +1568,7 @@ fun _written_names(Vec<Token>* tokens, str skip, Vec<Item>* items) {
         } elif token_is_keyword(prev, "enum") && !enum_names.contains(name) {
           enum_names.push(name);
         } elif (token_is_keyword(prev, "shape")) &&
-        !shape_names.contains(name) {
+          !shape_names.contains(name) {
           shape_names.push(name);
         }
       }
