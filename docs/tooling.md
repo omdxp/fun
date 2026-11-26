@@ -573,6 +573,9 @@ quick orientation.
 - `std.fs`: files and directories; `read_binary`/`write_binary` read and
   write whole binary files as bytes, zeros included.
 - `std.base64`: `encode` bytes as base64 text and `decode` it back.
+- `std.zlib`: `inflate` for raw DEFLATE data and `zlib_decompress` for zlib
+  streams (header and checksum checked), as PNG images and HTTP bodies hold
+  them, plus the `adler32` and `crc32` checksums.
 - `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/
   `Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`,
   Option-returning accessors, and `to_string`/`stringify`.
