@@ -1,12 +1,19 @@
 // A fixed-size array is a value: declaring one from another, assigning one
-// to another, or giving one to a compound literal's array field copies its
-// elements, the same as any other value.
+// to another, giving one to a compound literal's array field, or passing
+// one to a function copies its elements, the same as any other value. A
+// literal of plain numbers takes the array's own element type.
 
 use std.io;
 
 compound Swatch {
   str name;
   f32[4] rgba;
+}
+
+// Brightens its own copy; the caller's array is left alone.
+fun brightened(f32[4] c) f32 {
+  c[1] = c[1] * 2;
+  ret c[1];
 }
 
 fun main() {
@@ -21,5 +28,12 @@ fun main() {
     copy[1] as f64,
     s.rgba[1] as f64,
     t.rgba[1] as f64
+  );
+  t.rgba = [1, 0, 0, 1];
+  println_fmt(
+    "{dec} {dec} {dec}",
+    brightened(teal) as f64,
+    teal[1] as f64,
+    brightened([0, 2, 0, 1]) as f64 + t.rgba[0] as f64
   );
 }

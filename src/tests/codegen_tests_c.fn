@@ -3744,3 +3744,56 @@ test "a bare block is its own scope and runs its defers when it closes" {
     out
   );
 }
+
+test "array literals and array parameters copy as values of the target's element type" {
+  str src = `use std.io;
+  `compound P {
+  `  f32[4] c;
+  `}
+  `fun bump(f32[4] v) f32 {
+  `  v[1] = 99.0;
+  `  ret v[1] + v[3];
+  `}
+  `fun main() num {
+  `  P p = P{c = [1, 0, 0, 2]};
+  `  f32[4] a = [0.0, 0.0, 0.0, 0.0];
+  `  a = [1, 2, 3, 4];
+  `  p.c = [3, 0, 0, 1];
+  `  f32 got = bump(a);
+  `  println_fmt("{f32} {f32} {f32} {f32} {f32}", p.c[0], a[0], a[1], got, bump([1, 0, 0, 1]));
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "array_literal_copies", "array literals and parameters copy");
+  assert contains(out, "3 1 2 103 100"), format(
+    "expected element-typed copies and a caller-safe parameter, got {str}",
+    out
+  );
+}
+
+test "a method called on an operator over array elements resolves its receiver" {
+  str src = `use std.io;
+  `compound V {
+  `  f32 x;
+  `  f32 y;
+  `}
+  `impl V {
+  `  op_sub(V o) V {
+  `    ret V{x = self.x - o.x, y = self.y - o.y};
+  `  }
+  `  len2() f32 {
+  `    ret self.x * self.x + self.y * self.y;
+  `  }
+  `}
+  `fun main() num {
+  `  V[2] p;
+  `  p[0] = V{x = 1, y = 1};
+  `  p[1] = V{x = 4, y = 5};
+  `  println_fmt("{f32}", (p[1] - p[0]).len2());
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "operator_on_elements", "a method on an operator over elements");
+  assert contains(out, "25"), format(
+    "expected the difference's own method called, got {str}",
+    out
+  );
+}

@@ -5121,3 +5121,37 @@ test "a method's type parameter hides a type of the same name" {
     "expected A inside pick to mean pick's own type parameter"
   );
 }
+
+test "an array literal of plain numbers fits any number array" {
+  accepts(
+    `compound P {
+    `  f32[4] c;
+    `}
+    `fun take(f32[4] v) f32 {
+    `  ret v[0];
+    `}
+    `fun main() num {
+    `  P p = P{c = [1, 0, 0, 2]};
+    `  f32[4] a = [1, 2, -3, 4];
+    `  p.c = [3, 0, 0, 1];
+    `  _ = take([1, 0, 0, 1]);
+    `  ret a[0] as num;
+    `}`,
+    "expected whole-number literals accepted as the elements of a float array"
+  );
+  rejects(
+    `fun main() num {
+    `  num[2] whole = [1, 2];
+    `  f32[2] a = whole;
+    `  ret 0;
+    `}`,
+    "expected an array of whole numbers held in a variable still rejected for a float array"
+  );
+  rejects(
+    `fun main() num {
+    `  num[2] a = [1.5, 2.5];
+    `  ret 0;
+    `}`,
+    "expected decimal literals still rejected for a whole-number array"
+  );
+}

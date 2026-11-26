@@ -178,6 +178,9 @@ compare by address.
 ### Arrays
 
 Array literals require uniform element types: `num[] arr = [1, 2, 3];`.
+A literal of plain numbers takes the element type of the array it's
+stored in or passed as, the way a single number does: `f32[4] c = [1, 0,
+0, 1];`.
 A literal written one element per line may end with a comma after the
 last element, as a compound literal may.
 
@@ -185,8 +188,9 @@ A bracketed size makes it a fixed-size array instead: `num[3] c;` is a
 real, inline, stack-allocated C array, not a pointer and not
 `Vec<T>` (the separate, heap-backed, growable stdlib type) - a
 compound holding one has no indirection to its own fields. It is a value
-like any other: `num[3] d = c;`, `d = c;` and `Box{cells = c}` each copy
-the elements.
+like any other: `num[3] d = c;`, `d = c;`, `Box{cells = c}` and passing
+it to a `num[3]` parameter each copy the elements, so a function changing
+its parameter leaves the caller's array alone.
 
 ```fun
 use std.io;
