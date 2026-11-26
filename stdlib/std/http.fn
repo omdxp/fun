@@ -1749,6 +1749,25 @@ test "HttpRouter POST handler reads the real request body and echoes it back" {
   assert equals(resp.body, "ping"), "expected the handler to have read the real request body, not an empty one";
 }
 
+// Sends `req` on a task of its own, keeping the response in `out` and
+// reporting over `done` whether the send succeeded.
+async fun _send_async_task(HttpRequest* req, HttpResponse* out, Channel<num>* done) {
+  let result = await req.send_async();
+  num ok = 0;
+  if result.is_ok() {
+    *out = result.unwrap();
+    ok = 1;
+  }
+  _ = await done.send_async(ok);
+}
+
+// Handles one client through `router` on a task of its own, reporting
+// over `done` whether it succeeded.
+async fun _handle_client_task(HttpRouter* router, num client, Channel<num>* done) {
+  let result = await router.handle_client_async(client);
+  _ = await done.send_async(result.is_ok() ? 1 : 0);
+}
+
 test "HttpRequest.send_async performs a real round trip, off the calling thread" {
   let server_fd = tcp_listen(0);
   num port = tcp_local_port(server_fd);
@@ -1767,12 +1786,15 @@ test "HttpRequest.send_async performs a real round trip, off the calling thread"
   let built = http_request(.Get, format("http://127.0.0.1:{num}/", port));
   assert built.is_ok(), "expected the request to build";
   HttpRequest req = built.unwrap();
-  let result = req.send_async();
+  HttpResponse resp;
+  Channel<num> done = channel_new_cap(0, 1);
+  fork _send_async_task(&req, &resp, &done);
+  num ok = done.recv_timeout(5000);
+  done.destroy();
   let join_rc = thread_join(&server_thread, nil);
   assert join_rc == 0, "expected the server thread to join cleanly";
 
-  assert result.is_ok(), "expected send_async to succeed";
-  let resp = result.unwrap();
+  assert ok == 1, "expected send_async to succeed";
   assert resp.status_code() == 200, "expected the real status code";
   assert equals(resp.body, "hello async"), "expected the real body, read across a real connection";
 }
@@ -1794,10 +1816,13 @@ test "HttpRouter.handle_client_async dispatches a real request, off the calling 
 
   let client = tcp_accept(server_fd);
   assert client >= 0, "expected a real connection to accept";
-  let result = router.handle_client_async(client);
+  Channel<num> done = channel_new_cap(0, 1);
+  fork _handle_client_task(&router, client, &done);
+  num ok = done.recv_timeout(5000);
+  done.destroy();
   let join_rc = thread_join(&client_thread, nil);
   assert join_rc == 0, "expected the client thread to join cleanly";
 
-  assert result.is_ok(), "expected handle_client_async to succeed";
+  assert ok == 1, "expected handle_client_async to succeed";
   assert equals(cctx.response_status_line, "HTTP/1.1 200 OK"), "expected the real status line the client actually read";
 }

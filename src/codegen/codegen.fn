@@ -19055,6 +19055,16 @@ impl Codegen {
           }
           ret .Some(as_dt.type_str);
         }
+        // A call through a function value, held in a local or a field,
+        // returns what the value's own signature says.
+        let callee_dt = self.infer_arg_dtype(e.left);
+        if callee_dt.is_some() {
+          DataType cdt = callee_dt.unwrap();
+          FnTypeSig* sig = dtype_signature(&cdt);
+          if sig != nil {
+            ret self.resolve_type_name(*sig.rtype);
+          }
+        }
         fit e.left.kind {
           .Identifier(callee_name) -> {
             let rt = self.lookup_function_rtype(callee_name);

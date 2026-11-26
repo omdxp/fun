@@ -521,6 +521,12 @@ fun rename_node(Node* n, str old, str new, flag is_type) {
       }
       n.kind = .Impl(im);
     }
+    .Test(t) -> { rename_node(t.body, old, new, is_type); }
+    .Fuzz(z) -> {
+      rename_node(z.data_param, old, new, is_type);
+      rename_node(z.len_param, old, new, is_type);
+      rename_node(z.body, old, new, is_type);
+    }
     .TypeAlias(ta) -> {
       rename_dtype(ta.body, old, new);
       rename_names(&ta.bound_alternatives, old, new);

@@ -4785,6 +4785,10 @@ impl Parser {
       ret .Some(.InvalidStatement);
     }
     self.state.token_next();
+    if self.state.next_token_is_keyword("if") {
+      self.state.err("write 'elif' instead of 'else if'");
+      ret .Some(.InvalidStatement);
+    }
 
     let berr = self._parse_if_body();
     if berr.is_some() {

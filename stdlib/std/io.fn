@@ -828,7 +828,10 @@ test "format fills placeholders in order and keeps what it cannot fill" {
   str c = format("{{literal}} {}", "v");
   assert equals(c, "{literal}} v"), "expected an escaped brace to print one brace";
   free(c);
-  str d = format("{} {}", "only");
+  // Through a variable, since a literal format string short of arguments
+  // is rejected when compiling.
+  str two_slots = "{} {}";
+  str d = format(two_slots, "only");
   assert equals(d, "only {}"), "expected a placeholder with no argument to stay";
   free(d);
   str e = format("{unknown} {}", "v");

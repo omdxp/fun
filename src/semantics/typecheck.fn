@@ -1452,6 +1452,10 @@ compound Checker {
   // for types the checker never sees, so a name among them is a type
   // rather than one nothing declares.
   Vec<str> active_type_params;
+  // The type parameters of the function whose call arguments are being
+  // checked. They stand for whatever the call supplies, even where the
+  // program also declares a type of the same name.
+  Vec<str> call_type_params;
   // The type params of the generic `impl` whose methods are being checked
   // (`impl Box<T>`'s `T`), empty otherwise - in scope for every method
   // body exactly the way a method's own type params are.
@@ -1483,6 +1487,7 @@ compound Checker {
 fun _checker_new() Checker {
   Checker c;
   c.active_type_params.init(4);
+  c.call_type_params.init(0);
   c.impl_type_params.init(0);
   c.impl_type_param_bounds.init(0);
   c.active_type_param_bounds.init(4);
@@ -2081,6 +2086,9 @@ impl Checker {
     }
     if equals(t.name, "") {
       ret true;
+    }
+    if self.call_type_params.contains(t.name) {
+      ret false;
     }
     str name = self.canonical_type_name(t.name);
     if self.compounds.at(name).is_some() || self.shapes.has(name) ||
@@ -3145,8 +3153,14 @@ impl Checker {
         ret checked_unknown();
       }
       CheckedType base = self.infer(e.left, env);
-      if base.base == .Str && !base.is_array {
+      if base.base == .Str && !base.is_array && base.pointer_depth == 0 {
         ret checked_of(.Chr);
+      }
+      // A pointer indexes like C's own `p[i]`, reading what it points at.
+      if !base.is_array && base.pointer_depth > 0 && base.base != .Raw {
+        CheckedType pointee = base;
+        pointee.pointer_depth = base.pointer_depth - 1;
+        ret pointee;
       }
       if !base.is_array {
         if !e.has_right {
@@ -3657,11 +3671,24 @@ impl Checker {
     // even template form), the one case `is_unknown()`'s own "stands
     // for any type" leniency can't tell apart from a genuinely
     // unresolved expression.
-    ret substitute(
+    CheckedType returned = substitute(
       sig.rtype_template,
       &receiver_type_params,
       &found.receiver.generic_args
     );
+    // The method's own type parameters (`reduce<A>`) stand for whatever
+    // the call supplies, not for a type the program happens to declare
+    // under the same name.
+    if sig.type_params.len == 0 {
+      ret returned;
+    }
+    Vec<CheckedType> open_params;
+    open_params.init(sig.type_params.len);
+    defer open_params.free();
+    for _ : sig.type_params {
+      open_params.push(checked_unknown());
+    }
+    ret substitute(returned, &sig.type_params, &open_params);
   }
 
   // A shape-bound alternative's own bare name, with any generic-arg
@@ -3724,7 +3751,7 @@ impl Checker {
         // concrete instantiation of a generic shape (`T: To<num>`, or a
         // self-referential one like `T: Steppable<T>`) is handled by
         // `_bare_shape_bound_name` stripping the `<...>` suffix first.
-        if equals(bound, supplied_name) ||
+        if equals(bound, supplied_name) || _sized_number_meets_bound(supplied, bound) ||
           self.implements_shape(
           supplied,
           self.canonical_type_name(self._bare_shape_bound_name(bound))
@@ -3856,6 +3883,7 @@ impl Checker {
         for ea < allowed.len {
           str bound = allowed.get(ea);
           if equals(bound, explicit_name) ||
+            _sized_number_meets_bound(explicit_supplied, bound) ||
             self.implements_shape(
             explicit_supplied,
             self.canonical_type_name(self._bare_shape_bound_name(bound))
@@ -3895,7 +3923,7 @@ impl Checker {
           // bound is checked by real membership, not name equality,
           // with any generic-arg suffix on the bound itself stripped
           // first.
-          if equals(bound, supplied_name) ||
+          if equals(bound, supplied_name) || _sized_number_meets_bound(supplied, bound) ||
             self.implements_shape(
             supplied,
             self.canonical_type_name(self._bare_shape_bound_name(bound))
@@ -4283,6 +4311,9 @@ impl Checker {
     Vec<str>* type_params,
     Vec<CheckedType>* generic_args
   ) {
+    Vec<str> outer_call_params = self.call_type_params;
+    self.call_type_params = sig.type_params;
+    defer self.call_type_params = outer_call_params;
     if !sig.is_variadic {
       if args.len > sig.args.len {
         self.fail(format("too many arguments to '{str}'", name), node);
@@ -5379,6 +5410,12 @@ impl Checker {
         self.check_statement(ein.body, env);
       }
       .StatementElse(body) -> { self.check_statement(body, env); }
+      .StatementAssert(a) -> {
+        self.check_condition(a.condition, env);
+        if a.has_message {
+          self.walk_expr(a.message, env);
+        }
+      }
       .StatementDefer(inner) -> { self.check_statement(inner, env); }
       .StatementFor(kind) -> { self.check_for(stmt, kind, env); }
       .StatementFit(f) -> { self.check_fit(f, env); }
@@ -6365,7 +6402,7 @@ impl Checker {
         _free_checked_type_contents(&declared);
       }
     }
-    if !equals(declared.name, "") {
+    if !equals(declared.name, "") && !declared_is_type_param {
       str type_name = self.canonical_type_name(declared.name);
       let info = self.compounds.at(type_name);
       if info.is_some() {
@@ -7291,6 +7328,16 @@ fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node)
 }
 
 // Checks a whole program, reporting the first type error it finds.
+// True when `t` is a sized number (`i32`, `u8`, `f32`) and `bound` names
+// the kind it is one of, `num` or `dec`.
+fun _sized_number_meets_bound(CheckedType t, str bound) flag {
+  if len(t.width) == 0 || t.pointer_depth > 0 || t.is_array {
+    ret false;
+  }
+  ret (equals(bound, "num") && t.base == .Num) ||
+    (equals(bound, "dec") && t.base == .Dec);
+}
+
 pub fun typecheck_program(Vec<Node>* nodes) Result<flag, TypeError> {
   Vec<str> no_aliases;
   no_aliases.init(0);
@@ -7621,6 +7668,27 @@ pub fun typecheck_program_with_aliases(
         }
         checker.check_shape_conformance(block, node);
         checker.check_impl(block, nodes);
+      }
+      // A test or fuzz body is checked as the body of a function taking
+      // the block's parameters and returning nothing.
+      .Test(t) -> {
+        checker.current_file = node.has_pos ? node.pos.filename : "";
+        FunctionNode tf = function_node_new();
+        tf.body = t.body;
+        tf.has_body = true;
+        checker.check_function(tf, nodes);
+        tf.args.free();
+      }
+      .Fuzz(z) -> {
+        checker.current_file = node.has_pos ? node.pos.filename : "";
+        FunctionNode zf = function_node_new();
+        zf.args.push(z.data_param);
+        zf.args.push(z.len_param);
+        zf.has_args = true;
+        zf.body = z.body;
+        zf.has_body = true;
+        checker.check_function(zf, nodes);
+        zf.args.free();
       }
       _ -> {}
     }

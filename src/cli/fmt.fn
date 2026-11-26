@@ -709,6 +709,18 @@ fun _looks_like_call_generic_open(Vec<Token>* tokens, num idx) flag {
   ret equals(token_text(tokens.get(next_idx)), "(");
 }
 
+// True when the token at `idx` starts a function or closure type,
+// `fun(...) R` or `closure(...) R`.
+fun _is_fn_type_head(Vec<Token>* tokens, num idx) flag {
+  Token t = tokens.get(idx);
+  if t.type != .Keyword ||
+    !(equals(token_text(t), "fun") || equals(token_text(t), "closure")) {
+    ret false;
+  }
+  num open = _next_significant(tokens, idx + 1);
+  ret open >= 0 && equals(token_text(tokens.get(open)), "(");
+}
+
 // True when the `<` at `idx` opens generic arguments rather than
 // comparing two values.
 fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
@@ -732,7 +744,7 @@ fun _is_generic_open(Vec<Token>* tokens, num idx, flag in_decl_only) flag {
   // (`Box<(num, str)>`), unlike an ordinary parenthesized value - a
   // `(` never otherwise opens a type-token position right after `<`.
   flag next_is_tuple_open = next.type == .Operator && equals(token_text(next), "(");
-  if !_is_type_token(next) && !next_is_tuple_open {
+  if !_is_type_token(next) && !next_is_tuple_open && !_is_fn_type_head(tokens, next_idx) {
     ret false;
   }
   if in_decl_only {
