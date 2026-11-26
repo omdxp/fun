@@ -183,6 +183,8 @@ try {
   # Minimal output assertions (only where we have stable strings).
   $expected = @{
     'examples\test.fn'                            = @('The factorial of')
+    'examples\advanced\array_copies.fn'           = @('0.5 0.5 0.25')
+    'examples\advanced\callable_collections.fn'   = @('8 7', '105 100')
     'examples\advanced\custom_functions.fn'       = @('The result of subtracting')
     'examples\advanced\fit_exhaustive_ok.fn'      = @('x was true')
     'examples\advanced\fit_exhaustive_warning.fn' = @('x was true')

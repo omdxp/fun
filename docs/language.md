@@ -184,7 +184,9 @@ last element, as a compound literal may.
 A bracketed size makes it a fixed-size array instead: `num[3] c;` is a
 real, inline, stack-allocated C array, not a pointer and not
 `Vec<T>` (the separate, heap-backed, growable stdlib type) - a
-compound holding one has no indirection to its own fields:
+compound holding one has no indirection to its own fields. It is a value
+like any other: `num[3] d = c;`, `d = c;` and `Box{cells = c}` each copy
+the elements.
 
 ```fun
 use std.io;

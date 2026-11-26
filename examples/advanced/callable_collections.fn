@@ -1,0 +1,48 @@
+// Collections of functions and closures with different signatures sit side
+// by side: each signature is its own type, so `Vec<fun(num) num>` and
+// `Vec<fun() num>`, or `Vec<closure(num) num>` and `Vec<closure() num>`,
+// are different vectors.
+
+use std.io;
+use std.vec;
+
+fun twice(num x) num {
+  ret x * 2;
+}
+
+fun seven() num {
+  ret 7;
+}
+
+fun main() {
+  Vec<fun(num) num> unary;
+  unary.init(1);
+  defer unary.free();
+  Vec<fun() num> nullary;
+  nullary.init(1);
+  defer nullary.free();
+  unary.push(twice);
+  nullary.push(seven);
+  let f = unary.get(0);
+  let g = nullary.get(0);
+  println_fmt("{num} {num}", f(4), g());
+
+  num base = 100;
+  Vec<closure(num) num> adders;
+  adders.init(1);
+  defer adders.free();
+  Vec<closure() num> getters;
+  getters.init(1);
+  defer getters.free();
+  adders.push(fun(num x) num {
+    ret base + x;
+  });
+  getters.push(fun() num {
+    ret base;
+  });
+  let add = adders.get(0);
+  let get = getters.get(0);
+  println_fmt("{num} {num}", add(5), get());
+  add.free();
+  get.free();
+}
