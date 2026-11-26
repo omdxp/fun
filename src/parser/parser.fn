@@ -461,9 +461,50 @@ impl ParseState {
     ret self.token_peek_prev_significant(self.pindex, n);
   }
 
+  // The keyword about to be read when it stands where a declaration's
+  // name goes: right after a type, and right before `=` or `;`.
+  keyword_as_name() Option<str> {
+    let next = self.token_peek_n(0);
+    let after = self.token_peek_n(1);
+    let before = self.token_peek_prev_stream_n(0);
+    if next.is_none() || after.is_none() || before.is_none() {
+      ret .None;
+    }
+    Token kw = next.unwrap();
+    Token prev = before.unwrap();
+    Token then = after.unwrap();
+    str kw_text = _sval_text(kw);
+    if kw.type != .Keyword || keyword_is_datatype(kw_text) {
+      ret .None;
+    }
+    flag after_type = prev.type == .Identifier ||
+      (prev.type == .Keyword && keyword_is_datatype(_sval_text(prev))) ||
+      token_is_operator(prev, "*") || token_is_operator(prev, ">");
+    flag before_end = token_is_operator(then, "=") || token_is_symbol(then, ';');
+    if after_type && before_end {
+      ret .Some(kw_text);
+    }
+    ret .None;
+  }
+
   // Expects the next significant token to be the symbol `c`. Reports and
   // returns an error if it is anything else.
   pub expect_sym(chr c) Option<ParseErrorKind> {
+    // `Mat4 fit = ...;`: a keyword where a declaration's name goes reads
+    // as the statement ending early, which says nothing useful.
+    if c == ';' {
+      let named = self.keyword_as_name();
+      if named.is_some() {
+        _ = self.token_next();
+        let kmsg = format(
+          "'{str}' is a reserved word and cannot be used as a name here",
+          named.unwrap()
+        );
+        defer free(kmsg);
+        self.err(kmsg);
+        ret .Some(.InvalidSymbol);
+      }
+    }
     flag matched = false;
     fit self.token_next() {
       .Some(t) -> {
@@ -14285,4 +14326,13 @@ fun _is_expression_kind(Node* n) flag {
     .Expression(e) -> { ret true; }
     _ -> { ret false; }
   }
+}
+
+// The text a keyword or identifier token carries, or "".
+fun _sval_text(Token t) str {
+  fit t.data {
+    .Sval(s) -> { ret s; }
+    _ -> { ret ""; }
+  }
+  ret "";
 }

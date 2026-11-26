@@ -12,5 +12,5 @@ fun main() {
   a.data = malloc(len * sizeof(num));
   a.fill(0);
   printf("sum=%d\n", sum_num(arr, len));
-  printf("min=%d max=%d\n", min_num(arr, len), max_num(arr, len));
+  printf("min=%d max=%d\n", min_of_num(arr, len), max_of_num(arr, len));
 }

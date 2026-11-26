@@ -134,7 +134,7 @@ pub fun sum_num(num[] arr, num len) num {
 }
 
 // Minimum value in a numeric array slice (0 if empty).
-pub fun min_num(num[] arr, num len) num {
+pub fun min_of_num(num[] arr, num len) num {
   if len == 0 {
     ret 0;
   }
@@ -150,7 +150,7 @@ pub fun min_num(num[] arr, num len) num {
 }
 
 // Maximum value in a numeric array slice (0 if empty).
-pub fun max_num(num[] arr, num len) num {
+pub fun max_of_num(num[] arr, num len) num {
   if len == 0 {
     ret 0;
   }
@@ -245,8 +245,8 @@ test "the plain number-array helpers" {
   xs[2] = 9;
   xs[3] = 1;
   assert sum_num(xs, 4) == 12, "expected the sum";
-  assert min_num(xs, 4) == -2 && max_num(xs, 4) == 9, "expected the extremes";
-  assert min_num(xs, 0) == 0 && max_num(xs, 0) == 0, "expected an empty range to give 0";
+  assert min_of_num(xs, 4) == -2 && max_of_num(xs, 4) == 9, "expected the extremes";
+  assert min_of_num(xs, 0) == 0 && max_of_num(xs, 0) == 0, "expected an empty range to give 0";
   num[] ys = malloc(sizeof(num) * 4);
   copy_num(ys, xs, 4);
   assert ys[2] == 9, "expected the copy";

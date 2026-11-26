@@ -59,13 +59,13 @@ pub fun sys_system(str command) num {
   ret system(command);
 }
 
-// Seeds the pseudo-random generator.
-pub fun rand_seed(num seed) {
+// Seeds the C library's pseudo-random generator.
+pub fun sys_rand_seed(num seed) {
   srand(seed);
 }
 
-// Returns the next pseudo-random integer in 0..RAND_MAX.
-pub fun rand_next() num {
+// Returns the C library's next pseudo-random integer in 0..RAND_MAX.
+pub fun sys_rand_next() num {
   ret rand();
 }
 

@@ -3,7 +3,11 @@
 // harness cannot reach.
 
 use harness;
+use ..parser.import_resolver;
+use ..semantics.typecheck;
+use ..semantics.alias_expand;
 use std.string;
+use std.fs;
 
 test "std.vec: push and get monomorphize on the element type" {
   str src = `use std.vec;
@@ -535,4 +539,41 @@ test "std.step_range iterates a user-defined Steppable type through an ordinary 
   `}`;
   let out = run_source(src, "sl_step_range_days", "for-each over a StepRange<Day>");
   assert equals(out, "day 1\nday 2\nday 3\nday 4\n"), "expected StepRange<Day> to yield every day in [1, 5) through the for loop";
+}
+
+test "every stdlib module can be imported into one program" {
+  // Two modules' public names would clash only once a program uses both,
+  // so every module goes into one program here. The platform backends are
+  // chosen by their runtime modules rather than imported directly.
+  Vec<str> files = fs().walk_dir("stdlib/std");
+  defer files.free();
+  StringBuilder src = string_builder_init(4096);
+  num imported = 0;
+  for file : files {
+    if contains(file, "_backend_") || ends_with(file, "builtins.fn") {
+      continue;
+    }
+    str rel = substr(file, len("stdlib/"), len(file) - len("stdlib/") - len(".fn"));
+    str module = replace_char(replace_char(rel, '/', '.'), '\\', '.');
+    src.append("use ");
+    src.append(module);
+    src.append(";\n");
+    imported += 1;
+  }
+  src.append("fun main() num {\n  ret 0;\n}\n");
+  assert imported > 30, "expected the stdlib's modules found";
+  // Imports are resolved only for a file, as a build does.
+  str path = "src/tests/fixtures/all_stdlib_imports.fn";
+  assert write_string(path, src.build()), "expected the program written";
+  let parsed = parse_program_with_imports(path);
+  _ = remove_file(path);
+  assert parsed.is_ok(), "expected every module to parse together";
+  let merged = parsed.unwrap();
+  let expand_err = expand_type_aliases(&merged.nodes);
+  assert expand_err.is_none(), "expected every type alias to expand";
+  let checked = typecheck_program_with_aliases(&merged.nodes, &merged.aliases);
+  assert checked.is_ok(), format(
+    "expected no two stdlib modules to clash, got: {str}",
+    checked.is_err() ? checked.unwrap_err().message : ""
+  );
 }
