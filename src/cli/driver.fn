@@ -429,15 +429,15 @@ pub fun parse_args(str[] argv) Options {
     i = i + 1;
   }
 
-  // `-fmt`/`-fmt-all`/`-fmt-diag`/`-fmt-check` and the `lint` subcommand
-  // only ever check/format `o.input`, the single file the loop above
-  // captured first; none of them execute a program, so there's no
+  // `-fmt`/`-fmt-all`/`-fmt-diag`/`-fmt-check`/`-fmt-check-all` and the
+  // `lint` subcommand only ever check/format `o.input`, the single file or
+  // directory the loop above captured first; none of them execute a program, so there's no
   // legitimate `-- <program args>` use here. Without this check, a second
   // bare file falls silently into `o.program_args` above and is never
   // looked at, so e.g. `fun -fmt-check a.fn b.fn` would report success
   // after only ever checking `a.fn`.
-  if (o.fmt || o.fmt_all || o.fmt_diag || o.fmt_check || equals(o.subcommand, "lint")) &&
-    o.program_args.len > 0 {
+  if (o.fmt || o.fmt_all || o.fmt_diag || o.fmt_check || o.fmt_check_all ||
+    equals(o.subcommand, "lint")) && o.program_args.len > 0 {
     o.has_error = true;
     o.error_text = format(
       "only a single input file is supported here; got an extra argument: {str}",
@@ -1849,6 +1849,18 @@ test "recognizes a build subcommand" {
   a.push("build");
   let o = parse_args(_argv(&a));
   assert equals(o.subcommand, "build"), "expected the build subcommand";
+}
+
+test "-fmt-check-all with more than one path is an error, not a partial check" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-fmt-check-all");
+  a.push("src");
+  a.push("stdlib");
+  let o = parse_args(_argv(&a));
+  assert o.has_error, "expected a second path to be rejected";
+  assert contains(o.error_text, "stdlib"), "expected the error to name the ignored path";
 }
 
 test "recognizes an init subcommand and its kind positional" {

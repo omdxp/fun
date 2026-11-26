@@ -11,5 +11,12 @@ fun near(num x) num {
 }
 
 fun main() {
-  println_fmt("{num} {num} {num} {num} {num}", from_a(), from_b(), near(5), score_a(), score_b());
+  println_fmt(
+    "{num} {num} {num} {num} {num}",
+    from_a(),
+    from_b(),
+    near(5),
+    score_a(),
+    score_b()
+  );
 }

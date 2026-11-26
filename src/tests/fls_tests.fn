@@ -11524,8 +11524,8 @@ test "go-to-definition and hover find a file's own private name when other files
   main_doc.uri = format("file:///{str}", main_doc.path);
   main_doc.text = read_to_string(main_doc.path);
   main_doc.version = 1;
-  // `near(5)` in main.fn: zero-based line 13.
-  str in_main = definition(&reads, main_doc, 13, 68);
+  // `near(5)` in main.fn: zero-based line 17.
+  str in_main = definition(&reads, main_doc, 17, 5);
   assert contains(in_main, "private_names/main.fn"), format(
     "expected main.fn's own near, got {str}",
     in_main
