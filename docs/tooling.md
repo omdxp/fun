@@ -570,6 +570,9 @@ quick orientation.
 - `std.runtime_backend`/`std.thread_runtime`/`std.sync_runtime` and their
   `*_backend_posix`/`*_backend_windows` modules: the backend-selection
   machinery covered in [Platforms & Compilers](#platforms).
+- `std.fs`: files and directories; `read_binary`/`write_binary` read and
+  write whole binary files as bytes, zeros included.
+- `std.base64`: `encode` bytes as base64 text and `decode` it back.
 - `std.json`: typed JSON via the `JsonValue` data enum (`Null`/`Bool`/
   `Num`/`Str`/`Array`/`Object`); `parse(str) -> Result<JsonValue>`,
   Option-returning accessors, and `to_string`/`stringify`.
