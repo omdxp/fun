@@ -178,6 +178,8 @@ compare by address.
 ### Arrays
 
 Array literals require uniform element types: `num[] arr = [1, 2, 3];`.
+A literal written one element per line may end with a comma after the
+last element, as a compound literal may.
 
 A bracketed size makes it a fixed-size array instead: `num[3] c;` is a
 real, inline, stack-allocated C array, not a pointer and not

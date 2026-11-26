@@ -12,6 +12,7 @@ use std.map;
 use std.set;
 use std.option;
 use std.path;
+use std.io;
 
 // One top-level declaration: what it's called, which file declares it,
 // whether that's a type, and whether it's public.
@@ -91,10 +92,10 @@ pub fun separate_private_names(Vec<Node>* nodes, str entry_file) {
     }
     decls.push(
       TopDecl{
-      name = name.unwrap(),
-      file = n.pos.filename,
-      is_type = is_type,
-      is_public = n.flags.is_public
+        name = name.unwrap(),
+        file = n.pos.filename,
+        is_type = is_type,
+        is_public = n.flags.is_public
       }
     );
   }
@@ -483,8 +484,12 @@ fun rename_node(Node* n, str old, str new, flag is_type) {
       if is_type && equals(im.type_name, old) {
         im.type_name = new;
       }
+      // A shape impl's methods are stored as `Type__Shape__method`, so a
+      // renamed shape renames their middle part too.
+      str shape_method_prefix = "";
       if is_type && im.has_shape_name && equals(im.shape_name, old) {
         im.shape_name = new;
+        shape_method_prefix = format("{str}__{str}__", im.type_name, old);
       }
       for k : im.type_param_constraints {
         rename_names(&k, old, new);
@@ -507,9 +512,21 @@ fun rename_node(Node* n, str old, str new, flag is_type) {
                 "{str}__{str}",
                 new,
                 substr(
-                f.name,
-                len(method_prefix),
-                len(f.name) - len(method_prefix)
+                  f.name,
+                  len(method_prefix),
+                  len(f.name) - len(method_prefix)
+                )
+              );
+            }
+            if len(shape_method_prefix) > 0 && starts_with(f.name, shape_method_prefix) {
+              f.name = format(
+                "{str}__{str}__{str}",
+                im.type_name,
+                new,
+                substr(
+                  f.name,
+                  len(shape_method_prefix),
+                  len(f.name) - len(shape_method_prefix)
                 )
               );
             }

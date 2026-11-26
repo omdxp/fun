@@ -205,8 +205,8 @@ pub fun print_node(Node* node, num depth) {
             _line(
               depth + 1,
               format(
-              "Item (destructured): ({str})",
-              join(&it.item_destructure_names, ", ")
+                "Item (destructured): ({str})",
+                join(&it.item_destructure_names, ", ")
               )
             );
           } else {

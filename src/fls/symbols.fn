@@ -1592,11 +1592,11 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
         if equals(f.name, name) {
           ret .Some(
             _declaration_vis(
-            name,
-            .Function,
-            render_function(f),
-            n.pos,
-            n.flags.is_public
+              name,
+              .Function,
+              render_function(f),
+              n.pos,
+              n.flags.is_public
             )
           );
         }
@@ -1715,11 +1715,11 @@ pub fun lookup_top_level(Vec<Node>* program, str name, str module_path = "") Opt
           }
           ret .Some(
             _declaration_vis(
-            name,
-            .TypeAlias,
-            b.build(),
-            n.pos,
-            n.flags.is_public
+              name,
+              .TypeAlias,
+              b.build(),
+              n.pos,
+              n.flags.is_public
             )
           );
         }
@@ -7115,10 +7115,10 @@ fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
         if equals(v.name, name) {
           ret .Some(
             _declaration(
-            name,
-            .Parameter,
-            _render_param(fz.data_param),
-            fz.data_param.pos
+              name,
+              .Parameter,
+              _render_param(fz.data_param),
+              fz.data_param.pos
             )
           );
         }
@@ -7132,10 +7132,10 @@ fun _fuzz_param_named(FuzzDeclNode fz, str name) Option<Declaration> {
         if equals(v.name, name) {
           ret .Some(
             _declaration(
-            name,
-            .Parameter,
-            _render_param(fz.len_param),
-            fz.len_param.pos
+              name,
+              .Parameter,
+              _render_param(fz.len_param),
+              fz.len_param.pos
             )
           );
         }
@@ -7645,10 +7645,18 @@ fun _lookup_in_body(
           if equals(v.destructure_names.get(dni), name) {
             ret .Some(
               _declaration(
-              name,
-              .Local,
-              _destructure_binding_detail(tokens, v, dni, program, file, line, body.pos),
-              body.pos
+                name,
+                .Local,
+                _destructure_binding_detail(
+                  tokens,
+                  v,
+                  dni,
+                  program,
+                  file,
+                  line,
+                  body.pos
+                ),
+                body.pos
               )
             );
           }
@@ -9606,11 +9614,11 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         if f.has_name && !equals(f.name, "") {
           out.push(
             _declaration_vis(
-            f.name,
-            .Function,
-            render_function(f),
-            n.pos,
-            n.flags.is_public
+              f.name,
+              .Function,
+              render_function(f),
+              n.pos,
+              n.flags.is_public
             )
           );
         }
@@ -9628,11 +9636,11 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         );
         out.push(
           _declaration_vis(
-          c.name,
-          .Compound,
-          cb.build(),
-          n.pos,
-          n.flags.is_public
+            c.name,
+            .Compound,
+            cb.build(),
+            n.pos,
+            n.flags.is_public
           )
         );
         num f = 0;
@@ -9748,11 +9756,11 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         }
         out.push(
           _declaration_vis(
-          a.name,
-          .TypeAlias,
-          ab.build(),
-          n.pos,
-          n.flags.is_public
+            a.name,
+            .TypeAlias,
+            ab.build(),
+            n.pos,
+            n.flags.is_public
           )
         );
       }
@@ -9796,11 +9804,11 @@ pub fun _collect_declarations(Vec<Node>* nodes, str file, Vec<Declaration>* out)
         gb.append(v.name);
         out.push(
           _declaration_vis(
-          v.name,
-          .Global,
-          gb.build(),
-          n.pos,
-          n.flags.is_public
+            v.name,
+            .Global,
+            gb.build(),
+            n.pos,
+            n.flags.is_public
           )
         );
       }

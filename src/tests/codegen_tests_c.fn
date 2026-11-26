@@ -3636,3 +3636,40 @@ test "a string from a call through a function value reaches format as a string" 
   assert !contains(c, "(int64_t)(a.Name(1))"), "expected the field call's string not cast to a number";
   assert !contains(c, "(int64_t)(f(1))"), "expected the local function value's string not cast to a number";
 }
+
+test "a shape's second impl is ready before a function above it coerces to the shape" {
+  str src = `shape Putter {
+  `  put(num x) num;
+  `}
+  `compound Holder {
+  `  Putter sink;
+  `}
+  `compound First {
+  `  num total;
+  `}
+  `compound Second {
+  `  num total;
+  `}
+  `impl First as Putter {
+  `  pub put(num x) num { ret x; }
+  `}
+  `fun hold_second(Second* s) Holder {
+  `  Putter p = s;
+  `  ret Holder{sink = p};
+  `}
+  `impl Second as Putter {
+  `  pub put(num x) num { ret x * 10; }
+  `}
+  `fun main() {
+  `  Second s = Second{total = 0};
+  `  Holder h = hold_second(&s);
+  `  _ = h.sink.put(1);
+  `}`;
+  let out = transpile_source_with_detail(src);
+  assert out.is_ok(), "expected the program to transpile";
+  str c = out.unwrap();
+  num made = index_of_str(c, "__fun_coerce_Second_Putter(Second* self)");
+  num used = index_of_str(c, "= __fun_coerce_Second_Putter(s)");
+  assert made >= 0 && used >= 0, "expected the coercion helper and its use";
+  assert made < used, "expected the coercion helper defined before the function using it";
+}

@@ -1,5 +1,6 @@
 // Each of these three files keeps its own private `near`, and `a` and `b`
-// each their own private `World`: private names never collide across files.
+// each their own private `World` and `Scorer` shape: private names never
+// collide across files.
 
 use std.io;
 use a;
@@ -10,5 +11,12 @@ fun near(num x) num {
 }
 
 fun main() {
-  println_fmt("{num} {num} {num}", from_a(), from_b(), near(5));
+  println_fmt(
+    "{num} {num} {num} {num} {num}",
+    from_a(),
+    from_b(),
+    near(5),
+    score_a(),
+    score_b()
+  );
 }

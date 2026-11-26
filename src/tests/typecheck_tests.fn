@@ -1321,7 +1321,7 @@ test "a shape-bounded generic parameter rejects a non-implementor" {
   // ordinary shape-typed parameters - a bound is held to real membership.
   assert contains(
     check(
-    `shape Renderable { render() str; }
+      `shape Renderable { render() str; }
     `compound Other { num v; }
     `fun show<T: Renderable>(T x) str { ret x.render(); }
     `fun main() str {
@@ -1344,7 +1344,7 @@ test "a generic function's own shape-typed parameter still checks the caller's a
   // same way the equivalent non-generic parameter already is.
   assert contains(
     check(
-    `shape Container<T> { get() T; }
+      `shape Container<T> { get() T; }
     `compound Box<T> { T val; }
     `fun show<T>(Container<T> c) { ret; }
     `fun main() num {
@@ -1374,7 +1374,7 @@ test "a generic-instantiation bound alternative accepts a matching instantiation
 test "a generic-instantiation bound alternative rejects a mismatching instantiation" {
   assert contains(
     check(
-    `compound Box<T> { T value; }
+      `compound Box<T> { T value; }
     `fun identity<T: num | Box<num>>(T x) T { ret x; }
     `fun main() str {
     `  let out = identity("nope");
@@ -1461,7 +1461,7 @@ test "a bound naming a generic shape's own self-referential instantiation accept
 test "a bound naming a generic shape's own instantiation still rejects a non-implementor" {
   assert contains(
     check(
-    `shape Steppable<T> { succ() T; }
+      `shape Steppable<T> { succ() T; }
     `compound Other { num v; }
     `fun bump<T: Steppable<T>>(T x) T { ret x.succ(); }
     `fun main() num {
@@ -1520,7 +1520,7 @@ test "a bound-list type alias is usable as a generic constraint" {
   );
   assert contains(
     check(
-    `als Numeric = num | dec;
+      `als Numeric = num | dec;
     `fun identity<T: Numeric>(T x) T { ret x; }
     `fun main() str {
     `  ret identity("nope");
@@ -1582,7 +1582,7 @@ test "a bound-list type alias is usable as a generic constraint on a compound" {
   );
   assert contains(
     check(
-    `als Numeric = num | dec;
+      `als Numeric = num | dec;
     `compound Box<T: Numeric> { T value; }
     `fun main() str {
     `  Box<str> b = Box<str>{value = "nope"};
@@ -4732,7 +4732,7 @@ test "as converts numbers, plain enums, pointers, and addresses, and nothing els
   );
   assert contains(
     check(
-    `compound P { num x; }
+      `compound P { num x; }
       `fun main() {
       `  P p = P{x = 1};
       `  num n = p as num;
@@ -4742,7 +4742,7 @@ test "as converts numbers, plain enums, pointers, and addresses, and nothing els
   ), "expected a compound rejected";
   assert contains(
     check(
-    `fun main() {
+      `fun main() {
       `  dec d = 1.5;
       `  raw* r = d as raw*;
       `}`
@@ -4755,7 +4755,7 @@ test "as converts numbers, plain enums, pointers, and addresses, and nothing els
 test "a method called through a pointer must exist on the pointee" {
   assert contains(
     check(
-    `compound Q { num x; }
+      `compound Q { num x; }
       `fun f(Q* p) {
       `  p.bogus(1);
       `}
@@ -4828,7 +4828,7 @@ test "array element stores, literal fields, and function values are checked agai
   ), "expected a function checked against the array it is stored in";
   assert contains(
     check(
-    `fun a(num x) num { ret x; }
+      `fun a(num x) num { ret x; }
     `fun b(str x) str { ret x; }
     `fun main() { fun(num) num f = a; fun(str) str g = b; f = g; }`
     ),
@@ -4836,7 +4836,7 @@ test "array element stores, literal fields, and function values are checked agai
   ), "expected one function value checked against another";
   assert contains(
     check(
-    `fun neg(str x) str { ret x; }
+      `fun neg(str x) str { ret x; }
     `compound Ops { fun(num) num op; }
     `fun main() { Ops o = Ops{op = neg}; }`
     ),
@@ -4844,14 +4844,14 @@ test "array element stores, literal fields, and function values are checked agai
   ), "expected a function checked against the field it fills";
   assert contains(
     check(
-    `fun inc(num x) num { ret x + 1; }
+      `fun inc(num x) num { ret x + 1; }
     `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0](1, 2); }`
     ),
     "this function value expects 1 argument, got 2"
   ), "expected a call through an element checked for arity";
   assert contains(
     check(
-    `fun inc(num x) num { ret x + 1; }
+      `fun inc(num x) num { ret x + 1; }
     `fun main() { fun(num) num[2] fs; fs[0] = inc; num r = fs[0]("a"); }`
     ),
     "argument 1 of this function value expects num, found str"
@@ -4868,14 +4868,14 @@ test "array element stores, literal fields, and function values are checked agai
 test "comparisons need comparable values, and a for loop needs something to walk" {
   assert contains(
     check(
-    `compound P { num x; }
+      `compound P { num x; }
     `fun main() { P a = P{x = 1}; P b = P{x = 1}; flag r = a == b; }`
     ),
     "'==' cannot compare 'P' values; give 'P' an `op_eq` method, or compare their fields"
   ), "expected a compound comparison rejected";
   assert contains(
     check(
-    `compound P { num x; }
+      `compound P { num x; }
     `fun main() { P a = P{x = 1}; flag r = a < a; }`
     ),
     "give 'P' an `op_lt` method"
@@ -4944,7 +4944,7 @@ test "a for loop over an array types its item by the element" {
   ), "expected an array's index to count even over pairs";
   assert contains(
     check(
-    `fun main() { (num, str)[2] t = [(1, "a"), (2, "b")]; for (n, s) : t { flag f = s; } }`
+      `fun main() { (num, str)[2] t = [(1, "a"), (2, "b")]; for (n, s) : t { flag f = s; } }`
     ),
     "with str"
   ), "expected an array of tuples destructured";

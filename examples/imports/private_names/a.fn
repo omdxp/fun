@@ -18,6 +18,24 @@ pub fun from_a() num {
   ret near(1) + w.near(100) + f(0);
 }
 
+// A private shape each file declares under the same name, with its own
+// impl; dispatch through it stays within the file.
+shape Scorer {
+  score() num;
+}
+
+impl World as Scorer {
+  pub score() num {
+    ret 7;
+  }
+}
+
+pub fun score_a() num {
+  World w = World{a = 0};
+  Scorer s = &w;
+  ret s.score();
+}
+
 test "a test reaches this file's own near" {
   assert near(1) == 2, "expected a's near";
 }

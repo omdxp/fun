@@ -21,6 +21,24 @@ pub fun from_b() num {
   }
 }
 
+// A private shape each file declares under the same name, with its own
+// impl; dispatch through it stays within the file.
+shape Scorer {
+  score() num;
+}
+
+impl World as Scorer {
+  pub score() num {
+    ret 9;
+  }
+}
+
+pub fun score_b() num {
+  World w = World{name = "b", mode = Mode.Off};
+  Scorer s = &w;
+  ret s.score();
+}
+
 test "a test reaches this file's own near" {
   assert near(2) == 20, "expected b's near";
 }

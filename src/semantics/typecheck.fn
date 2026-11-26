@@ -1012,10 +1012,10 @@ fun _check_c_name(Checker* c, str name, str what, Node* at) {
   }
   c.fail(
     format(
-    "'{str}' is {str} and cannot be used as {str} name here - the generated C would fail to compile",
-    name,
-    reason,
-    what
+      "'{str}' is {str} and cannot be used as {str} name here - the generated C would fail to compile",
+      name,
+      reason,
+      what
     ),
     at
   );
@@ -1905,8 +1905,8 @@ impl Checker {
     if !equals(missing, "") {
       self.fail(
         format(
-        "no type called '{str}' is declared in this program (missing an import?)",
-        missing
+          "no type called '{str}' is declared in this program (missing an import?)",
+          missing
         ),
         at
       );
@@ -1985,9 +1985,9 @@ impl Checker {
         }
         self.fail(
           format(
-          "'{str}' cannot compare '{str}', an enum whose variants carry data; use `fit` to test which variant it is",
-          e.op,
-          offender.name
+            "'{str}' cannot compare '{str}', an enum whose variants carry data; use `fit` to test which variant it is",
+            e.op,
+            offender.name
           ),
           node
         );
@@ -2016,10 +2016,10 @@ impl Checker {
     }
     self.fail(
       format(
-      "'{str}' compares a {str} with a {str}, which share no variants",
-      e.op,
-      left.name,
-      right.name
+        "'{str}' compares a {str} with a {str}, which share no variants",
+        e.op,
+        left.name,
+        right.name
       ),
       node
     );
@@ -2744,9 +2744,9 @@ impl Checker {
     if holder.is_union && init.fields.len > 1 {
       self.fail(
         format(
-        "a '{str}' literal sets {num} fields, but a union holds only one at a time",
-        built.name,
-        init.fields.len
+          "a '{str}' literal sets {num} fields, but a union holds only one at a time",
+          built.name,
+          init.fields.len
         ),
         node
       );
@@ -2777,11 +2777,11 @@ impl Checker {
       if !self.assignable(want, got) {
         self.fail(
           format(
-          "field '{str}' of '{str}' expects {str}, found {str}",
-          f.name,
-          built.name,
-          type_name(want),
-          type_name(got)
+            "field '{str}' of '{str}' expects {str}, found {str}",
+            f.name,
+            built.name,
+            type_name(want),
+            type_name(got)
           ),
           f.value
         );
@@ -2836,9 +2836,9 @@ impl Checker {
       if !can_assign(held, element) && !can_assign(element, held) {
         self.fail(
           format(
-          "an array literal holds one type, found {str} and {str}",
-          type_name(held),
-          type_name(element)
+            "an array literal holds one type, found {str} and {str}",
+            type_name(held),
+            type_name(element)
           ),
           node
         );
@@ -2880,9 +2880,9 @@ impl Checker {
     }
     self.fail(
       format(
-      "a ternary's two branches must share a type, found {str} and {str}",
-      type_name(then_type),
-      type_name(else_type)
+        "a ternary's two branches must share a type, found {str} and {str}",
+        type_name(then_type),
+        type_name(else_type)
       ),
       node
     );
@@ -2995,11 +2995,11 @@ impl Checker {
         // The other propagation operator is the one that fits.
         self.fail(
           format(
-          "'{str}' unwraps an {str}, but this is a {str}; use '{str}'",
-          u.op,
-          want_name,
-          other_name,
-          is_option ? "!" : "?"
+            "'{str}' unwraps an {str}, but this is a {str}; use '{str}'",
+            u.op,
+            want_name,
+            other_name,
+            is_option ? "!" : "?"
           ),
           node
         );
@@ -3021,9 +3021,9 @@ impl Checker {
       if !equals(operand_e, rtype_e) {
         self.fail(
           format(
-          "'!' propagates {str}, but the enclosing function returns Result<_, {str}>",
-          operand_e,
-          rtype_e
+            "'!' propagates {str}, but the enclosing function returns Result<_, {str}>",
+            operand_e,
+            rtype_e
           ),
           node
         );
@@ -3061,9 +3061,9 @@ impl Checker {
       if !self.assignable(want_err, err_val) {
         self.fail(
           format(
-          "'?!' propagates {str}, but the enclosing function returns Result<_, {str}>",
-          type_name(err_val),
-          type_name(want_err)
+            "'?!' propagates {str}, but the enclosing function returns Result<_, {str}>",
+            type_name(err_val),
+            type_name(want_err)
           ),
           node
         );
@@ -3078,9 +3078,9 @@ impl Checker {
       if !self.assignable(want_err, err_val) {
         self.fail(
           format(
-          "'?!' propagates {str}, but the enclosing function returns Option<{str}>",
-          type_name(err_val),
-          type_name(want_err)
+            "'?!' propagates {str}, but the enclosing function returns Option<{str}>",
+            type_name(err_val),
+            type_name(want_err)
           ),
           node
         );
@@ -3242,10 +3242,10 @@ impl Checker {
     if !left_ok || !right_ok {
       self.fail(
         format(
-        "'{str}' is not defined between {str} and {str}",
-        e.op,
-        type_name(left),
-        type_name(right)
+          "'{str}' is not defined between {str} and {str}",
+          e.op,
+          type_name(left),
+          type_name(right)
         ),
         node
       );
@@ -3313,9 +3313,9 @@ impl Checker {
       if tuple_index < 0 || tuple_index >= receiver.tuple_members.len {
         self.fail(
           format(
-          "tuple has no element {num} (it has {num} element(s))",
-          tuple_index,
-          receiver.tuple_members.len
+            "tuple has no element {num} (it has {num} element(s))",
+            tuple_index,
+            receiver.tuple_members.len
           ),
           node
         );
@@ -3454,12 +3454,12 @@ impl Checker {
       if !self.assignable(sig.args.get(0), want_right) {
         self.fail(
           format(
-          "'{str}' on {str} ({str}) expects {str}, found {str}",
-          op,
-          left.name,
-          method,
-          type_name(sig.args.get(0)),
-          type_name(want_right)
+            "'{str}' on {str} ({str}) expects {str}, found {str}",
+            op,
+            left.name,
+            method,
+            type_name(sig.args.get(0)),
+            type_name(want_right)
           ),
           node
         );
@@ -4080,11 +4080,11 @@ impl Checker {
         CheckedType ft = found.unwrap();
         ret .Some(
           self.check_fn_value_call(
-          node,
-          format("'{str}'", field),
-          ft.has_fn_sig ? ft.fn_sig : ft.closure_sig,
-          args,
-          env
+            node,
+            format("'{str}'", field),
+            ft.has_fn_sig ? ft.fn_sig : ft.closure_sig,
+            args,
+            env
           )
         );
       }
@@ -4279,10 +4279,10 @@ impl Checker {
           ) {
             self.fail(
               format(
-              "argument {num} of '{str}': '{str}' does not match the expected signature",
-              i,
-              name,
-              fname
+                "argument {num} of '{str}': '{str}' does not match the expected signature",
+                i,
+                name,
+                fname
               ),
               args.get(i - 1)
             );
@@ -4418,11 +4418,11 @@ impl Checker {
       if !self.assignable(want, got) {
         self.fail(
           format(
-          "argument {num} of '{str}' expects {str}, found {str}",
-          i + 1,
-          name,
-          type_name(want),
-          type_name(got)
+            "argument {num} of '{str}' expects {str}, found {str}",
+            i + 1,
+            name,
+            type_name(want),
+            type_name(got)
           ),
           args.get(i)
         );
@@ -4486,11 +4486,11 @@ impl Checker {
       }
       self.fail(
         format(
-        "{str} arguments to '{str}': its own format string names {num}, {num} given",
-        which,
-        name,
-        expected.len,
-        given
+          "{str} arguments to '{str}': its own format string names {num}, {num} given",
+          which,
+          name,
+          expected.len,
+          given
         ),
         node
       );
@@ -4510,10 +4510,10 @@ impl Checker {
         if got.pointer_depth == 0 && got.base != .Raw {
           self.fail(
             format(
-            "argument {num} of '{str}' expects a pointer, found {str}",
-            arg_position,
-            name,
-            type_name(got)
+              "argument {num} of '{str}' expects a pointer, found {str}",
+              arg_position,
+              name,
+              type_name(got)
             ),
             arg_node
           );
@@ -4533,11 +4533,11 @@ impl Checker {
       if !self.assignable(want, got) {
         self.fail(
           format(
-          "argument {num} of '{str}' expects {str} (from its own format string), found {str}",
-          arg_position,
-          name,
-          want_name,
-          type_name(got)
+            "argument {num} of '{str}' expects {str} (from its own format string), found {str}",
+            arg_position,
+            name,
+            want_name,
+            type_name(got)
           ),
           arg_node
         );
@@ -4643,9 +4643,9 @@ impl Checker {
     if !ok {
       self.fail(
         format(
-        "cannot convert {str} to {str} with 'as'",
-        type_name(got),
-        type_name(want)
+          "cannot convert {str} to {str} with 'as'",
+          type_name(got),
+          type_name(want)
         ),
         node
       );
@@ -4685,13 +4685,13 @@ impl Checker {
     }
     self.fail(
       format(
-      "{num} doesn't fit in {str} ({num} to {num}); write `{num} as {str}` to wrap it on purpose",
-      n,
-      want.width,
-      lo,
-      hi,
-      n,
-      want.width
+        "{num} doesn't fit in {str} ({num} to {num}); write `{num} as {str}` to wrap it on purpose",
+        n,
+        want.width,
+        lo,
+        hi,
+        n,
+        want.width
       ),
       at
     );
@@ -4711,11 +4711,11 @@ impl Checker {
     if args.len != fsig.params.len {
       self.fail(
         format(
-        "{str} expects {num} {str}, got {num}",
-        label,
-        fsig.params.len,
-        fsig.params.len == 1 ? "argument" : "arguments",
-        args.len
+          "{str} expects {num} {str}, got {num}",
+          label,
+          fsig.params.len,
+          fsig.params.len == 1 ? "argument" : "arguments",
+          args.len
         ),
         node
       );
@@ -4732,11 +4732,11 @@ impl Checker {
       if !self.assignable(want, got) {
         self.fail(
           format(
-          "argument {num} of {str} expects {str}, found {str}",
-          ci + 1,
-          label,
-          type_name(want),
-          type_name(got)
+            "argument {num} of {str} expects {str}, found {str}",
+            ci + 1,
+            label,
+            type_name(want),
+            type_name(got)
           ),
           args.get(ci)
         );
@@ -4867,8 +4867,8 @@ impl Checker {
       args.len == 1 && self.infer(args.get(0), env).holds_refs {
       self.fail(
         format(
-        "'{str}' can't take a closure capturing a local by reference; the thread may outlive it",
-        name
+          "'{str}' can't take a closure capturing a local by reference; the thread may outlive it",
+          name
         ),
         node
       );
@@ -4972,10 +4972,10 @@ impl Checker {
       if !reachable {
         self.fail(
           format(
-          "cannot infer type parameter '{str}' for this call to '{str}' - pass it explicitly ('{str}<...>(...)')",
-          tp,
-          name,
-          name
+            "cannot infer type parameter '{str}' for this call to '{str}' - pass it explicitly ('{str}<...>(...)')",
+            tp,
+            name,
+            name
           ),
           node
         );
@@ -5472,9 +5472,9 @@ impl Checker {
           if !equals(named, "") && !equals(subject, "") && !equals(named, subject) {
             self.fail(
               format(
-              "fit branch names '{str}' but the value being matched is a '{str}'",
-              named,
-              subject
+                "fit branch names '{str}' but the value being matched is a '{str}'",
+                named,
+                subject
               ),
               branch.condition
             );
@@ -5526,10 +5526,10 @@ impl Checker {
         if tl.elements.len != subject_type.tuple_members.len {
           self.fail(
             format(
-            "a tuple pattern with {num} position(s) needs a {num}-element tuple subject, not '{str}'",
-            tl.elements.len,
-            subject_type.tuple_members.len,
-            type_name(subject_type)
+              "a tuple pattern with {num} position(s) needs a {num}-element tuple subject, not '{str}'",
+              tl.elements.len,
+              subject_type.tuple_members.len,
+              type_name(subject_type)
             ),
             branch.condition
           );
@@ -5577,9 +5577,9 @@ impl Checker {
             if !self.assignable(member, lit_type) {
               self.fail(
                 format(
-                "a tuple pattern position expects a '{str}', not '{str}'",
-                type_name(member),
-                type_name(lit_type)
+                  "a tuple pattern position expects a '{str}', not '{str}'",
+                  type_name(member),
+                  type_name(lit_type)
                 ),
                 el
               );
@@ -5606,9 +5606,9 @@ impl Checker {
       .NotAnImplementor -> {
         self.fail(
           format(
-          "'{str}' does not implement shape '{str}'",
-          type_name,
-          subject_type.name
+            "'{str}' does not implement shape '{str}'",
+            type_name,
+            subject_type.name
           ),
           branch.condition
         );
@@ -5617,8 +5617,8 @@ impl Checker {
       .Generic -> {
         self.fail(
           format(
-          "'{str}' is generic and has no single concrete implementation to downcast to",
-          type_name
+            "'{str}' is generic and has no single concrete implementation to downcast to",
+            type_name
           ),
           branch.condition
         );
@@ -5629,9 +5629,9 @@ impl Checker {
     if branch.bindings.len != 1 {
       self.fail(
         format(
-        "expected exactly one binding to recover the concrete '{str}' value, got {num}",
-        type_name,
-        branch.bindings.len
+          "expected exactly one binding to recover the concrete '{str}' value, got {num}",
+          type_name,
+          branch.bindings.len
         ),
         branch.condition
       );
@@ -5744,10 +5744,10 @@ impl Checker {
       }
       self.fail(
         format(
-        "'{str}' is ambiguous between {str} - write the generic arguments explicitly, like '{str}<...>(...)'",
-        type_name,
-        list_sb.build(),
-        type_name
+          "'{str}' is ambiguous between {str} - write the generic arguments explicitly, like '{str}<...>(...)'",
+          type_name,
+          list_sb.build(),
+          type_name
         ),
         condition
       );
@@ -6009,9 +6009,9 @@ impl Checker {
             } elif elem.is_tuple {
               self.fail(
                 format(
-                "'for' destructuring pattern has {num} name(s) but the iterable's own element has {num} element(s)",
-                it.item_destructure_names.len,
-                elem.tuple_members.len
+                  "'for' destructuring pattern has {num} name(s) but the iterable's own element has {num} element(s)",
+                  it.item_destructure_names.len,
+                  elem.tuple_members.len
                 ),
                 stmt
               );
@@ -6055,8 +6055,8 @@ impl Checker {
           if _is_scalar_value(iterable_type) {
             self.fail(
               format(
-              "'for' can't walk a value of type '{str}'; it needs an array, a Vec, or a type that implements Iterator",
-              type_name(iterable_type)
+                "'for' can't walk a value of type '{str}'; it needs an array, a Vec, or a type that implements Iterator",
+                type_name(iterable_type)
               ),
               it.iterable
             );
@@ -6144,8 +6144,8 @@ impl Checker {
         if const_root.is_some() {
           self.fail(
             format(
-            "cannot assign to a field of '{str}', which is const",
-            const_root.unwrap()
+              "cannot assign to a field of '{str}', which is const",
+              const_root.unwrap()
             ),
             node
           );
@@ -6163,9 +6163,9 @@ impl Checker {
         if !self.assignable(field, value) {
           self.fail(
             format(
-            "cannot assign {str} to a field of type {str}",
-            type_name(value),
-            type_name(field)
+              "cannot assign {str} to a field of type {str}",
+              type_name(value),
+              type_name(field)
             ),
             node
           );
@@ -6199,10 +6199,10 @@ impl Checker {
         if !self.assignable(b.type, value) {
           self.fail(
             format(
-            "cannot assign {str} to '{str}' of type {str}",
-            type_name(value),
-            name,
-            type_name(b.type)
+              "cannot assign {str} to '{str}' of type {str}",
+              type_name(value),
+              name,
+              type_name(b.type)
             ),
             node
           );
@@ -6233,9 +6233,9 @@ impl Checker {
         if !self.assignable(target, value) {
           self.fail(
             format(
-            "cannot assign {str} to a dereferenced value of type {str}",
-            type_name(value),
-            type_name(target)
+              "cannot assign {str} to a dereferenced value of type {str}",
+              type_name(value),
+              type_name(target)
             ),
             node
           );
@@ -6297,9 +6297,9 @@ impl Checker {
     if !self.assignable(element, value) {
       self.fail(
         format(
-        "cannot assign {str} to an element of type {str}",
-        type_name(value),
-        type_name(element)
+          "cannot assign {str} to an element of type {str}",
+          type_name(value),
+          type_name(element)
         ),
         node
       );
@@ -6345,8 +6345,8 @@ impl Checker {
       if self.receiver_method(base, "op_index").is_some() {
         self.fail(
           format(
-          "{str} has 'op_index' for reading but no 'op_index_set' for assignment through an index",
-          type_name(base)
+            "{str} has 'op_index' for reading but no 'op_index_set' for assignment through an index",
+            type_name(base)
           ),
           node
         );
@@ -6360,10 +6360,10 @@ impl Checker {
     if !self.assignable(s.args.get(0), index) {
       self.fail(
         format(
-        "'[]=' on {str} (op_index_set) expects index {str}, found {str}",
-        type_name(base),
-        type_name(s.args.get(0)),
-        type_name(index)
+          "'[]=' on {str} (op_index_set) expects index {str}, found {str}",
+          type_name(base),
+          type_name(s.args.get(0)),
+          type_name(index)
         ),
         node
       );
@@ -6372,10 +6372,10 @@ impl Checker {
     if !self.assignable(s.args.get(1), value) {
       self.fail(
         format(
-        "'[]=' on {str} (op_index_set) expects value {str}, found {str}",
-        type_name(base),
-        type_name(s.args.get(1)),
-        type_name(value)
+          "'[]=' on {str} (op_index_set) expects value {str}, found {str}",
+          type_name(base),
+          type_name(s.args.get(1)),
+          type_name(value)
         ),
         node
       );
@@ -6471,10 +6471,10 @@ impl Checker {
             }
             self.fail(
               format(
-              "cannot infer an enum type for '.{str}': ambiguous between {str} (give '{str}' an explicit declared type)",
-              variant_name,
-              ob.build(),
-              v.name
+                "cannot infer an enum type for '.{str}': ambiguous between {str} (give '{str}' an explicit declared type)",
+                variant_name,
+                ob.build(),
+                v.name
               ),
               stmt
             );
@@ -6497,8 +6497,8 @@ impl Checker {
             if !init.has_dtype {
               self.fail(
                 format(
-                "cannot infer a type for '{str}': a bare compound literal needs an explicit declared type",
-                v.name
+                  "cannot infer a type for '{str}': a bare compound literal needs an explicit declared type",
+                  v.name
                 ),
                 stmt
               );
@@ -6512,9 +6512,9 @@ impl Checker {
         if self.shapes.has(value.name) {
           self.fail(
             format(
-            "cannot infer a type for '{str}': '{str}' is a shape",
-            v.name,
-            value.name
+              "cannot infer a type for '{str}': '{str}' is a shape",
+              v.name,
+              value.name
             ),
             stmt
           );
@@ -6525,8 +6525,8 @@ impl Checker {
         if value.base == .Void && value.pointer_depth == 0 && !value.is_array {
           self.fail(
             format(
-            "'let' variable '{str}' cannot be initialized from a value of type void",
-            v.name
+              "'let' variable '{str}' cannot be initialized from a value of type void",
+              v.name
             ),
             stmt
           );
@@ -6539,10 +6539,10 @@ impl Checker {
       } elif !declared_is_type_param && !self.assignable(declared, value) {
         self.fail(
           format(
-          "cannot initialize '{str}' of type {str} with {str}",
-          v.name,
-          type_name(declared),
-          type_name(value)
+            "cannot initialize '{str}' of type {str} with {str}",
+            v.name,
+            type_name(declared),
+            type_name(value)
           ),
           stmt
         );
@@ -6582,10 +6582,10 @@ impl Checker {
       if !declared.is_tuple || declared.tuple_members.len != v.destructure_names.len {
         self.fail(
           format(
-          "a destructuring pattern with {num} name(s) needs a {num}-element declared tuple type, not {str}",
-          v.destructure_names.len,
-          v.destructure_names.len,
-          type_name(declared)
+            "a destructuring pattern with {num} name(s) needs a {num}-element declared tuple type, not {str}",
+            v.destructure_names.len,
+            v.destructure_names.len,
+            type_name(declared)
           ),
           stmt
         );
@@ -6594,9 +6594,9 @@ impl Checker {
       if !is_unknown(value) && !self.assignable(declared, value) {
         self.fail(
           format(
-          "cannot initialize a destructuring pattern of type {str} with {str}",
-          type_name(declared),
-          type_name(value)
+            "cannot initialize a destructuring pattern of type {str} with {str}",
+            type_name(declared),
+            type_name(value)
           ),
           stmt
         );
@@ -6628,9 +6628,9 @@ impl Checker {
     if value.tuple_members.len != v.destructure_names.len {
       self.fail(
         format(
-        "destructuring pattern has {num} name(s) but the value has {num} element(s)",
-        v.destructure_names.len,
-        value.tuple_members.len
+          "destructuring pattern has {num} name(s) but the value has {num} element(s)",
+          v.destructure_names.len,
+          value.tuple_members.len
         ),
         stmt
       );
@@ -6692,9 +6692,9 @@ impl Checker {
     if want.base != .Unknown || want.is_tuple || want.has_fn_sig {
       self.fail(
         format(
-        "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
-        variant_name,
-        type_name(want)
+          "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+          variant_name,
+          type_name(want)
         ),
         val
       );
@@ -6721,9 +6721,9 @@ impl Checker {
       if self.compounds.at(enum_name).is_some() {
         self.fail(
           format(
-          "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
-          variant_name,
-          type_name(want)
+            "'.{str}' is an enum variant pattern, but the value being matched is a '{str}', not an enum",
+            variant_name,
+            type_name(want)
           ),
           val
         );
@@ -6861,12 +6861,12 @@ impl Checker {
       }
       self.fail(
         format(
-        "variant '{str}' of '{str}' takes {num} {str}, found {num}",
-        variant_name,
-        enum_name,
-        payload_types.len,
-        unit,
-        written.len
+          "variant '{str}' of '{str}' takes {num} {str}, found {num}",
+          variant_name,
+          enum_name,
+          payload_types.len,
+          unit,
+          written.len
         ),
         at
       );
@@ -6891,12 +6891,12 @@ impl Checker {
       if !self.assignable(slot, got) {
         self.fail(
           format(
-          "argument {num} of variant '{str}' of '{str}' expects {str}, found {str}",
-          i + 1,
-          variant_name,
-          enum_name,
-          type_name(slot),
-          type_name(got)
+            "argument {num} of variant '{str}' of '{str}' expects {str}, found {str}",
+            i + 1,
+            variant_name,
+            enum_name,
+            type_name(slot),
+            type_name(got)
           ),
           written.get(i)
         );
@@ -6925,9 +6925,9 @@ impl Checker {
     if !self.assignable(self.rtype, got) {
       self.fail(
         format(
-        "cannot return {str} from a function returning {str}",
-        type_name(got),
-        type_name(self.rtype)
+          "cannot return {str} from a function returning {str}",
+          type_name(got),
+          type_name(self.rtype)
         ),
         stmt
       );
@@ -7037,10 +7037,10 @@ impl Checker {
       if supplied.is_none() {
         self.fail(
           format(
-          "'{str}' does not supply '{str}', which '{str}' requires",
-          block.type_name,
-          name,
-          block.shape_name
+            "'{str}' does not supply '{str}', which '{str}' requires",
+            block.type_name,
+            name,
+            block.shape_name
           ),
           node
         );
@@ -7053,10 +7053,10 @@ impl Checker {
         promised.unwrap().is_async != supplied.unwrap().is_async {
         self.fail(
           format(
-          "'{str}' does not match how '{str}' declares '{str}'",
-          block.type_name,
-          block.shape_name,
-          name
+            "'{str}' does not match how '{str}' declares '{str}'",
+            block.type_name,
+            block.shape_name,
+            name
           ),
           node
         );
@@ -7092,10 +7092,10 @@ impl Checker {
             if !equals(missing, "") {
               self.fail(
                 format(
-                "the type '{str}' of field '{str}' in '{str}' is not declared in this program (missing an import?)",
-                missing,
-                field.name,
-                c.name
+                  "the type '{str}' of field '{str}' in '{str}' is not declared in this program (missing an import?)",
+                  missing,
+                  field.name,
+                  c.name
                 ),
                 n
               );
@@ -7305,11 +7305,11 @@ fun _check_duplicate_top_level(Checker* checker, str name, str kind, Node* node)
     TopLevelSite site = existing.unwrap();
     checker.fail(
       format(
-      "'{str}' is already declared as {str} in {str}:{num}",
-      name,
-      site.kind,
-      site.file,
-      site.line
+        "'{str}' is already declared as {str} in {str}:{num}",
+        name,
+        site.kind,
+        site.file,
+        site.line
       ),
       node
     );
@@ -7396,8 +7396,8 @@ pub fun typecheck_program_with_aliases(
           if f.has_body && !f.has_type_params && _is_libc_function_name(f.name) {
             checker.fail(
               format(
-              "'{str}' is a C library function the generated C already declares, so a function cannot be defined under this name (rename it)",
-              f.name
+                "'{str}' is a C library function the generated C already declares, so a function cannot be defined under this name (rename it)",
+                f.name
               ),
               node
             );

@@ -429,15 +429,15 @@ pub fun parse_args(str[] argv) Options {
     i = i + 1;
   }
 
-  // `-fmt`/`-fmt-all`/`-fmt-diag`/`-fmt-check` and the `lint` subcommand
-  // only ever check/format `o.input`, the single file the loop above
-  // captured first; none of them execute a program, so there's no
+  // `-fmt`/`-fmt-all`/`-fmt-diag`/`-fmt-check`/`-fmt-check-all` and the
+  // `lint` subcommand only ever check/format `o.input`, the single file or
+  // directory the loop above captured first; none of them execute a program, so there's no
   // legitimate `-- <program args>` use here. Without this check, a second
   // bare file falls silently into `o.program_args` above and is never
   // looked at, so e.g. `fun -fmt-check a.fn b.fn` would report success
   // after only ever checking `a.fn`.
-  if (o.fmt || o.fmt_all || o.fmt_diag || o.fmt_check || equals(o.subcommand, "lint")) &&
-    o.program_args.len > 0 {
+  if (o.fmt || o.fmt_all || o.fmt_diag || o.fmt_check || o.fmt_check_all ||
+    equals(o.subcommand, "lint")) && o.program_args.len > 0 {
     o.has_error = true;
     o.error_text = format(
       "only a single input file is supported here; got an extra argument: {str}",
@@ -1276,14 +1276,14 @@ fun _compile_with_msvc_bat(
   if !write_string(
     bat_path,
     format(
-    "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17{str} \"{str}\"{str}{str} \"/Fe:{str}\" /link /STACK:134217728{str}\nexit /b %ERRORLEVEL%\n",
-    vcvarsall,
-    _quoted_args(&bat_pre),
-    c_path,
-    _quoted_args(&bat_sources),
-    debug_flag,
-    exe_path,
-    _quoted_args(&bat_link)
+      "@echo off\ncall \"{str}\" x64 > NUL 2>&1\ncl.exe /nologo /std:c17{str} \"{str}\"{str}{str} \"/Fe:{str}\" /link /STACK:134217728{str}\nexit /b %ERRORLEVEL%\n",
+      vcvarsall,
+      _quoted_args(&bat_pre),
+      c_path,
+      _quoted_args(&bat_sources),
+      debug_flag,
+      exe_path,
+      _quoted_args(&bat_link)
     )
   ) {
     writeln_to(Sink.Stderr, "could not write MSVC build wrapper");
@@ -1849,6 +1849,18 @@ test "recognizes a build subcommand" {
   a.push("build");
   let o = parse_args(_argv(&a));
   assert equals(o.subcommand, "build"), "expected the build subcommand";
+}
+
+test "-fmt-check-all with more than one path is an error, not a partial check" {
+  Vec<str> a;
+  a.init(0);
+  defer a.free();
+  a.push("-fmt-check-all");
+  a.push("src");
+  a.push("stdlib");
+  let o = parse_args(_argv(&a));
+  assert o.has_error, "expected a second path to be rejected";
+  assert contains(o.error_text, "stdlib"), "expected the error to name the ignored path";
 }
 
 test "recognizes an init subcommand and its kind positional" {
@@ -2542,10 +2554,10 @@ pub fun build_project(flag debug_info, Vec<Define>* extra_defines, flag objects 
     writeln_to(
       Sink.Stderr,
       format(
-      "[Error]\npackage `{str}` requires fun {str} or newer (this is {str}) - run `fun upgrade`",
-      m.package_name,
-      m.min_fun_version,
-      PACKAGE_VERSION
+        "[Error]\npackage `{str}` requires fun {str} or newer (this is {str}) - run `fun upgrade`",
+        m.package_name,
+        m.min_fun_version,
+        PACKAGE_VERSION
       )
     );
     ret 1;
@@ -2920,8 +2932,8 @@ pub fun init_project(str kind) num {
     writeln_to(
       Sink.Stderr,
       format(
-      "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
-      resolved_kind
+        "[Error]\nunknown project kind `{str}` (expected `lib`, `exe`, or `mix`)",
+        resolved_kind
       )
     );
     ret 1;
@@ -2947,8 +2959,8 @@ pub fun init_project(str kind) num {
   // available rather than leaving a newcomer to find them in the docs.
   toml.append(
     format(
-    "# description = \"\"\n# license = \"\"\n# authors = []\n# repository = \"\"\n# min_fun_version = \"{str}\"\n",
-    PACKAGE_VERSION
+      "# description = \"\"\n# license = \"\"\n# authors = []\n# repository = \"\"\n# min_fun_version = \"{str}\"\n",
+      PACKAGE_VERSION
     )
   );
 
@@ -3128,10 +3140,10 @@ fun _cover_finish(CoverReport* full, CoverOptions* cover) num {
       writeln_to(
         Sink.Stderr,
         format(
-        "coverage {str}% is below the required {num}.{num}%",
-        percent_text(report.covered(), report.statements()),
-        cover.min_tenths / 10,
-        cover.min_tenths % 10
+          "coverage {str}% is below the required {num}.{num}%",
+          percent_text(report.covered(), report.statements()),
+          cover.min_tenths / 10,
+          cover.min_tenths % 10
         )
       );
       code = 1;
@@ -3538,12 +3550,12 @@ fun _test_suite_worker(raw* arg) raw* {
       if ctx.timing {
         println(
           format(
-          "  ok  {str}  ({num} tests)  lower {num}ms, cc {num}ms, run {num}ms",
-          path,
-          n,
-          res.lower_ms,
-          res.cc_ms,
-          res.run_ms
+            "  ok  {str}  ({num} tests)  lower {num}ms, cc {num}ms, run {num}ms",
+            path,
+            n,
+            res.lower_ms,
+            res.cc_ms,
+            res.run_ms
           )
         );
       } else {
@@ -3773,12 +3785,12 @@ pub fun run_test_suite(
   if ctx.timing {
     println(
       format(
-      "wall {num}ms across {num} workers; summed per phase: lower {num}ms, cc {num}ms, run {num}ms",
-      _wall_ms() - suite_start_ms,
-      workers,
-      ctx.total_lower_ms,
-      ctx.total_cc_ms,
-      ctx.total_run_ms
+        "wall {num}ms across {num} workers; summed per phase: lower {num}ms, cc {num}ms, run {num}ms",
+        _wall_ms() - suite_start_ms,
+        workers,
+        ctx.total_lower_ms,
+        ctx.total_cc_ms,
+        ctx.total_run_ms
       )
     );
   }
@@ -4634,12 +4646,12 @@ pub fun run_lint(str root, flag summary_only) num {
       if f.has_pos {
         println(
           format(
-          "{str}:{num}:{num}: warning[{str}]: {str}",
-          f.file,
-          f.line,
-          f.col,
-          f.id,
-          f.message
+            "{str}:{num}:{num}: warning[{str}]: {str}",
+            f.file,
+            f.line,
+            f.col,
+            f.id,
+            f.message
           )
         );
       } else {
@@ -4693,10 +4705,10 @@ pub fun run_lint(str root, flag summary_only) num {
     }
     println(
       format(
-      "{str} in {num} of {str}",
-      _counted(outcome.findings.len, "warning", "warnings"),
-      with_findings.len,
-      _counted(outcome.files, "file", "files")
+        "{str} in {num} of {str}",
+        _counted(outcome.findings.len, "warning", "warnings"),
+        with_findings.len,
+        _counted(outcome.files, "file", "files")
       )
     );
   } else {
@@ -4705,8 +4717,8 @@ pub fun run_lint(str root, flag summary_only) num {
   if outcome.failures.len > 0 {
     println(
       format(
-      "{str} could not be analyzed",
-      _counted(outcome.failures.len, "file", "files")
+        "{str} could not be analyzed",
+        _counted(outcome.failures.len, "file", "files")
       )
     );
   }

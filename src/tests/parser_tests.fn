@@ -706,3 +706,15 @@ test "else if is rejected in favor of elif" {
     `}`
   ), "expected 'else if' to be a parse error";
 }
+
+test "an array literal may end with a comma" {
+  assert !parse_fails(
+    `fun f() {
+    `  num[3] a = [
+    `    1,
+    `    2,
+    `    3,
+    `  ];
+    `}`
+  ), "expected a trailing comma to parse";
+}
