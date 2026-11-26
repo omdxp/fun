@@ -22689,6 +22689,9 @@ impl Codegen {
     if program_uses_std_c_header(self.all_nodes, "simd.fn") {
       self.emit_simd_runtime();
     }
+    if program_uses_std_c_header(self.all_nodes, "dynlib.fn") {
+      self.emit_dynlib_runtime();
+    }
     // `std.c.sys`'s `__fun_cpu_count` binding (behind `std.sys.cpu_count`),
     // always emitted like the atomic wrappers above rather than gated on
     // program contents, since worker-pool sizing (`fun test`'s parallel
@@ -22884,6 +22887,29 @@ impl Codegen {
   // `std.c.simd`'s 128-bit lane operations: vector extensions under GCC and
   // Clang, SSE2 under MSVC on x86, and plain loops anywhere else. Each one
   // reads and writes lanes through pointers, so the Fun side needs no vector type.
+  // `std.c.dynlib`'s shared-library loading: `dlopen` and friends on POSIX,
+  // `LoadLibraryA` and friends on Windows. The link marker asks for `-ldl`,
+  // which older C libraries keep apart from libc.
+  emit_dynlib_runtime() {
+    self.state.write(format("/* __fun_link: -l{str} */\n", "dl"));
+    self.state.write(
+      `#ifdef _WIN32
+    `static inline void* __fun_dl_open(const char* path) { return (void*)LoadLibraryA(path); }
+    `static inline void* __fun_dl_sym(void* lib, const char* name) { return (void*)GetProcAddress((HMODULE)lib, name); }
+    `static inline int64_t __fun_dl_close(void* lib) { return FreeLibrary((HMODULE)lib) ? 0 : -1; }
+    `static char __fun_dl_error_buf[64];
+    `static inline char* __fun_dl_error(void) { DWORD e = GetLastError(); if (!e) return (char*)""; snprintf(__fun_dl_error_buf, sizeof __fun_dl_error_buf, "Windows error %lu", (unsigned long)e); return __fun_dl_error_buf; }
+    `#else
+    `#include <dlfcn.h>
+    `static inline void* __fun_dl_open(const char* path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
+    `static inline void* __fun_dl_sym(void* lib, const char* name) { return dlsym(lib, name); }
+    `static inline int64_t __fun_dl_close(void* lib) { return dlclose(lib) == 0 ? 0 : -1; }
+    `static inline char* __fun_dl_error(void) { const char* e = dlerror(); return (char*)(e ? e : ""); }
+    `#endif
+    ``
+    );
+  }
+
   emit_simd_runtime() {
     self.state.write(
       `#if (defined(__GNUC__) || defined(__clang__)) && !defined(__FUN_SIMD_SCALAR)

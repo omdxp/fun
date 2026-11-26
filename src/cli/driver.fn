@@ -1105,6 +1105,13 @@ fun _append_compile_args(
       argv_args.push("-lssl");
       argv_args.push("-lcrypto");
     }
+    // std.c.dynlib's `dlopen` is in libc on current systems, but older C
+    // libraries keep it in libdl. Built from pieces for the same reason as
+    // the OpenSSL marker above.
+    str dl_marker = format("__fun_link: -l{str} */", "dl");
+    if !runtime_backend_is_windows() && contains(read_to_string(c_path), dl_marker) {
+      argv_args.push("-ldl");
+    }
     _push_build_link_flags(argv_args, false);
   }
 }

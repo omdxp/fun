@@ -1,0 +1,101 @@
+// Loading shared libraries while a program runs: open one by path, look up
+// its functions by name, and close it. A function's address converts to a
+// function value with `as`, so it can be called like any other:
+//
+// ```
+// let lib = library_open("libm.so.6")!;
+// let cosine = lib.symbol("cos")? as fun(f64) f64;
+// f64 one = cosine(0);
+// lib.close();
+// ```
+//
+// This is how a program uses a library that may not be installed, such as an
+// optional audio driver, or reloads code it rebuilt while running.
+
+use std.c.dynlib;
+use std.option;
+use std.result;
+use std.string;
+use std.io;
+
+// An open shared library.
+pub compound Library {
+  raw* handle;
+  // The path it was opened from.
+  str path;
+}
+
+// Opens the shared library at `path`: a full path, or a bare file name the
+// system searches for in its usual places. The error carries the system's
+// own reason.
+pub fun library_open(str path) Result<Library, str> {
+  raw* handle = __fun_dl_open(path);
+  if handle == nil {
+    str why = __fun_dl_error();
+    if len(why) == 0 {
+      ret .Err(format("could not open {str}", path));
+    }
+    ret .Err(format("could not open {str}: {str}", path, why));
+  }
+  ret .Ok(Library{handle = handle, path = path});
+}
+
+// Opens the first of `paths` that loads, for a library whose file name
+// differs from system to system. The error lists every path tried.
+pub fun library_open_any(str[] paths, num count) Result<Library, str> {
+  StringBuilder tried = string_builder_init(64);
+  num i = 0;
+  for i < count {
+    let lib = library_open(paths[i]);
+    if lib.is_ok() {
+      ret lib;
+    }
+    if i > 0 {
+      tried.append(", ");
+    }
+    tried.append(paths[i]);
+    i += 1;
+  }
+  ret .Err(format("could not open any of {str}", tried.build()));
+}
+
+impl Library {
+  // The address of `name`, or nothing when the library doesn't export it.
+  pub symbol(str name) Option<raw*> {
+    raw* p = __fun_dl_sym(self.handle, name);
+    if p == nil {
+      ret .None;
+    }
+    ret .Some(p);
+  }
+
+  // Unloads the library. Function values taken from it must not be called
+  // afterwards.
+  pub close() {
+    if self.handle != nil {
+      _ = __fun_dl_close(self.handle);
+      self.handle = nil;
+    }
+  }
+}
+
+test "the C library opens and its functions can be called" {
+  // The C library's file name on macOS, Linux and Windows.
+  str[3] paths = ["/usr/lib/libSystem.B.dylib", "libc.so.6", "msvcrt.dll"];
+  let lib = library_open_any(paths, 3);
+  assert lib.is_ok(), "expected the C library to open";
+  Library c = lib.unwrap();
+  let found = c.symbol("abs");
+  assert found.is_some(), "expected abs to be exported";
+  let c_abs = found.unwrap() as fun(i32) i32;
+  assert c_abs(-42) == 42, "expected abs(-42) to be 42";
+  assert c.symbol("no_such_function_anywhere").is_none(), "expected a missing name to be none";
+  c.close();
+  assert c.handle == nil, "expected close to clear the handle";
+}
+
+test "a library that doesn't exist reports why" {
+  let lib = library_open("no-such-library-anywhere.so");
+  assert lib.is_err(), "expected the open to fail";
+  assert contains(lib.unwrap_err(), "no-such-library-anywhere.so"), "expected the path in the error";
+}
