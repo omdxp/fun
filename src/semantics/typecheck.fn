@@ -6138,6 +6138,33 @@ impl Checker {
     }
   }
 
+  // Rejects an array literal with more elements than the fixed-size
+  // array it's stored in holds; C would drop or overflow the rest.
+  check_array_literal_fits(Node* val, CheckedType want) {
+    if !want.is_array || want.pointer_depth != 0 || want.array_sizes.len == 0 {
+      ret;
+    }
+    num size = want.array_sizes.get(0);
+    if size < 0 {
+      ret;
+    }
+    fit val.kind {
+      .Bracket(items) -> {
+        Vec<Node*> elements;
+        elements.init(4);
+        defer elements.free();
+        _call_args(items, &elements);
+        if elements.len > size {
+          self.fail(
+            format("the array holds {num} elements, but {num} are given", size, elements.len),
+            val
+          );
+        }
+      }
+      _ -> {}
+    }
+  }
+
   // Rejects an assignment to a name declared const, and checks that the
   // value assigned fits what the name holds.
   check_assignment(Node* node, ExprNode e, TypeEnv* env) {
@@ -6147,6 +6174,26 @@ impl Checker {
     fit e.left.kind {
       .Expression(target) -> {
         if equals(target.op, "[]") {
+          // `TABLE[i] = v;`, or through fields, `head.cells[i] = v;`:
+          // an array is its elements, so writing one changes the const
+          // binding it's rooted at. Indexing a pointer writes what it
+          // points to, which stays allowed, as for a pointer field.
+          if target.has_left {
+            let const_root = self._field_assignment_const_root(target.left, env);
+            if const_root.is_some() {
+              CheckedType indexed = self.infer(target.left, env);
+              if indexed.is_array && indexed.pointer_depth == 0 {
+                self.fail(
+                  format(
+                    "cannot assign to an element of '{str}', which is const",
+                    const_root.unwrap()
+                  ),
+                  node
+                );
+                ret;
+              }
+            }
+          }
           self.check_index_assignment(node, e, target, env);
           ret;
         }
@@ -6673,6 +6720,10 @@ impl Checker {
   // program declares as an enum: anything else has no variant list to
   // consult, so it is left to whatever checks it already gets.
   check_shorthand_variant(Node* val, CheckedType want, TypeEnv* env) {
+    if self.failed {
+      ret;
+    }
+    self.check_array_literal_fits(val, want);
     if self.failed {
       ret;
     }

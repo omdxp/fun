@@ -5155,3 +5155,61 @@ test "an array literal of plain numbers fits any number array" {
     "expected decimal literals still rejected for a whole-number array"
   );
 }
+
+test "writing an element of a const array is rejected, through fields too" {
+  rejects(
+    `const u8[4] SIG = [1, 2, 3, 4];
+    `fun main() num {
+    `  SIG[0] = 9;
+    `  ret 0;
+    `}`,
+    "expected a const array's element write rejected"
+  );
+  accepts(
+    `const u8[4] SIG = [1, 2, 3, 4];
+    `fun read(u8* p) u8 {
+    `  ret p[1];
+    `}
+    `fun main() num {
+    `  ret read(&SIG[0]) as num;
+    `}`,
+    "expected a const array's elements still readable through a pointer"
+  );
+}
+
+test "an array literal longer than its array is rejected" {
+  rejects(
+    `fun main() num {
+    `  num[2] a = [1, 2, 3];
+    `  ret a[0];
+    `}`,
+    "expected an overlong declaration rejected"
+  );
+  rejects(
+    `compound P {
+    `  f32[2] c;
+    `}
+    `fun main() num {
+    `  P p = P{c = [1, 2, 3]};
+    `  ret 0;
+    `}`,
+    "expected an overlong field rejected"
+  );
+  rejects(
+    `fun take(f32[2] v) f32 {
+    `  ret v[0];
+    `}
+    `fun main() num {
+    `  _ = take([4, 5, 6]);
+    `  ret 0;
+    `}`,
+    "expected an overlong argument rejected"
+  );
+  accepts(
+    `fun main() num {
+    `  num[4] a = [1, 2];
+    `  ret a[0];
+    `}`,
+    "expected a shorter literal still accepted, the rest zero"
+  );
+}

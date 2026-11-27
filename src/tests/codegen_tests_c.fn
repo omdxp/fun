@@ -3839,3 +3839,39 @@ test "a prefix operator binds tighter than a ternary" {
     out
   );
 }
+
+test "a temp hoisted inside a closure's body stays in the body, in order" {
+  str src = `use std.io;
+  `compound V {
+  `  f32 x;
+  `  f32 y;
+  `}
+  `fun v(f32 x, f32 y) V {
+  `  ret V{x = x, y = y};
+  `}
+  `impl V {
+  `  op_sub(V o) V {
+  `    ret V{x = self.x - o.x, y = self.y - o.y};
+  `  }
+  `  len2() f32 {
+  `    ret self.x * self.x + self.y * self.y;
+  `  }
+  `}
+  `fun main() num {
+  `  V e = v(1, 1);
+  `  flag on = false;
+  `  let f = fun() {
+  `    if on {
+  `      println("on");
+  `    } else {
+  `      f32 d = (v(4, 5) - e).len2();
+  `      println_fmt("closure {f32}", d);
+  `    }
+  `  };
+  `  f();
+  `  f.free();
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "closure_body_temp", "a temp hoisted inside a closure's body");
+  assert contains(out, "closure 25"), format("expected the closure's own temp, got {str}", out);
+}
