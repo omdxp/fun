@@ -591,6 +591,14 @@ pub compound Codegen {
   Map<str, TypedefHint> typedef_hints;
   CodegenState* root_state;
   Option<num> root_hoist_pos;
+  // While a closure literal's body is emitted: its buffer, the start of
+  // the body statement being emitted, and the scratch depth of the body
+  // itself. A temp hoisted from deeper inside one of its statements goes
+  // before that statement, in the body, not into the function the literal
+  // sits in.
+  CodegenState* closure_stmt_state;
+  Option<num> closure_stmt_pos;
+  num closure_stmt_depth;
   Option<num> root_stmt_start_pos;
   // Bumped each time `emit_statements` starts a statement. Keys
   // `materialize_operator_operand`'s memo, so an operand rendered more
@@ -869,6 +877,9 @@ pub fun codegen_new(CodegenState* state) Codegen {
   g.cache_splices.init(64);
   g.typedef_hints.init(64);
   g.root_hoist_pos = .None;
+  g.closure_stmt_state = nil;
+  g.closure_stmt_pos = .None;
+  g.closure_stmt_depth = 0;
   g.root_stmt_start_pos = .None;
   g.stmt_serial = 0;
   g.op_memo_nodes.init(0);
@@ -9575,7 +9586,16 @@ impl Codegen {
     // also above zero, but there a statement position is active and the temp
     // belongs in that body, right before its statement; only an expression
     // buffer, which has no statement position, needs the reach-through below.
-    if self.hoist_scratch_depth > 0 && self.current_stmt_start_pos.is_none() {
+    if self.closure_stmt_state != nil && self.closure_stmt_pos.is_some() &&
+      self.hoist_scratch_depth > self.closure_stmt_depth &&
+      self.current_stmt_start_pos.is_none() {
+      // Inside an expression of a closure body's statement: the temp goes
+      // before that statement, in the body.
+      str closure_tmp_text = recv_tmp_stmt_sb.build();
+      num at = self.closure_stmt_pos.unwrap();
+      self.closure_stmt_state.out.insert_at(at, closure_tmp_text);
+      self.closure_stmt_pos = .Some(at + len(closure_tmp_text));
+    } elif self.hoist_scratch_depth > 0 && self.current_stmt_start_pos.is_none() {
       // Nested inside `resolve_field_chain`'s call-as-receiver scratch
       // buffer. `hoist_insert_pos`/`current_stmt_start_pos` only reach
       // that enclosing buffer, which holds an expression result rather
@@ -9607,9 +9627,19 @@ impl Codegen {
     } else {
       let saved_recv_tmp_hoist_pos = self.hoist_insert_pos;
       let recv_tmp_splice_pos = self.current_stmt_start_pos;
+      // In a closure body, after any temp this statement already hoisted
+      // from deeper in, so each lands before the one using it.
+      flag in_closure_stmt = self.closure_stmt_state == self.state &&
+        self.closure_stmt_pos.is_some();
+      if in_closure_stmt {
+        recv_tmp_splice_pos = self.closure_stmt_pos;
+      }
       self.hoist_insert_pos = recv_tmp_splice_pos;
       str recv_tmp_text = recv_tmp_stmt_sb.build();
       self.emit_hoisted(recv_tmp_text);
+      if in_closure_stmt {
+        self.closure_stmt_pos = .Some(recv_tmp_splice_pos.unwrap() + len(recv_tmp_text));
+      }
       // `saved_recv_tmp_hoist_pos` is a captured local, so this splice
       // needs a manual adjustment.
       if recv_tmp_splice_pos.is_some() {
@@ -10191,10 +10221,19 @@ impl Codegen {
         self.state = &body_scratch;
         self.hoist_insert_pos = .None;
         self.current_stmt_start_pos = .None;
+        CodegenState* saved_closure_stmt_state = self.closure_stmt_state;
+        let saved_closure_stmt_pos = self.closure_stmt_pos;
+        num saved_closure_stmt_depth = self.closure_stmt_depth;
+        self.closure_stmt_state = &body_scratch;
+        self.closure_stmt_pos = .None;
+        self.closure_stmt_depth = self.hoist_scratch_depth;
         Set<str> saved_alias_names = self.closure_alias_names;
         self.closure_alias_names = deref_names;
         let body_err = self.emit_function_named(synth_node, body_name);
         self.closure_alias_names = saved_alias_names;
+        self.closure_stmt_state = saved_closure_stmt_state;
+        self.closure_stmt_pos = saved_closure_stmt_pos;
+        self.closure_stmt_depth = saved_closure_stmt_depth;
         self.state = saved_state_body;
         self.hoist_insert_pos = saved_hoist_pos;
         self.current_stmt_start_pos = saved_stmt_start_pos;
@@ -12776,7 +12815,10 @@ impl Codegen {
           }
         }
         flag const_is_compound = self.compound_names.contains(const_check_type_name);
-        if v.is_const && !const_is_ptr_binding && !const_is_compound && !fn_sig_local {
+        // An array as for a global: see its own note.
+        flag const_local_is_array = v.var_type != nil && v.var_type.is_array;
+        if v.is_const && !const_is_ptr_binding && !const_is_compound && !fn_sig_local &&
+          !const_local_is_array {
           self.state.write("const ");
         }
 
@@ -16620,6 +16662,9 @@ impl Codegen {
       // triggered it. The swap restores the outer value afterward, as it
       // does for `hoist_insert_pos`.
       self.current_stmt_start_pos = .Some(self.state.out.len());
+      if self.closure_stmt_state == self.state {
+        self.closure_stmt_pos = self.current_stmt_start_pos;
+      }
       self.stmt_serial = self.stmt_serial + 1;
       flag is_if = false;
       fit stmt.kind {
@@ -18599,7 +18644,12 @@ impl Codegen {
         // compound cases above already drop it for their own reasons.
         // Fun's own typechecker already rejects reassigning a const
         // binding regardless of what C emits, so this loses no safety.
-        if v.is_const && !const_is_ptr_binding && !const_is_compound && !needs_runtime {
+        // A const array isn't written `const` either: Fun's typechecker
+        // already rejects writing its elements, and in C a pointer to one
+        // (`&TABLE[0]`) would carry a `const` no Fun pointer type has.
+        flag const_is_array = v.var_type != nil && v.var_type.is_array;
+        if v.is_const && !const_is_ptr_binding && !const_is_compound && !needs_runtime &&
+          !const_is_array {
           self.state.write("const ");
         }
         // `let arr = [1, 2];` at the top level needs a real array
