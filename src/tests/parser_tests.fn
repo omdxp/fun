@@ -744,3 +744,17 @@ test "a keyword where a declaration's name goes says so" {
     msg
   );
 }
+
+test "a type keyword where a generic declaration's name goes says so" {
+  str msg = parse_error_message(
+    `use std.vec;
+    `fun main() num {
+    `  Vec<u8> raw;
+    `  ret 0;
+    `}`
+  );
+  assert contains(msg, "'raw' is a reserved word"), format(
+    "expected the keyword named, got {str}",
+    msg
+  );
+}

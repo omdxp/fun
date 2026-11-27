@@ -3821,3 +3821,21 @@ test "a closure reading a field doesn't capture a local named like the field" {
   str out = run_source(src, "closure_field_name", "a closure reading a field");
   assert contains(out, "size 7"), format("expected only p captured, got {str}", out);
 }
+
+test "a prefix operator binds tighter than a ternary" {
+  str src = `use std.io;
+  `fun main() num {
+  `  flag a = true;
+  `  flag b = false;
+  `  num x = !b ? 1 : 2;
+  `  num y = a && !b ? 3 : 4;
+  `  num z = -x > 0 ? 5 : 6;
+  `  println_fmt("picked {num} {num} {num}", x, y, z);
+  `  ret 0;
+  `}`;
+  str out = run_source(src, "unary_ternary", "a prefix operator before a ternary");
+  assert contains(out, "picked 1 3 6"), format(
+    "expected the operator applied to its operand alone, got {str}",
+    out
+  );
+}

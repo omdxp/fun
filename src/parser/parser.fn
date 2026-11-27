@@ -2742,8 +2742,12 @@ impl Parser {
           // continuations (`(`, `[`, `.`) and the `<-` receive prefix
           // aren't binary-only, so they still continue the primary. See
           // `Parser.stop_at_binary_op`'s doc comment.
-          if self.stop_at_binary_op && is_binary_only_operator(t) &&
-            !(self.propagation_binds_in_operand && is_postfix_propagation_operator(t)) &&
+          // A `?` that opens a ternary is a binary operator here, not
+          // propagation: `!b ? 1 : 2` is `(!b) ? 1 : 2`.
+          flag propagates = self.propagation_binds_in_operand &&
+            is_postfix_propagation_operator(t) &&
+            !(token_is_operator(t, "?") && self.state.looks_like_ternary_branch());
+          if self.stop_at_binary_op && is_binary_only_operator(t) && !propagates &&
             self.node_peek_expressionable().is_some() {
             ret .None;
           }
@@ -7661,6 +7665,13 @@ impl Parser {
       }
     }
     let t1 = self.state.token_peek_n(off);
+    if t1.is_some() && t1.unwrap().type == .Keyword {
+      // `Vec<u8> raw;`: a keyword where the name goes is still a
+      // declaration, so its parser can say the name is reserved.
+      let t2 = self.state.token_peek_n(off + 1);
+      ret t2.is_some() &&
+        (token_is_operator(t2.unwrap(), "=") || token_is_symbol(t2.unwrap(), ';'));
+    }
     ret t1.is_some() && t1.unwrap().type == .Identifier;
   }
 
