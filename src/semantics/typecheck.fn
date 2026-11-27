@@ -1499,6 +1499,9 @@ compound Checker {
   // whole merged program, read as a valid alias-qualified call
   // regardless of whether that name was ever declared as one.
   Set<str> declared_import_aliases;
+  // The local whose initializer is being checked. In the generated C a
+  // local is already in scope inside its own initializer.
+  str declaring_local;
   flag failed;
   TypeError error;
 }
@@ -1530,6 +1533,7 @@ fun _checker_new() Checker {
   c.rtype = checked_unknown();
   c.closure_depth = 0;
   c.in_async = false;
+  c.declaring_local = "";
   c.failed = false;
   ret c;
 }
@@ -4850,6 +4854,16 @@ impl Checker {
       );
     }
     let known = self.fns.at(name);
+    if known.is_some() && (shadowing.is_some() || equals(name, self.declaring_local)) {
+      self.fail(
+        format(
+          "cannot call function '{str}' while a local of the same name is in scope - the local hides it in the generated C, so rename the local",
+          name
+        ),
+        node
+      );
+      ret checked_unknown();
+    }
     if known.is_none() {
       // A name bound in scope holds a function rather than naming one -
       // a function-typed parameter, most commonly. Its own declared
@@ -6499,7 +6513,10 @@ impl Checker {
       ret;
     }
     if v.has_val {
+      str outer_declaring = self.declaring_local;
+      self.declaring_local = v.name;
       CheckedType value = self.infer(v.val, env);
+      self.declaring_local = outer_declaring;
       self.check_shorthand_variant(v.val, declared, env);
       if self.failed {
         ret;

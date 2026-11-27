@@ -5213,3 +5213,37 @@ test "an array literal longer than its array is rejected" {
     "expected a shorter literal still accepted, the rest zero"
   );
 }
+
+test "a function can't be called while a local of its name hides it" {
+  str own = check(
+    `fun tick() num { ret 2; }
+    `fun main() {
+    `  num tick = tick() + 1;
+    `}`
+  );
+  assert contains(own, "cannot call function 'tick' while a local of the same name is in scope"), "expected a call in the local's own initializer to be rejected";
+  str later = check(
+    `fun tick() num { ret 2; }
+    `fun main() {
+    `  num tick = 1;
+    `  num again = tick();
+    `}`
+  );
+  assert contains(later, "cannot call function 'tick'"), "expected a call after the local to be rejected";
+  str param = check(
+    `fun tick() num { ret 2; }
+    `fun f(num tick) num { ret tick(); }`
+  );
+  assert contains(param, "cannot call function 'tick'"), "expected a call under a parameter of that name to be rejected";
+  accepts(
+    `fun tick() num { ret 2; }
+    `fun main() {
+    `  num taken = tick();
+    `  if taken > 0 {
+    `    num tick = 3;
+    `  }
+    `  num again = tick();
+    `}`,
+    "expected a call outside the local's scope to pass"
+  );
+}

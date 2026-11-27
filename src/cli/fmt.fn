@@ -391,6 +391,17 @@ impl FmtState {
     ret levels;
   }
 
+  // `nest_levels` for the line a closer starts, where `opened_on` is the
+  // line the delimiter it closes opened on: any still open from that same
+  // line indent nothing more, so `f(Point{` closes as `})` under `f`.
+  pub closing_levels(num baseline, num opened_on) num {
+    num end = self.delim_lines.len;
+    for end > baseline && self.delim_lines.get(end - 1) == opened_on {
+      end = end - 1;
+    }
+    ret self.nest_levels(baseline, self.delim_lines.len - end);
+  }
+
   pub newline() {
     self.pending_space = false;
     self.line_count = self.line_count + 1;
@@ -1595,6 +1606,43 @@ fun _bool_chain_operand_end(Vec<Token>* tokens, num from) num {
   ret i;
 }
 
+// True for an operator that joins two operands and so ends a method
+// chain written as one of them. `<` and `>` are left out, since they
+// also spell a generic call's own type arguments.
+fun _ends_method_chain(str text) flag {
+  fit text {
+    "+", "-", "*", "/", "%", "==", "!=", "<=", ">=", "&", "|", "^", "<<", "?", ":", "=", "+=",
+    "-=", "*=", "/=", "%=" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+// The index just past the method chain continuing at `from`: where
+// `_bool_chain_operand_end` would stop, or sooner at a top-level operator
+// joining the chain to another operand. -1 when a closure literal sits
+// inside it, whose body already breaks onto lines of its own.
+fun _method_chain_end(Vec<Token>* tokens, num from) num {
+  num end = _bool_chain_operand_end(tokens, from);
+  num depth = 0;
+  num i = from;
+  for i < end {
+    Token t = tokens.get(i);
+    str text = token_text(t);
+    if token_is_keyword(t, "fun") {
+      ret -1;
+    }
+    if equals(text, "(") || equals(text, "[") {
+      depth = depth + 1;
+    } elif equals(text, ")") || equals(text, "]") {
+      depth = depth - 1;
+    } elif depth == 0 && t.type != .NewLine && t.type != .Comment && _ends_method_chain(text) {
+      ret i;
+    }
+    i = i + 1;
+  }
+  ret end;
+}
+
 // True when `tokens.get(i)` is a `.` that continues a method/index
 // chain off a call's or index's own result (`f().g`, `a[0].g`) rather
 // than an ordinary field/method access straight off a plain receiver
@@ -2240,8 +2288,17 @@ pub fun format_source(str src, str filename) Result<str, str> {
         }
       }
     }
+    // A brace inside a call or index the statement opened can't be that
+    // statement's own body (`if blocks(Point{x = 1}) {`), unless a
+    // return type just ended a closure's parameter list.
+    num delims_since_block = s.open_delims;
+    if s.open_delims_at_block.len > 0 {
+      delims_since_block = s.open_delims -
+        s.open_delims_at_block.get(s.open_delims_at_block.len - 1);
+    }
+    flag literal_in_delims = delims_since_block > 0 && !type_after_params;
     flag is_literal_brace = equals(text, "{") && s.has_prev && literal_lead &&
-      (!block_context || literal_lead_before_body);
+      (!block_context || literal_lead_before_body || literal_in_delims);
 
     // A `fit` arm whose body is a single short block stays on one line,
     // which is how arms read when written by hand.
@@ -2333,6 +2390,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
     if equals(text, "}") && s.brace_kinds.len > 0 &&
       s.brace_kinds.get(s.brace_kinds.len - 1) == 1 {
       s.brace_kinds.pop();
+      num opened_on = s.delim_lines.len > 0 ? s.delim_lines.get(s.delim_lines.len - 1) : -1;
       s.close_delim();
       flag wrapped = false;
       if s.call_arg_wrap.len > 0 {
@@ -2351,7 +2409,7 @@ pub fun format_source(str src, str filename) Result<str, str> {
         if s.open_delims_at_block.len > 0 {
           block_baseline = s.open_delims_at_block.get(s.open_delims_at_block.len - 1);
         }
-        s.continuation = s.nest_levels(block_baseline, 0);
+        s.continuation = s.closing_levels(block_baseline, opened_on);
         s.write(text);
         s.has_prev = true;
         s.prev = t;
@@ -2510,9 +2568,11 @@ pub fun format_source(str src, str filename) Result<str, str> {
       if next_idx >= 0 && _is_chain_continuation_dot(&tokens, next_idx) {
         flag chain_fill_break = s.method_chain_wrap;
         if !chain_fill_break {
-          num chain_end = _bool_chain_operand_end(&tokens, next_idx);
-          num chain_width = _inline_width(&tokens, next_idx, chain_end);
-          chain_fill_break = s.col + chain_width > MAX_LINE_WIDTH;
+          num chain_end = _method_chain_end(&tokens, next_idx);
+          if chain_end >= 0 {
+            num chain_width = _inline_width(&tokens, next_idx, chain_end);
+            chain_fill_break = s.col + chain_width > MAX_LINE_WIDTH;
+          }
         }
         if chain_fill_break {
           s.method_chain_wrap = true;
@@ -2833,6 +2893,56 @@ test "an if condition ending in a compound literal is not mistaken for the if's 
   `}`;
   let out = format_source(src, "t.fn").unwrap();
   assert contains(out, "if x == Point{x = 1} {"), "expected the literal and the if's own body brace on the same line";
+}
+
+test "a compound literal passed to a call in a condition stays a literal" {
+  str src = `fun a() num {
+  `  if blocks(Point{x = 1, y = 2}) {
+  `    ret 1;
+  `  }
+  `  for x : items(Box<num>{v = 1}) {
+  `    ret 2;
+  `  }
+  `  if run(fun() num { ret 3; }) {
+  `    ret 4;
+  `  }
+  `  ret 0;
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "if blocks(Point{x = 1, y = 2}) {"), "expected the literal kept inline in an if";
+  assert contains(out, "for x : items(Box<num>{v = 1}) {"), "expected the literal kept inline in a for";
+  assert contains(out, "if run(fun() num {"), "expected a closure body inside the condition to stay a block";
+}
+
+test "a method chain written as one operand is measured on its own" {
+  str src = `fun a() {
+  `  Vec3 move = self.forward().scale(input.forward) + self.right().scale(input.right) +
+  `    vec3(0, input.up, 0);
+  `  let x = list.iter().map(fun(num a) num { ret a; }).filter(something_long_here).collect().len();
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(
+    out,
+    "Vec3 move = self.forward().scale(input.forward) + self.right().scale(input.right) +"
+  ), "expected short chains joined by an operator left alone";
+  assert contains(out, "let x = list.iter().map(fun(num a) num {"), "expected a chain holding a closure not wrapped at its dots";
+  assert contains(out, "}).filter(something_long_here).collect().len();"), "expected the chain to continue after the closure's close";
+}
+
+test "a literal broken over lines inside a call closes under the call" {
+  str src = `fun a() {
+  `  flag b = blocks(Point{
+  `    x = 1, y = 2
+  `  });
+  `  if blocks(Point{
+  `    x = 1, y = 2
+  `  }) {
+  `    ret;
+  `  }
+  `}`;
+  let out = format_source(src, "t.fn").unwrap();
+  assert contains(out, "\n  });\n"), "expected the literal's close at the statement's own indent";
+  assert contains(out, "\n  }) {\n"), "expected the same inside an if condition";
 }
 
 test "a ternary gets a space on both sides of '?' and ':'" {
