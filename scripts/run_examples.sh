@@ -170,6 +170,7 @@ expected_content_for() {
   case "$1" in
     "examples/test.fn") printf '%s' $'The factorial of' ;;
     "examples/advanced/array_copies.fn") printf '%s' $'0.5 0.5 0.25\n0.5 0.25 5' ;;
+    "examples/advanced/operator_operands.fn") printf '%s' $'picked 20\nlane 3' ;;
     "examples/advanced/callable_collections.fn") printf '%s' $'8 7\n105 100' ;;
     "examples/advanced/custom_functions.fn") printf '%s' $'The result of subtracting' ;;
     "examples/advanced/fit_exhaustive_ok.fn") printf '%s' $'x was true' ;;

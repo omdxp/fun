@@ -1,0 +1,38 @@
+// Operators on compounds whose operands aren't plain names: a value picked
+// by a conditional, and a SIMD lane read off a field of a call's result.
+
+use std.io;
+use std.vec;
+use std.simd;
+
+compound Scale {
+  num by;
+}
+
+impl Scale {
+  pub op_mul(Scale o) Scale {
+    ret Scale{by = self.by * o.by};
+  }
+}
+
+compound Joint {
+  F32x4 lanes;
+}
+
+compound Pose {
+  Joint joint;
+}
+
+fun main() {
+  Scale small = Scale{by = 2};
+  Scale big = Scale{by = 10};
+  flag grown = true;
+  Scale picked = (grown ? big : small) * small;
+  println(format("picked {num}", picked.by));
+  Vec<Pose> poses;
+  poses.init(1);
+  defer poses.free();
+  poses.push(Pose{joint = Joint{lanes = f32x4(1, 2, 3, 4)}});
+  f32 lane = poses.get(0).joint.lanes[2];
+  println(format("lane {f32}", lane));
+}
