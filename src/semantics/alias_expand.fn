@@ -343,7 +343,8 @@ fun _expand_bound_alternatives(
 // Walks every top-level declaration's own DataType-bearing positions and
 // expands each in place: a function/method's own params and return type,
 // a compound's own fields, a plain variable declaration's own type, a
-// shape method's own signature, and every generic bound-list's own
+// shape method's own signature, a test or fuzz block's body, and every
+// generic bound-list's own
 // alternatives (function, compound, and impl - a method's own bound list
 // is covered via the function-shaped branch inside `.Impl`'s methods).
 // `fit node.kind { .Function(f) -> {...} }` gives `f` as a plain VALUE
@@ -415,6 +416,8 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
           }
         }
       }
+      .Test(t) -> { _expand_body(t.body, resolved, &unused); }
+      .Fuzz(fz) -> { _expand_body(fz.body, resolved, &unused); }
       _ -> {}
     }
   }
@@ -546,6 +549,16 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
       if e.has_right {
         _expand_body(e.right, resolved, unused);
       }
+      if equals(e.op, "()") && e.has_left && e.has_right {
+        fit e.left.kind {
+          .Identifier(callee) -> {
+            if equals(callee, "sizeof") {
+              _expand_sizeof_operand(e.right, resolved);
+            }
+          }
+          _ -> {}
+        }
+      }
       if e.has_generic_args {
         num gi = 0;
         for gi < e.generic_args.len {
@@ -556,6 +569,52 @@ fun _expand_body(Node* stmt, Map<str, _ResolvedAlias>* resolved, flag* unused) {
     }
     _ -> {}
   }
+}
+
+// `sizeof(Alias)` and `sizeof(Alias*)`: the operand is a plain name rather
+// than a type, so it is renamed to what the alias stands for. Only an alias
+// of a plain named type has a name to stand in; any other kind is left for
+// typecheck to report.
+fun _expand_sizeof_operand(Node* operand, Map<str, _ResolvedAlias>* resolved) {
+  // The argument list arrives parenthesized.
+  fit operand.kind {
+    .ExpressionParenthesis(inner) -> {
+      _expand_sizeof_operand(inner, resolved);
+      ret;
+    }
+    _ -> {}
+  }
+  str named = "";
+  fit operand.kind {
+    .Identifier(text) -> { named = text; }
+    _ -> { ret; }
+  }
+  str bare = named;
+  num stars = 0;
+  for ends_with(bare, "*") {
+    bare = substr(bare, 0, len(bare) - 1);
+    stars = stars + 1;
+  }
+  let found = resolved.at(bare);
+  if found.is_none() {
+    ret;
+  }
+  _ResolvedAlias ra = found.unwrap();
+  if !ra.is_used {
+    ra.is_used = true;
+    resolved.put(bare, ra);
+  }
+  if !ra.is_resolved || ra.is_bound_list || ra.type_params.len > 0 || ra.body == nil {
+    ret;
+  }
+  DataType* body = ra.body;
+  if body.has_fn_sig || body.has_closure_sig || body.generic_args.len > 0 ||
+    body.tuple_members.len > 0 || body.array_brackets.len > 0 || body.pointer_depth > 0 {
+    ret;
+  }
+  operand.kind = .Identifier(
+    format("{str}{str}", body.type_str, repeat("*", body.pointer_depth + stars))
+  );
 }
 
 // `insts` is one Cartesian-product row per combo, one bound string per

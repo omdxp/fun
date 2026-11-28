@@ -2,6 +2,7 @@
 // then builds and runs it unless asked not to.
 
 use driver;
+use bindgen;
 use upgrade;
 use stdlib_env;
 use std.string;
@@ -84,6 +85,21 @@ fun main(str[] args) num {
       );
     }
     ret deps_update_command(opts.input);
+  }
+  if equals(opts.subcommand, "bindgen") {
+    Vec<str> defines;
+    defines.init(opts.defines.len);
+    defer defines.free();
+    for d : opts.defines {
+      defines.push(format("{str}={str}", d.name, d.value));
+    }
+    ret bindgen_command(
+      opts.input,
+      opts.output,
+      opts.bindgen_name,
+      opts.bindgen_prefix,
+      &defines
+    );
   }
   if equals(opts.subcommand, "lint") {
     ret run_lint(opts.input, opts.lint_summary);

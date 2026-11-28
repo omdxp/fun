@@ -1258,6 +1258,21 @@ fun _escape_asm_registers(str template) str {
   ret b.build();
 }
 
+// `n` as a C integer literal. One outside 32 bits gets `LL`: a C compiler
+// may give an unsuffixed decimal too big for `int` an unsigned type (MSVC
+// does), so `-2147483648` would be a large positive number there. The
+// most negative value has no literal of its own and is written as an
+// expression.
+pub fun c_int_literal(num n) str {
+  if n >= -2147483647 && n <= 2147483647 {
+    ret format_num(n);
+  }
+  if n == -9223372036854775807 - 1 {
+    ret format("(-9223372036854775807LL - 1)");
+  }
+  ret format("{num}LL", n);
+}
+
 // True for an integer literal, parenthesized or not.
 fun _is_int_literal_node(Node* n) flag {
   fit n.kind {
@@ -6940,7 +6955,9 @@ impl Codegen {
       .Number(data) -> {
         fit data {
           .Num(n) -> {
-            self.state.write(format_num(n));
+            str lit = c_int_literal(n);
+            self.state.write(lit);
+            free(lit);
             ret .None;
           }
           .Dec(d) -> {
@@ -8159,7 +8176,8 @@ impl Codegen {
   // Counts each typed `{kind}` placeholder in a `format()` literal's
   // format string (any word `is_placeholder_word` accepts),
   // mirroring the reference compiler's own placeholder recognition:
-  // `{{`/`}}` are escaped braces, and a bare `{}` opts the whole string
+  // `{{` is an escaped brace (a `}` is always literal), and a bare `{}`
+  // opts the whole string
   // out of counting (returns `.None`), since it takes the general vararg
   // path rather than a specific typed one.
   count_format_placeholders(str fmt) Option<num> {

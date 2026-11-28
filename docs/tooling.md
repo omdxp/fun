@@ -401,6 +401,65 @@ Files with warnings:
 - The exit code is 1 when there is any warning or any file that could
   not be analyzed, and 0 otherwise, so it can gate a CI job.
 
+## Binding a C Library
+
+`fun bindgen <header.h>` reads a C header and writes Fun declarations for
+it, so a shared library can be called without writing its bindings by
+hand. Nothing links against the library when the program is built: the
+generated loader opens it while the program runs.
+
+```text
+$ fun bindgen include/physics.h -out src/physics.fn -name Physics -prefix PHY_
+```
+
+- Numeric `#define`s become typed constants (`f32`, `f64`, `i32`, `u32`,
+  `i64` or `u64`, from the literal's form and value). Include guards and
+  macros that only stand for attributes or calling conventions are left
+  out.
+- An enum becomes an alias of `i32` and one constant per value, its
+  values worked out (`1 << 2`, `A | B`, implicit increments). A value
+  whose name starts with `_` is taken to be the header's own and left
+  out.
+- A struct becomes a compound with the same fields in the same order,
+  arrays and function pointers included, so its layout matches. A
+  struct that is only ever declared, never defined, becomes an alias of
+  `raw`, used through pointers.
+- A typedef becomes an alias; a function pointer or function type
+  becomes a function type.
+- Every function becomes a field of one compound, named by `-name`
+  (default: the header's file stem in CamelCase), with `-prefix` taken
+  off each field's name. `<name>_load(path)` opens the library and
+  looks up every function, failing on the first one it lacks;
+  `<name>_close(lib)` closes it.
+
+```fun
+use physics;
+
+fun main() num {
+  let loaded = physics_load("libphysics.so");
+  if loaded.is_err() {
+    println(loaded.unwrap_err());
+    ret 1;
+  }
+  Physics* phy = loaded.unwrap();
+  defer physics_close(phy);
+  _ = phy.Init();
+  ret 0;
+}
+```
+
+- `#if`, `#ifdef` and the rest are evaluated, with `-D name=value`
+  defining what the header tests; nothing else is predefined.
+- `char*` is `str`, `void*` is `raw*`, `bool` is `flag`, `size_t` is `u64`
+  and the fixed-width integer types are their Fun counterparts. `long`
+  and `wchar_t` change size between platforms, so a header using them is
+  rejected, naming the declaration.
+- Functions taking variadic arguments and unions are left out, each
+  reported on stderr; a bit-field or a nested struct or union is an
+  error. Functions defined in the header itself have no symbol to load
+  and are skipped.
+- The output is formatted, so it passes `fun -fmt-check-all` as written.
+
 ## The Language Server (`fls`)
 
 `fls` is Fun's language server: diagnostics, formatting-aware workflows,
@@ -479,6 +538,8 @@ fun test [<path>] -memcheck   (runs under the memory checker, see Memory Checker
 fun fuzz <input_file> [<target>]   (shorthand for `fun -in <input_file> -fuzz [-fuzz-target <target>]`)
 fun fuzz [<dir>]        (runs every `fuzz` target under <dir> for FUN_FUZZ_DEFAULT_SECONDS each, default '.'/30s)
 fun lint [<path>] [-summary]   (reports every warning under <path>, a file or directory, default '.')
+fun bindgen <header.h> [-out <file.fn>] [-name <Name>] [-prefix <prefix>] [-D name=value]
+                         (writes Fun bindings for a C header, see Binding a C Library)
 fun build                (reads ./fun.toml, installs optimized binaries under fun-out/bin/)
 fun init [lib|exe|mix]   (scaffolds fun.toml and src/, default exe, see Get Started)
 fun add <name> -git <url> [-path <subfolder>] [-tag <ref> | -branch <ref> | -rev <sha>] [-token-env <VAR>]

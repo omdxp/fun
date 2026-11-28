@@ -45,7 +45,7 @@ str _cc_cached_value = "";
 
 // What the arguments asked for.
 pub compound Options {
-  // `build`, `test`, `fuzz`, `init`, `add`, `deps`, `lint`, or "" for a
+  // `build`, `test`, `fuzz`, `init`, `add`, `deps`, `lint`, `bindgen`, or "" for a
   // plain compile.
   str subcommand;
   // `-test`/`-fuzz` given directly (alongside `-in`) rather than via a
@@ -118,6 +118,9 @@ pub compound Options {
   str dep_branch;
   str dep_rev;
   str dep_token_env;
+  // `fun bindgen`'s `-name` and `-prefix`.
+  str bindgen_name;
+  str bindgen_prefix;
   // `-cover` and its companions (see `CoverOptions`).
   CoverOptions cover;
   // Set when parsing failed, with `error_text` explaining why.
@@ -183,6 +186,8 @@ fun _options_new() Options {
   o.dep_branch = "";
   o.dep_rev = "";
   o.dep_token_env = "";
+  o.bindgen_name = "";
+  o.bindgen_prefix = "";
   o.cover = _cover_options_new();
   o.has_error = false;
   o.error_text = "";
@@ -296,6 +301,8 @@ fun _value_flags() Vec<str> {
   out.push("cover-min");
   out.push("cover-exclude");
   out.push("arch");
+  out.push("name");
+  out.push("prefix");
   ret out;
 }
 
@@ -321,7 +328,7 @@ pub fun parse_args(str[] argv) Options {
     str head = leading.unwrap();
     if equals(head, "build") || equals(head, "test") || equals(head, "fuzz") ||
       equals(head, "init") || equals(head, "add") || equals(head, "deps") ||
-      equals(head, "lint") || equals(head, "upgrade") {
+      equals(head, "lint") || equals(head, "upgrade") || equals(head, "bindgen") {
       o.subcommand = head;
       first_positional = 1;
     }
@@ -369,11 +376,13 @@ pub fun parse_args(str[] argv) Options {
   o.dep_branch = parsed.get_or("branch", "");
   o.dep_rev = parsed.get_or("rev", "");
   o.dep_token_env = parsed.get_or("token-env", "");
+  o.bindgen_name = parsed.get_or("name", "");
+  o.bindgen_prefix = parsed.get_or("prefix", "");
   _parse_cover_options(&parsed, &o);
   if o.has_error {
     ret o;
   }
-  if !equals(o.output, "") {
+  if !equals(o.output, "") && !equals(o.subcommand, "bindgen") {
     if !ends_with(o.output, ".c") {
       o.has_error = true;
       o.error_text = format("-out expects a `.c` file, found `{str}`", o.output);
@@ -1738,6 +1747,8 @@ pub fun help_text() str {
   `  fun test [<path>] -memcheck   runs the tests under the built-in memory checker (leaks, double-frees, use-after-free)
   `  fun fuzz <input.fn> [<target>]   builds and runs one fuzz block, open-ended
   `  fun fuzz [<dir>]         runs every fuzz target under <dir>, briefly bounded
+  `  fun bindgen <header.h> [-out <file.fn>] [-name <Name>] [-prefix <prefix>] [-D name=value]
+  `                           writes Fun bindings for a C header, its functions loaded from a shared library at run time
   `  fun lint [<path>] [-summary]  reports every warning under <path> (a file or directory, default '.'), then totals; exits 1 if any
   `  fun build [-obj]         reads ./fun.toml, installs binaries under fun-out/bin/; -obj builds objects under fun-out/obj/ instead
   `  fun init [lib|exe|mix]   scaffolds fun.toml and src/ (default exe)
@@ -1952,6 +1963,27 @@ test "reads a -D define" {
   assert o.defines.len == 1, "expected the define";
   assert equals(o.defines.get(0).name, "TAG"), "expected the define's name";
   assert equals(o.defines.get(0).value, "v1.2.3"), "expected the define's value";
+}
+
+test "fun bindgen takes a header, a .fn output, a name and a prefix" {
+  Vec<str> a;
+  a.init(0);
+  a.push("bindgen");
+  a.push("include/lib.h");
+  a.push("-out");
+  a.push("src/lib.fn");
+  a.push("-name");
+  a.push("Lib");
+  a.push("-prefix");
+  a.push("LIB_");
+  let o = parse_args(_argv(&a));
+  defer o.free();
+  assert !o.has_error, "expected a .fn output accepted";
+  assert equals(o.subcommand, "bindgen"), "expected the subcommand";
+  assert equals(o.input, "include/lib.h"), "expected the header";
+  assert equals(o.output, "src/lib.fn"), "expected the output";
+  assert equals(o.bindgen_name, "Lib"), "expected the name";
+  assert equals(o.bindgen_prefix, "LIB_"), "expected the prefix";
 }
 
 test "a malformed -D is reported" {
