@@ -1079,3 +1079,50 @@ test "an integer literal outside 32 bits is written as a 64-bit one" {
   assert !contains(out, "2147483647LL"), "expected no suffix inside int's range";
   assert contains(out, "9223372036854775807LL"), "expected the largest literal suffixed";
 }
+
+test "an operator on a conditional's compound value calls its operator method" {
+  str src = `compound V {
+  `  num x;
+  `}
+  `impl V {
+  `  pub op_mul(V o) V {
+  `    ret V{x = self.x * o.x};
+  `  }
+  `}
+  `fun main() num {
+  `  V a = V{x = 2};
+  `  V b = V{x = 3};
+  `  flag pick = true;
+  `  V c = (pick ? a : b) * b;
+  `  ret c.x;
+  `}`;
+  let out = emit_c(src, "ternary operand");
+  assert contains(out, "op_mul("), "expected the operator method called";
+  assert !contains(out, ": (b)) * b"), "expected no raw C multiply of two structs";
+}
+
+test "an operator on a field of a call's result renders the whole operand" {
+  str src = `compound V {
+  `  num x;
+  `}
+  `impl V {
+  `  pub op_mul(V o) V {
+  `    ret V{x = self.x * o.x};
+  `  }
+  `}
+  `compound Outer {
+  `  V inner;
+  `}
+  `fun make() Outer {
+  `  ret Outer{inner = V{x = 4}};
+  `}
+  `fun main() num {
+  `  V b = V{x = 3};
+  `  V c = make().inner * b;
+  `  ret c.x;
+  `}`;
+  let out = emit_c(src, "field of a call operand");
+  assert contains(out, "op_mul("), "expected the operator method called";
+  assert !contains(out, "= .inner"), "expected no temp missing its base";
+  assert contains(out, "make()"), "expected the call rendered";
+}
