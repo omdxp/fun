@@ -1063,3 +1063,19 @@ test "reachability pruning keeps a function referenced only as a value, never ca
   );
   assert contains(out, "value_only_helper"), "expected the value-referenced function's body to survive pruning even with no direct call-by-name syntax";
 }
+
+test "an integer literal outside 32 bits is written as a 64-bit one" {
+  str src = `fun main() num {
+  `  num big = 3000000000;
+  `  num low = -2147483648;
+  `  num small = -2147483647;
+  `  num most = 9223372036854775807;
+  `  ret big + low + small + most;
+  `}`;
+  let out = emit_c(src, "64-bit literals");
+  assert contains(out, "3000000000LL"), "expected a literal past int's range suffixed";
+  assert contains(out, "2147483648LL"), "expected the magnitude of int's minimum suffixed";
+  assert contains(out, "2147483647;") || contains(out, "2147483647)"), "expected a literal inside int's range left bare";
+  assert !contains(out, "2147483647LL"), "expected no suffix inside int's range";
+  assert contains(out, "9223372036854775807LL"), "expected the largest literal suffixed";
+}

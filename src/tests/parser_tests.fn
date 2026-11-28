@@ -758,3 +758,12 @@ test "a type keyword where a generic declaration's name goes says so" {
     msg
   );
 }
+
+test "a reserved word as a compound field's name says so" {
+  str decl = parse_error_message("compound Id {\n  u32 raw;\n}\n");
+  assert contains(decl, "'raw' is a reserved word"), decl;
+  str init = parse_error_message(
+    "compound Id {\n  u32 v;\n}\nfun f() {\n  let i = Id{fit = 1};\n}\n"
+  );
+  assert contains(init, "'fit' is a reserved word"), init;
+}

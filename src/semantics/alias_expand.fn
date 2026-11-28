@@ -343,7 +343,8 @@ fun _expand_bound_alternatives(
 // Walks every top-level declaration's own DataType-bearing positions and
 // expands each in place: a function/method's own params and return type,
 // a compound's own fields, a plain variable declaration's own type, a
-// shape method's own signature, and every generic bound-list's own
+// shape method's own signature, a test or fuzz block's body, and every
+// generic bound-list's own
 // alternatives (function, compound, and impl - a method's own bound list
 // is covered via the function-shaped branch inside `.Impl`'s methods).
 // `fit node.kind { .Function(f) -> {...} }` gives `f` as a plain VALUE
@@ -415,6 +416,8 @@ fun _expand_program(Vec<Node>* nodes, Map<str, _ResolvedAlias>* resolved) {
           }
         }
       }
+      .Test(t) -> { _expand_body(t.body, resolved, &unused); }
+      .Fuzz(fz) -> { _expand_body(fz.body, resolved, &unused); }
       _ -> {}
     }
   }

@@ -5247,3 +5247,25 @@ test "a function can't be called while a local of its name hides it" {
     "expected a call outside the local's scope to pass"
   );
 }
+
+test "an alias names a local's type inside a test or fuzz block" {
+  accepts(
+    `compound Real {
+    `  num v;
+    `}
+    `als Engine = Real;
+    `fun open(Engine* e) {
+    `  e.v = 1;
+    `}
+    `test "alias local" {
+    `  Engine e;
+    `  open(&e);
+    `  assert e.v == 1, "expected the alias to name Real";
+    `}
+    `fuzz "alias in fuzz" (raw* data, num len) {
+    `  Engine e;
+    `  open(&e);
+    `}`,
+    "expected the alias expanded in test and fuzz bodies"
+  );
+}
