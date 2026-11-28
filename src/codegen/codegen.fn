@@ -5838,7 +5838,7 @@ impl Codegen {
   // from its call-result case's own hoisting and lazy-emission side
   // effects.
   //
-  // Three shapes resolve, each bottoming out at a bare local:
+  // These shapes resolve, each bottoming out at a bare local:
   // - `.Identifier`: `resolve_field_chain`'s own identifier case - pure
   // table lookups.
   // - `a.b` (`.Expression(".")`, an ordinary field name, not a tuple
@@ -5870,6 +5870,25 @@ impl Codegen {
       // `resolve_field_chain`'s own identical arm from already doing
       // this for every other receiver position).
       .ExpressionParenthesis(inner) -> { ret self.resolve_operator_operand(inner); }
+      // `(c ? a : b) * m`: both branches the same compound value, typed by
+      // them; rendering the whole conditional is left to
+      // `materialize_operator_operand`, as for a call's result.
+      .Ternary(t) -> {
+        let then_r = self.resolve_operator_operand(t.then_val)?;
+        let else_r = self.resolve_operator_operand(t.else_val)?;
+        if then_r.is_pointer || else_r.is_pointer ||
+          !equals(then_r.type_name, else_r.type_name) ||
+          !self.compound_names.contains(then_r.type_name) {
+          ret .None;
+        }
+        ChainResolution pick_r;
+        pick_r.text = "";
+        pick_r.type_name = then_r.type_name;
+        pick_r.is_pointer = false;
+        pick_r.dtype = then_r.dtype;
+        pick_r.is_call_result = true;
+        ret .Some(pick_r);
+      }
       // `Vec2{x = 1} + b`: a compound literal's own written type. Only a
       // non-generic one, since naming a generic instance can instantiate
       // it; rendering is left to `materialize_operator_operand`.
@@ -5964,6 +5983,18 @@ impl Codegen {
           }
           let recv_r = self.resolve_operator_operand(inner_e.left)?;
           let field_info = self.lookup_compound_field(recv_r.type_name, field_name)?;
+          if recv_r.is_call_result && equals(recv_r.text, "") {
+            // A field of a call's result not rendered yet (`v.get(0).r`):
+            // there is no text to build on, so the whole operand is
+            // rendered at once, as the call itself would be.
+            ChainResolution field_r;
+            field_r.text = "";
+            field_r.type_name = field_info.type_name;
+            field_r.is_pointer = field_info.is_pointer;
+            field_r.dtype = field_info.dtype;
+            field_r.is_call_result = true;
+            ret .Some(field_r);
+          }
           StringBuilder sb = string_builder_init(8);
           sb.append(recv_r.text);
           if recv_r.is_pointer {
