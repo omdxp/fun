@@ -1,0 +1,1874 @@
+// `fun bindgen`: Fun bindings generated from a C header. Its constants,
+// enums, typedefs and structs become Fun declarations, and its functions
+// become fields of one compound that a generated loader fills in from a
+// shared library while the program runs, so nothing links against the
+// library when the program is built.
+
+use ..lexer.lexdefs;
+use fmt;
+use std.string;
+use std.vec;
+use std.map;
+use std.set;
+use std.option;
+use std.result;
+use std.fs;
+use std.path;
+use std.ctype;
+use std.io;
+
+// What a header token is.
+enum CTokKind {
+  Ident,
+  Number,
+  Punct,
+  Literal,
+  Directive,
+}
+
+compound CTok {
+  CTokKind kind;
+  str text;
+  num line;
+}
+
+fun ctok(CTokKind kind, str text, num line) CTok {
+  ret CTok{kind = kind, text = text, line = line};
+}
+
+fun is_ident_start(chr c) flag {
+  ret is_alpha(c) || c == '_';
+}
+
+fun is_ident_char(chr c) flag {
+  ret is_alnum(c) || c == '_';
+}
+
+// The punctuators the declarations bindgen reads can contain, longest
+// first so `<<` wins over `<`.
+fun punct_at(str src, num i) str {
+  str two = substr(src, i, 2);
+  for p : ["<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "->", "##"] {
+    if equals(two, p) {
+      ret p;
+    }
+  }
+  if equals(substr(src, i, 3), "...") {
+    ret "...";
+  }
+  ret substr(src, i, 1);
+}
+
+// Splits `src` into tokens, dropping comments. A preprocessor line,
+// continuations joined, becomes one `Directive` token holding what
+// follows its `#`.
+fun c_tokenize(str src) Vec<CTok> {
+  Vec<CTok> out;
+  out.init(256);
+  num n = len(src);
+  num i = 0;
+  num line = 1;
+  flag line_start = true;
+  for i < n {
+    chr c = src[i];
+    if c == '\n' {
+      line += 1;
+      line_start = true;
+      i += 1;
+      continue;
+    }
+    if c == ' ' || c == '\t' || c == '\r' || c as num == 12 || c as num == 11 {
+      i += 1;
+      continue;
+    }
+    if c == '/' && i + 1 < n && src[i + 1] == '/' {
+      for i < n && src[i] != '\n' {
+        i += 1;
+      }
+      continue;
+    }
+    if c == '/' && i + 1 < n && src[i + 1] == '*' {
+      i += 2;
+      for i + 1 < n && !(src[i] == '*' && src[i + 1] == '/') {
+        if src[i] == '\n' {
+          line += 1;
+        }
+        i += 1;
+      }
+      i += 2;
+      continue;
+    }
+    if c == '#' && line_start {
+      num start = i + 1;
+      num at = line;
+      StringBuilder body = string_builder_init(64);
+      i = start;
+      for i < n && src[i] != '\n' {
+        if src[i] == '\\' && i + 1 < n && (src[i + 1] == '\n' || src[i + 1] == '\r') {
+          i += 1;
+          if src[i] == '\r' && i + 1 < n && src[i + 1] == '\n' {
+            i += 1;
+          }
+          line += 1;
+          body.append_char(' ');
+          i += 1;
+          continue;
+        }
+        if src[i] == '/' && i + 1 < n && src[i + 1] == '*' {
+          i += 2;
+          for i + 1 < n && !(src[i] == '*' && src[i + 1] == '/') {
+            if src[i] == '\n' {
+              line += 1;
+            }
+            i += 1;
+          }
+          i += 2;
+          body.append_char(' ');
+          continue;
+        }
+        if src[i] == '/' && i + 1 < n && src[i + 1] == '/' {
+          for i < n && src[i] != '\n' {
+            i += 1;
+          }
+          continue;
+        }
+        body.append_char(src[i]);
+        i += 1;
+      }
+      out.push(ctok(.Directive, body.build(), at));
+      continue;
+    }
+    line_start = false;
+    if is_ident_start(c) {
+      num start = i;
+      for i < n && is_ident_char(src[i]) {
+        i += 1;
+      }
+      out.push(ctok(.Ident, substr(src, start, i - start), line));
+      continue;
+    }
+    if is_digit(c) || (c == '.' && i + 1 < n && is_digit(src[i + 1])) {
+      num start = i;
+      for i < n &&
+        (is_alnum(src[i]) || src[i] == '.' ||
+        ((src[i] == '+' || src[i] == '-') && (src[i - 1] == 'e' || src[i - 1] == 'E'))) {
+        i += 1;
+      }
+      out.push(ctok(.Number, substr(src, start, i - start), line));
+      continue;
+    }
+    if c == '"' || c == '\'' {
+      num start = i;
+      i += 1;
+      for i < n && src[i] != c {
+        if src[i] == '\\' {
+          i += 1;
+        }
+        i += 1;
+      }
+      i += 1;
+      out.push(ctok(.Literal, substr(src, start, i - start), line));
+      continue;
+    }
+    str p = punct_at(src, i);
+    out.push(ctok(.Punct, p, line));
+    i += len(p);
+  }
+  ret out;
+}
+
+// An object-like macro's body, or a function-like macro (whose body is
+// never used: such a macro written in a declaration is dropped along
+// with its arguments).
+compound Macro {
+  Vec<CTok> body;
+  flag function_like;
+}
+
+// The header as the preprocessor leaves it: the tokens of every branch
+// taken, macros expanded, and the object-like macros defined at the top
+// level in the order they were written.
+compound Preprocessed {
+  Vec<CTok> tokens;
+  Map<str, Macro> macros;
+  Vec<str> defined_order;
+}
+
+// Evaluates a constant integer expression over tokens, the language of
+// `#if`, enumerator values and array sizes.
+compound ExprEval {
+  Vec<CTok>* toks;
+  num pos;
+  Map<str, Macro>* macros;
+  Map<str, num>* names;
+  // In an `#if`, an unknown name is 0, as the preprocessor treats it;
+  // anywhere else it makes the expression not constant.
+  flag in_directive;
+  flag failed;
+}
+
+fun number_value(str text, flag* is_float) num {
+  num end = len(text);
+  for end > 0 &&
+    (text[end - 1] == 'u' || text[end - 1] == 'U' || text[end - 1] == 'l' ||
+    text[end - 1] == 'L') {
+    end -= 1;
+  }
+  str digits = substr(text, 0, end);
+  if starts_with(digits, "0x") || starts_with(digits, "0X") {
+    num v = 0;
+    num k = 2;
+    for k < len(digits) {
+      chr d = digits[k];
+      num nib = 0;
+      if is_digit(d) {
+        nib = (d - '0') as num;
+      } elif d >= 'a' && d <= 'f' {
+        nib = (d - 'a') as num + 10;
+      } else {
+        nib = (d - 'A') as num + 10;
+      }
+      v = v * 16 + nib;
+      k += 1;
+    }
+    ret v;
+  }
+  if contains(digits, ".") || contains(digits, "e") || contains(digits, "E") ||
+    ends_with(text, "f") || ends_with(text, "F") {
+    *is_float = true;
+    ret 0;
+  }
+  if len(digits) > 1 && digits[0] == '0' {
+    num v = 0;
+    num k = 1;
+    for k < len(digits) {
+      v = v * 8 + (digits[k] - '0') as num;
+      k += 1;
+    }
+    ret v;
+  }
+  ret parse_int(digits);
+}
+
+impl ExprEval {
+  peek() str {
+    if self.pos >= self.toks.len {
+      ret "";
+    }
+    ret self.toks.get(self.pos).text;
+  }
+
+  eat(str text) flag {
+    if equals(self.peek(), text) {
+      self.pos += 1;
+      ret true;
+    }
+    ret false;
+  }
+
+  primary() num {
+    if self.pos >= self.toks.len {
+      self.failed = true;
+      ret 0;
+    }
+    CTok t = self.toks.get(self.pos);
+    self.pos += 1;
+    if t.kind == .Number {
+      flag is_float = false;
+      num v = number_value(t.text, &is_float);
+      if is_float {
+        self.failed = true;
+      }
+      ret v;
+    }
+    if t.kind == .Literal && starts_with(t.text, "'") && len(t.text) == 3 {
+      ret t.text[1] as num;
+    }
+    if equals(t.text, "(") {
+      num v = self.ternary();
+      if !self.eat(")") {
+        self.failed = true;
+      }
+      ret v;
+    }
+    if t.kind == .Ident {
+      if equals(t.text, "defined") {
+        flag paren = self.eat("(");
+        str name = self.peek();
+        self.pos += 1;
+        if paren && !self.eat(")") {
+          self.failed = true;
+        }
+        ret self.macros.has(name) ? 1 : 0;
+      }
+      let known = self.names.at(t.text);
+      if known.is_some() {
+        ret known.unwrap();
+      }
+      if self.in_directive {
+        ret 0;
+      }
+    }
+    self.failed = true;
+    ret 0;
+  }
+
+  unary() num {
+    if self.eat("-") {
+      ret 0 - self.unary();
+    }
+    if self.eat("+") {
+      ret self.unary();
+    }
+    if self.eat("~") {
+      ret ~self.unary();
+    }
+    if self.eat("!") {
+      ret self.unary() == 0 ? 1 : 0;
+    }
+    ret self.primary();
+  }
+
+  binary(num level) num {
+    if level > 9 {
+      ret self.unary();
+    }
+    num left = self.binary(level + 1);
+    for true {
+      str op = self.peek();
+      if !binary_op_at_level(op, level) {
+        ret left;
+      }
+      self.pos += 1;
+      num right = self.binary(level + 1);
+      left = apply_binary(op, left, right, &self.failed);
+    }
+    ret left;
+  }
+
+  ternary() num {
+    num cond = self.binary(0);
+    if self.eat("?") {
+      num yes = self.ternary();
+      if !self.eat(":") {
+        self.failed = true;
+      }
+      num no = self.ternary();
+      ret cond != 0 ? yes : no;
+    }
+    ret cond;
+  }
+}
+
+// C's binary operators from loosest (0) to tightest (9).
+fun binary_op_at_level(str op, num level) flag {
+  fit level {
+    0 -> { ret equals(op, "||"); }
+    1 -> { ret equals(op, "&&"); }
+    2 -> { ret equals(op, "|"); }
+    3 -> { ret equals(op, "^"); }
+    4 -> { ret equals(op, "&"); }
+    5 -> { ret equals(op, "==") || equals(op, "!="); }
+    6 -> {
+      ret equals(op, "<") || equals(op, ">") || equals(op, "<=") || equals(op, ">=");
+    }
+    7 -> { ret equals(op, "<<") || equals(op, ">>"); }
+    8 -> { ret equals(op, "+") || equals(op, "-"); }
+    9 -> { ret equals(op, "*") || equals(op, "/") || equals(op, "%"); }
+    _ -> { ret false; }
+  }
+}
+
+fun apply_binary(str op, num a, num b, flag* failed) num {
+  fit op {
+    "||" -> { ret (a != 0 || b != 0) ? 1 : 0; }
+    "&&" -> { ret (a != 0 && b != 0) ? 1 : 0; }
+    "|" -> { ret a | b; }
+    "^" -> { ret a ^ b; }
+    "&" -> { ret a & b; }
+    "==" -> { ret a == b ? 1 : 0; }
+    "!=" -> { ret a != b ? 1 : 0; }
+    "<" -> { ret a < b ? 1 : 0; }
+    ">" -> { ret a > b ? 1 : 0; }
+    "<=" -> { ret a <= b ? 1 : 0; }
+    ">=" -> { ret a >= b ? 1 : 0; }
+    "<<" -> { ret a << b; }
+    ">>" -> { ret a >> b; }
+    "+" -> { ret a + b; }
+    "-" -> { ret a - b; }
+    "*" -> { ret a * b; }
+    _ -> {}
+  }
+  if b == 0 {
+    *failed = true;
+    ret 0;
+  }
+  ret equals(op, "/") ? a / b : a % b;
+}
+
+// Evaluates `toks` as one constant expression, failing unless every
+// token was used.
+fun eval_tokens(
+  Vec<CTok>* toks,
+  Map<str,
+  Macro>* macros,
+  Map<str,
+  num>* names,
+  flag in_directive,
+  flag* ok
+) num {
+  ExprEval e = ExprEval{
+    toks = toks,
+    pos = 0,
+    macros = macros,
+    names = names,
+    in_directive = in_directive,
+    failed = false
+  };
+  num v = e.ternary();
+  *ok = !e.failed && e.pos == toks.len;
+  ret v;
+}
+
+// One open `#if` group: whether the branch being read is taken, and
+// whether any branch of the group already was.
+compound CondFrame {
+  flag active;
+  flag taken;
+  flag parent_active;
+}
+
+fun all_active(Vec<CondFrame>* stack) flag {
+  ret stack.len == 0 || stack.get(stack.len - 1).active;
+}
+
+// Appends `t` to `out`, expanding it first when it names a macro.
+// `expanding` holds the macros already being expanded, which a macro's
+// own name inside its body does not expand again.
+fun expand_into(
+  Vec<CTok>* out,
+  Vec<CTok>* src,
+  num* at,
+  Map<str,
+  Macro>* macros,
+  Set<str>* expanding
+) {
+  CTok t = src.get(*at);
+  *at += 1;
+  if t.kind != .Ident || expanding.has(t.text) {
+    out.push(t);
+    ret;
+  }
+  let found = macros.at(t.text);
+  if found.is_none() {
+    out.push(t);
+    ret;
+  }
+  Macro m = found.unwrap();
+  if m.function_like {
+    // Written in a declaration, a function-like macro is an attribute
+    // (`DEPRECATED("...")`); it and its arguments go.
+    if *at < src.len && equals(src.get(*at).text, "(") {
+      num depth = 0;
+      for *at < src.len {
+        str s = src.get(*at).text;
+        *at += 1;
+        if equals(s, "(") {
+          depth += 1;
+        } elif equals(s, ")") {
+          depth -= 1;
+          if depth == 0 {
+            break;
+          }
+        }
+      }
+    }
+    ret;
+  }
+  expanding.add(t.text);
+  num k = 0;
+  for k < m.body.len {
+    expand_into(out, &m.body, &k, macros, expanding);
+  }
+  _ = expanding.remove(t.text);
+}
+
+// The directive's name and the tokens after it.
+fun split_directive(str text, str* name) Vec<CTok> {
+  Vec<CTok> toks = c_tokenize(text);
+  if toks.len == 0 {
+    *name = "";
+    ret toks;
+  }
+  *name = toks.get(0).text;
+  _ = toks.remove_at(0);
+  ret toks;
+}
+
+fun preprocess(Vec<CTok>* toks, Vec<str>* defines, str* error) Preprocessed {
+  Preprocessed p;
+  p.tokens.init(toks.len);
+  p.macros.init(64);
+  p.defined_order.init(16);
+  Map<str, num> no_names;
+  no_names.init(1);
+  for d : *defines {
+    num eq = index_of_char(d, '=');
+    str name = eq < 0 ? d : substr(d, 0, eq);
+    str value = eq < 0 ? "1" : substr(d, eq + 1, len(d) - eq - 1);
+    p.macros.put(name, Macro{body = c_tokenize(value), function_like = false});
+  }
+  Vec<CondFrame> stack;
+  stack.init(8);
+  Set<str> expanding = set_init("", 8);
+  // The name an `#ifndef` just tested: a `#define` of it right after is
+  // an include guard rather than a constant.
+  str guard = "";
+  num i = 0;
+  for i < toks.len {
+    CTok t = toks.get(i);
+    if t.kind != .Directive {
+      guard = "";
+      if all_active(&stack) {
+        expand_into(&p.tokens, toks, &i, &p.macros, &expanding);
+      } else {
+        i += 1;
+      }
+      continue;
+    }
+    i += 1;
+    str name = "";
+    Vec<CTok> rest = split_directive(t.text, &name);
+    flag active = all_active(&stack);
+    str tested = guard;
+    guard = "";
+    if equals(name, "ifndef") && rest.len > 0 {
+      guard = rest.get(0).text;
+    }
+    if equals(name, "if") || equals(name, "ifdef") || equals(name, "ifndef") {
+      flag cond = false;
+      if active {
+        if equals(name, "if") {
+          flag ok = false;
+          cond = eval_tokens(&rest, &p.macros, &no_names, true, &ok) != 0;
+          if !ok {
+            *error = format(
+              "line {num}: can't evaluate `#if {str}`",
+              t.line,
+              trim(substr(t.text, 2, len(t.text) - 2))
+            );
+            ret p;
+          }
+        } else {
+          flag has = rest.len > 0 && p.macros.has(rest.get(0).text);
+          cond = equals(name, "ifdef") ? has : !has;
+        }
+      }
+      stack.push(CondFrame{active = active && cond, taken = cond, parent_active = active});
+    } elif equals(name, "elif") || equals(name, "else") {
+      if stack.len == 0 {
+        *error = format("line {num}: `#{str}` without `#if`", t.line, name);
+        ret p;
+      }
+      CondFrame top = stack.pop();
+      flag cond = true;
+      if equals(name, "elif") && top.parent_active && !top.taken {
+        flag ok = false;
+        cond = eval_tokens(&rest, &p.macros, &no_names, true, &ok) != 0;
+        if !ok {
+          *error = format("line {num}: can't evaluate `#elif`", t.line);
+          ret p;
+        }
+      }
+      flag now = top.parent_active && !top.taken && cond;
+      stack.push(
+        CondFrame{
+          active = now,
+          taken = top.taken || now,
+          parent_active = top.parent_active
+        }
+      );
+    } elif equals(name, "endif") {
+      if stack.len == 0 {
+        *error = format("line {num}: `#endif` without `#if`", t.line);
+        ret p;
+      }
+      _ = stack.pop();
+    } elif active && equals(name, "define") && rest.len > 0 {
+      str macro_name = rest.get(0).text;
+      flag function_like = false;
+      // `NAME(` with no space between is a function-like macro.
+      num paren = index_of_char(t.text, '(');
+      num name_at = index_of_str(t.text, macro_name);
+      if rest.len > 1 && equals(rest.get(1).text, "(") && paren == name_at + len(macro_name) {
+        function_like = true;
+      }
+      Vec<CTok> body;
+      body.init(rest.len);
+      num k = 1;
+      for k < rest.len {
+        body.push(rest.get(k));
+        k += 1;
+      }
+      if !p.macros.has(macro_name) && !equals(macro_name, tested) {
+        p.defined_order.push(macro_name);
+      }
+      p.macros.put(macro_name, Macro{body = body, function_like = function_like});
+    } elif active && equals(name, "undef") && rest.len > 0 {
+      _ = p.macros.remove(rest.get(0).text);
+    } elif active && equals(name, "error") {
+      *error = format(
+        "line {num}: the header stops with `#{str}`",
+        t.line,
+        trim(t.text)
+      );
+      ret p;
+    }
+  }
+  if stack.len > 0 {
+    *error = "an `#if` is never closed with `#endif`";
+  }
+  ret p;
+}
+
+// A C type as written: its base, the pointers around it, any array
+// sizes after a declarator, and for a function or function pointer its
+// signature.
+compound CType {
+  str base;
+  num ptr;
+  Vec<num> arrays;
+  flag is_fn;
+  // How many pointers point at the function: 0 for a function type
+  // (`typedef void F(int)`), 1 for a function pointer.
+  num fn_ptr;
+  CSig* sig;
+}
+
+compound CSig {
+  CType ret_type;
+  Vec<CType> params;
+  flag variadic;
+}
+
+fun ctype_named(str base) CType {
+  CType t;
+  t.base = base;
+  t.ptr = 0;
+  t.arrays.init(0);
+  t.is_fn = false;
+  t.fn_ptr = 0;
+  t.sig = nil;
+  ret t;
+}
+
+enum DeclKind {
+  Const,
+  Alias,
+  Opaque,
+  Struct,
+  Enum,
+  Function,
+}
+
+compound Field {
+  str name;
+  CType ctype;
+}
+
+compound Enumerator {
+  str name;
+  num value;
+}
+
+compound Decl {
+  DeclKind kind;
+  str name;
+  // Alias: the aliased type; Function: its signature as a function type.
+  CType ctype;
+  Vec<Field> fields;
+  Vec<Enumerator> items;
+  // Const: the Fun type and the literal.
+  str const_type;
+  str const_value;
+  num line;
+}
+
+fun decl_new(DeclKind kind, str name, num line) Decl {
+  Decl d;
+  d.kind = kind;
+  d.name = name;
+  d.ctype = ctype_named("");
+  d.fields.init(0);
+  d.items.init(0);
+  d.const_type = "";
+  d.const_value = "";
+  d.line = line;
+  ret d;
+}
+
+// Reads declarations off the preprocessed tokens.
+compound DeclParser {
+  Vec<CTok>* toks;
+  num pos;
+  Map<str, Macro>* macros;
+  // Enumerators and numeric macros seen so far, for the expressions
+  // that follow.
+  Map<str, num> names;
+  Vec<Decl> decls;
+  // Struct and enum tags to the typedef name that names them.
+  Map<str, str> tags;
+  Vec<str> skipped;
+  // The tag of a body read in the declaration being parsed, which a
+  // typedef in that same declaration names.
+  str body_tag;
+  str error;
+}
+
+fun is_qualifier(str s) flag {
+  fit s {
+    "const", "volatile", "restrict", "__restrict", "__restrict__", "extern", "static", "inline",
+    "__inline", "__inline__", "__cdecl", "__stdcall", "__fastcall", "__extension__" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+fun is_basic_word(str s) flag {
+  fit s {
+    "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool",
+    "bool" -> { ret true; }
+    _ -> { ret false; }
+  }
+}
+
+impl DeclParser {
+  at_end() flag {
+    ret self.pos >= self.toks.len;
+  }
+
+  peek() str {
+    if self.at_end() {
+      ret "";
+    }
+    ret self.toks.get(self.pos).text;
+  }
+
+  peek_at(num k) str {
+    if self.pos + k >= self.toks.len {
+      ret "";
+    }
+    ret self.toks.get(self.pos + k).text;
+  }
+
+  line() num {
+    if self.at_end() {
+      ret self.toks.len > 0 ? self.toks.get(self.toks.len - 1).line : 0;
+    }
+    ret self.toks.get(self.pos).line;
+  }
+
+  eat(str text) flag {
+    if equals(self.peek(), text) {
+      self.pos += 1;
+      ret true;
+    }
+    ret false;
+  }
+
+  fail(str msg) {
+    if equals(self.error, "") {
+      self.error = format("line {num}: {str}", self.line(), msg);
+    }
+  }
+
+  // Skips `__attribute__((...))` and `__declspec(...)` wherever they sit.
+  skip_attributes() {
+    for equals(self.peek(), "__attribute__") || equals(self.peek(), "__declspec") ||
+      equals(self.peek(), "__asm__") {
+      self.pos += 1;
+      self.skip_group("(", ")");
+    }
+  }
+
+  skip_group(str open, str close) {
+    if !equals(self.peek(), open) {
+      ret;
+    }
+    num depth = 0;
+    for !self.at_end() {
+      str s = self.peek();
+      self.pos += 1;
+      if equals(s, open) {
+        depth += 1;
+      } elif equals(s, close) {
+        depth -= 1;
+        if depth == 0 {
+          ret;
+        }
+      }
+    }
+  }
+
+  // Skips to just past the `;` ending what starts here.
+  skip_decl() {
+    num depth = 0;
+    for !self.at_end() {
+      str t = self.peek();
+      self.pos += 1;
+      if equals(t, "{") || equals(t, "(") || equals(t, "[") {
+        depth += 1;
+      } elif equals(t, "}") || equals(t, ")") || equals(t, "]") {
+        depth -= 1;
+      } elif equals(t, ";") && depth <= 0 {
+        ret;
+      }
+    }
+  }
+
+  // The type specifiers starting here, with any struct or enum body read
+  // as a declaration of its own.
+  specifiers() CType {
+    Vec<str> words;
+    words.init(4);
+    defer words.free();
+    str named = "";
+    for !self.at_end() {
+      self.skip_attributes();
+      str s = self.peek();
+      if is_qualifier(s) {
+        self.pos += 1;
+        continue;
+      }
+      if is_basic_word(s) {
+        words.push(s);
+        self.pos += 1;
+        continue;
+      }
+      if (equals(s, "struct") || equals(s, "union") || equals(s, "enum")) &&
+        equals(named, "") &&
+        words.len == 0 {
+        self.pos += 1;
+        self.skip_attributes();
+        str tag = "";
+        if !self.at_end() && self.toks.get(self.pos).kind == .Ident {
+          tag = self.peek();
+          self.pos += 1;
+        }
+        if equals(self.peek(), "{") {
+          named = self.body(s, tag);
+        } else {
+          named = format("{str} {str}", s, tag);
+        }
+        continue;
+      }
+      if !self.at_end() && self.toks.get(self.pos).kind == .Ident && equals(named, "") &&
+        words.len == 0 {
+        named = s;
+        self.pos += 1;
+        continue;
+      }
+      break;
+    }
+    if !equals(named, "") {
+      ret ctype_named(named);
+    }
+    if words.len == 0 {
+      self.fail(format("expected a type, found `{str}`", self.peek()));
+      ret ctype_named("int");
+    }
+    ret ctype_named(join(&words, " "));
+  }
+
+  // Reads a struct, union or enum body (the `{` is next) and records it;
+  // the type that names it, which a typedef may rename.
+  body(str keyword, str tag) str {
+    num line = self.line();
+    str name = equals(tag, "") ? format("__anon{num}", self.decls.len) : tag;
+    self.body_tag = name;
+    if equals(keyword, "enum") {
+      Decl d = decl_new(.Enum, name, line);
+      self.pos += 1;
+      num next = 0;
+      for !self.at_end() && !equals(self.peek(), "}") {
+        str item = self.peek();
+        self.pos += 1;
+        num value = next;
+        if self.eat("=") {
+          Vec<CTok> expr;
+          expr.init(4);
+          num depth = 0;
+          for !self.at_end() {
+            str s = self.peek();
+            if depth == 0 && (equals(s, ",") || equals(s, "}")) {
+              break;
+            }
+            if equals(s, "(") {
+              depth += 1;
+            } elif equals(s, ")") {
+              depth -= 1;
+            }
+            expr.push(self.toks.get(self.pos));
+            self.pos += 1;
+          }
+          flag ok = false;
+          value = eval_tokens(&expr, self.macros, &self.names, false, &ok);
+          if !ok {
+            self.fail(format("can't evaluate the value of `{str}`", item));
+            ret name;
+          }
+        }
+        d.items.push(Enumerator{name = item, value = value});
+        self.names.put(item, value);
+        next = value + 1;
+        _ = self.eat(",");
+      }
+      _ = self.eat("}");
+      self.decls.push(d);
+      ret format("enum {str}", name);
+    }
+    Decl d = decl_new(.Struct, name, line);
+    if equals(keyword, "union") {
+      self.skip_group("{", "}");
+      self.skipped.push(format("union {str} (line {num}): Fun has no unions", name, line));
+      ret format("union {str}", name);
+    }
+    self.pos += 1;
+    for !self.at_end() && !equals(self.peek(), "}") {
+      CType base = self.specifiers();
+      if !equals(self.error, "") {
+        ret name;
+      }
+      if starts_with(base.base, "struct __anon") || starts_with(base.base, "union ") {
+        self.fail(
+          format(
+            "struct {str} holds a nested struct or union, which bindgen can't lay out",
+            name
+          )
+        );
+        ret name;
+      }
+      for true {
+        str field = "";
+        CType ft = self.declarator(base, &field);
+        if !equals(self.error, "") {
+          ret name;
+        }
+        if equals(self.peek(), ":") {
+          self.fail(
+            format("struct {str} has a bit-field, which bindgen can't lay out", name)
+          );
+          ret name;
+        }
+        d.fields.push(Field{name = field, ctype = ft});
+        if !self.eat(",") {
+          break;
+        }
+      }
+      if !self.eat(";") {
+        self.fail(format("expected `;` after a field of struct {str}", name));
+        ret name;
+      }
+    }
+    _ = self.eat("}");
+    self.decls.push(d);
+    ret format("struct {str}", name);
+  }
+
+  // The declarator after `base`: pointers, a name (into `*name`, which
+  // may stay empty), a function's parameters and array sizes.
+  declarator(CType base, str* name) CType {
+    CType t = base;
+    t.arrays.init(0);
+    for true {
+      self.skip_attributes();
+      if self.eat("*") {
+        t.ptr += 1;
+        continue;
+      }
+      if is_qualifier(self.peek()) {
+        self.pos += 1;
+        continue;
+      }
+      break;
+    }
+    if equals(self.peek(), "(") &&
+      (equals(self.peek_at(1), "*") || is_qualifier(self.peek_at(1)) ||
+      equals(self.peek_at(1), "__attribute__")) {
+      self.pos += 1;
+      num stars = 0;
+      for true {
+        self.skip_attributes();
+        if self.eat("*") {
+          stars += 1;
+          continue;
+        }
+        if is_qualifier(self.peek()) {
+          self.pos += 1;
+          continue;
+        }
+        break;
+      }
+      if !self.at_end() && self.toks.get(self.pos).kind == .Ident {
+        *name = self.peek();
+        self.pos += 1;
+      }
+      self.arrays(&t);
+      if !self.eat(")") {
+        self.fail("expected `)` closing a function pointer's name");
+        ret t;
+      }
+      CType f = ctype_named("");
+      f.is_fn = true;
+      f.fn_ptr = stars;
+      f.sig = self.params(t);
+      ret f;
+    }
+    if !self.at_end() && self.toks.get(self.pos).kind == .Ident {
+      *name = self.peek();
+      self.pos += 1;
+    }
+    self.skip_attributes();
+    if equals(self.peek(), "(") {
+      CType f = ctype_named("");
+      f.is_fn = true;
+      f.fn_ptr = 0;
+      f.sig = self.params(t);
+      self.skip_attributes();
+      ret f;
+    }
+    self.arrays(&t);
+    self.skip_attributes();
+    ret t;
+  }
+
+  arrays(CType* t) {
+    for self.eat("[") {
+      Vec<CTok> expr;
+      expr.init(4);
+      for !self.at_end() && !equals(self.peek(), "]") {
+        expr.push(self.toks.get(self.pos));
+        self.pos += 1;
+      }
+      _ = self.eat("]");
+      if expr.len == 0 {
+        // `T name[]`: a pointer in a parameter, and a flexible member in
+        // a struct, which no fixed layout holds.
+        t.ptr += 1;
+        continue;
+      }
+      flag ok = false;
+      num size = eval_tokens(&expr, self.macros, &self.names, false, &ok);
+      if !ok || size <= 0 {
+        self.fail("can't evaluate an array size");
+        ret;
+      }
+      t.arrays.push(size);
+    }
+  }
+
+  // A parameter list (`(` is next), for a function returning `ret_type`.
+  params(CType ret_type) CSig* {
+    CSig* sig = malloc(sizeof(CSig));
+    sig.ret_type = ret_type;
+    sig.params.init(4);
+    sig.variadic = false;
+    self.pos += 1;
+    if equals(self.peek(), "void") && equals(self.peek_at(1), ")") {
+      self.pos += 2;
+      ret sig;
+    }
+    for !self.at_end() && !equals(self.peek(), ")") {
+      if self.eat("...") {
+        sig.variadic = true;
+        continue;
+      }
+      CType base = self.specifiers();
+      str ignored = "";
+      CType p = self.declarator(base, &ignored);
+      if !equals(self.error, "") {
+        ret sig;
+      }
+      // An array parameter is a pointer, and a function parameter a
+      // pointer to one, as C adjusts them.
+      if p.arrays.len > 0 {
+        p.ptr += 1;
+        p.arrays.init(0);
+      }
+      if p.is_fn && p.fn_ptr == 0 {
+        p.fn_ptr = 1;
+      }
+      sig.params.push(p);
+      if !self.eat(",") {
+        break;
+      }
+    }
+    if !self.eat(")") {
+      self.fail("expected `)` closing a parameter list");
+    }
+    ret sig;
+  }
+
+  // One top-level declaration.
+  declaration() {
+    self.skip_attributes();
+    if self.eat(";") {
+      ret;
+    }
+    // `extern "C" {` and the `}` closing it.
+    if equals(self.peek(), "extern") && starts_with(self.peek_at(1), "\"") {
+      self.pos += 2;
+      _ = self.eat("{");
+      ret;
+    }
+    if self.eat("}") {
+      ret;
+    }
+    num line = self.line();
+    self.body_tag = "";
+    flag is_typedef = self.eat("typedef");
+    CType base = self.specifiers();
+    if !equals(self.error, "") {
+      ret;
+    }
+    if self.eat(";") {
+      ret;
+    }
+    for true {
+      str name = "";
+      CType t = self.declarator(base, &name);
+      if !equals(self.error, "") {
+        ret;
+      }
+      if equals(self.peek(), "{") {
+        // A function defined in the header has no symbol to load.
+        self.skip_group("{", "}");
+        ret;
+      }
+      if equals(self.peek(), "=") {
+        self.skip_decl();
+        ret;
+      }
+      if is_typedef {
+        self.typedef_decl(name, t, line);
+      } elif t.is_fn && t.fn_ptr == 0 && !equals(name, "") {
+        Decl d = decl_new(.Function, name, line);
+        d.ctype = t;
+        self.decls.push(d);
+      }
+      if !self.eat(",") {
+        break;
+      }
+    }
+    if !self.eat(";") {
+      self.fail(format("expected `;`, found `{str}`", self.peek()));
+    }
+  }
+
+  typedef_decl(str name, CType t, num line) {
+    if equals(name, "") {
+      ret;
+    }
+    // `typedef struct Tag Tag;` and the like name what the tag names.
+    if t.ptr == 0 && t.arrays.len == 0 && !t.is_fn &&
+      (starts_with(t.base, "struct ") || starts_with(t.base, "enum ") ||
+      starts_with(t.base, "union ")) {
+      str tag = substr(t.base, index_of_char(t.base, ' ') + 1, len(t.base));
+      if equals(tag, self.body_tag) {
+        self.tags.put(tag, name);
+        ret;
+      }
+      if equals(tag, name) {
+        ret;
+      }
+    }
+    Decl d = decl_new(.Alias, name, line);
+    d.ctype = t;
+    self.decls.push(d);
+  }
+}
+
+// Everything the header declares, in the order it declares it.
+compound Header {
+  Vec<Decl> decls;
+  Map<str, str> tags;
+  Vec<str> skipped;
+}
+
+fun parse_header(str src, Vec<str>* defines) Result<Header, str> {
+  Vec<CTok> toks = c_tokenize(src);
+  str error = "";
+  Preprocessed pre = preprocess(&toks, defines, &error);
+  if !equals(error, "") {
+    ret .Err(error);
+  }
+  DeclParser dp;
+  dp.toks = &pre.tokens;
+  dp.pos = 0;
+  dp.macros = &pre.macros;
+  dp.names.init(64);
+  dp.decls.init(64);
+  dp.tags.init(64);
+  dp.skipped.init(0);
+  dp.body_tag = "";
+  dp.error = "";
+  // The numeric macros come first, ahead of the declarations they size.
+  for name : pre.defined_order {
+    let m = pre.macros.at(name);
+    if m.is_none() || m.unwrap().function_like || m.unwrap().body.len == 0 {
+      continue;
+    }
+    Macro macro = m.unwrap();
+    Decl c = decl_new(.Const, name, 0);
+    if macro_constant(&macro, &pre.macros, &dp.names, &c) {
+      dp.names.put(name, parse_int(c.const_value));
+      dp.decls.push(c);
+    }
+  }
+  for !dp.at_end() && equals(dp.error, "") {
+    num before = dp.pos;
+    dp.declaration();
+    if dp.pos == before {
+      dp.pos += 1;
+    }
+  }
+  if !equals(dp.error, "") {
+    ret .Err(dp.error);
+  }
+  ret .Ok(Header{decls = dp.decls, tags = dp.tags, skipped = dp.skipped});
+}
+
+// Fills `c` with the Fun type and literal for a macro whose body is a
+// constant number; false for any other macro.
+fun macro_constant(
+  Macro* m,
+  Map<str,
+  Macro>* macros,
+  Map<str,
+  num>* names,
+  Decl* c
+) flag {
+  Vec<CTok> body;
+  body.init(m.body.len);
+  Set<str> expanding = set_init("", 4);
+  num k = 0;
+  for k < m.body.len {
+    expand_into(&body, &m.body, &k, macros, &expanding);
+  }
+  // A single float literal, signed or in parentheses.
+  Vec<str> texts;
+  texts.init(body.len);
+  for t : body {
+    if !equals(t.text, "(") && !equals(t.text, ")") {
+      texts.push(t.text);
+    }
+  }
+  if texts.len >= 1 && texts.len <= 2 {
+    str lit = texts.get(texts.len - 1);
+    flag negative = texts.len == 2 && equals(texts.get(0), "-");
+    flag is_float = false;
+    if texts.len == 1 || negative {
+      chr first = lit[0];
+      if is_digit(first) || first == '.' {
+        _ = number_value(lit, &is_float);
+      }
+    }
+    if is_float {
+      flag single = ends_with(lit, "f") || ends_with(lit, "F");
+      str digits = single ? substr(lit, 0, len(lit) - 1) : lit;
+      if starts_with(digits, ".") {
+        digits = format("0{str}", digits);
+      }
+      if ends_with(digits, ".") {
+        digits = format("{str}0", digits);
+      }
+      if !contains(digits, ".") {
+        num e = index_of_char(to_lower(digits), 'e');
+        digits = format(
+          "{str}.0{str}",
+          substr(digits, 0, e),
+          substr(digits, e, len(digits) - e)
+        );
+      }
+      c.const_type = single ? "f32" : "f64";
+      c.const_value = negative ? format("-{str}", digits) : digits;
+      ret true;
+    }
+  }
+  flag ok = false;
+  num v = eval_tokens(&body, macros, names, false, &ok);
+  if !ok {
+    ret false;
+  }
+  // The type C gives the literal: unsigned with a `U` suffix, 64 bits with
+  // `LL` or when the value needs it.
+  flag is_unsigned = false;
+  flag wide = false;
+  for t : body {
+    if t.kind == .Number {
+      str suffix = to_lower(number_suffix(t.text));
+      if contains(suffix, "u") {
+        is_unsigned = true;
+      }
+      if contains(suffix, "ll") {
+        wide = true;
+      }
+    }
+  }
+  if is_unsigned {
+    if !wide && v >= -2147483648 && v <= 4294967295 {
+      c.const_type = "u32";
+      c.const_value = hex_literal(v & 4294967295);
+    } else {
+      c.const_type = "u64";
+      c.const_value = hex_literal(v);
+    }
+    ret true;
+  }
+  if !wide && v >= -2147483648 && v <= 2147483647 {
+    c.const_type = "i32";
+  } else {
+    c.const_type = "i64";
+  }
+  c.const_value = format("{num}", v);
+  ret true;
+}
+
+// The `u`/`l` letters ending an integer literal.
+fun number_suffix(str text) str {
+  num end = len(text);
+  for end > 0 {
+    chr c = text[end - 1];
+    if c != 'u' && c != 'U' && c != 'l' && c != 'L' {
+      break;
+    }
+    end -= 1;
+  }
+  ret substr(text, end, len(text) - end);
+}
+
+// `v` as an unsigned hex literal, all 64 bits of it.
+fun hex_literal(num v) str {
+  str digits = "0123456789ABCDEF";
+  StringBuilder sb = string_builder_init(18);
+  num shift = 60;
+  flag started = false;
+  for shift >= 0 {
+    num nib = (v >> shift) & 15;
+    if nib != 0 || started || shift == 0 {
+      sb.append_char(digits[nib]);
+      started = true;
+    }
+    shift -= 4;
+  }
+  ret format("0x{str}", sb.build());
+}
+
+// What a run of bindgen is asked for.
+pub compound BindgenOptions {
+  // The compound holding the functions, and the stem of its loader.
+  str name;
+  // Taken off each function's name to make its field's.
+  str prefix;
+  Vec<str> defines;
+  str header_name;
+}
+
+// Turns C types into Fun ones for one header.
+compound TypeMap {
+  Header* header;
+  // Names the generated file declares.
+  Set<str> declared;
+  // Typedefs of a function type rather than a pointer to one.
+  Set<str> fn_typedefs;
+  // Typedefs naming an enum, which C sizes as an int.
+  Set<str> enum_types;
+  // Types used but declared nowhere, emitted as opaque.
+  Set<str> opaque;
+  Vec<str> opaque_order;
+  str error;
+}
+
+impl TypeMap {
+  // The name a `struct Tag` or `enum Tag` is declared under.
+  tag_name(str base) str {
+    num sp = index_of_char(base, ' ');
+    if sp < 0 {
+      ret base;
+    }
+    str tag = substr(base, sp + 1, len(base) - sp - 1);
+    let renamed = self.header.tags.at(tag);
+    if renamed.is_some() {
+      ret renamed.unwrap();
+    }
+    ret tag;
+  }
+
+  base_name(CType* t, num* ptr, str context) str {
+    str b = t.base;
+    if starts_with(b, "enum ") {
+      str n = self.tag_name(b);
+      ret self.declared.has(n) ? n : "i32";
+    }
+    if starts_with(b, "struct ") || starts_with(b, "union ") {
+      str n = self.tag_name(b);
+      if !self.declared.has(n) {
+        self.note_opaque(n);
+      }
+      ret n;
+    }
+    fit b {
+      "void" -> { ret *ptr > 0 ? "raw" : "void"; }
+      "char", "signed char" -> {
+        if *ptr > 0 && equals(b, "char") {
+          *ptr -= 1;
+          ret "str";
+        }
+        ret equals(b, "char") ? "chr" : "i8";
+      }
+      "unsigned char" -> { ret "u8"; }
+      "short", "short int", "signed short", "signed short int" -> { ret "i16"; }
+      "unsigned short", "unsigned short int", "short unsigned int" -> { ret "u16"; }
+      "int", "signed", "signed int" -> { ret "i32"; }
+      "unsigned", "unsigned int" -> { ret "u32"; }
+      "long long", "long long int", "signed long long", "signed long long int" -> { ret "i64"; }
+      "unsigned long long", "unsigned long long int" -> { ret "u64"; }
+      "float" -> { ret "f32"; }
+      "double" -> { ret "f64"; }
+      "bool", "_Bool" -> { ret "flag"; }
+      "int8_t" -> { ret "i8"; }
+      "int16_t" -> { ret "i16"; }
+      "int32_t" -> { ret "i32"; }
+      "int64_t", "intptr_t", "ptrdiff_t", "ssize_t", "intmax_t" -> { ret "i64"; }
+      "uint8_t" -> { ret "u8"; }
+      "uint16_t" -> { ret "u16"; }
+      "uint32_t" -> { ret "u32"; }
+      "uint64_t", "uintptr_t", "size_t", "uintmax_t" -> { ret "u64"; }
+      _ -> {}
+    }
+    if contains(b, "long") || equals(b, "wchar_t") {
+      if equals(self.error, "") {
+        self.error = format(
+          "{str} uses `{str}`, whose size differs between platforms - give it a fixed-width type",
+          context,
+          b
+        );
+      }
+      ret "i64";
+    }
+    if self.fn_typedefs.has(b) && *ptr > 0 {
+      *ptr -= 1;
+    }
+    if !self.declared.has(b) {
+      self.note_opaque(b);
+    }
+    ret b;
+  }
+
+  note_opaque(str name) {
+    if !self.opaque.has(name) {
+      self.opaque.add(name);
+      self.opaque_order.push(name);
+    }
+  }
+
+  // `t` written as a Fun type, array sizes left out.
+  fun_type(CType t, str context) str {
+    if t.is_fn {
+      StringBuilder sb = string_builder_init(32);
+      sb.append("fun(");
+      num i = 0;
+      for p : t.sig.params {
+        if i > 0 {
+          sb.append(", ");
+        }
+        sb.append(self.fun_type(p, context));
+        i += 1;
+      }
+      sb.append(") ");
+      sb.append(self.fun_type(t.sig.ret_type, context));
+      num extra = t.fn_ptr - 1;
+      for extra > 0 {
+        sb.append("*");
+        extra -= 1;
+      }
+      ret sb.build();
+    }
+    num ptr = t.ptr;
+    str base = self.base_name(&t, &ptr, context);
+    ret format("{str}{str}", base, repeat("*", ptr));
+  }
+}
+
+// `name` usable as a Fun name: a Fun keyword gets a trailing `_`.
+fun fun_name(str name) str {
+  if is_keyword(name) || equals(name, "self") {
+    ret format("{str}_", name);
+  }
+  ret name;
+}
+
+fun snake_case(str name) str {
+  StringBuilder sb = string_builder_init(len(name) + 4);
+  num i = 0;
+  for i < len(name) {
+    chr c = name[i];
+    if is_upper(c) {
+      if i > 0 && (is_lower(name[i - 1]) || is_digit(name[i - 1])) {
+        sb.append_char('_');
+      }
+      sb.append_char(to_lower_chr(c));
+    } else {
+      sb.append_char(c);
+    }
+    i += 1;
+  }
+  ret sb.build();
+}
+
+// The default compound name for a header: its file stem in CamelCase.
+pub fun bindgen_default_name(str header_path) str {
+  str stem = strip_ext(basename(header_path));
+  StringBuilder sb = string_builder_init(len(stem));
+  flag up = true;
+  num i = 0;
+  for i < len(stem) {
+    chr c = stem[i];
+    if !is_alnum(c) {
+      up = true;
+    } elif up {
+      sb.append_char(to_upper_chr(c));
+      up = false;
+    } else {
+      sb.append_char(c);
+    }
+    i += 1;
+  }
+  str out = sb.build();
+  if len(out) == 0 || is_digit(out[0]) {
+    ret format("Lib{str}", out);
+  }
+  ret out;
+}
+
+// The Fun source for `src`, formatted.
+pub fun bindgen_source(str src, BindgenOptions* opts) Result<str, str> {
+  let parsed = parse_header(src, &opts.defines);
+  if parsed.is_err() {
+    ret .Err(parsed.unwrap_err());
+  }
+  Header h = parsed.unwrap();
+  TypeMap tm;
+  tm.header = &h;
+  tm.declared = set_init("", 64);
+  tm.fn_typedefs = set_init("", 16);
+  tm.enum_types = set_init("", 16);
+  tm.opaque = set_init("", 16);
+  tm.opaque_order.init(16);
+  tm.error = "";
+  for d : h.decls {
+    fit d.kind {
+      .Struct -> { tm.declared.add(d.name); }
+      .Enum -> { tm.declared.add(d.name); }
+      .Alias -> {
+        tm.declared.add(d.name);
+        if d.ctype.is_fn && d.ctype.fn_ptr == 0 && d.ctype.ptr == 0 {
+          tm.fn_typedefs.add(d.name);
+        }
+      }
+      _ -> {}
+    }
+  }
+  // An enum or struct named only by its tag goes by the typedef that
+  // renames it.
+  Map<str, str> renamed;
+  renamed.init(16);
+  for d : h.decls {
+    if d.kind == .Struct || d.kind == .Enum {
+      let alias = h.tags.at(d.name);
+      if alias.is_some() {
+        renamed.put(d.name, alias.unwrap());
+        tm.declared.add(alias.unwrap());
+      }
+    }
+  }
+
+  StringBuilder body = string_builder_init(4096);
+  Vec<Decl> functions;
+  functions.init(64);
+  for d : h.decls {
+    str name = renamed.get_or(d.name, d.name);
+    fit d.kind {
+      .Const -> {
+        body.append(
+          format(
+            "pub const {str} {str} = {str};\n",
+            d.const_type,
+            fun_name(d.name),
+            d.const_value
+          )
+        );
+      }
+      .Enum -> {
+        if starts_with(name, "__anon") {
+          // An unnamed enum only names its constants.
+          for e : d.items {
+            if !starts_with(e.name, "_") {
+              body.append(
+                format("pub const i32 {str} = {num};\n", fun_name(e.name), e.value)
+              );
+            }
+          }
+          continue;
+        }
+        flag wide = false;
+        for e : d.items {
+          if e.value > 2147483647 || e.value < -2147483648 {
+            wide = true;
+          }
+        }
+        body.append(format("\npub als {str} = {str};\n", name, wide ? "i64" : "i32"));
+        for e : d.items {
+          // A name starting with `_` is the header's own, a count or a
+          // value forcing the enum's size.
+          if !starts_with(e.name, "_") {
+            body.append(
+              format(
+                "pub const {str} {str} = {num};\n",
+                name,
+                fun_name(e.name),
+                e.value
+              )
+            );
+          }
+        }
+      }
+      .Struct -> {
+        body.append(format("\npub compound {str} {\n", name));
+        for f : d.fields {
+          str t = tm.fun_type(f.ctype, format("field {str} of {str}", f.name, name));
+          for size : f.ctype.arrays {
+            t = format("{str}[{num}]", t, size);
+          }
+          body.append(format("  {str} {str};\n", t, fun_name(f.name)));
+        }
+        body.append("}\n");
+      }
+      .Alias -> {
+        str target = tm.fun_type(d.ctype, format("typedef {str}", d.name));
+        if d.ctype.is_fn && d.ctype.fn_ptr == 0 {
+          // A function type stands for a pointer to it.
+          CType ptr_form = d.ctype;
+          ptr_form.fn_ptr = 1;
+          target = tm.fun_type(ptr_form, format("typedef {str}", d.name));
+        }
+        for size : d.ctype.arrays {
+          target = format("{str}[{num}]", target, size);
+        }
+        if !equals(target, d.name) {
+          body.append(format("pub als {str} = {str};\n", d.name, target));
+        }
+      }
+      .Function -> {
+        if d.ctype.sig.variadic {
+          h.skipped.push(
+            format("{str} (line {num}): takes variadic arguments", d.name, d.line)
+          );
+        } else {
+          functions.push(d);
+        }
+      }
+      _ -> {}
+    }
+    if !equals(tm.error, "") {
+      ret .Err(format("line {num}: {str}", d.line, tm.error));
+    }
+  }
+
+  StringBuilder loader = string_builder_init(8192);
+  if functions.len > 0 {
+    Set<str> fields = set_init("", functions.len);
+    Vec<str> field_names;
+    field_names.init(functions.len);
+    for f : functions {
+      str field = f.name;
+      if !equals(opts.prefix, "") && starts_with(field, opts.prefix) &&
+        len(field) > len(opts.prefix) &&
+        is_ident_start(field[len(opts.prefix)]) {
+        field = substr(field, len(opts.prefix), len(field) - len(opts.prefix));
+      }
+      field = fun_name(field);
+      fields.add(field);
+      field_names.push(field);
+    }
+    str lib_field = "library";
+    for fields.has(lib_field) {
+      lib_field = format("{str}_", lib_field);
+    }
+    str stem = snake_case(opts.name);
+    loader.append(
+      format(
+        "\n// Every function {str} declares, looked up in a shared library\n",
+        opts.header_name
+      )
+    );
+    loader.append("// while the program runs.\n");
+    loader.append(
+      format("pub compound {str} {\n  Library {str};\n", opts.name, lib_field)
+    );
+    num i = 0;
+    for f : functions {
+      loader.append(
+        format(
+          "  {str} {str};\n",
+          tm.fun_type(f.ctype, f.name),
+          field_names.get(i)
+        )
+      );
+      i += 1;
+    }
+    loader.append("}\n\n");
+    loader.append(
+      format(
+        "fun {str}_symbol(Library* library, str name, str* missing) raw* {\n  let found = library.symbol(name);\n  if found.is_none() {\n    if equals(*missing, \"\") {\n      *missing = name;\n    }\n    ret nil;\n  }\n  ret found.unwrap();\n}\n\n",
+        stem
+      )
+    );
+    loader.append("// Opens the shared library at `path` and looks up every function, failing\n");
+    loader.append("// on the first one it lacks.\n");
+    loader.append(
+      format(
+        "pub fun {str}_load(str path) Result<{str}*, str> {\n  let opened = library_open(path);\n  if opened.is_err() {\n    ret .Err(opened.unwrap_err());\n  }\n  {str}* lib = malloc(sizeof({str}));\n  lib.{str} = opened.unwrap();\n  str missing = \"\";\n",
+        stem,
+        opts.name,
+        opts.name,
+        opts.name,
+        lib_field
+      )
+    );
+    i = 0;
+    for f : functions {
+      loader.append(
+        format(
+          "  lib.{str} = {str}_symbol(&lib.{str}, \"{str}\", &missing) as {str};\n",
+          field_names.get(i),
+          stem,
+          lib_field,
+          f.name,
+          tm.fun_type(f.ctype, f.name)
+        )
+      );
+      i += 1;
+    }
+    loader.append(
+      format(
+        "  if !equals(missing, \"\") {\n    lib.{str}.close();\n    free(lib);\n    ret .Err(format(\"PLACEHOLDER_STR has no function PLACEHOLDER_STR\", path, missing));\n  }\n  ret .Ok(lib);\n}\n\n",
+        lib_field
+      )
+    );
+    loader.append("// Closes the library; nothing looked up from it may be called after.\n");
+    loader.append(
+      format(
+        "pub fun {str}_close({str}* lib) {\n  lib.{str}.close();\n  free(lib);\n}\n",
+        stem,
+        opts.name,
+        lib_field
+      )
+    );
+  }
+  StringBuilder out = string_builder_init(8192);
+  out.append(
+    format(
+      "// Generated by `fun bindgen` from {str}. Regenerate it rather than\n",
+      opts.header_name
+    )
+  );
+  out.append("// editing it.\n\n");
+  if functions.len > 0 {
+    out.append("use std.dynlib;\nuse std.result;\nuse std.string;\nuse std.c.mem;\n\n");
+  }
+  for name : tm.opaque_order {
+    out.append(format("pub als {str} = raw;\n", name));
+  }
+  out.append(body.build());
+  out.append(loader.build());
+
+  if !equals(tm.error, "") {
+    ret .Err(tm.error);
+  }
+  str generated = replace_str(out.build(), "PLACEHOLDER_STR", "{str}");
+  let formatted = format_source(generated, "bindgen.fn");
+  if formatted.is_err() {
+    ret .Err(
+      format("the generated source doesn't format: {str}", formatted.unwrap_err())
+    );
+  }
+  ret .Ok(formatted.unwrap());
+}
+
+// The declarations bindgen left out, one line each, for `fun bindgen` to
+// report.
+pub fun bindgen_skipped(str src, Vec<str>* defines) Vec<str> {
+  let parsed = parse_header(src, defines);
+  if parsed.is_err() {
+    Vec<str> none;
+    none.init(0);
+    ret none;
+  }
+  Header h = parsed.unwrap();
+  for d : h.decls {
+    if d.kind == .Function && d.ctype.sig.variadic {
+      h.skipped.push(
+        format("{str} (line {num}): takes variadic arguments", d.name, d.line)
+      );
+    }
+  }
+  ret h.skipped;
+}
+
+// `fun bindgen <header> [-out file.fn] [-name Name] [-prefix P] [-D ...]`:
+// writes the bindings to `output`, or prints them when it is empty, and
+// reports anything left out on stderr.
+pub fun bindgen_command(str input, str output, str name, str prefix, Vec<str>* defines) num {
+  if equals(input, "") {
+    writeln_to(Sink.Stderr, "[Error]\nfun bindgen expects a C header");
+    ret 1;
+  }
+  if !exists(input) {
+    writeln_to(Sink.Stderr, format("[Error]\nno such header: {str}", input));
+    ret 1;
+  }
+  if !equals(output, "") && !ends_with(output, ".fn") {
+    writeln_to(
+      Sink.Stderr,
+      format("[Error]\n-out expects a `.fn` file, found `{str}`", output)
+    );
+    ret 1;
+  }
+  str src = read_to_string(input);
+  BindgenOptions opts = BindgenOptions{
+    name = equals(name, "") ? bindgen_default_name(input) : name,
+    prefix = prefix,
+    defines = *defines,
+    header_name = basename(input)
+  };
+  let generated = bindgen_source(src, &opts);
+  if generated.is_err() {
+    writeln_to(
+      Sink.Stderr,
+      format("[Error]\n{str}: {str}", input, generated.unwrap_err())
+    );
+    ret 1;
+  }
+  for note : bindgen_skipped(src, defines) {
+    writeln_to(Sink.Stderr, format("left out {str}", note));
+  }
+  if equals(output, "") {
+    print(generated.unwrap());
+    ret 0;
+  }
+  if !write_string(output, generated.unwrap()) {
+    writeln_to(Sink.Stderr, format("[Error]\ncan't write {str}", output));
+    ret 1;
+  }
+  ret 0;
+}

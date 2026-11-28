@@ -1,0 +1,266 @@
+// `fun bindgen` cases: a C header, and the Fun declarations it becomes.
+
+use ..cli.bindgen;
+use ..parser.import_resolver;
+use ..semantics.typecheck;
+use ..semantics.alias_expand;
+use std.string;
+use std.result;
+use std.vec;
+use std.fs;
+
+fun header() str {
+  ret `#ifndef DEMO_H_
+  `#define DEMO_H_ 1
+  `
+  `#include <stdint.h>
+  `#include <stdbool.h>
+  `
+  `#ifdef __cplusplus
+  `#  define DEMO_EXTERN extern "C"
+  `#else
+  `#  define DEMO_EXTERN extern
+  `#endif
+  `#if defined(_WIN32)
+  `#  define DEMO_CALL __cdecl
+  `#else
+  `#  define DEMO_CALL
+  `#endif
+  `#define DEMO_API DEMO_EXTERN
+  `#define DEMO_DEPRECATED(msg) __attribute__((deprecated(msg)))
+  `
+  `#define DEMO_TOLERANCE (1.0e-4f) /* a float */
+  `#define DEMO_SCALE 2.5
+  `#define DEMO_MAX_BODIES (1 << 10)
+  `#define DEMO_INVALID (~0U)
+  `#define DEMO_BIG 0x100000000ULL
+  `#define DEMO_NEG (-3)
+  `#define DEMO_LANES 4
+  `
+  `typedef uint32_t DEMO_BodyID;
+  `typedef struct DEMO_World DEMO_World;
+  `
+  `typedef enum DEMO_Motion {
+  `  DEMO_Motion_Static = 0,
+  `  DEMO_Motion_Kinematic,
+  `  DEMO_Motion_Dynamic = 1 << 2,
+  `  DEMO_Motion_Both = DEMO_Motion_Kinematic | DEMO_Motion_Dynamic,
+  `  _DEMO_Motion_Force32 = 0x7fffffff
+  `} DEMO_Motion;
+  `
+  `enum { DEMO_ANON_A = 7, DEMO_ANON_B };
+  `
+  `typedef struct DEMO_Vec3 {
+  `  float x, y, z;
+  `} DEMO_Vec3;
+  `
+  `typedef struct DEMO_Mat {
+  `  DEMO_Vec3 column[DEMO_LANES];
+  `  float grid[2][3];
+  `  int fit;
+  `  const char* name;
+  `  bool (DEMO_CALL *ShouldCollide)(void* user, DEMO_BodyID id);
+  `} DEMO_Mat;
+  `
+  `struct DEMO_Tagged {
+  `  unsigned char flags;
+  `  struct DEMO_Vec3 at;
+  `};
+  `typedef struct DEMO_Tagged DEMO_TaggedAlias;
+  `
+  `union DEMO_Either { int a; float b; };
+  `
+  `typedef void (DEMO_CALL *DEMO_TraceFunc)(const char* message);
+  `typedef float DEMO_RayCallback(void* context, const DEMO_Vec3* hit);
+  `
+  `#if defined(DEMO_DOUBLE)
+  `DEMO_API void DEMO_OnlyDouble(double v);
+  `#endif
+  `
+  `DEMO_API bool DEMO_Init(void);
+  `DEMO_API void DEMO_SetTrace(DEMO_TraceFunc trace);
+  `DEMO_API DEMO_World* DEMO_World_Create(uint32_t maxBodies, size_t bytes);
+  `DEMO_API void DEMO_World_Cast(DEMO_World* world, DEMO_RayCallback* callback, float out[3]);
+  `DEMO_API DEMO_DEPRECATED("old") int DEMO_Old(struct DEMO_Tagged* tagged, DEMO_Motion motion);
+  `DEMO_API void DEMO_Log(const char* fmt, ...);
+  `DEMO_API const char* DEMO_Name(const DEMO_Mat* const m, enum DEMO_Motion motion);
+  `static inline int DEMO_Helper(int a) { return a + 1; }
+  `
+  `#endif /* DEMO_H_ */`;
+}
+
+fun generate(str src, str prefix) str {
+  Vec<str> defines;
+  defines.init(0);
+  BindgenOptions opts = BindgenOptions{
+    name = "Demo",
+    prefix = prefix,
+    defines = defines,
+    header_name = "demo.h"
+  };
+  let out = bindgen_source(src, &opts);
+  if out.is_err() {
+    ret format("ERROR {str}", out.unwrap_err());
+  }
+  ret out.unwrap();
+}
+
+test "constants become typed Fun constants" {
+  str out = generate(header(), "DEMO_");
+  assert contains(out, "pub const f32 DEMO_TOLERANCE = 1.0e-4;"), "expected a float constant";
+  assert contains(out, "pub const f64 DEMO_SCALE = 2.5;"), "expected a double constant";
+  assert contains(out, "pub const i32 DEMO_MAX_BODIES = 1024;"), "expected an evaluated integer";
+  assert contains(out, "pub const u32 DEMO_INVALID = 0xFFFFFFFF;"), "expected an unsigned constant";
+  assert contains(out, "pub const u64 DEMO_BIG = 0x100000000;"), "expected a 64-bit constant";
+  assert contains(out, "pub const i32 DEMO_NEG = -3;"), "expected a negative constant";
+  assert !contains(out, "DEMO_H_"), "expected the include guard left out";
+  assert !contains(out, "DEMO_API"), "expected an attribute macro left out";
+}
+
+test "enums become an alias and one constant per value" {
+  str out = generate(header(), "DEMO_");
+  assert contains(out, "pub als DEMO_Motion = i32;"), "expected the enum's alias";
+  assert contains(out, "pub const DEMO_Motion DEMO_Motion_Kinematic = 1;"), "expected an implicit value";
+  assert contains(out, "pub const DEMO_Motion DEMO_Motion_Dynamic = 4;"), "expected a shifted value";
+  assert contains(out, "pub const DEMO_Motion DEMO_Motion_Both = 5;"), "expected a value built from others";
+  assert !contains(out, "Force32"), "expected a `_` value left out";
+  assert contains(out, "pub const i32 DEMO_ANON_B = 8;"), "expected an unnamed enum's values";
+}
+
+test "structs keep their fields in order" {
+  str out = generate(header(), "DEMO_");
+  assert contains(out, "pub compound DEMO_Vec3 {\n  f32 x;\n  f32 y;\n  f32 z;\n}"), "expected each declarator a field";
+  assert contains(out, "DEMO_Vec3[4] column;"), "expected an array sized by a macro";
+  assert contains(out, "f32[2][3] grid;"), "expected a two-dimensional array";
+  assert contains(out, "i32 fit_;"), "expected a Fun keyword renamed";
+  assert contains(out, "str name;"), "expected a C string as str";
+  assert contains(out, "fun(raw*, DEMO_BodyID) flag ShouldCollide;"), "expected a function pointer field";
+  assert contains(out, "pub compound DEMO_Tagged {\n  u8 flags;\n  DEMO_Vec3 at;\n}"), "expected a tagged struct";
+  assert contains(out, "pub als DEMO_TaggedAlias = DEMO_Tagged;"), "expected a typedef of a tag";
+  assert !contains(out, "DEMO_Either"), "expected a union left out";
+}
+
+test "typedefs become aliases" {
+  str out = generate(header(), "DEMO_");
+  assert contains(out, "pub als DEMO_BodyID = u32;"), "expected a scalar typedef";
+  assert contains(out, "pub als DEMO_World = raw;"), "expected an opaque struct";
+  assert contains(out, "pub als DEMO_TraceFunc = fun(str) void;"), "expected a function pointer typedef";
+  assert contains(out, "pub als DEMO_RayCallback = fun(raw*, DEMO_Vec3*) f32;"), "expected a function typedef";
+}
+
+test "functions become fields of one loaded compound" {
+  str out = generate(header(), "DEMO_");
+  assert contains(out, "pub compound Demo {"), "expected the compound";
+  assert contains(out, "Library library;"), "expected the library it was loaded from";
+  assert contains(out, "fun() flag Init;"), "expected the prefix taken off a field's name";
+  assert contains(out, "fun(DEMO_TraceFunc) void SetTrace;"), "expected a function pointer parameter";
+  assert contains(out, "fun(u32, u64) DEMO_World* World_Create;"), "expected size_t as u64";
+  assert contains(out, "fun(DEMO_World*, DEMO_RayCallback, f32*) void World_Cast;"), "expected function and array parameters adjusted";
+  assert contains(out, "fun(DEMO_Tagged*, DEMO_Motion) i32 Old;"), "expected a function-like macro dropped";
+  assert contains(out, "fun(DEMO_Mat*, DEMO_Motion) str Name;"), "expected qualifiers dropped";
+  assert contains(out, "\"DEMO_Init\""), "expected the symbol looked up by its C name";
+  assert contains(out, "pub fun demo_load(str path) Result<Demo*, str> {"), "expected the loader";
+  assert contains(out, "pub fun demo_close(Demo* lib) {"), "expected the closer";
+  assert contains(out, "has no function {str}"), "expected the missing symbol named";
+  assert !contains(out, "DEMO_Log"), "expected a variadic function left out";
+  assert !contains(out, "OnlyDouble"), "expected a branch not taken left out";
+  assert !contains(out, "DEMO_Helper"), "expected a function defined in the header left out";
+}
+
+test "a define picks the branch it names" {
+  Vec<str> defines;
+  defines.init(1);
+  defines.push("DEMO_DOUBLE");
+  BindgenOptions opts = BindgenOptions{
+    name = "Demo",
+    prefix = "",
+    defines = defines,
+    header_name = "demo.h"
+  };
+  let out = bindgen_source(header(), &opts);
+  assert out.is_ok(), "expected the header bound";
+  assert contains(out.unwrap(), "fun(f64) void DEMO_OnlyDouble;"), "expected the branch's function, prefix kept";
+}
+
+test "variadic functions and unions are reported as left out" {
+  Vec<str> defines;
+  defines.init(0);
+  Vec<str> skipped = bindgen_skipped(header(), &defines);
+  assert skipped.len == 2, format("expected two left out, got {num}", skipped.len);
+  flag union_noted = false;
+  flag variadic_noted = false;
+  for s : skipped {
+    if contains(s, "DEMO_Either") {
+      union_noted = true;
+    }
+    if contains(s, "DEMO_Log") && contains(s, "variadic") {
+      variadic_noted = true;
+    }
+  }
+  assert union_noted && variadic_noted, "expected each one named with its reason";
+}
+
+test "a type whose size differs between platforms is an error" {
+  str out = generate("long DEMO_Count(void);", "");
+  assert starts_with(out, "ERROR"), "expected long rejected";
+  assert contains(out, "`long`"), "expected the type named";
+  str bits = generate("struct S { int a : 3; };", "");
+  assert contains(bits, "bit-field"), "expected a bit-field rejected";
+  str cond = generate("#if 1\nint a;\n", "");
+  assert contains(cond, "never closed"), "expected an open #if reported";
+  str stop = generate("#error not supported\n", "");
+  assert contains(stop, "#error"), "expected #error reported";
+}
+
+test "the generated source typechecks with its imports" {
+  str out = generate(header(), "DEMO_");
+  assert !starts_with(out, "ERROR"), out;
+  str dir = "src/tests/fixtures";
+  str bound = format("{str}/bindgen_demo.fn", dir);
+  str entry = format("{str}/bindgen_demo_main.fn", dir);
+  assert write_string(bound, out), "expected the bindings written";
+  assert write_string(
+    entry,
+    "use bindgen_demo;\nuse std.io;\nfun main() num {\n  let d = demo_load(\"none\");\n  if d.is_ok() {\n    demo_close(d.unwrap());\n  }\n  DEMO_Mat m;\n  m.column[0].x = DEMO_TOLERANCE;\n  ret DEMO_Motion_Both;\n}\n"
+  ), "expected the program written";
+  let parsed = parse_program_with_imports(entry);
+  _ = remove_file(bound);
+  _ = remove_file(entry);
+  assert parsed.is_ok(), format(
+    "expected the bindings to parse, got: {str}",
+    parsed.is_err() ? parsed.unwrap_err() : ""
+  );
+  let merged = parsed.unwrap();
+  let expand_err = expand_type_aliases(&merged.nodes);
+  assert expand_err.is_none(), "expected the aliases to expand";
+  let checked = typecheck_program_with_aliases(&merged.nodes, &merged.aliases);
+  assert checked.is_ok(), format(
+    "expected the bindings to typecheck, got: {str}",
+    checked.is_err() ? checked.unwrap_err().message : ""
+  );
+}
+
+test "the compound name defaults to the header's capitalized stem" {
+  assert equals(bindgen_default_name("include/joltc.h"), "Joltc"), "expected the stem capitalized";
+  assert equals(bindgen_default_name("my-lib_v2.h"), "MyLibV2"), "expected separators joined";
+  assert equals(bindgen_default_name("3d.h"), "Lib3d"), "expected a leading digit prefixed";
+}
+
+test "fun bindgen writes the bindings to the file named" {
+  str dir = "src/tests/fixtures";
+  str h = format("{str}/bindgen_cli.h", dir);
+  str out = format("{str}/bindgen_cli_out.fn", dir);
+  assert write_string(h, "typedef struct W W;\nW* w_make(int n);\n"), "expected the header written";
+  Vec<str> defines;
+  defines.init(0);
+  num code = bindgen_command(h, out, "", "w_", &defines);
+  str written = read_to_string(out);
+  _ = remove_file(h);
+  _ = remove_file(out);
+  assert code == 0, "expected success";
+  assert contains(written, "pub compound BindgenCli {"), "expected the default name";
+  assert contains(written, "fun(i32) W* make;"), "expected the prefix taken off";
+  assert bindgen_command("", "", "", "", &defines) == 1, "expected a missing header reported";
+  assert bindgen_command("no/such.h", "", "", "", &defines) == 1, "expected an unknown header reported";
+  assert bindgen_command("README.md", "x.c", "", "", &defines) == 1, "expected a non-.fn output reported";
+}
